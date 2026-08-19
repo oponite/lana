@@ -1,20 +1,20 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "lana-lang"
-version = "0.2.0"
+version = "0.3.0"
 description = "A general-purpose language where uncertain, evolving information is first-class state"
 requires-python = ">=3.11"
 
 [project.scripts]
+lana = "lana_tooling.cli:main"
 ss = "lana_tooling.cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["lana_tooling*"]
+[tool.scikit-build]
+wheel.packages = ["src/lana_tooling"]

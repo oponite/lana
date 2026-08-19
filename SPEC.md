@@ -44,3 +44,20 @@ retain the latest N versions or versions within a timestamp duration.
 Merge averages two states. Update applies each original state to the other
 simultaneously. Joint creates a pair container and assigns it no additional
 probability mathematics.
+
+## Task semantics
+
+`fork function(arguments)` creates a native task with an isolated VM, register
+file, call stack, heap, random stream, error state, instruction budget, and
+memory budget. Captured argument values are deep-copied. Bytecode and constants
+are immutable and may be shared.
+
+`join` returns a completed task's value. `join_all` returns values in task
+creation order, not completion order. `join_timeout` raises `SS_ERR_TIMEOUT`
+when its deadline passes. `cancel` is cooperative and checked at instruction
+and host-call boundaries. Leaving a task group cancels and waits for unfinished
+children.
+
+Joining a state never changes a parent state implicitly. The program must
+explicitly assign, apply, or compose the returned value. External file side
+effects remain the programmer's responsibility.

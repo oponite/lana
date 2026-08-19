@@ -1,0 +1,19 @@
+fn update(belief, evidence) {
+    apply evidence -> belief;
+    return belief;
+}
+
+state belief = state(p: 0.50, d: 0.20);
+state positive = state(p: 0.90, d: 0.50);
+state negative = state(p: 0.10, d: 0.50);
+
+taskgroup {
+    let positive_task = fork update(belief, positive);
+    let negative_task = fork update(belief, negative);
+    let results = join_all([positive_task, negative_task]);
+    let positive_result = results[0];
+    let negative_result = results[1];
+    print(measure positive_result);
+    print(measure negative_result);
+    print(measure belief);
+}

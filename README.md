@@ -15,8 +15,8 @@ influence. Positive `d` aligns influence with `p`; negative `d` makes the
 influence contrarian by targeting `1 - p`; `|d|` is the strength.
 
 ```lana
-state belief = state { p: 0.50, d: 0.30 };
-state evidence = state { p: 0.90, d: 0.65 };
+state belief = state(p: 0.50, d: 0.30);
+state evidence = state(p: 0.90, d: 0.65);
 apply evidence -> belief;
 print(measure belief as probability);
 ```
@@ -25,7 +25,19 @@ Python provides source tooling. The canonical register VM and structured-state
 semantics are written in C11. ARM64 and x86_64 assembly probes validate the
 low-level `APPLY` arithmetic without becoming a second semantic authority.
 
-## Build and run
+## Install and run
+
+Build an installable wheel containing both the Python source tooling and native
+C VM:
+
+```bash
+python3 -m pip install .
+lana run examples/belief.lana
+lana check examples/belief.lana
+lana version
+```
+
+For VM development:
 
 ```bash
 cmake -S . -B build
@@ -52,10 +64,38 @@ Initial scalar syntax includes `let`, assignment, arithmetic, comparisons,
 arrays, `if`, `while`, functions, and `return`. Structured-state operations
 compile to dedicated opcodes.
 
+State fields accept runtime expressions. Strings preserve whitespace. Built-in
+host calls currently provide `args`, `read_text`, `write_text`, `now`, `random`,
+and `assert`.
+
 Optional `timestamp`, `source`, `weight`, and `confidence` indexes stay outside
 the primitive pair. Configure bounded history with
 `history belief latest 32;` or a duration. `previous(belief)`,
 `change(belief)`, and `velocity(belief)` expose recorded transitions.
+
+## Structured concurrency
+
+`fork` executes a function in an isolated native VM. Arguments are deep-copied,
+so a child cannot mutate its parent's arrays or states. Results return only
+through `join` or `join_all`.
+
+```lana
+fn update(belief, evidence) {
+    apply evidence -> belief;
+    return belief;
+}
+
+taskgroup {
+    let first = fork update(belief, source_a);
+    let second = fork update(belief, source_b);
+    let results = join_all([first, second]);
+}
+```
+
+Task groups cancel and wait for unfinished children on exit. `cancel(task)` and
+`join_timeout(task, seconds)` provide explicit control. Pure task results and
+seeded sampling are reproducible; external file side effects are not made
+deterministic by the VM.
 
 See [SPEC.md](SPEC.md) for the normative state and operation semantics.
 

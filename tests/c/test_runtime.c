@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+_Static_assert(OP_RETURN == 30, "Bytecode v1 OP_RETURN value changed");
+_Static_assert(OP_PRINT == 31, "Bytecode v1 OP_PRINT value changed");
+_Static_assert(OP_HALT == 32, "Bytecode v1 OP_HALT value changed");
+
 #define CHECK(condition) do { if (!(condition)) { (void)fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__, __LINE__, #condition); return 1; } } while (0)
 
 static SSInstruction instruction(OpCode opcode, uint32_t a, uint32_t b,
@@ -175,6 +179,13 @@ static int test_assembler_serialization_and_loader(void) {
     CHECK(fabs(vm.frames[0].registers[0].as.state.state.p - 0.76) < SS_STATE_EPSILON);
     CHECK(vm.frames[0].registers[2].type == VAL_NUMBER);
     CHECK(fabs(vm.frames[0].registers[2].as.number - 0.76) < SS_STATE_EPSILON);
+    ss_vm_free(&vm); ss_chunk_free(&loaded);
+    assembled.version = 1u;
+    CHECK(ss_chunk_write_file(&assembled, binary, &error) == SS_OK);
+    CHECK(ss_chunk_read_file(&loaded, binary, &error) == SS_OK);
+    CHECK(loaded.version == 1u);
+    ss_vm_init(&vm, &loaded); CHECK(ss_vm_run(&vm) == SS_OK);
+    CHECK(fabs(vm.frames[0].registers[0].as.state.state.p - 0.76) < SS_STATE_EPSILON);
     ss_vm_free(&vm); ss_chunk_free(&loaded); ss_chunk_free(&assembled);
     CHECK(remove(binary) == 0);
     return 0;

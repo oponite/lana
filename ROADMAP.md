@@ -1,20 +1,27 @@
-# Lana Roadmap
+# Lana 1.0 Launch Roadmap
 
-## Foundation
+This file lists unfinished launch work only.
 
-Implement and validate the C semantic runtime, register VM, assembler,
-portable bytecode, disassembler, trace mode, and sanitizer tests.
+## 1. Data-complete programs
 
-The obsolete Python v0 VM is retained under `reference/python_v0/` for
-historical comparison only.
+- Add maps and local module imports.
+- Add native CSV reading and JSON parsing/stringifying.
+- Define consistent file, parse, assertion, and task error messages.
 
-## Language
+## 2. Concurrency hardening
 
-Compile the new brace syntax with Python tooling into verified SSBC executed by
-the C VM.
+- Replace one-pthread-per-task execution with a bounded worker pool.
+- Preserve configured state history when a state is passed to a task.
+- Add ThreadSanitizer coverage, scheduler stress tests, and malformed task-bytecode fuzzing.
 
-## After Bytecode v1
+## 3. Out-of-the-box distribution
 
-Bytecode v1 is frozen. Add broader collections, standard-library I/O, fuzzing,
-and performance work without changing its existing instruction meanings.
-JIT compilation, concurrency, and a REPL are deliberately deferred.
+- Publish a signed macOS ARM64 wheel and Homebrew bottle.
+- Test installation and execution on a clean Apple Silicon runner.
+- Make `lana test` source locations and assertion failures release-quality.
+
+## 4. Launch evidence
+
+- Add CSV and concurrent evidence examples to the five-minute guide.
+- Rerun the falsification benchmark on the release build.
+- Freeze the Lana 1.0 source specification after release-candidate tests pass.

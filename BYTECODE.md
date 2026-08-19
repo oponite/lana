@@ -1,4 +1,4 @@
-# SSBC Bytecode v1
+# SSBC Bytecode
 
 SSBC v1 is Lana's portable register bytecode for ordinary values and the native
 `STATE(p, d)` primitive. The version was frozen after the C VM, assembler,
@@ -15,3 +15,23 @@ probability is stored. The verifier checks opcodes, registers, constant types,
 function ranges, and jump targets before execution.
 
 Changes to instruction meanings or encoding require a new bytecode version.
+
+## Bytecode v2
+
+SSBC v2 appends opcodes without renumbering any v1 opcode. It adds runtime state
+construction, host calls, and structured tasks:
+
+```text
+STATE_BUILD
+FORK
+JOIN
+JOIN_TIMEOUT
+JOIN_ALL
+CANCEL
+TASKGROUP_ENTER
+TASKGROUP_EXIT
+HOST_CALL
+```
+
+The loader accepts v1 and v2. The verifier rejects v2-only instructions in a
+v1 file. Product version and bytecode version are independent.
