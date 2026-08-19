@@ -36,8 +36,14 @@ static int assemble_command(int argc, char **argv) {
 static int load_command(int argc, char **argv, bool execute) {
     SSChunk chunk; SSErrorInfo error = {0}; SSError result;
     bool trace = false; bool stats = false; uint64_t seed = UINT64_C(0x4c414e41); int index;
+    int program_argc = 0; const char **program_argv = NULL;
     if (argc < 3) { usage(stderr); return 2; }
     for (index = 3; index < argc; ++index) {
+        if (strcmp(argv[index], "--") == 0) {
+            program_argc = argc - index - 1;
+            program_argv = (const char **)&argv[index + 1];
+            break;
+        }
         if (strcmp(argv[index], "--trace") == 0) trace = true;
         else if (strcmp(argv[index], "--stats") == 0) stats = true;
         else if (strcmp(argv[index], "--seed") == 0 && index + 1 < argc) {
@@ -52,6 +58,7 @@ static int load_command(int argc, char **argv, bool execute) {
         struct timespec started, finished;
         uint64_t elapsed_ns;
         VM vm; ss_vm_init(&vm, &chunk); vm.trace = trace; ss_vm_seed(&vm, seed);
+        ss_vm_set_program_args(&vm, program_argc, program_argv);
         (void)timespec_get(&started, TIME_UTC);
         result = ss_vm_run(&vm);
         (void)timespec_get(&finished, TIME_UTC);

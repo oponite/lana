@@ -14,6 +14,10 @@ static SSError wait_task(VM *vm, SSTask *task, double timeout_seconds, Value *ou
 
 static SSError vm_fail(VM *vm, SSError code, size_t ip, const SSInstruction *ins,
                        const char *message) {
+    if (vm->error.code != SS_OK && vm->error.message[0] != '\0') {
+        vm->running = false;
+        return code;
+    }
     ss_error_set(&vm->error, code, ip, ins == NULL ? OP_NOP : ins->opcode,
                  ins == NULL ? 0u : ins->line, "%s", message);
     vm->running = false;
@@ -194,8 +198,11 @@ static SSError start_task(VM *parent, uint32_t function_index,
     if (task == NULL) return SS_ERR_OOM;
     task->child = malloc(sizeof(*task->child));
     if (task->child == NULL) { free(task); return SS_ERR_OOM; }
-    if (pthread_mutex_init(&task->mutex, NULL) != 0 ||
-        pthread_cond_init(&task->completed_condition, NULL) != 0) {
+    if (pthread_mutex_init(&task->mutex, NULL) != 0) {
+        free(task->child); free(task); return SS_ERR_TASK;
+    }
+    if (pthread_cond_init(&task->completed_condition, NULL) != 0) {
+        (void)pthread_mutex_destroy(&task->mutex);
         free(task->child); free(task); return SS_ERR_TASK;
     }
     task->id = parent->next_task_id++;
@@ -247,12 +254,105 @@ static SSError wait_task(VM *vm, SSTask *task, double timeout_seconds, Value *ou
         return task->status;
     }
     if (!task->joined) {
-        SSError error = clone_value(vm, &task->result, &task->result);
+        Value cloned;
+        SSError error = clone_value(vm, &task->result, &cloned);
         if (error != SS_OK) return error;
+        task->result = cloned;
         ss_vm_free(task->child); free(task->child); task->child = NULL; task->joined = true;
     }
     *out = task->result;
     return SS_OK;
+}
+
+static SSError host_read_text(VM *vm, const Value *argument, Value *out) {
+    FILE *file;
+    long length;
+    char *contents;
+    if (argument->type != VAL_STRING) return SS_ERR_TYPE;
+    file = fopen(argument->as.string, "rb");
+    if (file == NULL) return SS_ERR_IO;
+    if (fseek(file, 0, SEEK_END) != 0 || (length = ftell(file)) < 0 ||
+        fseek(file, 0, SEEK_SET) != 0) { (void)fclose(file); return SS_ERR_IO; }
+    if ((size_t)length > vm->memory_limit - vm->allocated_bytes) {
+        (void)fclose(file); return SS_ERR_LIMIT;
+    }
+    contents = ss_vm_alloc(vm, (size_t)length + 1u);
+    if (contents == NULL) { (void)fclose(file); return SS_ERR_OOM; }
+    if (fread(contents, 1, (size_t)length, file) != (size_t)length) {
+        (void)fclose(file); return SS_ERR_IO;
+    }
+    contents[length] = '\0';
+    if (fclose(file) != 0) return SS_ERR_IO;
+    *out = ss_value_string(contents);
+    return SS_OK;
+}
+
+static SSError execute_host_call(VM *vm, uint32_t host_id, const Value *arguments,
+                                 size_t argc, Value *out) {
+    size_t index;
+    *out = ss_value_null();
+    switch ((SSHostCallId)host_id) {
+        case SS_HOST_ARGS: {
+            SSArray *array;
+            if (argc != 0u) return SS_ERR_TYPE;
+            array = ss_vm_alloc(vm, sizeof(*array));
+            if (array == NULL) return SS_ERR_OOM;
+            array->count = (size_t)vm->program_argc;
+            array->items = ss_vm_alloc(vm, array->count * sizeof(*array->items));
+            if (array->items == NULL && array->count > 0u) return SS_ERR_OOM;
+            for (index = 0; index < array->count; ++index) {
+                Value source = ss_value_string(vm->program_argv[index]);
+                SSError error = clone_value(vm, &source, &array->items[index]);
+                if (error != SS_OK) return error;
+            }
+            out->type = VAL_ARRAY; out->as.array = array; return SS_OK;
+        }
+        case SS_HOST_READ_TEXT:
+            return argc == 1u ? host_read_text(vm, &arguments[0], out) : SS_ERR_TYPE;
+        case SS_HOST_WRITE_TEXT: {
+            FILE *file;
+            size_t length;
+            if (argc != 2u || arguments[0].type != VAL_STRING || arguments[1].type != VAL_STRING)
+                return SS_ERR_TYPE;
+            file = fopen(arguments[0].as.string, "wb");
+            if (file == NULL) return SS_ERR_IO;
+            length = strlen(arguments[1].as.string);
+            if (fwrite(arguments[1].as.string, 1, length, file) != length) {
+                (void)fclose(file); return SS_ERR_IO;
+            }
+            if (fclose(file) != 0) return SS_ERR_IO;
+            return SS_OK;
+        }
+        case SS_HOST_NOW: {
+            struct timespec now;
+            if (argc != 0u || timespec_get(&now, TIME_UTC) != TIME_UTC) return SS_ERR_TYPE;
+            *out = ss_value_number((double)now.tv_sec + (double)now.tv_nsec / 1000000000.0);
+            return SS_OK;
+        }
+        case SS_HOST_RANDOM:
+            if (argc != 0u) return SS_ERR_TYPE;
+            *out = ss_value_number((double)ss_vm_random(vm) / 4294967296.0); return SS_OK;
+        case SS_HOST_ASSERT:
+            if (argc != 1u || arguments[0].type != VAL_BOOL) return SS_ERR_TYPE;
+            return arguments[0].as.boolean ? SS_OK : SS_ERR_TASK;
+        default: return SS_ERR_FORMAT;
+    }
+}
+
+static SSError close_task_group(VM *vm, uint64_t group_id) {
+    SSTask *task;
+    Value ignored;
+    SSError first_error = SS_OK;
+    for (task = vm->tasks; task != NULL; task = task->next)
+        if (task->group_id == group_id && !task->completed) cancel_task(task);
+    for (task = vm->tasks; task != NULL; task = task->next) {
+        if (task->group_id == group_id && !task->joined) {
+            SSError error = wait_task(vm, task, -1.0, &ignored);
+            if (error == SS_ERR_CANCELLED) memset(&vm->error, 0, sizeof(vm->error));
+            else if (error != SS_OK && first_error == SS_OK) first_error = error;
+        }
+    }
+    return first_error;
 }
 
 static SSError history_append(VM *vm, SSHistory *history, SSStateValue state) {
@@ -425,6 +525,7 @@ static bool values_equal(const Value *left, const Value *right) {
 
 static void trace_instruction(VM *vm, size_t ip, const SSInstruction *ins) {
     SSFrame *frame = current_frame(vm);
+    if (vm->task_id != 0u) (void)printf("[task %llu] ", (unsigned long long)vm->task_id);
     ss_disassemble_instruction(vm->chunk, ip, stdout);
     if (ins->opcode == OP_APPLY && frame->registers[ins->a].type == VAL_STATE &&
         frame->registers[ins->b].type == VAL_STATE) {
@@ -445,6 +546,8 @@ SSError ss_vm_run(VM *vm) {
         const SSInstruction *ins;
         size_t instruction_ip;
         SSError error = SS_OK;
+        if (atomic_load(&vm->cancelled))
+            return vm_fail(vm, SS_ERR_CANCELLED, vm->ip, NULL, "task cancelled");
         if (vm->instruction_count++ >= vm->instruction_limit)
             return vm_fail(vm, SS_ERR_LIMIT, vm->ip, NULL, "instruction limit exceeded");
         if (vm->ip >= vm->chunk->code_count)
@@ -466,6 +569,15 @@ SSError ss_vm_run(VM *vm) {
                 if (p->type != VAL_NUMBER || d->type != VAL_NUMBER) error = SS_ERR_TYPE;
                 else error = ss_state_make(p->as.number, d->as.number, &state);
                 if (error == SS_OK) error = store_state(vm, ins->a, ss_value_state(state).as.state);
+                break;
+            }
+            case OP_STATE_BUILD: {
+                SSState state;
+                if (frame->registers[ins->a].type != VAL_NUMBER ||
+                    frame->registers[ins->b].type != VAL_NUMBER) error = SS_ERR_TYPE;
+                else error = ss_state_make(frame->registers[ins->a].as.number,
+                                           frame->registers[ins->b].as.number, &state);
+                if (error == SS_OK) error = store_state(vm, ins->c, ss_value_state(state).as.state);
                 break;
             }
             case OP_STATE_SET:
@@ -689,6 +801,76 @@ SSError ss_vm_run(VM *vm) {
                 for (index = 0; index < ins->imm; ++index) callee->registers[index] = frame->registers[ins->c + index];
                 vm->ip = function->entry; break;
             }
+            case OP_FORK: {
+                SSTask *task;
+                error = start_task(vm, ins->b, &frame->registers[ins->c], ins->imm, &task);
+                if (error == SS_OK) {
+                    frame->registers[ins->a].type = VAL_TASK;
+                    frame->registers[ins->a].as.task = task;
+                    if (vm->trace) (void)printf("  forked task %llu\n", (unsigned long long)task->id);
+                }
+                break;
+            }
+            case OP_JOIN: {
+                Value *task_value = &frame->registers[ins->a];
+                if (task_value->type != VAL_TASK) error = SS_ERR_TYPE;
+                else error = wait_task(vm, task_value->as.task, -1.0, &frame->registers[ins->b]);
+                break;
+            }
+            case OP_JOIN_TIMEOUT: {
+                Value *task_value = &frame->registers[ins->a];
+                Value *timeout = &frame->registers[ins->b];
+                if (task_value->type != VAL_TASK || timeout->type != VAL_NUMBER || timeout->as.number < 0.0)
+                    error = SS_ERR_TYPE;
+                else error = wait_task(vm, task_value->as.task, timeout->as.number,
+                                       &frame->registers[ins->c]);
+                break;
+            }
+            case OP_JOIN_ALL: {
+                Value *tasks = &frame->registers[ins->a];
+                SSArray *results;
+                size_t index;
+                if (tasks->type != VAL_ARRAY) { error = SS_ERR_TYPE; break; }
+                results = ss_vm_alloc(vm, sizeof(*results));
+                if (results == NULL) { error = SS_ERR_OOM; break; }
+                results->count = tasks->as.array->count;
+                results->items = ss_vm_alloc(vm, results->count * sizeof(*results->items));
+                if (results->items == NULL && results->count > 0u) { error = SS_ERR_OOM; break; }
+                for (index = 0; index < results->count && error == SS_OK; ++index) {
+                    Value *task_value = &tasks->as.array->items[index];
+                    if (task_value->type != VAL_TASK) error = SS_ERR_TYPE;
+                    else error = wait_task(vm, task_value->as.task, -1.0, &results->items[index]);
+                }
+                if (error == SS_OK) {
+                    frame->registers[ins->b].type = VAL_ARRAY;
+                    frame->registers[ins->b].as.array = results;
+                }
+                break;
+            }
+            case OP_CANCEL:
+                if (frame->registers[ins->a].type != VAL_TASK) error = SS_ERR_TYPE;
+                else cancel_task(frame->registers[ins->a].as.task);
+                break;
+            case OP_TASKGROUP_ENTER:
+                if (vm->group_depth >= SS_MAX_CALL_FRAMES) error = SS_ERR_LIMIT;
+                else {
+                    vm->group_stack[vm->group_depth++] = vm->current_group_id;
+                    vm->current_group_id = vm->next_group_id++;
+                }
+                break;
+            case OP_TASKGROUP_EXIT: {
+                uint64_t group_id = vm->current_group_id;
+                if (vm->group_depth == 0u) error = SS_ERR_TASK;
+                else {
+                    vm->current_group_id = vm->group_stack[--vm->group_depth];
+                    error = close_task_group(vm, group_id);
+                }
+                break;
+            }
+            case OP_HOST_CALL:
+                error = execute_host_call(vm, ins->b, &frame->registers[ins->c], ins->imm,
+                                          &frame->registers[ins->a]);
+                break;
             case OP_RETURN: {
                 Value returned = frame->registers[ins->a];
                 if (vm->frame_count == 1u) { vm->result = returned; vm->running = false; }

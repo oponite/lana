@@ -12,8 +12,8 @@ ROOT = Path(__file__).parents[1]
 def test_new_syntax_emits_native_state_bytecode_assembly() -> None:
     assembly = compile_source((ROOT / "examples" / "belief.lana").read_text())
 
-    assert "STATE_NEW R0 0.5 0.3" in assembly
-    assert "APPLY R1 R0" in assembly
+    assert "STATE_BUILD" in assembly
+    assert "APPLY" in assembly
     assert "MEASURE R0 probability" in assembly
 
 
@@ -119,3 +119,105 @@ def test_malformed_bytecode_is_rejected_without_crashing(tmp_path: Path) -> None
 
     assert result.returncode == 1
     assert "SS_ERR_FORMAT" in result.stderr
+
+
+def run_lana_source(tmp_path: Path, source: str, *program_args: str) -> subprocess.CompletedProcess[str]:
+    vm = ROOT / "build" / "ssvm"
+    assembly = tmp_path / "program.ssa"
+    bytecode = tmp_path / "program.ssb"
+    assembly.write_text(compile_source(source))
+    subprocess.run([vm, "asm", assembly, "-o", bytecode], check=True)
+    return subprocess.run(
+        [vm, "run", bytecode, "--", *program_args], check=False, text=True, capture_output=True
+    )
+
+
+def test_runtime_state_and_strings_with_whitespace(tmp_path: Path) -> None:
+    result = run_lana_source(
+        tmp_path,
+        'let p = 0.8; let d = 0.4; state belief = state(p: p, d: d, source: "sensor one"); print(belief.source); print(measure belief);',
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "sensor one\n0.8\n"
+
+
+def test_host_arguments_and_text_io(tmp_path: Path) -> None:
+    output = tmp_path / "output with spaces.txt"
+    result = run_lana_source(
+        tmp_path,
+        f'let values = args(); let ignored = write_text("{output}", "hello world"); let text = read_text("{output}"); print(values); print(text);',
+        "alpha",
+        "beta",
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "[alpha, beta]\nhello world\n"
+    assert output.read_text() == "hello world"
+
+
+def test_fork_snapshot_isolation_and_ordered_join_all(tmp_path: Path) -> None:
+    result = run_lana_source(
+        tmp_path,
+        """
+        fn update(belief, evidence) {
+            apply evidence -> belief;
+            return belief;
+        }
+        state belief = state(p: 0.5, d: 0.2);
+        state positive = state(p: 0.9, d: 0.5);
+        state negative = state(p: 0.1, d: 0.5);
+        taskgroup {
+            let first = fork update(belief, positive);
+            let second = fork update(belief, negative);
+            let results = join_all([first, second]);
+            let first_result = results[0];
+            let second_result = results[1];
+            print(measure first_result);
+            print(measure second_result);
+            print(measure belief);
+        }
+        """,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "0.7\n0.3\n0.5\n"
+
+
+def test_cancelled_unjoined_task_is_cleaned_up_by_group(tmp_path: Path) -> None:
+    result = run_lana_source(
+        tmp_path,
+        """
+        fn spin() {
+            let value = 0;
+            while (true) { value = value + 1; }
+            return value;
+        }
+        taskgroup {
+            let work = fork spin();
+            cancel(work);
+        }
+        print("cancelled safely");
+        """,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "cancelled safely\n"
+
+
+def test_join_timeout_reports_runtime_error(tmp_path: Path) -> None:
+    result = run_lana_source(
+        tmp_path,
+        """
+        fn spin() {
+            let value = 0;
+            while (true) { value = value + 1; }
+            return value;
+        }
+        let work = fork spin();
+        let result = join_timeout(work, 0.001);
+        """,
+    )
+
+    assert result.returncode == 1
+    assert "SS_ERR_TIMEOUT" in result.stderr
