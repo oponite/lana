@@ -1,0 +1,15 @@
+{
+  "checks": [
+    "accuracy",
+    "Brier score",
+    "log loss",
+    "implementation parity",
+    "stress parity"
+  ],
+  "groups_recomputed": 30,
+  "max_implementation_parity_error": 4.998224056862455e-13,
+  "max_metric_recompute_error": 0.0,
+  "max_stress_parity_error": 4.537481501643015e-13,
+  "prediction_rows": 2880,
+  "status": "passed"
+}
