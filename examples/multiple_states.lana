@@ -1,0 +1,6 @@
+state observation = state { p: 0.90, d: 0.40 };
+state report = state { p: 0.70, d: 0.60 };
+state belief = state { p: 0.20, d: 0.10 };
+
+apply [observation, report] -> belief using mean;
+print(measure belief);

@@ -1,0 +1,7 @@
+state belief = state { p: 0.50, d: 0.30 };
+state evidence = state { p: 0.90, d: 0.65 };
+
+apply evidence -> belief;
+
+let result = measure belief;
+print(result);
