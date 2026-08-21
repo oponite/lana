@@ -1,0 +1,435 @@
+import "./syntax.lana" as syntax;
+
+fn emitter_new(namespace) { return [array_new(0), array_new(0), 0, 0, namespace, array_new(0), array_new(0)]; }
+fn emit(context, line) { array_push(context[0], line); return null; }
+fn reg(number) { return string_concat("R", number_to_string(number)); }
+
+fn new_register(context) {
+    let value = context[2]; context[2] = value + 1;
+    assert(context[2] <= 256, "function requires more than 256 registers"); return value;
+}
+
+fn new_label(context, kind) {
+    context[3] = context[3] + 1;
+    return string_concat("__", context[4], "_", kind, "_", number_to_string(context[3]));
+}
+
+fn symbol_add(context, name, register, information) {
+    array_push(context[1], [name, register]); if (information) { array_push(context[5], name); } return register;
+}
+
+fn symbol_is_information(context, name) {
+    let index = 0; while (index < array_length(context[5])) { if (context[5][index] == name) { return true; } index = index + 1; }
+    return false;
+}
+
+fn expression_is_information(context, node) {
+    if (node[0] == 21) { return symbol_is_information(context, node[1]); }
+    if (node[0] == 29) { return true; } if (node[0] == 30) { return true; }
+    if (node[0] == 31) {
+        if (node[1] == "append") { return false; } if (node[1] == "sample") { return false; }
+        if (node[1] == "resolve") { return false; } return true;
+    }
+    return false;
+}
+
+fn field_find(fields, name) {
+    let index = 0; while (index < array_length(fields)) { if (fields[index][0] == name) { return fields[index][1]; } index = index + 1; }
+    return null;
+}
+
+fn replace_commas(text) {
+    let pieces = array_new(0); let index = 0;
+    while (index < string_length(text)) {
+        if (string_byte_at(text, index) == 44) { array_push(pieces, ";"); }
+        else { array_push(pieces, string_slice(text, index, index + 1)); }
+        index = index + 1;
+    }
+    return string_join(pieces, "");
+}
+
+fn symbol_find(context, name) {
+    let index = array_length(context[1]);
+    while (index > 0) {
+        index = index - 1;
+        if (context[1][index][0] == name) { return context[1][index][1]; }
+    }
+    assert(false, string_concat("unknown name ", name)); return 0;
+}
+
+fn call_target(context, name) {
+    let index = 0; while (index < array_length(context[6])) { if (context[6][index][0] == name) { return context[6][index][1]; } index = index + 1; }
+    return name;
+}
+
+fn is_host_call(name) {
+    if (name == "args") { return true; } if (name == "read_text") { return true; }
+    if (name == "write_text") { return true; } if (name == "now") { return true; }
+    if (name == "random") { return true; } if (name == "assert") { return true; }
+    if (name == "map_new") { return true; } if (name == "index_get") { return true; }
+    if (name == "index_set") { return true; } if (name == "json_parse") { return true; }
+    if (name == "json_stringify") { return true; } if (name == "string_length") { return true; }
+    if (name == "string_byte_at") { return true; } if (name == "string_slice") { return true; }
+    if (name == "string_concat") { return true; } if (name == "number_to_string") { return true; }
+    if (name == "array_new") { return true; } if (name == "array_push") { return true; }
+    if (name == "string_hex") { return true; } if (name == "string_join") { return true; }
+    if (name == "array_length") { return true; } if (name == "string_unescape") { return true; }
+    if (name == "path_resolve") { return true; }
+    if (name == "ml_fit_ridge") { return true; } if (name == "ml_fit_logistic") { return true; }
+    if (name == "ml_predict") { return true; } if (name == "ml_standardize") { return true; }
+    if (name == "ml_polynomial_features") { return true; } if (name == "ml_rbf_features") { return true; }
+    if (name == "ml_regression_metrics") { return true; } if (name == "ml_classification_metrics") { return true; }
+    if (name == "ml_model_write") { return true; } if (name == "ml_model_read") { return true; }
+    if (name == "json_parse") { return true; } if (name == "json_stringify") { return true; }
+    if (name == "csv_read") { return true; } if (name == "csv_write") { return true; }
+    return false;
+}
+
+fn emit_contiguous(context, arguments) {
+    let values = array_new(0); let index = 0;
+    while (index < array_length(arguments)) { array_push(values, emit_expression(context, arguments[index])); index = index + 1; }
+    let base = context[2]; index = 0;
+    while (index < array_length(values)) {
+        let destination = new_register(context);
+        emit(context, string_concat("MOVE ", reg(destination), " ", reg(values[index]))); index = index + 1;
+    }
+    return [base, array_length(values)];
+}
+
+fn emit_literal(context, node) {
+    let destination = new_register(context);
+    if (node[1] == "string") {
+        let encoded = string_hex(node[2]);
+        if (string_length(encoded) == 0) { encoded = "-"; }
+        emit(context, string_concat("LOAD_STRING ", reg(destination), " ", encoded));
+    } else {
+        let text = node[2];
+        if (node[1] == "bool") { if (node[2]) { text = "true"; } else { text = "false"; } }
+        if (node[1] == "null") { text = "null"; }
+        emit(context, string_concat("LOAD_CONST ", reg(destination), " ", text));
+    }
+    return destination;
+}
+
+fn emit_call(context, node) {
+    let packed = emit_contiguous(context, node[2]); let destination = new_register(context);
+    if (is_host_call(node[1])) {
+        emit(context, string_concat("HOST_CALL ", node[1], " ", reg(packed[0]), " ", number_to_string(packed[1]), " ", reg(destination)));
+    } else {
+        emit(context, string_concat("CALL ", call_target(context, node[1]), " ", reg(packed[0]), " ", number_to_string(packed[1]), " ", reg(destination)));
+    }
+    return destination;
+}
+
+fn emit_binary(context, node) {
+    let left = emit_expression(context, node[2]); let right = emit_expression(context, node[3]);
+    let destination = new_register(context); let opcode = "BINARY";
+    if (node[1] == "==") { opcode = "COMPARE"; } if (node[1] == "!=") { opcode = "COMPARE"; }
+    if (node[1] == "<") { opcode = "COMPARE"; } if (node[1] == "<=") { opcode = "COMPARE"; }
+    if (node[1] == ">") { opcode = "COMPARE"; } if (node[1] == ">=") { opcode = "COMPARE"; }
+    emit(context, string_concat(opcode, " ", reg(left), " ", node[1], " ", reg(right), " ", reg(destination)));
+    return destination;
+}
+
+fn emit_unary(context, node) {
+    let source = emit_expression(context, node[2]); let destination = new_register(context);
+    emit(context, string_concat("UNARY ", node[1], " ", reg(source), " ", reg(destination))); return destination;
+}
+
+fn emit_array(context, node) {
+    let packed = emit_contiguous(context, node[1]); let destination = new_register(context);
+    emit(context, string_concat("ARRAY_NEW ", reg(destination), " ", reg(packed[0]), " ", number_to_string(packed[1])));
+    return destination;
+}
+
+fn emit_index(context, node) {
+    let arguments = [node[1], node[2]]; let packed = emit_contiguous(context, arguments); let destination = new_register(context);
+    emit(context, string_concat("HOST_CALL index_get ", reg(packed[0]), " 2 ", reg(destination))); return destination;
+}
+
+fn emit_map(context, node) {
+    let arguments = array_new(0); let index = 0;
+    while (index < array_length(node[1])) {
+        array_push(arguments, syntax.literal_node("string", node[1][index][0], node[2]));
+        array_push(arguments, node[1][index][1]); index = index + 1;
+    }
+    let packed = emit_contiguous(context, arguments); let destination = new_register(context);
+    emit(context, string_concat("HOST_CALL map_new ", reg(packed[0]), " ", number_to_string(packed[1]), " ", reg(destination))); return destination;
+}
+
+fn emit_joint(context, node) {
+    let packed = emit_contiguous(context, node[3]); let destination = new_register(context);
+    emit(context, string_concat("JOINT_BUILD_V5 ", reg(destination), " ", reg(packed[0]), " ", number_to_string(packed[1]), " ", node[1], ":", string_join(node[2], ";")));
+    return destination;
+}
+
+fn emit_finite_joint(context, node) {
+    let rows = emit_expression(context, node[2]); let destination = new_register(context);
+    emit(context, string_concat("JOINT_BUILD_FINITE_V5 ", reg(rows), " ", reg(destination), " ", string_join(node[1], ";"))); return destination;
+}
+
+fn emit_append(context, arguments) {
+    let left = emit_expression(context, arguments[0]); let right = emit_expression(context, arguments[1]); let destination = new_register(context);
+    emit(context, string_concat("APPEND ", reg(left), " ", reg(right), " ", reg(destination))); return destination;
+}
+
+fn emit_joint_refinement(context, operation, arguments) {
+    let source = emit_expression(context, arguments[0]); let destination = new_register(context);
+    if (operation == "project") { emit(context, string_concat("JOINT_PROJECT_V5 ", reg(source), " ", reg(destination), " ", replace_commas(arguments[1][2]))); return destination; }
+    if (operation == "condition") { let evidence = emit_expression(context, arguments[2]); emit(context, string_concat("JOINT_CONDITION_V5 ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", reg(evidence))); return destination; }
+    if (operation == "rename") { emit(context, string_concat("JOINT_RENAME_V5 ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", arguments[2][2])); return destination; }
+    let evidence = emit_expression(context, arguments[2]); emit(context, string_concat("OBSERVE_V5 ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", reg(evidence))); return destination;
+}
+
+fn emit_information_read(context, operation, arguments) {
+    let source = emit_expression(context, arguments[0]); let destination = new_register(context);
+    if (operation == "possibility") { emit(context, string_concat("POSSIBILITY_BUILD_V5 ", reg(source), " ", reg(destination))); return destination; }
+    if (operation == "sample") {
+        if (expression_is_information(context, arguments[0])) { emit(context, string_concat("INFO_SAMPLE_V5 ", reg(source), " ", reg(destination))); }
+        else { emit(context, string_concat("SAMPLE_STATE_DIST ", reg(source), " ", reg(destination))); }
+        return destination;
+    }
+    emit(context, string_concat("RESOLVE_V5 ", reg(source), " ", reg(destination))); return destination;
+}
+
+fn emit_information(context, node) {
+    if (node[1] == "append") { return emit_append(context, node[2]); }
+    if (node[1] == "project") { return emit_joint_refinement(context, node[1], node[2]); }
+    if (node[1] == "condition") { return emit_joint_refinement(context, node[1], node[2]); }
+    if (node[1] == "rename") { return emit_joint_refinement(context, node[1], node[2]); }
+    if (node[1] == "observe") { return emit_joint_refinement(context, node[1], node[2]); }
+    return emit_information_read(context, node[1], node[2]);
+}
+
+fn emit_measure(context, node) {
+    let destination = new_register(context); let source = symbol_find(context, node[1]);
+    if (node[2] == "") { emit(context, string_concat("MEASURE_V3 ", reg(source), " ", node[3], " ", reg(destination))); }
+    else { emit(context, string_concat("MEASURE_BASIS_V4 ", reg(source), " ", reg(destination), " ", node[2], " ", node[3])); }
+    return destination;
+}
+
+fn emit_estimate_measure(context, node) {
+    let opcode = "ESTIMATE_MEASURE_DISTRIBUTION_V4"; if (node[3] == "probability") { opcode = "ESTIMATE_MEASURE_PROBABILITY_V4"; }
+    let destination = new_register(context); emit(context, string_concat(opcode, " ", reg(symbol_find(context, node[1])), " ", reg(destination), " ", node[2], " ", node[4])); return destination;
+}
+
+fn emit_task_expression(context, node) {
+    if (node[0] == 35) {
+        let packed = emit_contiguous(context, node[2]); let destination = new_register(context);
+        emit(context, string_concat("FORK ", call_target(context, node[1]), " ", reg(packed[0]), " ", number_to_string(packed[1]), " ", reg(destination))); return destination;
+    }
+    if (node[0] == 36) {
+        let task = emit_expression(context, node[2]); let destination = new_register(context);
+        let opcode = "JOIN"; if (node[1] == "join_all") { opcode = "JOIN_ALL"; }
+        emit(context, string_concat(opcode, " ", reg(task), " ", reg(destination))); return destination;
+    }
+    let task = emit_expression(context, node[1]); let timeout = emit_expression(context, node[2]); let destination = new_register(context);
+    emit(context, string_concat("JOIN_TIMEOUT ", reg(task), " ", reg(timeout), " ", reg(destination))); return destination;
+}
+
+fn emit_extended_expression(context, node) {
+    if (node[0] == 27) {
+        let source = emit_expression(context, node[1]); let destination = new_register(context); let opcode = "GET_FIELD";
+        if (node[2] == "timestamp") { opcode = "GET_INDEX"; } if (node[2] == "source") { opcode = "GET_INDEX"; }
+        if (node[2] == "weight") { opcode = "GET_INDEX"; } if (node[2] == "confidence") { opcode = "GET_INDEX"; }
+        emit(context, string_concat(opcode, " ", reg(source), " ", node[2], " ", reg(destination))); return destination;
+    }
+    if (node[0] == 28) { return emit_map(context, node); }
+    if (node[0] == 29) { return emit_joint(context, node); }
+    if (node[0] == 30) { return emit_finite_joint(context, node); }
+    if (node[0] == 31) { return emit_information(context, node); }
+    if (node[0] == 32) { return emit_measure(context, node); }
+    if (node[0] == 33) { return emit_estimate_measure(context, node); }
+    if (node[0] == 34) {
+        let opcode = "PREVIOUS"; if (node[1] == "change") { opcode = "CHANGE"; } if (node[1] == "velocity") { opcode = "VELOCITY"; }
+        let destination = new_register(context); emit(context, string_concat(opcode, " ", reg(symbol_find(context, node[2])), " ", reg(destination))); return destination;
+    }
+    if (node[0] == 35) { return emit_task_expression(context, node); }
+    if (node[0] == 36) { return emit_task_expression(context, node); }
+    if (node[0] == 37) { return emit_task_expression(context, node); }
+    assert(false, "unsupported expression in native emitter"); return 0;
+}
+
+fn emit_expression(context, node) {
+    if (node[0] == 20) { return emit_literal(context, node); }
+    if (node[0] == 21) { return symbol_find(context, node[1]); }
+    if (node[0] == 22) { return emit_binary(context, node); }
+    if (node[0] == 23) { return emit_unary(context, node); }
+    if (node[0] == 24) { return emit_call(context, node); }
+    if (node[0] == 25) { return emit_array(context, node); }
+    if (node[0] == 26) { return emit_index(context, node); }
+    return emit_extended_expression(context, node);
+}
+
+fn emit_assignment(context, target, value) {
+    if (target[0] == 21) {
+        let source = emit_expression(context, value); let destination = symbol_find(context, target[1]);
+        if (expression_is_information(context, value)) { array_push(context[5], target[1]); }
+        emit(context, string_concat("MOVE ", reg(destination), " ", reg(source))); return null;
+    }
+    if (target[0] == 26) {
+        let arguments = [target[1], target[2], value]; let packed = emit_contiguous(context, arguments); let ignored = new_register(context);
+        emit(context, string_concat("HOST_CALL index_set ", reg(packed[0]), " 3 ", reg(ignored))); return null;
+    }
+    assert(false, "invalid assignment target"); return null;
+}
+
+fn emit_if(context, node) {
+    let otherwise = new_label(context, "else"); let end = new_label(context, "endif");
+    let predicate = emit_expression(context, node[1]);
+    let uncertain = expression_is_information(context, node[1]); let opcode = "JUMP_IF_FALSE";
+    if (uncertain) { opcode = "PATH_SPLIT_V5"; }
+    emit(context, string_concat(opcode, " ", reg(predicate), " ", otherwise));
+    emit_statements(context, node[2]); emit(context, string_concat("JUMP ", end)); emit(context, string_concat(otherwise, ":"));
+    emit_statements(context, node[3]); emit(context, string_concat(end, ":")); if (uncertain) { emit(context, "PATH_JOIN_V5"); } return null;
+}
+
+fn emit_while(context, node) {
+    let start = new_label(context, "while"); let end = new_label(context, "endwhile");
+    assert(!expression_is_information(context, node[1]), "unresolved loop guards require a bounded execution form");
+    emit(context, string_concat(start, ":")); let predicate = emit_expression(context, node[1]);
+    emit(context, string_concat("JUMP_IF_FALSE ", reg(predicate), " ", end)); emit_statements(context, node[2]);
+    emit(context, string_concat("JUMP ", start)); emit(context, string_concat(end, ":")); return null;
+}
+
+fn emit_state_statement(context, node) {
+    let destination = new_register(context); symbol_add(context, node[1], destination, false);
+    let p = emit_expression(context, field_find(node[2], "p")); let d_re_node = field_find(node[2], "d"); let d_im = new_register(context); let d_re = 0;
+    if (d_re_node == null) { d_re = emit_expression(context, field_find(node[2], "d_re")); d_im = emit_expression(context, field_find(node[2], "d_im")); }
+    else { d_re = emit_expression(context, d_re_node); emit(context, string_concat("LOAD_CONST ", reg(d_im), " 0")); }
+    emit(context, string_concat("STATE_BUILD_V3 ", reg(p), " ", reg(d_re), " ", reg(d_im), " ", reg(destination)));
+    let metadata = ["timestamp", "source", "weight", "confidence"]; let index = 0;
+    while (index < array_length(metadata)) {
+        let field = field_find(node[2], metadata[index]);
+        if (field != null) { emit(context, string_concat("SET_INDEX ", reg(destination), " ", metadata[index], " ", reg(emit_expression(context, field)))); }
+        index = index + 1;
+    }
+    return null;
+}
+
+fn emit_extended_statement(context, node) {
+    if (node[0] == 9) { return emit_state_statement(context, node); }
+    if (node[0] == 10) { emit(context, string_concat("HISTORY ", reg(symbol_find(context, node[1])), " ", node[2], " ", reg(emit_expression(context, node[3])))); return null; }
+    if (node[0] == 11) { let target = symbol_find(context, node[1]); emit(context, string_concat("TRANSFORM_V3 ", reg(target), " ", reg(target), " ", node[2])); return null; }
+    if (node[0] == 12) { emit(context, "TASKGROUP_ENTER"); emit_statements(context, node[1]); emit(context, "TASKGROUP_EXIT"); return null; }
+    if (node[0] == 13) { emit(context, string_concat("CANCEL ", reg(emit_expression(context, node[1])))); return null; }
+    assert(false, "unsupported statement in native emitter"); return null;
+}
+
+fn emit_statement(context, ir_node) {
+    let node = ir_node[3]; emit(context, string_concat(".line ", number_to_string(node[array_length(node) - 1])));
+    if (node[0] == 2) {
+        let source = emit_expression(context, node[2]); let destination = new_register(context);
+        symbol_add(context, node[1], destination, expression_is_information(context, node[2])); emit(context, string_concat("MOVE ", reg(destination), " ", reg(source))); return null;
+    }
+    if (node[0] == 3) { return emit_assignment(context, node[1], node[2]); }
+    if (node[0] == 4) { return emit_if(context, node); }
+    if (node[0] == 5) { return emit_while(context, node); }
+    if (node[0] == 6) { emit(context, string_concat("RETURN ", reg(emit_expression(context, node[1])))); return null; }
+    if (node[0] == 7) { emit_expression(context, node[1]); return null; }
+    if (node[0] == 8) { emit(context, string_concat("PRINT ", reg(emit_expression(context, node[1])))); return null; }
+    return emit_extended_statement(context, node);
+}
+
+fn emit_statements(context, statements) {
+    let index = 0; while (index < array_length(statements)) { emit_statement(context, statements[index]); index = index + 1; }
+    return null;
+}
+
+fn emit_function_named(node, emitted_name, mappings) {
+    let context = emitter_new(emitted_name); context[6] = mappings; let index = 0;
+    while (index < array_length(node[2])) { symbol_add(context, node[2][index], index, false); context[2] = index + 1; index = index + 1; }
+    emit_statements(context, node[3]);
+    let empty = new_register(context); emit(context, string_concat("LOAD_CONST ", reg(empty), " null")); emit(context, string_concat("RETURN ", reg(empty)));
+    let header = string_concat(".function ", emitted_name, " ", number_to_string(array_length(node[2])), " ", number_to_string(context[2]));
+    return string_concat(header, "\n", string_join(context[0], "\n"));
+}
+
+fn emit_function(node) { return emit_function_named(node, node[1], array_new(0)); }
+
+fn expressions_use_v5(nodes) {
+    let index = 0; while (index < array_length(nodes)) { if (expression_uses_v5(nodes[index])) { return true; } index = index + 1; }
+    return false;
+}
+
+fn expression_uses_v5(node) {
+    if (node[0] == 29) { return true; } if (node[0] == 30) { return true; }
+    if (node[0] == 31) {
+        if (node[1] == "append") { return expressions_use_v5(node[2]); }
+        if (node[1] == "sample") { return expressions_use_v5(node[2]); }
+        return true;
+    }
+    if (node[0] == 22) { if (expression_uses_v5(node[2])) { return true; } return expression_uses_v5(node[3]); }
+    if (node[0] == 23) { return expression_uses_v5(node[2]); }
+    if (node[0] == 24) { return expressions_use_v5(node[2]); }
+    if (node[0] == 25) { return expressions_use_v5(node[1]); }
+    if (node[0] == 26) { if (expression_uses_v5(node[1])) { return true; } return expression_uses_v5(node[2]); }
+    if (node[0] == 27) { return expression_uses_v5(node[1]); }
+    if (node[0] == 28) {
+        let index = 0; while (index < array_length(node[1])) { if (expression_uses_v5(node[1][index][1])) { return true; } index = index + 1; }
+    }
+    if (node[0] == 35) { return expressions_use_v5(node[2]); }
+    if (node[0] == 36) { return expression_uses_v5(node[2]); }
+    if (node[0] == 37) { if (expression_uses_v5(node[1])) { return true; } return expression_uses_v5(node[2]); }
+    return false;
+}
+
+fn statements_use_v5(statements) {
+    let index = 0;
+    while (index < array_length(statements)) {
+        let node = statements[index][3];
+        if (node[0] == 2) { if (expression_uses_v5(node[2])) { return true; } }
+        if (node[0] == 3) { if (expression_uses_v5(node[2])) { return true; } }
+        if (node[0] == 4) {
+            if (expression_uses_v5(node[1])) { return true; }
+            if (statements_use_v5(node[2])) { return true; } if (statements_use_v5(node[3])) { return true; }
+        }
+        if (node[0] == 5) { if (expression_uses_v5(node[1])) { return true; } if (statements_use_v5(node[2])) { return true; } }
+        if (node[0] == 6) { if (expression_uses_v5(node[1])) { return true; } }
+        if (node[0] == 7) { if (expression_uses_v5(node[1])) { return true; } }
+        if (node[0] == 8) { if (expression_uses_v5(node[1])) { return true; } }
+        if (node[0] == 12) { if (statements_use_v5(node[1])) { return true; } }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn program_uses_v5(program) {
+    let index = 0; while (index < array_length(program[1])) { if (statements_use_v5(program[1][index][3])) { return true; } index = index + 1; }
+    return statements_use_v5(program[2]);
+}
+
+fn emit_program(program) {
+    let sections = array_new(0); if (program_uses_v5(program)) { array_push(sections, ".version 5"); } else { array_push(sections, ".version 4"); }
+    if (array_length(program[1]) > 0) { array_push(sections, "JUMP __main"); }
+    let index = 0;
+    while (index < array_length(program[1])) { array_push(sections, emit_function(program[1][index])); index = index + 1; }
+    if (array_length(program[1]) > 0) { array_push(sections, "__main:"); }
+    let main = emitter_new("main"); emit_statements(main, program[2]); emit(main, "HALT");
+    array_push(sections, string_join(main[0], "\n"));
+    return string_concat(string_join(sections, "\n"), "\n");
+}
+
+fn modules_use_v5(modules) {
+    let index = 0; while (index < array_length(modules)) { if (program_uses_v5(modules[index][2])) { return true; } index = index + 1; }
+    return false;
+}
+
+fn emit_modules(modules, root_index) {
+    let sections = array_new(0); if (modules_use_v5(modules)) { array_push(sections, ".version 5"); } else { array_push(sections, ".version 4"); }
+    let function_count = 0; let module_index = 0;
+    while (module_index < array_length(modules)) { function_count = function_count + array_length(modules[module_index][2][1]); module_index = module_index + 1; }
+    if (function_count > 0) { array_push(sections, "JUMP __main"); }
+    module_index = 0;
+    while (module_index < array_length(modules)) {
+        let module = modules[module_index]; let function_index = 0;
+        while (function_index < array_length(module[2][1])) {
+            let function_node = module[2][1][function_index];
+            array_push(sections, emit_function_named(function_node, string_concat(module[1], function_node[1]), module[3])); function_index = function_index + 1;
+        }
+        module_index = module_index + 1;
+    }
+    if (function_count > 0) { array_push(sections, "__main:"); }
+    let root = modules[root_index]; let main = emitter_new("main"); main[6] = root[3]; emit_statements(main, root[2][2]); emit(main, "HALT");
+    array_push(sections, string_join(main[0], "\n")); return string_concat(string_join(sections, "\n"), "\n");
+}

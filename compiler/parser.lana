@@ -1,0 +1,246 @@
+import "./lexer.lana" as lexer;
+import "./syntax.lana" as syntax;
+
+fn parser_new(source) { return [lexer.lex(source), 0]; }
+fn current(parser) { return parser[0][parser[1]]; }
+fn current_text(parser) { return current(parser)[1]; }
+fn current_line(parser) { return current(parser)[2]; }
+fn matches(parser, text) {
+    if (current(parser)[0] == "string") { return false; }
+    return current_text(parser) == text;
+}
+
+fn take(parser) {
+    let value = current(parser);
+    parser[1] = parser[1] + 1;
+    return value;
+}
+
+fn expect(parser, text) {
+    let value = take(parser);
+    assert(value[1] == text, string_concat("expected ", text, ", got ", value[1]));
+    return value;
+}
+
+fn parse_arguments(parser) {
+    let values = array_new(0); expect(parser, "(");
+    if (!matches(parser, ")")) {
+        array_push(values, parse_expression(parser));
+        while (matches(parser, ",")) { take(parser); array_push(values, parse_expression(parser)); }
+    }
+    expect(parser, ")"); return values;
+}
+
+fn parse_named_values(parser, closing) {
+    let entries = array_new(0);
+    while (!matches(parser, closing)) {
+        let name = take(parser); expect(parser, ":");
+        array_push(entries, [name[1], parse_expression(parser)]);
+        if (!matches(parser, ",")) { return entries; }
+        take(parser);
+    }
+    return entries;
+}
+
+fn is_joint_product_kind(kind) { if (kind == "independent") { return true; } return kind == "conditional"; }
+fn is_join_operation(text) { if (text == "join") { return true; } return text == "join_all"; }
+fn is_history_operation(text) { if (text == "previous") { return true; } if (text == "change") { return true; } return text == "velocity"; }
+fn is_information_operation(text) {
+    if (text == "append") { return true; } if (text == "sample") { return true; }
+    if (text == "project") { return true; } if (text == "condition") { return true; }
+    if (text == "resolve") { return true; } if (text == "rename") { return true; }
+    if (text == "possibility") { return true; } return text == "observe";
+}
+
+fn parse_joint(parser, line) {
+    let kind = take(parser)[1]; let names = array_new(0); let values = array_new(0);
+    if (kind == "correlated") {
+        expect(parser, "("); array_push(names, take(parser)[1]);
+        while (matches(parser, ",")) { take(parser); array_push(names, take(parser)[1]); }
+        expect(parser, ")"); expect(parser, "with"); expect(parser, "support"); expect(parser, ":");
+        return syntax.finite_joint_node(names, parse_expression(parser), line);
+    }
+    assert(is_joint_product_kind(kind), "joint kind must be independent, correlated, or conditional");
+    expect(parser, "{"); let entries = parse_named_values(parser, "}"); expect(parser, "}");
+    let index = 0; while (index < array_length(entries)) {
+        array_push(names, entries[index][0]); array_push(values, entries[index][1]); index = index + 1;
+    }
+    assert(array_length(names) > 0, "a joint cannot be empty");
+    return syntax.joint_node(kind, names, values, line);
+}
+
+fn parse_measure(parser, line) {
+    let source = take(parser)[1]; let basis = ""; let mode = "distribution";
+    if (matches(parser, "in")) { take(parser); basis = take(parser)[1]; }
+    if (matches(parser, "as")) { take(parser); mode = take(parser)[1]; }
+    return syntax.measure_node(source, basis, mode, line);
+}
+
+fn parse_estimate_measure(parser, line) {
+    let source = take(parser)[1]; expect(parser, "in"); let basis = take(parser)[1];
+    expect(parser, "as"); let mode = take(parser)[1]; expect(parser, "with"); expect(parser, "samples"); expect(parser, ":");
+    return syntax.estimate_measure_node(source, basis, mode, take(parser)[1], line);
+}
+
+fn parse_keyword_primary(parser, text, line) {
+    if (text == "measure") { return parse_measure(parser, line); }
+    if (text == "estimate_measure") { return parse_estimate_measure(parser, line); }
+    if (text == "joint") { return parse_joint(parser, line); }
+    if (text == "fork") { let name = take(parser)[1]; return syntax.fork_node(name, parse_arguments(parser), line); }
+    if (is_join_operation(text)) { expect(parser, "("); let task = parse_expression(parser); expect(parser, ")"); return syntax.join_node(text, task, line); }
+    if (text == "join_timeout") {
+        expect(parser, "("); let task = parse_expression(parser); expect(parser, ","); let timeout = parse_expression(parser); expect(parser, ")");
+        return syntax.join_timeout_node(task, timeout, line);
+    }
+    if (is_history_operation(text)) { expect(parser, "("); let source = take(parser)[1]; expect(parser, ")"); return syntax.history_value_node(text, source, line); }
+    if (is_information_operation(text)) { return syntax.information_node(text, parse_arguments(parser), line); }
+    return null;
+}
+
+fn parse_basic_primary(parser, value) {
+    let text = value[1]; let line = value[2];
+    if (text == "(") { let node = parse_expression(parser); expect(parser, ")"); return node; }
+    if (text == "[") {
+        let items = array_new(0);
+        if (!matches(parser, "]")) {
+            array_push(items, parse_expression(parser));
+            while (matches(parser, ",")) { take(parser); array_push(items, parse_expression(parser)); }
+        }
+        expect(parser, "]"); return syntax.array_node(items, line);
+    }
+    if (text == "{") { let entries = parse_named_values(parser, "}"); expect(parser, "}"); return syntax.map_node(entries, line); }
+    assert(value[0] == "identifier", string_concat("expected expression, got ", value[0], " ", value[1], " at line ", number_to_string(value[2])));
+    if (matches(parser, "(")) { return syntax.call_node(text, parse_arguments(parser), line); }
+    return syntax.name_node(text, line);
+}
+
+fn parse_primary(parser) {
+    let value = take(parser); let text = value[1]; let line = value[2]; let node = null;
+    if (value[0] == "number") { node = syntax.literal_node("number", text, line); }
+    else { if (value[0] == "string") { node = syntax.literal_node("string", text, line); }
+    else { if (text == "true") { node = syntax.literal_node("bool", true, line); }
+    else { if (text == "false") { node = syntax.literal_node("bool", false, line); }
+    else { if (text == "null") { node = syntax.literal_node("null", null, line); }
+    else { node = parse_keyword_primary(parser, text, line); if (node == null) { node = parse_basic_primary(parser, value); } }
+    } } } }
+    let postfix = true;
+    while (postfix) {
+        if (matches(parser, "[")) {
+            take(parser); let index = parse_expression(parser); expect(parser, "]"); node = syntax.index_node(node, index, line);
+        } else {
+            if (matches(parser, ".")) {
+                take(parser); let field = take(parser)[1];
+                if (matches(parser, "(")) {
+                    assert(node[0] == 21, "invalid qualified function call");
+                    node = syntax.call_node(string_concat(node[1], ".", field), parse_arguments(parser), line);
+                } else { node = syntax.field_node(node, field, line); }
+            } else { postfix = false; }
+        }
+    }
+    return node;
+}
+
+fn parse_unary(parser) {
+    if (matches(parser, "!")) { let op = take(parser); return syntax.unary_node(op[1], parse_unary(parser), op[2]); }
+    if (matches(parser, "-")) { let op = take(parser); return syntax.unary_node(op[1], parse_unary(parser), op[2]); }
+    return parse_primary(parser);
+}
+
+fn parse_factor(parser) {
+    let value = parse_unary(parser); let scanning = true;
+    while (scanning) {
+        if (matches(parser, "*")) { let op = take(parser); value = syntax.binary_node(op[1], value, parse_unary(parser), op[2]); }
+        else { if (matches(parser, "/")) { let op = take(parser); value = syntax.binary_node(op[1], value, parse_unary(parser), op[2]); } else { scanning = false; } }
+    }
+    return value;
+}
+
+fn parse_term(parser) {
+    let value = parse_factor(parser); let scanning = true;
+    while (scanning) {
+        if (matches(parser, "+")) { let op = take(parser); value = syntax.binary_node(op[1], value, parse_factor(parser), op[2]); }
+        else { if (matches(parser, "-")) { let op = take(parser); value = syntax.binary_node(op[1], value, parse_factor(parser), op[2]); } else { scanning = false; } }
+    }
+    return value;
+}
+
+fn is_comparison(text) {
+    if (text == "==") { return true; } if (text == "!=") { return true; }
+    if (text == "<") { return true; } if (text == "<=") { return true; }
+    if (text == ">") { return true; } if (text == ">=") { return true; } return false;
+}
+
+fn parse_expression(parser) {
+    let value = parse_term(parser);
+    while (is_comparison(current_text(parser))) {
+        let op = take(parser); value = syntax.binary_node(op[1], value, parse_term(parser), op[2]);
+    }
+    return value;
+}
+
+fn parse_block(parser) {
+    let body = array_new(0); expect(parser, "{");
+    while (!matches(parser, "}")) { array_push(body, parse_statement(parser)); }
+    expect(parser, "}"); return body;
+}
+
+fn parse_function(parser) {
+    let start = expect(parser, "fn"); let name = take(parser)[1]; let parameters = array_new(0);
+    expect(parser, "(");
+    if (!matches(parser, ")")) {
+        array_push(parameters, take(parser)[1]);
+        while (matches(parser, ",")) { take(parser); array_push(parameters, take(parser)[1]); }
+    }
+    expect(parser, ")"); return syntax.function_node(name, parameters, parse_block(parser), start[2]);
+}
+
+fn parse_state_statement(parser, line) {
+    take(parser); let name = take(parser)[1]; expect(parser, "="); expect(parser, "state");
+    let closing = "}"; if (matches(parser, "(")) { closing = ")"; }
+    if (closing == ")") { expect(parser, "("); } else { expect(parser, "{"); }
+    let fields = parse_named_values(parser, closing); expect(parser, closing); expect(parser, ";"); return syntax.state_node(name, fields, line);
+}
+
+fn parse_if_statement(parser, line) {
+    take(parser); expect(parser, "("); let predicate = parse_expression(parser); expect(parser, ")");
+    let then_body = parse_block(parser); let else_body = array_new(0);
+    if (matches(parser, "else")) { take(parser); else_body = parse_block(parser); }
+    return syntax.if_node(predicate, then_body, else_body, line);
+}
+
+fn parse_transform_statement(parser, line) {
+    take(parser); let target = take(parser)[1]; expect(parser, "with"); let name = take(parser)[1];
+    let arguments = parse_arguments(parser); assert(array_length(arguments) == 0, "core transforms take no arguments"); expect(parser, ";");
+    return syntax.transform_node(target, name, line);
+}
+
+fn parse_statement(parser) {
+    let line = current_line(parser);
+    if (matches(parser, "state")) { return parse_state_statement(parser, line); }
+    if (matches(parser, "history")) { take(parser); let target = take(parser)[1]; let policy = take(parser)[1]; let amount = parse_expression(parser); expect(parser, ";"); return syntax.history_node(target, policy, amount, line); }
+    if (matches(parser, "let")) { take(parser); let name = take(parser)[1]; expect(parser, "="); let value = parse_expression(parser); expect(parser, ";"); return syntax.let_node(name, value, line); }
+    if (matches(parser, "if")) { return parse_if_statement(parser, line); }
+    if (matches(parser, "while")) { take(parser); expect(parser, "("); let predicate = parse_expression(parser); expect(parser, ")"); return syntax.while_node(predicate, parse_block(parser), line); }
+    if (matches(parser, "transform")) { return parse_transform_statement(parser, line); }
+    if (matches(parser, "taskgroup")) { take(parser); return syntax.taskgroup_node(parse_block(parser), line); }
+    if (matches(parser, "cancel")) { take(parser); expect(parser, "("); let task = parse_expression(parser); expect(parser, ")"); expect(parser, ";"); return syntax.cancel_node(task, line); }
+    if (matches(parser, "return")) { take(parser); let value = parse_expression(parser); expect(parser, ";"); return syntax.return_node(value, line); }
+    if (matches(parser, "print")) { take(parser); expect(parser, "("); let value = parse_expression(parser); expect(parser, ")"); expect(parser, ";"); return syntax.print_node(value, line); }
+    let target = parse_expression(parser);
+    if (matches(parser, "=")) { take(parser); let value = parse_expression(parser); expect(parser, ";"); return syntax.assign_node(target, value, line); }
+    expect(parser, ";"); return syntax.expression_node(target, line);
+}
+
+fn parse(source) {
+    let parser = parser_new(source); let functions = array_new(0); let statements = array_new(0); let imports = array_new(0);
+    while (matches(parser, "import")) {
+        let start = take(parser); let path = take(parser); assert(path[0] == "string", "import path must be a quoted string");
+        expect(parser, "as"); let alias = take(parser)[1]; expect(parser, ";"); array_push(imports, [path[1], alias, start[2]]);
+    }
+    while (!matches(parser, "<eof>")) {
+        assert(!matches(parser, "import"), "imports must precede functions and statements");
+        if (matches(parser, "fn")) { array_push(functions, parse_function(parser)); }
+        else { array_push(statements, parse_statement(parser)); }
+    }
+    return syntax.program(functions, statements, imports);
+}

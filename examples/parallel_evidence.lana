@@ -1,6 +1,6 @@
 fn update(belief, evidence) {
-    apply evidence -> belief;
-    return belief;
+    let combined = append(belief, evidence);
+    return sample(combined);
 }
 
 state belief = state(p: 0.50, d: 0.20);
@@ -13,7 +13,7 @@ taskgroup {
     let results = join_all([positive_task, negative_task]);
     let positive_result = results[0];
     let negative_result = results[1];
-    print(measure positive_result);
-    print(measure negative_result);
-    print(measure belief);
+    print(measure positive_result as probability);
+    print(measure negative_result as probability);
+    print(measure belief as probability);
 }

@@ -1,0 +1,55 @@
+import "./parser.lana" as parser;
+import "./resolver.lana" as resolver;
+import "./ir.lana" as ir;
+import "./emitter.lana" as emitter;
+
+fn array_contains(values, expected) {
+    let index = 0; while (index < array_length(values)) { if (values[index] == expected) { return true; } index = index + 1; }
+    return false;
+}
+
+fn stack_with(stack, value) {
+    let result = array_new(0); let index = 0;
+    while (index < array_length(stack)) { array_push(result, stack[index]); index = index + 1; }
+    array_push(result, value); return result;
+}
+
+fn module_find(modules, path) {
+    let index = 0; while (index < array_length(modules)) { if (modules[index][0] == path) { return index; } index = index + 1; }
+    return -1;
+}
+
+fn add_local_mappings(mappings, prefix, program) {
+    let index = 0; while (index < array_length(program[1])) {
+        let name = program[1][index][1]; array_push(mappings, [name, string_concat(prefix, name)]); index = index + 1;
+    }
+    return null;
+}
+
+fn add_import_mappings(mappings, alias, child) {
+    let index = 0; while (index < array_length(child[2][1])) {
+        let name = child[2][1][index][1]; array_push(mappings, [string_concat(alias, ".", name), string_concat(child[1], name)]); index = index + 1;
+    }
+    return null;
+}
+
+fn load_module(path, prefix, modules, stack, root) {
+    let canonical = path_resolve(path, ""); assert(!array_contains(stack, canonical), "import cycle detected");
+    let existing = module_find(modules, canonical); if (existing >= 0) { return existing; }
+    let syntax_tree = parser.parse(read_text(canonical));
+    if (!root) { assert(array_length(syntax_tree[2]) == 0, "imported modules cannot execute statements"); }
+    let semantic_ir = ir.lower(resolver.resolve_program(syntax_tree)); let mappings = array_new(0);
+    let record = [canonical, prefix, semantic_ir, mappings]; let module_index = array_length(modules); array_push(modules, record);
+    add_local_mappings(mappings, prefix, semantic_ir); let next_stack = stack_with(stack, canonical); let import_index = 0;
+    while (import_index < array_length(syntax_tree[3])) {
+        let imported = syntax_tree[3][import_index]; let target = path_resolve(canonical, imported[0]);
+        let child_prefix = string_concat("__m", number_to_string(array_length(modules)), "__");
+        let child_index = load_module(target, child_prefix, modules, next_stack, false);
+        add_import_mappings(mappings, imported[1], modules[child_index]); import_index = import_index + 1;
+    }
+    return module_index;
+}
+
+let argv = args(); assert(array_length(argv) == 2, "usage: lana-compiler <input.lana> <output.ssa>");
+let modules = array_new(0); let root = load_module(argv[0], "", modules, array_new(0), true);
+write_text(argv[1], emitter.emit_modules(modules, root));

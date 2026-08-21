@@ -1,0 +1,7 @@
+# Legacy SSBC v1 signed-real compatibility fixture.
+STATE_NEW R0 0.50 0.30
+STATE_NEW R1 0.90 0.65
+APPLY R1 R0
+MEASURE R0 probability R2
+PRINT R2
+HALT

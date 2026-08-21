@@ -24,7 +24,18 @@ typedef enum {
     SS_ERR_LIMIT,
     SS_ERR_TASK,
     SS_ERR_CANCELLED,
-    SS_ERR_TIMEOUT
+    SS_ERR_TIMEOUT,
+    SS_ERR_INVALID_TRANSFORM_RESULT,
+    SS_ERR_UNSUPPORTED_OPERATION,
+    SS_ERR_UNSUPPORTED_EXACT_MEASUREMENT,
+    SS_ERR_INVALID_DISTRIBUTION,
+    SS_ERR_BUDGET_EXHAUSTED,
+    SS_ERR_KEY,
+    SS_ERR_PARSE,
+    SS_ERR_ASSERTION,
+    SS_ERR_INVALID_CONDITIONING,
+    SS_ERR_UNRESOLVED_VALUE,
+    SS_ERR_PATH_LIMIT
 } SSError;
 
 typedef struct {
@@ -32,6 +43,7 @@ typedef struct {
     size_t ip;
     uint8_t opcode;
     uint32_t line;
+    char function[128];
     char message[256];
 } SSErrorInfo;
 

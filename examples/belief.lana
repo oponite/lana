@@ -1,7 +1,8 @@
-state belief = state { p: 0.50, d: 0.30 };
-state evidence = state { p: 0.90, d: 0.65 };
+state belief = state(p: 0.50, d_re: 0.30, d_im: 0.10);
+state evidence = state(p: 0.90, d: 0.65);
 
-apply evidence -> belief;
+let combined = append(belief, evidence);
+transform combined with invert();
 
-let result = measure belief;
+let result = measure combined as probability;
 print(result);

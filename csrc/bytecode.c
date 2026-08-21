@@ -99,7 +99,14 @@ const char *ss_opcode_name(uint8_t opcode) {
         "COMPARE", "JUMP", "JUMP_IF_TRUE", "JUMP_IF_FALSE", "ARRAY_NEW",
         "ARRAY_GET", "ARRAY_SET", "CALL", "RETURN", "PRINT", "HALT",
         "STATE_BUILD", "FORK", "JOIN", "JOIN_TIMEOUT", "JOIN_ALL", "CANCEL",
-        "TASKGROUP_ENTER", "TASKGROUP_EXIT", "HOST_CALL"
+        "TASKGROUP_ENTER", "TASKGROUP_EXIT", "HOST_CALL", "STATE_NEW_V3",
+        "STATE_BUILD_V3", "TRANSFORM_V3", "MEASURE_V3", "APPEND",
+        "SAMPLE_STATE_DIST", "MEASURE_BASIS_V4",
+        "ESTIMATE_MEASURE_PROBABILITY_V4", "ESTIMATE_MEASURE_DISTRIBUTION_V4",
+        "JOINT_BUILD_V5", "JOINT_PROJECT_V5", "JOINT_CONDITION_V5",
+        "JOINT_SAMPLE_V5", "RESOLVE_V5", "JOINT_BUILD_FINITE_V5",
+        "JOINT_RENAME_V5", "POSSIBILITY_BUILD_V5", "PATH_SPLIT_V5",
+        "PATH_JOIN_V5", "OBSERVE_V5", "INFO_SAMPLE_V5"
     };
     return opcode < OP_COUNT ? names[opcode] : "UNKNOWN";
 }
@@ -126,6 +133,11 @@ SSError ss_chunk_verify(const SSChunk *chunk, SSErrorInfo *error) {
         ss_error_set(error, SS_ERR_FORMAT, 0, OP_NOP, 0, "chunk has no valid entry point");
         return SS_ERR_FORMAT;
     }
+    if (chunk->version < SSBC_MIN_VERSION || chunk->version > SSBC_VERSION) {
+        ss_error_set(error, SS_ERR_FORMAT, 0, OP_NOP, 0,
+                     "unsupported SSBC version %u", chunk->version);
+        return SS_ERR_FORMAT;
+    }
     for (function_index = 0; function_index < chunk->function_count; ++function_index) {
         const SSFunction *function = &chunk->functions[function_index];
         if (function->entry >= chunk->code_count || function->register_count > SS_MAX_REGISTERS ||
@@ -146,6 +158,23 @@ SSError ss_chunk_verify(const SSChunk *chunk, SSErrorInfo *error) {
         if (chunk->version == 1u && ins->opcode > OP_HALT) {
             ss_error_set(error, SS_ERR_OPCODE, ip, ins->opcode, ins->line,
                          "Bytecode v1 cannot contain %s", ss_opcode_name(ins->opcode));
+            return SS_ERR_OPCODE;
+        }
+        if (chunk->version == 2u && ins->opcode > OP_HOST_CALL) {
+            ss_error_set(error, SS_ERR_OPCODE, ip, ins->opcode, ins->line,
+                         "Bytecode v2 cannot contain %s", ss_opcode_name(ins->opcode));
+            return SS_ERR_OPCODE;
+        }
+        if (chunk->version < 4u && ins->opcode > OP_SAMPLE_STATE_DIST) {
+            ss_error_set(error, SS_ERR_OPCODE, ip, ins->opcode, ins->line,
+                         "Bytecode v%u cannot contain %s", chunk->version,
+                         ss_opcode_name(ins->opcode));
+            return SS_ERR_OPCODE;
+        }
+        if (chunk->version < 5u && ins->opcode > OP_ESTIMATE_MEASURE_DISTRIBUTION_V4) {
+            ss_error_set(error, SS_ERR_OPCODE, ip, ins->opcode, ins->line,
+                         "Bytecode v%u cannot contain %s", chunk->version,
+                         ss_opcode_name(ins->opcode));
             return SS_ERR_OPCODE;
         }
         switch ((OpCode)ins->opcode) {
@@ -177,6 +206,145 @@ SSError ss_chunk_verify(const SSChunk *chunk, SSErrorInfo *error) {
                 result = verify_register(error, ip, ins, ins->a);
                 if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
                 if (result == SS_OK) result = verify_register(error, ip, ins, ins->c);
+                break;
+            case OP_STATE_NEW_V3: {
+                SSState state;
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK && (!constant_valid(chunk, ins->b) ||
+                    !constant_valid(chunk, ins->c) || !constant_valid(chunk, ins->imm)))
+                    result = SS_ERR_CONSTANT;
+                if (result == SS_OK && (chunk->constants[ins->b].type != VAL_NUMBER ||
+                    chunk->constants[ins->c].type != VAL_NUMBER ||
+                    chunk->constants[ins->imm].type != VAL_NUMBER)) result = SS_ERR_TYPE;
+                if (result == SS_OK)
+                    result = ss_state_make_complex(chunk->constants[ins->b].as.number,
+                                                   chunk->constants[ins->c].as.number,
+                                                   chunk->constants[ins->imm].as.number,
+                                                   &state);
+                break;
+            }
+            case OP_STATE_BUILD_V3:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->c);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->imm);
+                break;
+            case OP_TRANSFORM_V3:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && ins->c > SS_TRANSFORM_V3_NEUTRALIZE)
+                    result = SS_ERR_TRANSFORM;
+                if (result == SS_OK && ins->imm != 0u) result = SS_ERR_FORMAT;
+                break;
+            case OP_MEASURE_V3:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && ins->c > SS_MEASURE_V3_SAMPLE)
+                    result = SS_ERR_MEASURE;
+                if (result == SS_OK && ins->imm != 0u) result = SS_ERR_FORMAT;
+                break;
+            case OP_APPEND:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->c);
+                if (result == SS_OK && ins->imm != 0u) result = SS_ERR_FORMAT;
+                break;
+            case OP_SAMPLE_STATE_DIST:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && (ins->c != 0u || ins->imm != 0u))
+                    result = SS_ERR_FORMAT;
+                break;
+            case OP_MEASURE_BASIS_V4:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && ins->c > SS_MEASURE_BASIS_Y)
+                    result = SS_ERR_MEASURE;
+                if (result == SS_OK && ins->imm > SS_MEASURE_V3_SAMPLE)
+                    result = SS_ERR_MEASURE;
+                break;
+            case OP_ESTIMATE_MEASURE_PROBABILITY_V4:
+            case OP_ESTIMATE_MEASURE_DISTRIBUTION_V4:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && ins->c > SS_MEASURE_BASIS_Y)
+                    result = SS_ERR_MEASURE;
+                if (result == SS_OK && ins->imm == 0u)
+                    result = SS_ERR_FORMAT;
+                break;
+            case OP_JOINT_BUILD_V5:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && (ins->c == 0u || ins->b + ins->c > SS_MAX_REGISTERS))
+                    result = SS_ERR_REGISTER;
+                if (result == SS_OK && !constant_valid(chunk, ins->imm)) result = SS_ERR_CONSTANT;
+                if (result == SS_OK && chunk->constants[ins->imm].type != VAL_STRING)
+                    result = SS_ERR_TYPE;
+                break;
+            case OP_JOINT_PROJECT_V5:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && !constant_valid(chunk, ins->c)) result = SS_ERR_CONSTANT;
+                if (result == SS_OK && chunk->constants[ins->c].type != VAL_STRING)
+                    result = SS_ERR_TYPE;
+                break;
+            case OP_JOINT_CONDITION_V5:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->imm);
+                if (result == SS_OK && !constant_valid(chunk, ins->c)) result = SS_ERR_CONSTANT;
+                if (result == SS_OK && chunk->constants[ins->c].type != VAL_STRING)
+                    result = SS_ERR_TYPE;
+                break;
+            case OP_JOINT_SAMPLE_V5:
+            case OP_RESOLVE_V5:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && (ins->c != 0u || ins->imm != 0u))
+                    result = SS_ERR_FORMAT;
+                break;
+            case OP_JOINT_BUILD_FINITE_V5:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && !constant_valid(chunk, ins->c)) result = SS_ERR_CONSTANT;
+                if (result == SS_OK && chunk->constants[ins->c].type != VAL_STRING)
+                    result = SS_ERR_TYPE;
+                if (result == SS_OK && ins->imm != 0u) result = SS_ERR_FORMAT;
+                break;
+            case OP_JOINT_RENAME_V5:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && (!constant_valid(chunk, ins->c) ||
+                                        !constant_valid(chunk, ins->imm)))
+                    result = SS_ERR_CONSTANT;
+                if (result == SS_OK && (chunk->constants[ins->c].type != VAL_STRING ||
+                                        chunk->constants[ins->imm].type != VAL_STRING))
+                    result = SS_ERR_TYPE;
+                break;
+            case OP_POSSIBILITY_BUILD_V5:
+            case OP_INFO_SAMPLE_V5:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK && (ins->c != 0u || ins->imm != 0u))
+                    result = SS_ERR_FORMAT;
+                break;
+            case OP_PATH_SPLIT_V5:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK && ins->imm >= chunk->code_count) result = SS_ERR_JUMP;
+                if (result == SS_OK && (ins->b != 0u || ins->c != 0u))
+                    result = SS_ERR_FORMAT;
+                break;
+            case OP_PATH_JOIN_V5:
+                if (ins->a != 0u || ins->b != 0u || ins->c != 0u || ins->imm != 0u)
+                    result = SS_ERR_FORMAT;
+                break;
+            case OP_OBSERVE_V5:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->b);
+                if (result == SS_OK) result = verify_register(error, ip, ins, ins->imm);
+                if (result == SS_OK && !constant_valid(chunk, ins->c)) result = SS_ERR_CONSTANT;
+                if (result == SS_OK && chunk->constants[ins->c].type != VAL_STRING)
+                    result = SS_ERR_TYPE;
                 break;
             case OP_JUMP:
                 if (ins->imm >= chunk->code_count) result = SS_ERR_JUMP;
@@ -262,7 +430,9 @@ SSError ss_chunk_verify(const SSChunk *chunk, SSErrorInfo *error) {
                 break;
             case OP_HOST_CALL:
                 result = verify_register(error, ip, ins, ins->a);
-                if (result == SS_OK && ins->b > SS_HOST_ASSERT) result = SS_ERR_FORMAT;
+                if (result == SS_OK &&
+                    ((chunk->version < 3u && ins->b > SS_HOST_ML_MODEL_READ) ||
+                     ins->b > SS_HOST_PATH_RESOLVE)) result = SS_ERR_FORMAT;
                 if (result == SS_OK && (ins->c >= SS_MAX_REGISTERS || ins->c + ins->imm > SS_MAX_REGISTERS)) result = SS_ERR_REGISTER;
                 break;
             case OP_COUNT: result = SS_ERR_OPCODE; break;
@@ -443,6 +613,7 @@ failure:
 void ss_disassemble_instruction(const SSChunk *chunk, size_t offset, FILE *out) {
     const SSInstruction *ins = &chunk->code[offset];
     static const char *measure_names[] = {"distribution", "probability", "sample", "collapse"};
+    static const char *measure_names_v3[] = {"probability", "distribution", "sample"};
     (void)fprintf(out, "%04zu %-20s ", offset, ss_opcode_name(ins->opcode));
     switch ((OpCode)ins->opcode) {
         case OP_STATE_NEW:
@@ -452,6 +623,88 @@ void ss_disassemble_instruction(const SSChunk *chunk, size_t offset, FILE *out) 
             break;
         case OP_STATE_BUILD:
             (void)fprintf(out, "R%u p=R%u d=R%u", ins->c, ins->a, ins->b);
+            break;
+        case OP_STATE_NEW_V3:
+            (void)fprintf(out,
+                          "R%u p=K%u(%.12g) d_re=K%u(%.12g) d_im=K%u(%.12g)",
+                          ins->a, ins->b, chunk->constants[ins->b].as.number,
+                          ins->c, chunk->constants[ins->c].as.number,
+                          ins->imm, chunk->constants[ins->imm].as.number);
+            break;
+        case OP_STATE_BUILD_V3:
+            (void)fprintf(out, "R%u p=R%u d_re=R%u d_im=R%u", ins->imm,
+                          ins->a, ins->b, ins->c);
+            break;
+        case OP_TRANSFORM_V3:
+            (void)fprintf(out, "R%u <- %s(R%u)", ins->a,
+                          ins->c == SS_TRANSFORM_V3_INVERT ? "invert" : "neutralize",
+                          ins->b);
+            break;
+        case OP_MEASURE_V3:
+            (void)fprintf(out, "R%u %s -> R%u", ins->a,
+                          ins->c <= SS_MEASURE_V3_SAMPLE ? measure_names_v3[ins->c] : "unknown",
+                          ins->b);
+            break;
+        case OP_APPEND:
+            (void)fprintf(out, "R%u R%u -> R%u", ins->a, ins->b, ins->c);
+            break;
+        case OP_SAMPLE_STATE_DIST:
+            (void)fprintf(out, "R%u -> R%u", ins->a, ins->b);
+            break;
+        case OP_MEASURE_BASIS_V4:
+            (void)fprintf(out, "R%u basis=%s mode=%s -> R%u", ins->a,
+                          ins->c == SS_MEASURE_BASIS_COMPUTATIONAL ? "computational" :
+                          ins->c == SS_MEASURE_BASIS_X ? "x" : "y",
+                          ins->imm == SS_MEASURE_V3_PROBABILITY ? "probability" :
+                          ins->imm == SS_MEASURE_V3_DISTRIBUTION ? "distribution" : "sample",
+                          ins->b);
+            break;
+        case OP_ESTIMATE_MEASURE_PROBABILITY_V4:
+        case OP_ESTIMATE_MEASURE_DISTRIBUTION_V4:
+            (void)fprintf(out, "R%u basis=%s samples=%u -> R%u", ins->a,
+                          ins->c == SS_MEASURE_BASIS_COMPUTATIONAL ? "computational" :
+                          ins->c == SS_MEASURE_BASIS_X ? "x" : "y",
+                          ins->imm, ins->b);
+            break;
+        case OP_JOINT_BUILD_V5:
+            (void)fprintf(out, "R%u..R%u descriptor[%u] -> R%u", ins->b,
+                          ins->b + ins->c - 1u, ins->imm, ins->a);
+            break;
+        case OP_JOINT_PROJECT_V5:
+            (void)fprintf(out, "R%u names[%u] -> R%u", ins->a, ins->c, ins->b);
+            break;
+        case OP_JOINT_CONDITION_V5:
+            (void)fprintf(out, "R%u %s[%u]=R%u -> R%u", ins->a,
+                          "condition", ins->c, ins->imm, ins->b);
+            break;
+        case OP_JOINT_SAMPLE_V5:
+            (void)fprintf(out, "R%u -> R%u", ins->a, ins->b);
+            break;
+        case OP_RESOLVE_V5:
+            (void)fprintf(out, "R%u -> R%u", ins->a, ins->b);
+            break;
+        case OP_JOINT_BUILD_FINITE_V5:
+            (void)fprintf(out, "rows=R%u names[%u] -> R%u", ins->a, ins->c, ins->b);
+            break;
+        case OP_JOINT_RENAME_V5:
+            (void)fprintf(out, "R%u name[%u]->name[%u] -> R%u",
+                          ins->a, ins->c, ins->imm, ins->b);
+            break;
+        case OP_POSSIBILITY_BUILD_V5:
+            (void)fprintf(out, "R%u -> R%u", ins->a, ins->b);
+            break;
+        case OP_PATH_SPLIT_V5:
+            (void)fprintf(out, "R%u false->%u", ins->a, ins->imm);
+            break;
+        case OP_PATH_JOIN_V5:
+            (void)fprintf(out, "join");
+            break;
+        case OP_OBSERVE_V5:
+            (void)fprintf(out, "R%u name[%u]=R%u -> R%u", ins->a, ins->c,
+                          ins->imm, ins->b);
+            break;
+        case OP_INFO_SAMPLE_V5:
+            (void)fprintf(out, "R%u -> R%u", ins->a, ins->b);
             break;
         case OP_FORK:
             (void)fprintf(out, "function[%u] R%u argc=%u -> R%u", ins->b, ins->c, ins->imm, ins->a);
