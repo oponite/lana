@@ -1,0 +1,5 @@
+let joint_value = joint correlated (x, y, z) with support: [[0, 0, 0, 0.5], [1, 1, 1, 0.5]];
+let refined = condition(joint_value, "x", 1);
+let projected = project(refined, "y,z");
+let result = resolve(projected);
+print(result[0]);

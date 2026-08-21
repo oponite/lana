@@ -1,0 +1,1411 @@
+# 1.0 - Lana Mathematical Semantics
+
+## 0. Scope and Semantic Authority
+
+This document is the normative Lana 1.0 definition of `STATE`, `STATE_DIST`, and the core state operations `MEASURE`, `TRANSFORM`, and `APPEND`. It also specifies how those values and operations compose, their mathematical guarantees and boundary behavior, and the minimum obligations of a conforming runtime.
+
+The other Lana documents have narrower roles:
+
+1. `VM.md` describes execution architecture.
+2. `BYTECODE.md` describes SSBC representation and instruction encoding.
+3. `README.md` describes the user-facing language and development experience.
+4. `SPEC.md` and other documents may describe implementations or language facilities built around these semantics, but they may not redefine the mathematical objects or operations defined here.
+
+If an implementation or another document disagrees with this document, this document is authoritative and the implementation is non-conforming until the disagreement is resolved.
+
+This document intentionally does not define general parser grammar, variable syntax except in non-normative examples, string or array implementation, standard-library internals, CLI or project initialization, bytecode binary layout, register allocation, memory management, or threading implementation. Those concerns cannot change the mathematical value semantics defined here.
+
+## 0.1 Information model
+
+Lana represents information separately from the concrete value it may describe.
+For a measurable value domain $X$, define
+
+$$
+\operatorname{Information}(X)=
+\operatorname{Definite}(X)
+\;|\;\operatorname{Possibility}(X)
+\;|\;\operatorname{Distribution}(X)
+\;|\;\operatorname{Joint}(X)
+\;|\;\operatorname{Paths}(X).
+$$
+
+The alternatives have different meanings and must not be silently coerced:
+
+- `Definite(x)` contains exactly one known value $x\in X$.
+- `Possibility(S)` contains a valid set or relation of candidates $S\subseteq X$
+  without assigning probabilities to those candidates.
+- `Distribution(\mu)` contains a probability measure $\mu$ over $X$.
+- `Joint` contains one law or supported lazy law over named variables in a
+  product domain. It is not a collection of unrelated marginal fields.
+- `Paths` contains guarded alternatives produced by uncertain execution. A
+  path is not another representation of a joint law.
+
+A quantum state is a future specialized information domain with additional
+physical constraints. Lana does not interpret ordinary unresolved or
+probabilistic information as quantum information.
+
+Every information value has a domain, a validity condition, and a declared
+evaluation boundary. An operation that cannot be performed exactly must return
+an explicit unsupported-operation error. Sampling, finite precision, and
+Monte Carlo estimation are not implicit replacements for exact semantics.
+
+For each value type $T$, let $(X_T,\Sigma_T)$ be its measurable domain. A
+definite value denotes the Dirac measure $\delta_x$ when embedded in a
+distribution. A finite possibility is a nonempty finite subset of $X_T$. A
+finite distribution is a sequence $(x_i,w_i)_{i=1}^m$ with distinct supported
+values, $w_i>0$, and $\sum_iw_i=1$. Runtime floating-point weights are valid
+only after the normalization and tolerance checks in Section 7.3; zero,
+negative, non-finite, and materially non-normalized weights are invalid.
+
+### 0.1.1 Information operations
+
+The operations below are semantically distinct:
+
+$$
+\begin{aligned}
+\operatorname{project}(I,N)&:\operatorname{Joint}(X)\to\operatorname{Joint}(X_N),\\
+\operatorname{condition}(I,e)&:\operatorname{Information}(X)\to\operatorname{Information}(X),\\
+\operatorname{observe}(I,e)&:\operatorname{Information}(X)\to\operatorname{Information}(X),\\
+\operatorname{sample}(I)&:\bigl(\operatorname{Distribution}(X)\;|\;\operatorname{Joint}(X_N)\;|\;\operatorname{Paths}(X)\bigr)\to\operatorname{Definite}(X),\\
+\operatorname{resolve}(I)&:\operatorname{Information}(X)\to\operatorname{Definite}(X).
+\end{aligned}
+$$
+
+`project` (or marginalize) is pure and returns a new view or law over the
+requested named variables. An unknown variable, duplicate requested name, or
+unsupported exact marginalization is an error. `condition` is pure refinement;
+impossible evidence returns `SS_ERR_INVALID_CONDITIONING` and does not mutate
+the input. `observe` is an external information event: it records or consumes
+evidence in the execution context and returns the refined information or a
+definite observed result. It is effectful even when its returned value is
+immutable. `sample` is stochastic and read-only; it consumes the configured
+random stream and returns one definite result. `resolve` is exact and succeeds
+only for already definite information or a singleton after refinement. It may
+not choose an arbitrary representative; a non-singleton returns
+`SS_ERR_UNRESOLVED_VALUE`.
+
+For a joint assignment, sampling has the corresponding product-space form:
+
+$$
+\operatorname{sample}(J):\operatorname{Joint}(X_N)
+\to\operatorname{Definite}\left(\prod_{n\in N}X_n\right).
+$$
+
+The returned assignment is definite for every named variable. Sampling a
+joint must not mutate the joint law or any of its projections.
+
+General equality for distributions, joints, and path sets is unsupported unless
+a later canonical representation makes it decidable. The existing concrete
+`STATE` and `STATE_DIST` equality rules remain unchanged.
+
+### 0.1.2 Joint information
+
+A joint value has a finite canonical ordered set of unique variable names, a
+domain descriptor for each variable, and a joint law or explicitly supported
+lazy expression over their product space. The following constructions are
+distinct:
+
+1. `independent(x, y)` denotes the product of the supplied marginal laws.
+2. `correlated(x, y)` denotes a law whose relationship is part of the joint
+   object.
+3. `conditional(x | y)` denotes a law or relation conditioned on named
+   variables.
+
+Combining two marginals does not imply correlation. Dependency edges used by a
+runtime are derived composition or execution structure; they are not, by
+themselves, the mathematical joint law. Cyclic relation definitions, duplicate
+names, empty joints, and unsupported exact inference are invalid or unsupported
+and must fail deterministically. Joint construction, projection, and
+conditioning are immutable: the source joint remains unchanged.
+
+For the first exact correlated representation, a finite joint law is
+
+$$
+J=\{(a_i,w_i)\}_{i=1}^m,
+\qquad
+a_i\in\prod_{n\in N}X_n,
+\qquad
+w_i>0,
+\qquad
+\sum_iw_i=1.
+$$
+
+Equal assignments are canonicalized by summing their weights. Projection to
+$M\subseteq N$ maps every $a_i$ to $a_i|_M$, combines equal projected
+assignments, and preserves total mass. Conditioning on evidence $E$ retains
+the rows satisfying $E$ and divides their weights by
+$J(E)=\sum_{a_i\models E}w_i$. If $J(E)=0$, conditioning returns
+`SS_ERR_INVALID_CONDITIONING`. Sampling performs one weighted row selection;
+it never samples each variable independently.
+
+An independent product may remain lazy. Its law is the product measure
+$\bigotimes_{n\in N}\mu_n$ and therefore does not assert correlation. A
+relation-backed or conditional node must declare which of project, condition,
+sample, and resolve it supports. An undeclared operation returns
+`SS_ERR_UNSUPPORTED_OPERATION`; it may not fall back to enumeration, sampling,
+or an independence assumption.
+
+Existing `STATE` values embed as `Definite(STATE)`. Existing `STATE_DIST`
+values embed as `Distribution(STATE)`. These embeddings do not change the
+observable behavior of `MEASURE`, `TRANSFORM`, `APPEND`, or
+`SAMPLE_STATE_DIST`; their existing sections below remain authoritative.
+
+More explicitly, for the embeddings $\eta_S(s)=\operatorname{Definite}(s)$
+and $\eta_D(\mu)=\operatorname{Distribution}(\mu)$:
+
+$$
+\begin{aligned}
+\operatorname{MEASURE}(\eta_S(s))&=\operatorname{MEASURE}(s),\\
+\operatorname{TRANSFORM}(\eta_S(s),\Phi)&=\eta_S(\operatorname{TRANSFORM}(s,\Phi)),\\
+\operatorname{APPEND}(\eta_S(a),\eta_S(b))&=\eta_D(\operatorname{APPEND}(a,b)),\\
+\operatorname{sample}(\eta_D(\mu))&=\eta_S(\operatorname{SAMPLE\_STATE\_DIST}(\mu)).
+\end{aligned}
+$$
+
+These are compatibility identities, not alternate implementations. In
+particular, embedding cannot add normalization, sampling, collapse, or a new
+equality rule to an existing operation.
+
+### 0.1.3 Information-aware execution
+
+An execution path is the immutable tuple
+
+```text
+(path condition, environment delta, result information,
+ pending effects, optional probability weight)
+```
+
+An unresolved Boolean used as an `if` guard creates guarded alternatives. Path
+conditions remain separate from dependencies inside a joint law. Pure functions
+map over each guarded path and preserve its condition and information. Joining
+paths preserves conditions and results; it does not silently select or average
+one alternative.
+
+External I/O, printing, task creation, and host calls require definite inputs
+unless an explicit per-path effect policy is present. The initial execution
+semantics reject unresolved loop guards. Path count, memory, instruction, and
+sampling limits are hard limits. Budget exhaustion, cancellation, or an
+unsupported path join returns an error and exposes no partial result.
+
+The semantics in this section define the boundary for future quantum-compatible
+lowering. The current SSBC and C VM implementation may support only a declared
+subset; it must report unsupported operations rather than silently approximate
+or collapse information.
+
+
+## 1. Mathematical Domains
+
+### 1.1 STATE
+
+Let the computational basis be the fixed ordered basis
+
+$$
+(|0\rangle,|1\rangle).
+$$
+
+Matrix index $0$ therefore corresponds to $|0\rangle$, and matrix index $1$ corresponds to $|1\rangle$. In particular, $\rho_{00}$ is the upper-left entry and $\rho_{11}$ is the lower-right entry.
+
+The domain of concrete Lana `STATE` values is
+
+$$
+\mathcal S
+=
+\left\{
+\rho\in\mathcal L(\mathbb C^2)
+\;\middle|\;
+\rho=\rho^\dagger,\;
+\rho\succeq0,\;
+\operatorname{Tr}(\rho)=1
+\right\}.
+$$
+
+Here $\mathcal L(\mathbb C^2)$ denotes the linear operators on $\mathbb C^2$, $\rho^\dagger$ is the conjugate transpose, $\rho\succeq0$ means that $\rho$ is positive semidefinite, and $\operatorname{Tr}$ is the matrix trace. For distributional constructions, $\mathcal S$ carries the Borel measurable structure inherited from this finite-dimensional operator space.
+
+Every $\rho\in\mathcal S$ has the canonical representation
+
+$$
+\rho=
+\begin{pmatrix}
+1-p & c \\
+c^* & p
+\end{pmatrix},
+$$
+
+where
+
+$$
+0\le p\le1,
+\qquad
+c\in\mathbb C,
+\qquad
+|c|^2\le p(1-p).
+$$
+
+Here
+
+$$
+p=\rho_{11},
+\qquad
+1-p=\rho_{00},
+\qquad
+c=\rho_{01},
+\qquad
+c^*=\rho_{10}.
+$$
+
+These conditions are the global mathematical invariant for every concrete Lana `STATE`. The complex number $c$ is the canonical mathematical internal parameter.
+
+The notation $c^*$ denotes the complex conjugate of $c$.
+
+For $0<p<1$, define the normalized disposition
+
+$$
+d=
+\frac{c}{\sqrt{p(1-p)}}.
+$$
+
+The positivity condition implies
+
+$$
+d\in\mathbb C,
+\qquad
+|d|\le1.
+$$
+
+At the probability boundaries
+
+$$
+p\in\{0,1\},
+$$
+
+positive semidefiniteness forces $c=0$, and Lana defines
+
+$$
+d=0
+$$
+
+by convention. Thus $c$ is canonical, while $d$ is a normalized representation derived from $(p,c)$ with an explicit boundary convention. No signed-real ordering or unrelated inequality on $d$ is part of Lana 1.0 semantics.
+
+### 1.2 STATE_DIST
+
+For a measurable space $E$, write $\operatorname{Dist}(E)$ for the set of probability distributions, equivalently probability measures, on $E$.
+
+The mathematical type `STATE_DIST` is
+
+$$
+\operatorname{STATE_DIST}
+=
+\operatorname{Dist}(\mathcal S).
+$$
+
+For an ordinary state $\rho\in\mathcal S$, the Dirac distribution
+
+$$
+\delta_\rho\in\operatorname{Dist}(\mathcal S)
+$$
+
+assigns probability $1$ to $\rho$ and probability $0$ to every set that does not contain $\rho$. It embeds one concrete `STATE` as a degenerate `STATE_DIST`.
+
+### 1.3 Core Type Signatures
+
+The core operations have the signatures below. The parameter $\Phi$ ranges over the valid transforms defined in Section 3.
+
+$$
+\operatorname{MEASURE}:
+\mathcal S
+\rightarrow
+\operatorname{Dist}(\{0,1\}),
+$$
+
+$$
+\operatorname{TRANSFORM}_\Phi:
+\mathcal S
+\rightarrow
+\mathcal S,
+$$
+
+and
+
+$$
+\operatorname{APPEND}:
+\mathcal S\times\mathcal S
+\rightarrow
+\operatorname{STATE_DIST}.
+$$
+
+Section 5 defines the lifted forms acting on `STATE_DIST` values.
+
+
+## 2. MEASURE
+
+### 2.1 Definition
+
+For
+
+$$
+\rho=
+\begin{pmatrix}
+1-p & c \\
+c^* & p
+\end{pmatrix}
+\in\mathcal S,
+$$
+
+define computational-basis measurement by
+
+$$
+\operatorname{MEASURE}(\rho)
+=
+\operatorname{Bernoulli}(p).
+$$
+
+Therefore
+
+$$
+P(1)=p,
+\qquad
+P(0)=1-p.
+$$
+
+`MEASURE` returns a probability distribution. It does not automatically sample a classical scalar; sampling is a separate evaluation action defined in Section 5.6.
+
+### 2.2 Interpretation
+
+The diagonal entries of $\rho$ determine computational-basis outcome probabilities. The internal parameters $c$ and $d$ do not affect this measurement distribution.
+
+`MEASURE` is read-only. It changes neither $p$, $c$, nor $d$, and it does not replace or collapse its input state.
+
+### 2.3 Properties
+
+`MEASURE` is well-defined for every concrete `STATE`, preserves its input, and depends only on the canonical probability $p$.
+
+### 2.4 Proofs
+
+**Theorem 2.1 (Measurement Well-Definedness).** For every $\rho\in\mathcal S$,
+
+$$
+\operatorname{MEASURE}(\rho)
+\in
+\operatorname{Dist}(\{0,1\}).
+$$
+
+**Proof.** The `STATE` invariant gives $0\le p\le1$. Hence $p$ and $1-p$ are nonnegative and sum to $1$, so they define a Bernoulli probability distribution. $\square$
+
+**Theorem 2.2 (Measurement State Preservation).** Applying `MEASURE` leaves its input state unchanged.
+
+**Proof.** By definition, `MEASURE` reads $p$ and returns $\operatorname{Bernoulli}(p)$. It performs no state-producing or state-replacement step, so the input remains $\rho$. $\square$
+
+**Theorem 2.3 (Internal-Parameter Independence).** If $\rho_1,\rho_2\in\mathcal S$ have the same $p$ and any valid internal parameters $c_1,c_2$, then
+
+$$
+\operatorname{MEASURE}(\rho_1)
+=
+\operatorname{MEASURE}(\rho_2).
+$$
+
+**Proof.** Both sides equal $\operatorname{Bernoulli}(p)$ by Definition 2.1; $c$ and $d$ do not occur in that definition. $\square$
+
+### 2.4 Named basis measurement
+
+Lana defines these ordered binary bases:
+
+$$
+B_{\mathrm{computational}}=(|0\rangle,|1\rangle),
+\qquad
+B_x=(|+\rangle,|-\rangle),
+$$
+
+where $|+\rangle=(|0\rangle+|1\rangle)/\sqrt2$, and
+
+$$
+B_y=(|+y\rangle,|-y\rangle),
+\qquad
+|+y\rangle=(|0\rangle+i|1\rangle)/\sqrt2.
+$$
+
+Outcome $0$ always refers to the first vector in the named ordered basis. For
+$\rho$ with canonical off-diagonal value $c=\rho_{01}$, define the exact
+basis-0 probability $q_B(\rho)$ by
+
+$$
+q_{\mathrm{computational}}(\rho)=p,
+\qquad
+q_x(\rho)=\frac12+\operatorname{Re}(c),
+\qquad
+q_y(\rho)=\frac12-\operatorname{Im}(c).
+$$
+
+The basis-aware result is always the existing binary distribution shape
+$\operatorname{distribution}(1-q_B,q_B)$. Measurement is read-only and does
+not collapse or otherwise mutate the input.
+
+For a concrete `STATE`, probability, distribution, and classical sample modes
+use this exact $q_B$. For a `STATE_DIST`, exact basis-aware sampling first draws
+a concrete state $\rho\sim\mu$, then draws the binary outcome from
+$\operatorname{Bernoulli}(q_B(\rho))$. Exact basis-aware probability and
+distribution modes over `STATE_DIST` are intentionally unsupported until a
+separate exact basis-expectation evaluator is defined.
+
+### 2.5 Explicit Monte Carlo estimation
+
+Lana provides an explicit approximate operation for basis-aware probability and
+distribution measurement of a `STATE_DIST`. Given $N>0$ independent samples
+$\rho_1,\ldots,\rho_N\sim\mu$, define
+
+$$
+\widehat q_{B,N}(\mu)=\frac1N\sum_{i=1}^N q_B(\rho_i).
+$$
+
+`estimate_measure` returns $\widehat q_{B,N}$ in probability mode and
+$\operatorname{distribution}(1-\widehat q_{B,N},\widehat q_{B,N})$ in
+distribution mode. This regular sample-mean Monte Carlo estimator is a
+deliberate language semantic, not an invisible runtime optimization. It is not
+the exact mathematical probability $\int q_B(\rho)\,d\mu(\rho)$; accuracy is
+sample-count dependent. No confidence interval is part of the result. The
+runtime may use the existing seeded RNG and must not return a partial estimate
+when cancellation or a resource limit interrupts the trials.
+
+
+## 3. TRANSFORM
+
+### 3.1 Definition
+
+A valid concrete Lana transform is a deterministic, Borel-measurable function
+
+$$
+\Phi:\mathcal S\rightarrow\mathcal S.
+$$
+
+For $\rho\in\mathcal S$, define
+
+$$
+\operatorname{TRANSFORM}_\Phi(\rho)
+=
+\Phi(\rho).
+$$
+
+Mathematically, a transform returns a new `STATE`; Section 5.7 distinguishes this value semantics from language-level assignment.
+
+### 3.2 Well-Formedness
+
+If
+
+$$
+\Phi(\rho)=
+\rho'=
+\begin{pmatrix}
+1-p' & c' \\
+{c'}^* & p'
+\end{pmatrix},
+$$
+
+then validity requires
+
+$$
+0\le p'\le1,
+\qquad
+c'\in\mathbb C,
+\qquad
+|c'|^2\le p'(1-p').
+$$
+
+A rule that is nondeterministic, not Borel-measurable, or violates these
+conditions for any input in its declared domain is not a valid concrete
+transform on that domain.
+
+### 3.3 Composition
+
+For valid transforms
+
+$$
+\Phi,\Psi:\mathcal S\rightarrow\mathcal S,
+$$
+
+define ordinary function composition by
+
+$$
+(\Psi\circ\Phi)(\rho)
+=
+\Psi(\Phi(\rho)).
+$$
+
+Define the identity transform by
+
+$$
+I(\rho)=\rho.
+$$
+
+### 3.4 Properties
+
+Valid transforms preserve `STATE` well-formedness, are closed under composition, compose associatively, and include the identity. Individual transforms need not be invertible.
+
+Consequently, the set of valid Lana transforms forms a **monoid under function composition**, but not necessarily a group.
+
+### 3.5 Proofs
+
+**Theorem 3.1 (Transform Closure).** For a valid transform $\Phi$,
+
+$$
+\rho\in\mathcal S
+\implies
+\Phi(\rho)\in\mathcal S.
+$$
+
+**Proof.** This is the codomain obligation in the definition $\Phi:\mathcal S\rightarrow\mathcal S$. $\square$
+
+**Theorem 3.2 (Closure Under Composition).** If $\Phi$ and $\Psi$ are valid transforms, then $\Psi\circ\Phi$ is a valid transform.
+
+**Proof.** For any $\rho\in\mathcal S$, validity of $\Phi$ gives $\Phi(\rho)\in\mathcal S$. Validity of $\Psi$ then gives $\Psi(\Phi(\rho))\in\mathcal S$. The composition of deterministic functions is deterministic, and the composition of Borel-measurable functions is Borel-measurable, so $\Psi\circ\Phi:\mathcal S\rightarrow\mathcal S$ is valid. $\square$
+
+**Theorem 3.3 (Associativity of Transform Composition).** For valid transforms $\Phi$, $\Psi$, and $\Theta$,
+
+$$
+\Theta\circ(\Psi\circ\Phi)
+=
+(\Theta\circ\Psi)\circ\Phi.
+$$
+
+**Proof.** For every $\rho\in\mathcal S$, both sides evaluate to $\Theta(\Psi(\Phi(\rho)))$. Therefore the functions are equal. $\square$
+
+**Theorem 3.4 (Identity).** For every valid transform $\Phi$,
+
+$$
+I\circ\Phi
+=
+\Phi\circ I
+=
+\Phi.
+$$
+
+**Proof.** The function $I$ is deterministic and maps every $\rho\in\mathcal S$ to the same element $\rho\in\mathcal S$, so it is valid. For every $\rho\in\mathcal S$, $I(\Phi(\rho))=\Phi(\rho)$ and $\Phi(I(\rho))=\Phi(\rho)$. $\square$
+
+### 3.6 Interpretation
+
+Lana 1.0 uses an abstract state semantics: every deterministic,
+Borel-measurable endofunction on $\mathcal S$ is eligible to be a transform,
+provided its output remains in $\mathcal S$.
+
+If `STATE` is interpreted as a physical quantum state, physically realizable deterministic transformations satisfy stronger requirements, normally arising from completely positive trace-preserving maps on operators. Lana 1.0 does **not** require every abstract transform to be CPTP or physically realizable.
+
+### 3.7 Lana 1.0 Registered Transforms
+
+Lana 1.0 defines
+
+$$
+\operatorname{INVERT}(p,d)=(1-p,\overline d)
+$$
+
+and
+
+$$
+\operatorname{NEUTRALIZE}(p,d)=(p,0).
+$$
+
+Both rules are deterministic and continuous, hence Borel-measurable.
+Conjugation preserves $|d|$, so `INVERT` preserves the unit-disk and boundary
+invariants. `NEUTRALIZE` maps every disposition to the disk origin and
+preserves $p$. Their exact expected-probability rules are $q\mapsto1-q$ and
+$q\mapsto q$, respectively.
+
+
+## 4. APPEND
+
+### 4.1 Definition
+
+For ordinary inputs $A,B\in\mathcal S$, `APPEND(A,B)` combines the represented binary events using Lana's independent probabilistic-OR modeling rule and returns a probability distribution over concrete output states.
+
+Invoking `APPEND(A,B)` asserts independence of the two represented binary events **for that operation only**. Lana does not infer that all distinct `STATE` values are independent, and Lana 1.0 does not define `APPEND` for correlated events.
+
+The internal distribution defined in Section 4.4 is a Lana modeling rule, not a consequence of probability theory or quantum mechanics.
+
+### 4.2 Observable Probability
+
+Let the input states have observable probabilities $p_A$ and $p_B$. Define
+
+$$
+p_C
+=
+p_A+p_B-p_Ap_B,
+$$
+
+or equivalently
+
+$$
+p_C
+=
+1-(1-p_A)(1-p_B).
+$$
+
+The output `STATE_DIST` has this fixed observable probability when both inputs are concrete `STATE` values.
+
+### 4.3 Normalized Internal Values
+
+Define the complex unit disk by
+
+$$
+\mathbb D
+=
+\{z\in\mathbb C:|z|\le1\}.
+$$
+
+Let $d_A$ and $d_B$ be the normalized dispositions derived from the input states by Section 1.1. Thus
+
+$$
+d_A,d_B\in\mathbb D.
+$$
+
+Define
+
+$$
+m_C
+=
+\frac{d_A+d_B}{2}
+$$
+
+and
+
+$$
+\sigma_C
+=
+\frac{|d_A-d_B|}{2}.
+$$
+
+Because $\mathbb D$ is convex, $m_C\in\mathbb D$, and $\sigma_C\ge0$.
+
+### 4.4 Internal Distribution
+
+For
+
+$$
+0<p_C<1,
+\qquad
+\sigma_C>0,
+$$
+
+define the normalization constant
+
+$$
+Z(m,\sigma)
+=
+\int_{\mathbb D}
+\exp\left(
+-\frac{|z-m|^2}{2\sigma^2}
+\right)
+\,d^2z.
+$$
+
+For $m\in\mathbb D$ and $\sigma>0$, the integrand is positive and continuous on the compact disk, so $0<Z(m,\sigma)<\infty$.
+
+The normalized output disposition $d_C$ then has the truncated and renormalized circular complex-normal density
+
+$$
+f_C(d)
+=
+\frac{1}{Z(m_C,\sigma_C)}
+\exp\left(
+-\frac{|d-m_C|^2}{2\sigma_C^2}
+\right),
+\qquad
+d\in\mathbb D,
+$$
+
+with respect to two-dimensional Lebesgue measure $d^2d$ on the complex plane. By construction,
+
+$$
+\int_{\mathbb D}f_C(d)\,d^2d=1.
+$$
+
+If $0<p_C<1$ and $\sigma_C=0$, the internal distribution is the Dirac distribution concentrated at
+
+$$
+d_C=m_C.
+$$
+
+If
+
+$$
+p_C\in\{0,1\},
+$$
+
+the internal distribution is the Dirac distribution concentrated at
+
+$$
+d_C=0.
+$$
+
+These cases collectively define a probability distribution for $d_C$ without treating a degenerate case as an ordinary density $f_C$.
+
+### 4.5 STATE_DIST Result
+
+For every possible $d_C$ from Section 4.4, construct
+
+$$
+c_C
+=
+d_C\sqrt{p_C(1-p_C)}
+$$
+
+and
+
+$$
+\rho_C
+=
+\begin{pmatrix}
+1-p_C & c_C \\
+c_C^* & p_C
+\end{pmatrix}.
+$$
+
+The ordinary `APPEND` result is the induced probability distribution of $\rho_C$:
+
+$$
+\operatorname{APPEND}(A,B)
+\in
+\operatorname{Dist}(\mathcal S).
+$$
+
+### 4.6 Chaining
+
+For concrete independent input events, the observable component chains as
+
+$$
+p_{AB}=1-(1-p_A)(1-p_B)
+$$
+
+and
+
+$$
+p_{(AB)C}
+=
+p_{A(BC)}
+=
+1-(1-p_A)(1-p_B)(1-p_C).
+$$
+
+More generally, for $n\ge1$ inputs satisfying the required independence assumptions,
+
+$$
+p_{\operatorname{APPEND}}
+=
+1-\prod_{i=1}^{n}(1-p_i).
+$$
+
+This associativity applies only to the observable probability. The internal `STATE_DIST` construction is evaluated as a binary tree and is **not assumed associative**. Binary grouping therefore matters for the internal output distribution.
+
+### 4.7 Properties
+
+For ordinary `STATE` inputs, `APPEND` has bounded observable probability, produces only valid concrete states, and is commutative. Its observable probability is associative, while its internal distribution has no associativity guarantee.
+
+### 4.8 Proofs
+
+**Theorem 4.1 (APPEND Probability Bounds).** If $p_A,p_B\in[0,1]$, then $p_C\in[0,1]$.
+
+**Proof.** Since $1-p_A,1-p_B\in[0,1]$, their product lies in $[0,1]$. Therefore $1-(1-p_A)(1-p_B)\in[0,1]$. $\square$
+
+**Theorem 4.2 (APPEND STATE Validity).** Every concrete state in the output distribution is an element of $\mathcal S$.
+
+**Proof.** Section 4.4 places every possible $d_C$ in $\mathbb D$, including the degenerate cases, so $|d_C|\le1$. Therefore
+
+$$
+|c_C|^2
+=
+|d_C|^2p_C(1-p_C)
+\le
+p_C(1-p_C).
+$$
+
+Together with Theorem 4.1, the canonical matrix in Section 4.5 is Hermitian, positive semidefinite, and has trace $1$. Hence $\rho_C\in\mathcal S$. $\square$
+
+**Theorem 4.3 (APPEND Commutativity).** For ordinary `STATE` inputs,
+
+$$
+\operatorname{APPEND}(A,B)
+=
+\operatorname{APPEND}(B,A).
+$$
+
+**Proof.** The expression $1-(1-p_A)(1-p_B)$ is symmetric in $A$ and $B$. Also
+
+$$
+\frac{d_A+d_B}{2}
+=
+\frac{d_B+d_A}{2}
+$$
+
+and
+
+$$
+\frac{|d_A-d_B|}{2}
+=
+\frac{|d_B-d_A|}{2}.
+$$
+
+Thus $p_C$, $m_C$, and $\sigma_C$ are unchanged when the inputs are exchanged, so every branch of the internal-distribution definition and the induced output distribution is unchanged. $\square$
+
+**Theorem 4.4 (Observable Associativity).** For three concrete inputs whose represented events satisfy the required independence assumptions,
+
+$$
+p_{(AB)C}
+=
+p_{A(BC)}
+=
+1-(1-p_A)(1-p_B)(1-p_C).
+$$
+
+**Proof.** Applying $p_{XY}=1-(1-p_X)(1-p_Y)$ twice gives the displayed expression under either grouping. Induction on the number of inputs gives
+
+$$
+1-\prod_{i=1}^{n}(1-p_i).
+$$
+
+$\square$
+
+**Explicit limitation (internal non-associativity).** Lana 1.0 supplies no theorem or modeling rule equating the internal distributions of `APPEND(APPEND(A,B),C)` and `APPEND(A,APPEND(B,C))`. They may differ.
+
+
+## 5. Composition and Evaluation Semantics
+
+### 5.1 Evaluation Order
+
+Nested core expressions follow the language's deterministic expression evaluation order. This document requires that the selected order be honored; parser and VM mechanics belong in their respective specifications.
+
+For a binary `APPEND` tree, grouping is semantically meaningful. For example,
+
+```text
+APPEND(APPEND(A, B), C)
+```
+
+means:
+
+1. evaluate `APPEND(A,B)`;
+2. obtain a `STATE_DIST`;
+3. apply lifted `APPEND` to that distribution and `C`.
+
+It must not be silently rewritten as
+
+```text
+APPEND(A, APPEND(B, C))
+```
+
+because the internal distributions are not assumed equal.
+
+### 5.2 Degenerate Embedding
+
+Define
+
+$$
+\eta:\mathcal S\rightarrow\operatorname{Dist}(\mathcal S)
+$$
+
+by
+
+$$
+\eta(\rho)=\delta_\rho.
+$$
+
+This explicit embedding allows ordinary `STATE` and `STATE_DIST` values to participate uniformly in the lifted operations below.
+
+### 5.3 Lifting Deterministic TRANSFORM
+
+Not every valid concrete transform is runtime-admissible for distribution
+lifting. A lifted transform must supply all three of the following:
+
+1. a concrete `STATE` to `STATE` rule;
+2. a proof that the rule preserves `STATE` validity; and
+3. an exact rule for expected probability under its pushforward.
+
+No conforming runtime may replace the third obligation with Monte Carlo
+expectation estimation. A transform without that exact rule remains valid on
+concrete `STATE` values but is unsupported on `STATE_DIST`.
+
+For an admissible transform $\Phi:\mathcal S\rightarrow\mathcal S$, a distribution $\mu\in\operatorname{Dist}(\mathcal S)$, and every measurable set $E\subseteq\mathcal S$, define the pushforward distribution $\Phi_*\mu$ by
+
+$$
+(\Phi_*\mu)(E)
+=
+\mu(\Phi^{-1}(E))
+$$
+
+Operationally, sample $\rho\sim\mu$ and return $\Phi(\rho)$. This defines
+
+$$
+\widehat{\operatorname{TRANSFORM}}_\Phi:
+\operatorname{STATE_DIST}
+\rightarrow
+\operatorname{STATE_DIST},
+\qquad
+\widehat{\operatorname{TRANSFORM}}_\Phi(\mu)=\Phi_*\mu.
+$$
+
+This lifting introduces no randomness beyond the randomness already represented by $\mu$.
+
+### 5.4 Lifting APPEND
+
+Let $K(A,B)$ denote the ordinary `APPEND(A,B)` output distribution defined by Sections 4.1–4.5.
+
+Let $\mu,\nu\in\operatorname{Dist}(\mathcal S)$. For independent component draws
+
+$$
+\rho_A\sim\mu,
+\qquad
+\rho_B\sim\nu,
+$$
+
+for every measurable set $E\subseteq\mathcal S$, define lifted `APPEND` as the distribution $\lambda$ satisfying
+
+$$
+\lambda(E)
+=
+\int_{\mathcal S}\int_{\mathcal S}
+K(\rho_A,\rho_B)(E)
+\,d\mu(\rho_A)\,d\nu(\rho_B)
+$$
+
+Thus the fully distributed form has signature
+
+$$
+\widehat{\operatorname{APPEND}}:
+\operatorname{Dist}(\mathcal S)\times\operatorname{Dist}(\mathcal S)
+\rightarrow
+\operatorname{Dist}(\mathcal S).
+$$
+
+Equivalently: independently draw one component state from each input distribution, then apply the ordinary `APPEND` rule, including its conditional internal-distribution draw. The independent-input requirement is part of this lifted definition.
+
+Using the embedding $\eta$ where necessary, the supported forms are
+
+$$
+\operatorname{STATE}\times\operatorname{STATE},
+$$
+
+$$
+\operatorname{STATE_DIST}\times\operatorname{STATE},
+$$
+
+$$
+\operatorname{STATE}\times\operatorname{STATE_DIST},
+$$
+
+and
+
+$$
+\operatorname{STATE_DIST}\times\operatorname{STATE_DIST}.
+$$
+
+Every form yields `STATE_DIST`. For distributed inputs, $p_C$ need not be fixed globally; it is computed conditionally from each sampled component pair.
+
+### 5.5 Measurement of STATE_DIST
+
+For $\mu\in\operatorname{STATE_DIST}$, let $X\in\{0,1\}$ denote the classical computational-basis outcome. Define `MEASURE` as the mixture distribution
+
+$$
+P(X=x)
+=
+\int_{\mathcal S}
+P(X=x\mid\rho)
+\,d\mu(\rho),
+\qquad
+x\in\{0,1\}.
+$$
+
+This lifted operation has signature
+
+$$
+\widehat{\operatorname{MEASURE}}:
+\operatorname{STATE_DIST}
+\rightarrow
+\operatorname{Dist}(\{0,1\}).
+$$
+
+Writing $p(\rho)=\rho_{11}$, computational-basis measurement gives
+
+$$
+P(X=1)
+=
+\int_{\mathcal S}p(\rho)\,d\mu(\rho)
+$$
+
+and
+
+$$
+P(X=0)
+=
+1-P(X=1).
+$$
+
+This operation returns a distribution unless classical sampling is explicitly requested.
+
+### 5.6 Sampling
+
+For $\mu\in\operatorname{STATE_DIST}$,
+
+$$
+\operatorname{SAMPLE}(\mu)\sim\mu
+$$
+
+denotes a stochastic evaluation that returns one concrete `STATE`. Sampling does not mutate its source distribution.
+
+For a measurement result,
+
+$$
+X\sim\operatorname{Bernoulli}(p)
+$$
+
+returns one classical binary scalar. This classical draw is distinct from `MEASURE`, which constructs the Bernoulli distribution, and from `SAMPLE` on `STATE_DIST`, which returns a concrete `STATE`.
+
+### 5.7 Mutation Semantics
+
+The core mathematical operations have value semantics:
+
+- `MEASURE` is read-only.
+- Sampling is read-only unless a separate, explicitly mutating language operation is defined elsewhere.
+- `TRANSFORM` mathematically returns a new `STATE`.
+- Language-level assignment or replacement determines whether a program binds that returned state to a variable.
+- `APPEND` mutates neither input.
+
+VM register behavior cannot redefine these mathematical value semantics.
+
+
+## 6. Boundary and Error Semantics
+
+### 6.1 STATE Construction
+
+A proposed canonical state is invalid if
+
+$$
+p\notin[0,1]
+$$
+
+or
+
+$$
+|c|^2>p(1-p).
+$$
+
+A runtime must reject invalid construction rather than silently reinterpret it as another state.
+
+### 6.2 Probability Boundaries
+
+At
+
+$$
+p=0
+\quad\text{or}\quad
+p=1,
+$$
+
+positive semidefiniteness forces
+
+$$
+c=0.
+$$
+
+The normalized disposition is defined by convention as
+
+$$
+d=0.
+$$
+
+### 6.3 APPEND Degeneracy
+
+At
+
+$$
+p_C\in\{0,1\},
+$$
+
+`APPEND` produces a degenerate internal distribution concentrated at
+
+$$
+d_C=0.
+$$
+
+When $0<p_C<1$ and
+
+$$
+\sigma_C=0,
+$$
+
+the internal distribution is concentrated at
+
+$$
+d_C=m_C.
+$$
+
+### 6.4 Invalid TRANSFORM Output
+
+If a transform produces a value that violates the `STATE` invariants, that rule is not a valid Lana transform for the input in question. A conforming runtime must reject or trap the result rather than expose it as a valid `STATE`.
+
+### 6.5 Invalid Operation Types
+
+Core operations are defined only over the domains declared in Sections 1 and 5. Unsupported type combinations are type errors or runtime errors. No conversion is permitted unless it is explicitly defined in this document, such as the degenerate embedding $\eta$.
+
+### 6.6 Numerical Failure
+
+The mathematical semantics use exact real and complex arithmetic. Finite-precision approximation does not change mathematical validity; implementation tolerances and required rejection behavior are specified in Section 7.3.
+
+
+## 7. Implementation Correspondence
+
+This section states only the minimum implementation obligations needed to realize the mathematics. VM architecture and bytecode encoding remain outside this document.
+
+### 7.1 Canonical Runtime Information
+
+A concrete `STATE` implementation must retain enough information to reconstruct the canonical mathematical pair $(p,c)$ and therefore the canonical matrix $\rho$.
+
+No particular struct, register representation, redundant storage of $p$ and $1-p$, or storage of derived $d$ is required. If a runtime stores $d$ instead of $c$, it must preserve complex values and reconstruct
+
+$$
+c=d\sqrt{p(1-p)}
+$$
+
+with the boundary convention from Section 1.1.
+
+### 7.2 STATE_DIST Runtime Representation
+
+A runtime does not enumerate the generally infinite set of possible states in a `STATE_DIST`. It represents each runtime-constructible distribution as a finite lazy expression describing how values are generated. The mathematical domain $\operatorname{Dist}(\mathcal S)$ is not a requirement to enumerate or provide constructors for every probability measure on $\mathcal S$.
+
+Conceptually:
+
+```text
+STATE_DIST {
+    distribution_kind
+    parameters
+    inputs
+}
+```
+
+For ordinary `APPEND` inputs, a node may contain:
+
+```text
+p_C
+m_C
+sigma_C
+unit_disk_truncation
+input expressions
+```
+
+Degenerate nodes must encode the boundary or zero-spread rule rather than attempt to evaluate the nondegenerate density with $\sigma_C=0$.
+
+Chained operations may form finite lazy expression trees:
+
+```text
+AppendDist(
+    AppendDist(A, B),
+    C
+)
+```
+
+Evaluation, measurement, or sampling recursively evaluates only the portions required to produce the requested result. A finite expression represents a continuous probability distribution; it is not an enumeration of its support.
+
+### 7.3 Floating-Point Policy
+
+The mathematical definitions use exact arithmetic, but conforming implementations may use finite precision.
+
+For Lana 1.0:
+
+- probabilities must use sufficient precision to preserve the documented domain;
+- tiny violations near $0$ and $1$ may be clamped only within a documented implementation tolerance;
+- an implementation-defined small $\varepsilon\ge0$ may be used for the check
+
+$$
+|c|^2
+\le
+p(1-p)+\varepsilon;
+$$
+
+- materially invalid values must not be silently repaired; and
+- accepted near-boundary values must be canonicalized to a mathematically valid `STATE` before exposure as a concrete value.
+
+The conforming C runtime selects $\varepsilon=10^{-12}$. This tolerance does
+not materially enlarge $\mathcal S$; every accepted near-boundary value is
+canonicalized before exposure.
+
+### 7.4 Randomness
+
+Stochastic evaluation requires a pseudo-random source. A conforming implementation may provide seeded reproducibility. RNG algorithm selection, stream ownership, and serialization belong in VM or runtime documentation, not in the mathematical definition.
+
+### 7.5 Semantic Conformance
+
+An implementation conforms when its observable results agree with this document, modulo documented floating-point approximation and pseudo-random sampling. Specifically:
+
+- valid `STATE` construction corresponds to an element of $\mathcal S$;
+- `MEASURE` produces the prescribed Bernoulli distribution or mixture;
+- basis-aware concrete measurement produces the prescribed $q_B$ distribution;
+- explicit `estimate_measure` produces the documented Monte Carlo estimator and
+  does not claim exact `STATE_DIST` basis expectation;
+- `TRANSFORM` produces the state or pushforward prescribed by $\Phi$;
+- `APPEND` produces the prescribed `STATE_DIST`;
+- sampling follows the represented distribution;
+- supported v5 joint operations preserve names, immutability, and their
+  explicit error behavior;
+- operation evaluation order matches Section 5; and
+- invalid states and operations follow Section 6.
+
+### 7.6 Legacy Compatibility Boundary
+
+SSBC v1/v2 retain an older signed-real state model and its historical `apply`,
+`compose`, legacy `transform`, and mutating `collapse` instructions. Those
+instructions are compatibility behavior only. They are not Lana 1.0 source
+operations and do not redefine any mathematics in this document. SSBC v3/v4/v5
+and the Lana 1.0 compiler use the density-operator representation and core
+operations defined above.
+
+
+## Appendix A — Canonical Equation Reference
+
+This appendix contains only equations that remain normative after the rewrite. The numbered sections are authoritative and include additional normative definitions for composition, lifting, errors, and evaluation.
+
+### STATE
+
+$$
+\rho=
+\begin{pmatrix}
+1-p & c \\
+c^* & p
+\end{pmatrix}
+$$
+
+$$
+0\le p\le1
+$$
+
+$$
+|c|^2\le p(1-p)
+$$
+
+For $0<p<1$,
+
+$$
+d=
+\frac{c}{\sqrt{p(1-p)}},
+\qquad
+|d|\le1.
+$$
+
+For $p\in\{0,1\}$,
+
+$$
+c=0,
+\qquad
+d=0.
+$$
+
+### MEASURE
+
+$$
+\operatorname{MEASURE}(\rho)
+=
+\operatorname{Bernoulli}(p).
+$$
+
+### TRANSFORM
+
+$$
+\Phi:\mathcal S\rightarrow\mathcal S.
+$$
+
+### APPEND
+
+$$
+p_C
+=
+1-(1-p_A)(1-p_B)
+$$
+
+$$
+m_C
+=
+\frac{d_A+d_B}{2}
+$$
+
+$$
+\sigma_C
+=
+\frac{|d_A-d_B|}{2}
+$$
+
+For $0<p_C<1$ and $\sigma_C>0$,
+
+$$
+f_C(d)
+=
+\frac{1}{Z(m_C,\sigma_C)}
+\exp\left(
+-\frac{|d-m_C|^2}{2\sigma_C^2}
+\right),
+\qquad
+d\in\mathbb D,
+$$
+
+where
+
+$$
+\mathbb D=\{z\in\mathbb C:|z|\le1\}
+$$
+
+and
+
+$$
+Z(m,\sigma)
+=
+\int_{\mathbb D}
+\exp\left(
+-\frac{|z-m|^2}{2\sigma^2}
+\right)
+\,d^2z.
+$$
+
+$$
+\int_{\mathbb D}f_C(d)\,d^2d=1.
+$$
+
+The degenerate cases are
+
+$$
+d_C=
+\begin{cases}
+m_C, & 0<p_C<1\ \text{and}\ \sigma_C=0, \\
+0, & p_C\in\{0,1\}.
+\end{cases}
+$$
+
+For every possible output disposition,
+
+$$
+c_C
+=
+d_C\sqrt{p_C(1-p_C)}.
+$$
+
+### STATE_DIST
+
+$$
+\operatorname{STATE_DIST}
+=
+\operatorname{Dist}(\mathcal S).
+$$
+
+## Appendix B — Semantic Operation ↔ Runtime Mapping
+
+This table records current instruction availability without making opcode encoding normative. Detailed instruction behavior and encoding remain in `BYTECODE.md`.
+
+| Semantic concept | Runtime responsibility | Current direct opcode |
+| --- | --- | --- |
+| `STATE` construction | Validate and create a concrete canonical `STATE` | `STATE_NEW_V3` / `STATE_BUILD_V3` |
+| `MEASURE` | Produce the computational-basis distribution without mutation | `MEASURE_V3` |
+| Classical measurement sampling | Draw a binary scalar using the runtime RNG | `MEASURE_V3` sample mode |
+| `TRANSFORM` | Execute an admissible $\Phi$ and reject invalid output | `TRANSFORM_V3` |
+| `APPEND` | Construct the prescribed lazy `STATE_DIST` | `APPEND` |
+| `STATE_DIST` sampling | Evaluate and sample a lazy distribution | `SAMPLE_STATE_DIST` |
+| Named n-ary joint construction | Validate names and build an immutable joint law/view | `JOINT_BUILD_V5` |
+| Joint projection | Return an immutable named projection | `JOINT_PROJECT_V5` |
+| Joint conditioning | Refine by exact evidence or return an explicit error | `JOINT_CONDITION_V5` |
+| Joint sampling | Return definite member values without mutation | `JOINT_SAMPLE_V5` |
+| Singleton resolution | Return a definite value only for a singleton | `RESOLVE_V5` |
+| Finite possibility | Validate nonempty support and preserve dependency | `POSSIBILITY_BUILD_V5` |
+| Guarded branch execution | Snapshot, execute, and join bounded alternatives | `PATH_SPLIT_V5` / `PATH_JOIN_V5` |
+| Observation | Refine and record evidence after success | `OBSERVE_V5` |
+| General supported sampling | Return one definite read-only result | `INFO_SAMPLE_V5` |
+
+No opcode is inferred from a semantic operation merely because the operation is normative.

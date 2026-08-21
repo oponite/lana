@@ -1,0 +1,89 @@
+fn typed(node, type_name, effect_name) { return [node[0], type_name, effect_name, node]; }
+
+fn host_effect(name) {
+    if (name == "print") { return "io"; }
+    if (name == "read_text") { return "io"; }
+    if (name == "write_text") { return "io"; }
+    if (name == "args") { return "host"; }
+    if (name == "now") { return "host"; }
+    if (name == "random") { return "stochastic"; }
+    if (name == "assert") { return "host"; }
+    return "pure";
+}
+
+fn literal_type(node) {
+    if (node[1] == "number") { return "number"; }
+    if (node[1] == "string") { return "string"; }
+    if (node[1] == "bool") { return "bool"; }
+    if (node[1] == "null") { return "null"; }
+    return "unknown";
+}
+
+fn resolve_extended_expression(node) {
+    if (node[0] == 27) { return typed(node, "unknown", "pure"); }
+    if (node[0] == 28) { return typed(node, "map", "pure"); }
+    if (node[0] == 29) { return typed(node, "information", "pure"); }
+    if (node[0] == 30) { return typed(node, "information", "pure"); }
+    if (node[0] == 31) {
+        if (node[1] == "observe") { return typed(node, "information", "observe"); }
+        if (node[1] == "sample") { return typed(node, "unknown", "stochastic"); }
+        return typed(node, "information", "pure");
+    }
+    if (node[0] == 32) { return typed(node, "unknown", "stochastic"); }
+    if (node[0] == 33) { return typed(node, "unknown", "stochastic"); }
+    if (node[0] == 34) { return typed(node, "unknown", "pure"); }
+    if (node[0] == 35) { return typed(node, "task", "task"); }
+    if (node[0] == 36) { return typed(node, "unknown", "task"); }
+    if (node[0] == 37) { return typed(node, "unknown", "task"); }
+    assert(false, "unknown expression node"); return typed(node, "unknown", "pure");
+}
+
+fn resolve_expression(node) {
+    if (node[0] == 20) { return typed(node, literal_type(node), "pure"); }
+    if (node[0] == 21) { return typed(node, "unknown", "pure"); }
+    if (node[0] == 22) {
+        let result_type = "number";
+        if (node[1] == "==") { result_type = "bool"; }
+        if (node[1] == "!=") { result_type = "bool"; }
+        if (node[1] == "<") { result_type = "bool"; }
+        if (node[1] == "<=") { result_type = "bool"; }
+        if (node[1] == ">") { result_type = "bool"; }
+        if (node[1] == ">=") { result_type = "bool"; }
+        return typed(node, result_type, "pure");
+    }
+    if (node[0] == 23) { return typed(node, "unknown", "pure"); }
+    if (node[0] == 24) { return typed(node, "unknown", host_effect(node[1])); }
+    if (node[0] == 25) { return typed(node, "array", "pure"); }
+    if (node[0] == 26) { return typed(node, "unknown", "pure"); }
+    return resolve_extended_expression(node);
+}
+
+fn resolve_statement(node) {
+    if (node[0] == 2) { return [2, "statement", resolve_expression(node[2])[2], node]; }
+    if (node[0] == 3) { return [3, "statement", resolve_expression(node[2])[2], node]; }
+    if (node[0] == 4) { return [4, "statement", "path", node]; }
+    if (node[0] == 5) { return [5, "statement", "control", node]; }
+    if (node[0] == 6) { return [6, "statement", resolve_expression(node[1])[2], node]; }
+    if (node[0] == 7) { return [7, "statement", resolve_expression(node[1])[2], node]; }
+    if (node[0] == 8) { return [8, "statement", "io", node]; }
+    if (node[0] == 9) { return [9, "statement", "pure", node]; }
+    if (node[0] == 10) { return [10, "statement", "pure", node]; }
+    if (node[0] == 11) { return [11, "statement", "pure", node]; }
+    if (node[0] == 12) { return [12, "statement", "task", node]; }
+    if (node[0] == 13) { return [13, "statement", "task", node]; }
+    assert(false, "unknown statement node"); return [node[0], "statement", "unknown", node];
+}
+
+fn resolve_list(nodes) {
+    let result = array_new(0); let index = 0;
+    while (index < array_length(nodes)) { array_push(result, resolve_statement(nodes[index])); index = index + 1; }
+    return result;
+}
+
+fn resolve_function(node) { return [1, node[1], node[2], resolve_list(node[3]), node[4]]; }
+
+fn resolve_program(program) {
+    let functions = array_new(0); let index = 0;
+    while (index < array_length(program[1])) { array_push(functions, resolve_function(program[1][index])); index = index + 1; }
+    return [100, functions, resolve_list(program[2]), program[3]];
+}

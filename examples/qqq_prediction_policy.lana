@@ -1,0 +1,18 @@
+// Generated prediction inputs are typed evidence. Lana owns belief updates
+// and policy classification; native host calls own data and model fitting.
+state qqq_direction = state {
+    p: 0.61,
+    d: 0.48,
+    source: "qqq-direction-model-v1",
+    confidence: 0.48
+};
+
+state volatility_filter = state {
+    p: 0.55,
+    d: 0.20,
+    source: "qqq-volatility-filter-v1",
+    confidence: 0.70
+};
+
+let research_thesis = append(qqq_direction, volatility_filter);
+print(measure research_thesis as probability);

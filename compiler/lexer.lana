@@ -1,0 +1,121 @@
+fn token(kind, text, line, column) { return [kind, text, line, column]; }
+
+fn is_space(byte) {
+    if (byte == 32) { return true; }
+    if (byte == 9) { return true; }
+    if (byte == 10) { return true; }
+    if (byte == 13) { return true; }
+    return false;
+}
+
+fn is_digit(byte) { if (byte < 48) { return false; } if (byte > 57) { return false; } return true; }
+
+fn is_letter(byte) {
+    if (byte == 95) { return true; }
+    if (byte >= 65) { if (byte <= 90) { return true; } }
+    if (byte >= 97) { if (byte <= 122) { return true; } }
+    return false;
+}
+
+fn is_identifier_byte(byte) { if (is_letter(byte)) { return true; } return is_digit(byte); }
+
+fn skip_comment(source, offset, column) {
+    let length = string_length(source);
+    let scanning = true;
+    while (scanning) {
+        if (offset >= length) { scanning = false; } else {
+            if (string_byte_at(source, offset) == 10) { scanning = false; } else {
+                offset = offset + 1; column = column + 1;
+            }
+        }
+    }
+    return [offset, column];
+}
+
+fn scan_identifier(source, offset, line, column) {
+    let length = string_length(source); let start = offset; let start_column = column; let scanning = true;
+    while (scanning) {
+        if (offset >= length) { scanning = false; } else {
+            if (is_identifier_byte(string_byte_at(source, offset))) { offset = offset + 1; column = column + 1; }
+            else { scanning = false; }
+        }
+    }
+    return [offset, column, token("identifier", string_slice(source, start, offset), line, start_column)];
+}
+
+fn scan_number(source, offset, line, column) {
+    let length = string_length(source); let start = offset; let start_column = column;
+    let seen_dot = false; let scanning = true;
+    while (scanning) {
+        if (offset >= length) { scanning = false; } else {
+            let byte = string_byte_at(source, offset);
+            if (is_digit(byte)) { offset = offset + 1; column = column + 1; } else {
+                if (byte == 46) {
+                    if (seen_dot) { scanning = false; } else { seen_dot = true; offset = offset + 1; column = column + 1; }
+                } else { scanning = false; }
+            }
+        }
+    }
+    return [offset, column, token("number", string_slice(source, start, offset), line, start_column)];
+}
+
+fn scan_string(source, offset, line, column) {
+    let length = string_length(source); let start_column = column;
+    offset = offset + 1; column = column + 1; let content_start = offset;
+    let escaped = false; let scanning = true; let value = "";
+    while (scanning) {
+        assert(offset < length, "unterminated string literal");
+        let byte = string_byte_at(source, offset);
+        if (escaped) { escaped = false; offset = offset + 1; column = column + 1; } else {
+            if (byte == 92) { escaped = true; offset = offset + 1; column = column + 1; } else {
+                if (byte == 34) {
+                    value = string_unescape(string_slice(source, content_start, offset));
+                    scanning = false; offset = offset + 1; column = column + 1;
+                } else {
+                    assert(byte != 10, "unterminated string literal");
+                    offset = offset + 1; column = column + 1;
+                }
+            }
+        }
+    }
+    return [offset, column, token("string", value, line, start_column)];
+}
+
+fn scan_symbol(source, offset, line, column) {
+    let length = string_length(source); let text = string_slice(source, offset, offset + 1);
+    if (offset + 1 < length) {
+        let pair = string_slice(source, offset, offset + 2);
+        if (pair == "->") { text = pair; } if (pair == "==") { text = pair; }
+        if (pair == "!=") { text = pair; } if (pair == "<=") { text = pair; } if (pair == ">=") { text = pair; }
+    }
+    let size = string_length(text);
+    return [offset + size, column + size, token("symbol", text, line, column)];
+}
+
+fn lex(source) {
+    let tokens = array_new(0); let length = string_length(source); let offset = 0; let line = 1; let column = 1;
+    while (offset < length) {
+        let byte = string_byte_at(source, offset);
+        if (is_space(byte)) {
+            if (byte == 10) { line = line + 1; column = 1; } else { column = column + 1; }
+            offset = offset + 1;
+        } else {
+            let comment = false;
+            if (byte == 35) { comment = true; }
+            if (byte == 47) { if (offset + 1 < length) { if (string_byte_at(source, offset + 1) == 47) { comment = true; } } }
+            if (comment) {
+                let skipped = skip_comment(source, offset, column); offset = skipped[0]; column = skipped[1];
+            } else {
+                let scanned = null;
+                if (is_letter(byte)) { scanned = scan_identifier(source, offset, line, column); } else {
+                    if (is_digit(byte)) { scanned = scan_number(source, offset, line, column); } else {
+                        if (byte == 34) { scanned = scan_string(source, offset, line, column); }
+                        else { scanned = scan_symbol(source, offset, line, column); }
+                    }
+                }
+                offset = scanned[0]; column = scanned[1]; array_push(tokens, scanned[2]);
+            }
+        }
+    }
+    array_push(tokens, token("eof", "<eof>", line, column)); return tokens;
+}

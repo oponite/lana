@@ -1,0 +1,5 @@
+import "../../compiler/lexer.lana" as lexer;
+
+let argv = args();
+let source = read_text(argv[0]);
+print(json_stringify(lexer.lex(source)));

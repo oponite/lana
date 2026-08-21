@@ -1,0 +1,33 @@
+fn program(functions, statements, imports) { return [0, functions, statements, imports]; }
+fn function_node(name, parameters, body, line) { return [1, name, parameters, body, line]; }
+fn let_node(name, value, line) { return [2, name, value, line]; }
+fn assign_node(target, value, line) { return [3, target, value, line]; }
+fn if_node(predicate, then_body, else_body, line) { return [4, predicate, then_body, else_body, line]; }
+fn while_node(predicate, body, line) { return [5, predicate, body, line]; }
+fn return_node(value, line) { return [6, value, line]; }
+fn expression_node(value, line) { return [7, value, line]; }
+fn print_node(value, line) { return [8, value, line]; }
+fn state_node(name, fields, line) { return [9, name, fields, line]; }
+fn history_node(target, policy, amount, line) { return [10, target, policy, amount, line]; }
+fn transform_node(target, name, line) { return [11, target, name, line]; }
+fn taskgroup_node(body, line) { return [12, body, line]; }
+fn cancel_node(task, line) { return [13, task, line]; }
+
+fn literal_node(kind, value, line) { return [20, kind, value, line]; }
+fn name_node(name, line) { return [21, name, line]; }
+fn binary_node(operator, left, right, line) { return [22, operator, left, right, line]; }
+fn unary_node(operator, value, line) { return [23, operator, value, line]; }
+fn call_node(name, arguments, line) { return [24, name, arguments, line]; }
+fn array_node(items, line) { return [25, items, line]; }
+fn index_node(value, index, line) { return [26, value, index, line]; }
+fn field_node(value, field, line) { return [27, value, field, line]; }
+fn map_node(entries, line) { return [28, entries, line]; }
+fn joint_node(kind, names, values, line) { return [29, kind, names, values, line]; }
+fn finite_joint_node(names, rows, line) { return [30, names, rows, line]; }
+fn information_node(operation, arguments, line) { return [31, operation, arguments, line]; }
+fn measure_node(source, basis, mode, line) { return [32, source, basis, mode, line]; }
+fn estimate_measure_node(source, basis, mode, sample_count, line) { return [33, source, basis, mode, sample_count, line]; }
+fn history_value_node(operation, source, line) { return [34, operation, source, line]; }
+fn fork_node(name, arguments, line) { return [35, name, arguments, line]; }
+fn join_node(operation, task, line) { return [36, operation, task, line]; }
+fn join_timeout_node(task, timeout, line) { return [37, task, timeout, line]; }

@@ -1,52 +1,44 @@
 # Lana
 
-Lana is a general-purpose programming language that treats uncertain, evolving
-information as a first-class state rather than forcing it into definite values.
-
-Its underlying belief is that information is not always best represented as a
-definite value. It can be represented as a probability plus a built-in
-disposition toward future change.
-
-Alongside ordinary primitives such as numbers, booleans, strings, arrays, and
-functions, Lana has a native `STATE = (p, d)` primitive. `p` is its current
-observable probability/state value; `d` is its signed directional dependency—
-the built-in disposition controlling the direction and strength of future
-influence. Positive `d` aligns influence with `p`; negative `d` makes the
-influence contrarian by targeting `1 - p`; `|d|` is the strength.
+Lana is a general-purpose language with a native density-operator `STATE`, lazy
+`STATE_DIST` values, and ordinary numbers, booleans, strings, arrays, functions,
+tasks, and host calls.
 
 ```lana
-state belief = state(p: 0.50, d: 0.30);
+state belief = state(p: 0.50, d_re: 0.30, d_im: 0.10);
 state evidence = state(p: 0.90, d: 0.65);
-apply evidence -> belief;
-print(measure belief as probability);
+let combined = append(belief, evidence);
+transform combined with invert();
+print(measure combined as probability);
 ```
 
-Python provides source tooling. The canonical register VM and structured-state
-semantics are written in C11. ARM64 and x86_64 assembly probes validate the
-low-level `APPLY` arithmetic without becoming a second semantic authority.
+`p` is the observable probability. The complex normalized disposition is
+`d = d_re + i d_im` with `|d| <= 1`; the shorthand `d:` selects the real axis.
+At `p = 0` or `p = 1`, the disposition is canonicalized to zero. `append()`
+creates an immutable lazy distribution, and `sample()` returns a concrete state.
 
 ## Install and run
 
-Build an installable wheel containing both the Python source tooling and native
-C VM:
-
 ```bash
-python3 -m pip install .
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+cmake --install build --prefix "$HOME/.local"
 lana run examples/belief.lana
 lana check examples/belief.lana
-lana version
 ```
+
+The installed compile and run path consists of the C11 `lana`/`ssvm` binaries
+and the self-hosted Lana compiler bytecode. Python is not required.
 
 For VM development:
 
 ```bash
 cmake -S . -B build
 cmake --build build
-ctest --test-dir build
-PYTHONPATH=src python3 -m lana_tooling.cli run examples/belief.lana --trace
+ctest --test-dir build --output-on-failure
 ```
 
-Low-level bytecode tools work without Python:
+Low-level tooling assembles, verifies, disassembles, traces, and executes SSBC:
 
 ```bash
 build/ssvm asm examples/belief.ssa -o build/belief.ssb
@@ -56,60 +48,32 @@ build/ssvm run build/belief.ssb --trace
 
 ## Language basics
 
-Lana source uses braces and semicolons. Python tooling compiles it to portable
-SSBC bytecode; the C VM is the only execution engine.
+State fields accept runtime expressions. Read `p`, `d_re`, and `d_im` directly.
+Optional `timestamp`, `source`, `weight`, and `confidence` metadata stays outside
+the mathematical state and is preserved by assignment, history, and transforms.
 
-`STATE = (p, d)` is additional to ordinary values, not a replacement for them.
-Initial scalar syntax includes `let`, assignment, arithmetic, comparisons,
-arrays, `if`, `while`, functions, and `return`. Structured-state operations
-compile to dedicated opcodes.
+`measure value` defaults to the Bernoulli distribution. Use `as probability` for
+its exact expected probability or `as sample` for one classical bit. These
+measurements are read-only. `sample(dist)` is distinct: it samples a concrete
+`STATE` from a `STATE_DIST`.
 
-State fields accept runtime expressions. Strings preserve whitespace. Built-in
-host calls currently provide `args`, `read_text`, `write_text`, `now`, `random`,
-and `assert`.
+Concrete states also support exact named-basis measurement with `in
+computational`, `in x`, or `in y`. Basis-qualified probability/distribution
+measurement of a `STATE_DIST` is intentionally unsupported; use the explicit
+`estimate_measure dist in x as probability with samples: N` or distribution
+form for the documented Monte Carlo approximation.
 
-Optional `timestamp`, `source`, `weight`, and `confidence` indexes stay outside
-the primitive pair. Configure bounded history with
-`history belief latest 32;` or a duration. `previous(belief)`,
-`change(belief)`, and `velocity(belief)` expose recorded transitions.
+`fork` runs a function in an isolated VM. Arguments and results are deep-copied,
+including shared distribution DAGs and metadata; bytecode remains immutable and
+shared. Task groups, cancellation, timeout joins, arrays, control flow, and ML
+host calls remain ordinary language features.
 
-## Structured concurrency
+The authority order is:
 
-`fork` executes a function in an isolated native VM. Arguments are deep-copied,
-so a child cannot mutate its parent's arrays or states. Results return only
-through `join` or `join_all`.
+1. [papers/semantics.md](papers/semantics.md) — sole mathematical authority.
+2. [SPEC.md](SPEC.md) — source syntax and programmer-visible behavior.
+3. [BYTECODE.md](BYTECODE.md) — frozen SSBC encoding and version gates.
+4. [VM.md](VM.md) — allocation, cloning, RNG, and budget architecture.
 
-```lana
-fn update(belief, evidence) {
-    apply evidence -> belief;
-    return belief;
-}
-
-taskgroup {
-    let first = fork update(belief, source_a);
-    let second = fork update(belief, source_b);
-    let results = join_all([first, second]);
-}
-```
-
-Task groups cancel and wait for unfinished children on exit. `cancel(task)` and
-`join_timeout(task, seconds)` provide explicit control. Pure task results and
-seeded sampling are reproducible; external file side effects are not made
-deterministic by the VM.
-
-See [SPEC.md](SPEC.md) for the normative state and operation semantics.
-
-## Falsification benchmark
-
-Run the domain-neutral Lana-versus-Python benchmark with:
-
-```bash
-python3 benchmark/run_benchmark.py
-python3 benchmark/validate_results.py
-python3 benchmark/build_report.py
-```
-
-The benchmark compares plain Python, a Python `State` class, and native Lana
-bytecode on identical sequential evidence. It includes `d` ablations, stress
-tests, maintainability changes, runtime/VM counters, and a blinded human-test
-harness. See [benchmark/README.md](benchmark/README.md) for the methodology.
+The checked-in benchmark artifacts predate Lana 1.0 and are retained only as
+legacy signed-real-model history; they do not validate the density-operator model.

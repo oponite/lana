@@ -1,0 +1,5 @@
+import "../../compiler/parser.lana" as parser;
+
+let argv = args();
+let source = read_text(argv[0]);
+print(json_stringify(parser.parse(source)));

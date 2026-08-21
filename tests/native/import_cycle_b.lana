@@ -1,0 +1,5 @@
+import "./import_cycle_a.lana" as cycle_a;
+
+fn from_b() {
+    return cycle_a.from_a();
+}
