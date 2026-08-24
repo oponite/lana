@@ -1,0 +1,3 @@
+let source = information(possibility([1, 2]));
+let plan = planned_effect("io", source);
+print(execute_effect(plan));

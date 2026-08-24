@@ -1,0 +1,5 @@
+let sampled = random();
+print(sample_value(sampled));
+let metadata = sample_metadata(sampled);
+print(metadata.source_dependency);
+print(metadata.operation);

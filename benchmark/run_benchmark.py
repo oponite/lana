@@ -25,7 +25,8 @@ ROOT = Path(__file__).parents[1]
 BENCHMARK = Path(__file__).parent
 RESULTS = BENCHMARK / "results"
 DATA = BENCHMARK / "data" / "events.csv"
-VM = ROOT / "build" / "ssvm"
+DEFAULT_VM = ROOT / "build" / "lanavm"
+VM = DEFAULT_VM
 
 
 def load_module(name: str, path: Path):
@@ -67,7 +68,7 @@ def repeated_steps(layer: str, size: int) -> list[list[dict]]:
 
 
 def parse_vm_stats(stderr: str) -> dict:
-    match = re.search(r"SSVM_STATS (\{.*\})", stderr)
+    match = re.search(r"LANAVM_STATS (\{.*\})", stderr)
     if match is None:
         raise RuntimeError(f"VM stats missing from stderr: {stderr[-500:]}")
     return json.loads(match.group(1))
@@ -83,8 +84,8 @@ def run_lana(steps: list[list[dict]], layer: str, mode: str, name: str,
              emit_predictions: bool = True) -> tuple[list[float], dict, float, Path]:
     generated = RESULTS / "generated"
     generated.mkdir(parents=True, exist_ok=True)
-    assembly = generated / f"{name}.ssa"
-    bytecode = generated / f"{name}.ssb"
+    assembly = generated / f"{name}.lasm"
+    bytecode = generated / f"{name}.labc"
     assembly.write_text(LANA_GENERATOR.generate(steps, layer, mode, emit_predictions=emit_predictions))
     compile_ms = assemble(assembly, bytecode)
     completed = subprocess.run([VM, "run", bytecode, "--stats"], check=True, capture_output=True, text=True)
@@ -149,7 +150,7 @@ def command_measure(command: list[str]) -> dict[str, float | int | dict]:
 
 def runtime_metrics() -> list[dict]:
     rows: list[dict] = []
-    # Unrolled 10,000-step SSBC exceeds the v1 loader's deliberate 100,000
+    # Unrolled 10,000-step LABC exceeds the v1 loader's deliberate 100,000
     # constant safety ceiling. Four thousand steps is the largest rounded
     # comparison safely below that ceiling; the million-update loop stress test
     # covers long-running execution separately.
@@ -218,8 +219,8 @@ def stress_metrics() -> list[dict]:
             observed.append(target)
             lines.extend((f"STATE_NEW R1 {p:.17g} {d:.17g}", "APPLY R1 R0"))
         lines.extend(("MEASURE R0 probability R2", "PRINT R2", "HALT"))
-        assembly = generated / f"stress_{name}.ssa"
-        bytecode = generated / f"stress_{name}.ssb"
+        assembly = generated / f"stress_{name}.lasm"
+        bytecode = generated / f"stress_{name}.labc"
         assembly.write_text("\n".join(lines) + "\n")
         assemble(assembly, bytecode)
         completed = subprocess.run([VM, "run", bytecode, "--stats"], check=True, capture_output=True, text=True)
@@ -229,8 +230,8 @@ def stress_metrics() -> list[dict]:
             "lana_final_p": vm_final, "parity_error": abs(target - vm_final),
             "min_p": min(observed), "max_p": max(observed),
         })
-    long_assembly = generated / "stress_million.ssa"
-    long_bytecode = generated / "stress_million.ssb"
+    long_assembly = generated / "stress_million.lasm"
+    long_bytecode = generated / "stress_million.labc"
     long_assembly.write_text(LANA_GENERATOR.stress_program(1_000_000, 0.73, 0.02, 0.5))
     assemble(long_assembly, long_bytecode)
     measured = command_measure([VM, "run", long_bytecode, "--stats"])
@@ -271,17 +272,21 @@ def write_csv_rows(path: Path, rows: list[dict]) -> None:
     for row in rows[1:]:
         fields.extend(field for field in row if field not in fields)
     with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
 
 def main() -> None:
+    global VM
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true", help="skip runtime and million-transition measurements")
+    parser.add_argument("--vm", type=Path, default=DEFAULT_VM,
+                        help="path to lanavm (default: build/lanavm)")
     args = parser.parse_args()
+    VM = args.vm.resolve()
     if not VM.exists():
-        raise SystemExit("build/ssvm missing; run cmake -S . -B build && cmake --build build")
+        raise SystemExit(f"{VM} missing; build lanavm or pass --vm PATH")
     RESULTS.mkdir(parents=True, exist_ok=True)
     write_csv(DATA)
     behavior_rows: list[dict] = []
@@ -346,7 +351,7 @@ def main() -> None:
             "allocation": "VM arena allocations versus Python live tracemalloc blocks; directional only, not directly equivalent",
         },
         "observed_limits": {
-            "unrolled_large_case": "10,000 steps exceeded the SSBC v1 loader limit of 100,000 constants; runtime comparison uses 4,000 steps",
+            "unrolled_large_case": "10,000 steps exceeded the LABC v1 loader limit of 100,000 constants; runtime comparison uses 4,000 steps",
         },
     }
     (RESULTS / "evidence.json").write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")

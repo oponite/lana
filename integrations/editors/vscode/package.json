@@ -1,0 +1,62 @@
+{
+  "name": "lana-language-support",
+  "displayName": "Lana Language Support",
+  "description": "Language Server Protocol support for Lana 1.0",
+  "version": "1.0.0",
+  "publisher": "lana-language",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": ["Programming Languages"],
+  "files": [
+    "out/**",
+    "syntaxes/**",
+    "language-configuration.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "activationEvents": ["onLanguage:lana"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "lana",
+        "aliases": ["Lana", "lana"],
+        "extensions": [".lana"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lana",
+        "scopeName": "source.lana",
+        "path": "./syntaxes/lana.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Lana",
+      "properties": {
+        "lana.server.path": {
+          "type": "string",
+          "default": "lana",
+          "description": "Path to a Lana 1.0.x executable providing `lana lsp`."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "check": "tsc -p ./ --noEmit",
+    "package": "npm run compile && vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/vscode": "^1.91.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^7.0.2"
+  }
+}

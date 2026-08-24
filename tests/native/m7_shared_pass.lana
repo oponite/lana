@@ -1,0 +1,13 @@
+let admin = shared_information(possibility([1, 2]));
+let read = shared_grant(admin, "read");
+let observe_capability = shared_grant(admin, "observe");
+
+assert(shared_identity(admin) > 0, "shared identity was not stable");
+assert(shared_revision(admin) == 0, "new shared Information had a revision");
+let revision_1 = shared_observe(observe_capability, 2, 20);
+assert(resolve(shared_snapshot(read)) == 2, "shared snapshot missed commit");
+let revision_2 = shared_observe(observe_capability, 2, 10);
+assert(revision_2 > revision_1, "late observation did not commit");
+assert(resolve(shared_at(read, 10)) == 2, "effective-time replay failed");
+assert(shared_revision(read) == revision_2, "reader saw the wrong revision");
+print("M7_SHARED_PASS");

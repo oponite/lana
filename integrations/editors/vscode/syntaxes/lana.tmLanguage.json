@@ -1,0 +1,53 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Lana",
+  "scopeName": "source.lana",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#functions" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.lana", "match": "//.*$" }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.lana",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.lana", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.lana", "match": "\\b[0-9]+(?:\\.[0-9]+)?\\b" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.lana",
+          "match": "\\b(?:if|else|while|return|fork|join|cancel|taskgroup|import|as|in|with|measure|estimate_measure|evidence|assume|observe|resolve)\\b"
+        },
+        {
+          "name": "storage.type.lana",
+          "match": "\\b(?:let|fn|state|information|claim|planned_effect|true|false|null)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        { "name": "entity.name.function.lana", "match": "(?<=\\bfn\\s)[a-z_][a-z0-9_]*" }
+      ]
+    }
+  }
+}

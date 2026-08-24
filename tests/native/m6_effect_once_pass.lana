@@ -1,0 +1,5 @@
+let plan = planned_effect("io", 42);
+assert(execute_effect(plan) == 42, "planned effect returned the wrong result");
+assert(execute_effect(plan) == 42, "planned effect receipt was not reused");
+assert(effect_status(plan).execution_count == 1, "planned effect executed more than once in one revision");
+print(effect_status(plan).execution_count);

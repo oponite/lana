@@ -1,0 +1,2 @@
+let success = result_ok(42);
+print(success);

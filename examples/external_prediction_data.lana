@@ -1,0 +1,12 @@
+// External programs own model fitting and emit ordinary typed data.
+// Lana consumes the boundary record without an embedded model value.
+let prediction = ["qqq-direction-v1", 0.61, 0.48];
+
+state qqq_direction = state {
+    p: prediction[1],
+    d: prediction[2],
+    source: prediction[0],
+    confidence: prediction[2]
+};
+
+print(measure qqq_direction as probability);

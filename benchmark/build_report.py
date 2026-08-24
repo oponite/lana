@@ -196,7 +196,7 @@ def main() -> None:
         {"id": "ablation_table", "type": "table", "tableId": "ablation_table"},
         {"id": "runtime_intro", "type": "markdown", "sourceId": "evidence", "body":
          "## The precompiled C VM is faster and leaner on this workload\n\n"
-         "At 4,000 steps, Lana used less process memory, started faster, and executed the core faster than both Python implementations. This is a narrow VM result: source compilation is excluded, Python reads CSV while Lana loads precompiled bytecode, and the Python baselines were not optimized with native extensions. The 10,000-step unrolled case hit SSBC v1's 100,000-constant loader ceiling, so the large comparison uses 4,000 steps; a compact loop still completed one million `APPLY` transitions safely."},
+         "At 4,000 steps, Lana used less process memory, started faster, and executed the core faster than both Python implementations. This is a narrow VM result: source compilation is excluded, Python reads CSV while Lana loads precompiled bytecode, and the Python baselines were not optimized with native extensions. The 10,000-step unrolled case hit LABC v1's 100,000-constant loader ceiling, so the large comparison uses 4,000 steps; a compact loop still completed one million `APPLY` transitions safely."},
         {"id": "runtime_table", "type": "table", "tableId": "runtime_table"},
         {"id": "vm_intro", "type": "markdown", "sourceId": "evidence", "body":
          "## VM instructions make semantic compression inspectable\n\n"

@@ -7,7 +7,7 @@ This document is the normative Lana 1.0 definition of `STATE`, `STATE_DIST`, and
 The other Lana documents have narrower roles:
 
 1. `VM.md` describes execution architecture.
-2. `BYTECODE.md` describes SSBC representation and instruction encoding.
+2. `BYTECODE.md` describes LABC representation and instruction encoding.
 3. `README.md` describes the user-facing language and development experience.
 4. `SPEC.md` and other documents may describe implementations or language facilities built around these semantics, but they may not redefine the mathematical objects or operations defined here.
 
@@ -16,6 +16,30 @@ If an implementation or another document disagrees with this document, this docu
 This document intentionally does not define general parser grammar, variable syntax except in non-normative examples, string or array implementation, standard-library internals, CLI or project initialization, bytecode binary layout, register allocation, memory management, or threading implementation. Those concerns cannot change the mathematical value semantics defined here.
 
 ## 0.1 Information model
+
+### Immutable derivations
+
+Provenance is an immutable derivation DAG attached to a value and is not part
+of that value's mathematics. Mathematical equality ignores derivation identity.
+`evidence(v, label)` and `assume(v, proposition)` create explicit roots; labels
+carry no hidden inference rule. Every successful Information operation creates
+a node only after its mathematical result has validated. `condition`, sampling,
+and explicit approximation do not advance the revision. A successfully
+committed `observe` advances the VM revision exactly once; failed observation
+publishes no value and advances no revision.
+
+Each node has the canonical fields `id = [task_lineage, local_sequence]`,
+`revision`, `kind`, `operation`, ordered `inputs`, `source`, `exactness`,
+operation-specific `details`, `outcome`, and `reason`. IDs are deterministic
+within a seeded execution and contain no addresses, allocation order, wall
+clock time, or generated prose. Task cloning preserves origin IDs and clones
+the DAG with memoization. `derivation(v)` returns this record as ordinary maps
+and arrays. `explain(v)` uses a fixed renderer over the same fields.
+
+Sampling records the seed lineage and remains a read. `estimate_measure`
+records explicit approximation. Failed observation and resolution may attach an
+unpublished failure-node ID to the structured error, but never expose a partial
+value.
 
 Lana represents information separately from the concrete value it may describe.
 For a measurable value domain $X$, define
@@ -74,7 +98,7 @@ $$
 `project` (or marginalize) is pure and returns a new view or law over the
 requested named variables. An unknown variable, duplicate requested name, or
 unsupported exact marginalization is an error. `condition` is pure refinement;
-impossible evidence returns `SS_ERR_INVALID_CONDITIONING` and does not mutate
+impossible evidence returns `LANA_ERR_INVALID_CONDITIONING` and does not mutate
 the input. `observe` is an external information event: it records or consumes
 evidence in the execution context and returns the refined information or a
 definite observed result. It is effectful even when its returned value is
@@ -82,7 +106,7 @@ immutable. `sample` is stochastic and read-only; it consumes the configured
 random stream and returns one definite result. `resolve` is exact and succeeds
 only for already definite information or a singleton after refinement. It may
 not choose an arbitrary representative; a non-singleton returns
-`SS_ERR_UNRESOLVED_VALUE`.
+`LANA_ERR_UNRESOLVED_VALUE`.
 
 For a joint assignment, sampling has the corresponding product-space form:
 
@@ -135,7 +159,7 @@ $M\subseteq N$ maps every $a_i$ to $a_i|_M$, combines equal projected
 assignments, and preserves total mass. Conditioning on evidence $E$ retains
 the rows satisfying $E$ and divides their weights by
 $J(E)=\sum_{a_i\models E}w_i$. If $J(E)=0$, conditioning returns
-`SS_ERR_INVALID_CONDITIONING`. Sampling performs one weighted row selection;
+`LANA_ERR_INVALID_CONDITIONING`. Sampling performs one weighted row selection;
 it never samples each variable independently.
 
 An independent product may remain lazy. Its law is the product measure
@@ -188,9 +212,59 @@ sampling limits are hard limits. Budget exhaustion, cancellation, or an
 unsupported path join returns an error and exposes no partial result.
 
 The semantics in this section define the boundary for future quantum-compatible
-lowering. The current SSBC and C VM implementation may support only a declared
+lowering. The current LABC and C VM implementation may support only a declared
 subset; it must report unsupported operations rather than silently approximate
 or collapse information.
+
+## 0.2 Static uncertainty, effect, and failure foundation
+
+The source type categories are disjoint tagged constructors:
+
+```text
+T
+Information<T>
+Claim<T, Proposition>
+Sample<T>
+PlannedEffect<T, Effect>
+TaskHandle<T, Capabilities>
+Capability<Name>
+Result<T, E>
+```
+
+`Information<T>` means that a value is not yet definite. `Claim<T, P>` contains
+both a value and the programmer-supplied proposition `P`; Lana never derives a
+proposition from a bare `STATE` probability. `information(v)` and
+`claim(v, "P")` are therefore distinct constructions. `resolve(i)`,
+`claim_value(c)`, and `claim_proposition(c)` are explicit eliminations. A
+wrapped value cannot be consumed where exact `T` is required.
+
+Every stochastic source expression returns `Sample<T>`. Its runtime record is
+the pair `(value, metadata)`, where metadata contains the source dependency,
+root RNG seed, task lineage, operation, and revision. `sample_value(s)` is the
+only ordinary-value elimination and `sample_metadata(s)` exposes the immutable
+metadata record. Unwrapping does not erase the record or change provenance; it
+only makes the sampled value available to an exact operation.
+
+Effects form finite sets over `pure`, `observation`, `stochastic`, `io`,
+`mutation`, `task`, and `external_call`. Pure contributes no real-world effect.
+Observation and stochastic effects remain distinct. An unresolved guard may
+map pure computation over alternatives, but it cannot perform I/O, mutation,
+task creation, observation, or an external call. A `PlannedEffect<T, E>` is
+ordinary inert data describing a future effect; constructing or storing it does
+not execute `E`, and it cannot be consumed as `T`. Capabilities are explicit
+typed values and do not arise from possession of data or from probability.
+
+`Result<T, E>` has disjoint success and error alternatives. Construction and
+elimination are explicit; using a whole result as `T` is a type error. Task join
+and timeout produce typed result foundations rather than silently exposing a
+partial task result.
+
+Failures have a stable code and kind, message, full source span, operation,
+bounded causal chain, resolution reason and remaining-alternative count,
+exact-support status, cancellation context, and resource-limit context. A
+failure result contains no partial computational value. Human rendering may add
+formatting, but it cannot discard these structured fields or change their
+meaning.
 
 
 ## 1. Mathematical Domains
@@ -1237,19 +1311,16 @@ An implementation conforms when its observable results agree with this document,
 - `TRANSFORM` produces the state or pushforward prescribed by $\Phi$;
 - `APPEND` produces the prescribed `STATE_DIST`;
 - sampling follows the represented distribution;
-- supported v5 joint operations preserve names, immutability, and their
+- supported joint operations preserve names, immutability, and their
   explicit error behavior;
 - operation evaluation order matches Section 5; and
 - invalid states and operations follow Section 6.
 
-### 7.6 Legacy Compatibility Boundary
+### 7.6 Encoding Boundary
 
-SSBC v1/v2 retain an older signed-real state model and its historical `apply`,
-`compose`, legacy `transform`, and mutating `collapse` instructions. Those
-instructions are compatibility behavior only. They are not Lana 1.0 source
-operations and do not redefine any mathematics in this document. SSBC v3/v4/v5
-and the Lana 1.0 compiler use the density-operator representation and core
-operations defined above.
+Lana 1.0 implements the density-operator representation and core operations
+defined above through one encoding, LABC v1. Other bytecode formats and
+operations are outside this semantics and are rejected.
 
 
 ## Appendix A — Canonical Equation Reference
@@ -1386,26 +1457,80 @@ $$
 \operatorname{Dist}(\mathcal S).
 $$
 
+## Reactive ordinary Information
+
+For a process-local Information root $I$ with finite support $S_I$, a valid
+observation $e$ must satisfy $e \in S_I$. A committed observation refines the
+support to the singleton $\{e\}$; it never adds an alternative. If $e \notin
+S_I$, the operation fails and no revision is published.
+
+For an exact pure function $f$ and related uncertain inputs, lifting is the
+pointwise image of their declared relationship. Reusing one dependency is
+therefore zipped, not independent:
+
+$$
+f(I,I)=\{f(x,x):x\in S_I\}.
+$$
+
+Two distinct dependency identities have no implicit joint law. Their ordinary
+binary combination is undefined until a joint or conditional relationship is
+declared; the runtime must not substitute $S_A \times S_B$. Exact operations
+retain exact status, samples retain sample status, and explicit approximations
+retain approximate status.
+
+A pure dependency graph denotes functions of roots. Publishing revision $r+1$
+atomically replaces every affected node with its value under the committed root
+assignment and retains the value from revision $r$ as immutable history. Effect
+results are leaves, not graph operations. A planned effect may execute at most
+once for each process-local pair `(plan identity, committed revision)`; all
+subsequent propagation reads its receipt.
+
+## Shared Information
+
+A live shared handle has a stable process-local identity $h$ and a totally
+ordered commit revision $r_h$. Authority is explicit: read, observe, and admin
+tokens are distinct, revocable capabilities. Possession of $h$ or an admin
+token does not imply read or observation authority.
+
+An observation is the pair $(t,e)$ of integer effective time and definite
+evidence. A transaction replays the ordered sequence by $(t, sequence)$ into an
+isolated dependency graph, then atomically publishes the complete candidate at
+a unique process revision. Readers observe the complete previous commit or the
+complete new commit. Equal-time equal evidence is idempotent; equal-time unequal
+evidence is a conflict. Late evidence is inserted at its effective time and all
+later versions are replayed. Contradiction, revocation, cancellation, resource
+failure, or propagation failure discards the candidate and wakes no waiter.
+
+Subscription is a predicate wait on `revision > after_revision`. A wake is not
+a value publication: the waiter rechecks authority and the committed predicate
+under the shared mutex before cloning an immutable task-local snapshot. Samples
+remain private reads and never enter shared observation history.
+
 ## Appendix B — Semantic Operation ↔ Runtime Mapping
 
 This table records current instruction availability without making opcode encoding normative. Detailed instruction behavior and encoding remain in `BYTECODE.md`.
 
 | Semantic concept | Runtime responsibility | Current direct opcode |
 | --- | --- | --- |
-| `STATE` construction | Validate and create a concrete canonical `STATE` | `STATE_NEW_V3` / `STATE_BUILD_V3` |
-| `MEASURE` | Produce the computational-basis distribution without mutation | `MEASURE_V3` |
-| Classical measurement sampling | Draw a binary scalar using the runtime RNG | `MEASURE_V3` sample mode |
-| `TRANSFORM` | Execute an admissible $\Phi$ and reject invalid output | `TRANSFORM_V3` |
+| `STATE` construction | Validate and create a concrete canonical `STATE` | `STATE_NEW` / `STATE_BUILD` |
+| `MEASURE` | Produce the computational-basis distribution without mutation | `MEASURE` |
+| Classical measurement sampling | Draw a binary scalar using the runtime RNG | `MEASURE` sample mode |
+| `TRANSFORM` | Execute an admissible $\Phi$ and reject invalid output | `TRANSFORM` |
 | `APPEND` | Construct the prescribed lazy `STATE_DIST` | `APPEND` |
 | `STATE_DIST` sampling | Evaluate and sample a lazy distribution | `SAMPLE_STATE_DIST` |
-| Named n-ary joint construction | Validate names and build an immutable joint law/view | `JOINT_BUILD_V5` |
-| Joint projection | Return an immutable named projection | `JOINT_PROJECT_V5` |
-| Joint conditioning | Refine by exact evidence or return an explicit error | `JOINT_CONDITION_V5` |
-| Joint sampling | Return definite member values without mutation | `JOINT_SAMPLE_V5` |
-| Singleton resolution | Return a definite value only for a singleton | `RESOLVE_V5` |
-| Finite possibility | Validate nonempty support and preserve dependency | `POSSIBILITY_BUILD_V5` |
-| Guarded branch execution | Snapshot, execute, and join bounded alternatives | `PATH_SPLIT_V5` / `PATH_JOIN_V5` |
-| Observation | Refine and record evidence after success | `OBSERVE_V5` |
-| General supported sampling | Return one definite read-only result | `INFO_SAMPLE_V5` |
+| Named n-ary joint construction | Validate names and build an immutable joint law/view | `JOINT_BUILD` |
+| Joint projection | Return an immutable named projection | `JOINT_PROJECT` |
+| Joint conditioning | Refine by exact evidence or return an explicit error | `JOINT_CONDITION` |
+| Joint sampling | Return definite member values without mutation | `JOINT_SAMPLE` |
+| Singleton resolution | Return a definite value only for a singleton | `RESOLVE` |
+| Finite possibility | Validate nonempty support and preserve dependency | `POSSIBILITY_BUILD` |
+| Guarded branch execution | Snapshot, execute, and join bounded alternatives | `PATH_SPLIT` / `PATH_JOIN` |
+| Observation | Refine and record evidence after success | `OBSERVE` |
+| General supported sampling | Return one definite read-only result | `INFO_SAMPLE` |
+| Reactive ordinary Information | Retain pure dependencies and atomically publish affected values | Information host metadata over pure opcodes |
+| Runtime Claim | Retain value, proposition, exactness, tolerance, and source validity | Claim host calls |
+| Definite planned effect | Execute once per process-local plan identity and revision, then reuse its receipt | Planned-effect host calls |
+| Shared Information | Capability-checked effective-time replay and atomic process revision | Shared Information host calls |
+| Information inspection | Render runtime state from derivation and reactive metadata | `information_inspect` host call |
 
 No opcode is inferred from a semantic operation merely because the operation is normative.

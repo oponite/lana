@@ -1,0 +1,3 @@
+let asserted = claim(true, "sensor is active");
+print(claim_proposition(asserted));
+print(claim_value(asserted));

@@ -1,0 +1,13 @@
+let source = information(possibility([1, 2]));
+let snapshot = inspect_information(source);
+assert(snapshot.kind == "information_snapshot", "snapshot kind missing");
+assert(snapshot.remaining_alternatives == 2, "alternatives missing");
+assert(snapshot.reactive, "dependency graph status missing");
+
+let admin = shared_information(source);
+let shared = inspect_information(admin);
+assert(shared.kind == "shared_information", "shared kind missing");
+assert(shared.identity > 0, "shared identity missing");
+assert(shared.can_admin, "admin authority missing");
+assert(!shared.can_read, "admin incorrectly implied read authority");
+print("M10_INSPECTOR_PASS");
