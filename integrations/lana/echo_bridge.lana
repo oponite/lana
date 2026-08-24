@@ -1,0 +1,4 @@
+import "./bridge.lana" as bridge;
+
+let request = bridge.read_request();
+bridge.write_response(request);

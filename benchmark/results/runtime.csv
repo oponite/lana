@@ -1,7 +1,0 @@
-implementation,size,transitions,cold_wall_ms,repeated_wall_ms_median,max_rss_bytes_median,compile_ms,instruction_count,allocation_count,vm_allocated_bytes,state_transitions,core_elapsed_ms
-Python Plain,small,100,40.178334,39.888917,21987328,0.0,,89,4912,,0.237834
-Python State Class,small,100,39.976541,40.249583,22036480,0.0,,79,8792,,0.330334
-Lana,small,100,5.364417,4.364791,3620864,3.660084,3688,5,7168,1992,0.111
-Python Plain,large,4000,78.882209,75.645375,26394624,0.0,,89,130640,,8.769959
-Python State Class,large,4000,93.4715,91.849833,26411008,0.0,,79,134520,,12.283792
-Lana,large,4000,31.412375,31.638167,14876672,49.137625,147238,5,7168,79617,4.313

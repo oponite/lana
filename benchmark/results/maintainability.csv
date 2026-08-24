@@ -1,7 +1,0 @@
-change,implementation,lines_added,lines_removed,lines_changed,files_changed,new_names,tests_modified
-stale,Lana,6,0,6,1,6,0
-stale,Python Plain,4,0,4,1,2,0
-stale,Python State Class,3,0,3,1,4,0
-sources,Lana,4,2,6,1,5,0
-sources,Python Plain,5,1,6,1,0,0
-sources,Python State Class,5,1,6,1,0,0

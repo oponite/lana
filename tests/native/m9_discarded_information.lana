@@ -1,0 +1,2 @@
+let source = information(possibility([1, 2]));
+source;

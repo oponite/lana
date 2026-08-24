@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lana-integrations"
+version = "1.0.0"
+description = "Optional JSON, MCP, Jupyter, and native bindings for Lana 1.0"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Lana contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]
+jupyter = ["ipython>=8,<10"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+lana-bridge = "lana_integrations.cli:main"
+lana-mcp = "lana_integrations.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

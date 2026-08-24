@@ -1,0 +1,7 @@
+// This is a deliberately invalid Lana program for testing compile failures.
+fn main() {
+    let x = 5;
+    // Missing semicolon here for an intentional syntax error.
+    print(x + 2)
+    let y = x * 2; // This line might not even be reached due to the prior error.
+}

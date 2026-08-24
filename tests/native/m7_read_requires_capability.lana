@@ -1,0 +1,3 @@
+let admin = shared_information(possibility([1, 2]));
+let value = shared_snapshot(admin);
+print(value);

@@ -1,5 +1,5 @@
 // Generated prediction inputs are typed evidence. Lana owns belief updates
-// and policy classification; native host calls own data and model fitting.
+// and policy classification; external programs own fitting and model artifacts.
 state qqq_direction = state {
     p: 0.61,
     d: 0.48,

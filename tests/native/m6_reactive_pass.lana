@@ -1,0 +1,22 @@
+fn twice(value) { return value + value; }
+
+let source = information(possibility([1, 2]));
+let derived = twice(source);
+let nested = {value: [derived]};
+let predicate = derived > 3;
+let negated = !predicate;
+let refined = observe(source, "value", 2);
+
+assert(resolve(nested.value[0]) == 4, "reactive value did not cross function and composite boundaries");
+assert(resolve(predicate), "reactive comparison did not refine");
+assert(!resolve(negated), "reactive Boolean expression did not refine");
+assert(json_stringify(nested) == "{\"value\":[4]}", "serialization did not snapshot the committed revision");
+
+let statement = claim(derived, "twice the observed source");
+assert(claim_proposition(statement) == "twice the observed source", "claim proposition was not retained");
+assert(resolve(claim_value(statement)) == 4, "claim value did not remain reactive");
+assert(claim_status(statement).exactness == "exact", "claim exactness was not explicit");
+assert(claim_status(statement).tolerance == 0, "claim tolerance was not explicit");
+assert(claim_status(statement).source_valid, "claim source validity was not explicit");
+print(resolve(refined));
+print("M6_REACTIVE_PASS");

@@ -1,0 +1,2 @@
+let deferred = planned_effect("io", 42);
+print(deferred);

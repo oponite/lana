@@ -16,9 +16,19 @@ fn take(parser) {
     return value;
 }
 
+fn parse_error(token, message) {
+    let location = string_concat("parse error at line ", number_to_string(token[2]));
+    location = string_concat(location, " column ");
+    location = string_concat(location, number_to_string(token[3]));
+    assert(false, string_concat(location, string_concat(": ", message)));
+    return null;
+}
+
 fn expect(parser, text) {
     let value = take(parser);
-    assert(value[1] == text, string_concat("expected ", text, ", got ", value[1]));
+    if (value[1] != text) {
+        parse_error(value, string_concat("expected ", string_concat(text, string_concat(", got ", value[1]))));
+    }
     return value;
 }
 
@@ -49,7 +59,9 @@ fn is_information_operation(text) {
     if (text == "append") { return true; } if (text == "sample") { return true; }
     if (text == "project") { return true; } if (text == "condition") { return true; }
     if (text == "resolve") { return true; } if (text == "rename") { return true; }
-    if (text == "possibility") { return true; } return text == "observe";
+    if (text == "possibility") { return true; } if (text == "observe") { return true; }
+    if (text == "evidence") { return true; } if (text == "assume") { return true; }
+    if (text == "derivation") { return true; } return text == "explain";
 }
 
 fn parse_joint(parser, line) {
@@ -93,7 +105,9 @@ fn parse_keyword_primary(parser, text, line) {
         return syntax.join_timeout_node(task, timeout, line);
     }
     if (is_history_operation(text)) { expect(parser, "("); let source = take(parser)[1]; expect(parser, ")"); return syntax.history_value_node(text, source, line); }
-    if (is_information_operation(text)) { return syntax.information_node(text, parse_arguments(parser), line); }
+    if (is_information_operation(text)) {
+        if (matches(parser, "(")) { return syntax.information_node(text, parse_arguments(parser), line); }
+    }
     return null;
 }
 
@@ -109,7 +123,9 @@ fn parse_basic_primary(parser, value) {
         expect(parser, "]"); return syntax.array_node(items, line);
     }
     if (text == "{") { let entries = parse_named_values(parser, "}"); expect(parser, "}"); return syntax.map_node(entries, line); }
-    assert(value[0] == "identifier", string_concat("expected expression, got ", value[0], " ", value[1], " at line ", number_to_string(value[2])));
+    if (value[0] != "identifier") {
+        parse_error(value, string_concat("expected expression, got ", string_concat(value[0], string_concat(" ", value[1]))));
+    }
     if (matches(parser, "(")) { return syntax.call_node(text, parse_arguments(parser), line); }
     return syntax.name_node(text, line);
 }

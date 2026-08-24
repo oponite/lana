@@ -1,7 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "ss/assembler.h"
-#include "ss/vm.h"
+#include "lana/assembler.h"
+#include "lana/vm.h"
+#include "lana/project.h"
+#include "lana/lsp.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -10,22 +12,62 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifndef SS_COMPILER_BYTECODE_PATH
-#define SS_COMPILER_BYTECODE_PATH "lana-compiler.ssb"
+#ifndef LANA_COMPILER_BYTECODE_PATH
+#define LANA_COMPILER_BYTECODE_PATH "lana-compiler.labc"
 #endif
 
-static int report_error(const SSErrorInfo *error);
+static int report_error(const LanaErrorInfo *error);
+
+static bool debugger_hook(LanaVM *vm, size_t instruction, uint32_t source_line,
+                          void *context) {
+    char command[64];
+    LanaFrame *frame = &vm->frames[vm->frame_count - 1u];
+    const char *function = frame->function < vm->chunk->function_count
+        ? vm->chunk->functions[frame->function].name : "<entry>";
+    (void)context;
+    (void)printf("BREAK line=%u instruction=%zu function=%s frames=%zu\n",
+                 source_line, instruction, function, vm->frame_count);
+    (void)printf("debug [s]tep [c]ontinue [q]uit> ");
+    (void)fflush(stdout);
+    if (fgets(command, sizeof(command), stdin) == NULL || command[0] == 'q')
+        return false;
+    if (command[0] == 's') vm->debug_step = true;
+    else vm->debug_break_line = 0u;
+    return true;
+}
+
+static void compiler_error_context(LanaErrorInfo *error, const char *source_path) {
+    const char *location;
+    uint32_t line = 1u, column = 1u;
+    if (error == NULL) return;
+    location = strstr(error->message, " at line ");
+    if (location != NULL)
+        (void)sscanf(location, " at line %u column %u", &line, &column);
+    if (strstr(error->message, "parse error") != NULL) {
+        error->code = LANA_ERR_PARSE;
+        error->kind = lana_error_kind_from_code(error->code);
+    } else if (strstr(error->message, "type error") != NULL) {
+        error->code = LANA_ERR_TYPE;
+        error->kind = lana_error_kind_from_code(error->code);
+    }
+    lana_error_set_source_span(error, source_path, line, column, line, column + 1u);
+    lana_error_set_operation(error, "compile");
+}
 
 static void usage(FILE *out) {
     (void)fprintf(out,
         "usage:\n"
-        "  lana compile program.lana -o program.ssb\n"
+        "  lana compile program.lana -o program.labc\n"
+        "  lana new directory\n"
+        "  lana lsp\n"
+        "  lana debug program.lana\n"
+        "  lana build|run|test|check|fmt|doc\n"
         "  lana check program.lana\n"
-        "  ssvm asm program.ssa -o program.ssb\n"
-        "  ssvm run program.ssb [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n"
-        "  ssvm run-bytecode program.ssb [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n"
-        "  ssvm dis program.ssb\n"
-        "  ssvm verify program.ssb\n");
+        "  lanavm asm program.lasm -o program.labc\n"
+        "  lanavm run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n"
+        "  lanavm run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n"
+        "  lanavm dis program.labc\n"
+        "  lanavm verify program.labc\n");
 }
 
 static bool has_suffix(const char *text, const char *suffix) {
@@ -34,17 +76,17 @@ static bool has_suffix(const char *text, const char *suffix) {
 }
 
 static bool compiler_candidate(const char *directory, char *out, size_t out_size) {
-    int written = snprintf(out, out_size, "%s/%s", directory, "lana-compiler.ssb");
+    int written = snprintf(out, out_size, "%s/%s", directory, "lana-compiler.labc");
     return written > 0 && (size_t)written < out_size && access(out, R_OK) == 0;
 }
 
 static bool find_compiler(const char *argv0, char *out, size_t out_size) {
-    const char *configured = getenv("LANA_COMPILER_SSBC");
+    const char *configured = getenv("LANA_COMPILER_LABC");
     const char *path;
     char executable[4096], paths[8192], *cursor, *next;
     if (configured != NULL && snprintf(out, out_size, "%s", configured) > 0 && access(out, R_OK) == 0) return true;
-    if (access(SS_COMPILER_BYTECODE_PATH, R_OK) == 0) {
-        return snprintf(out, out_size, "%s", SS_COMPILER_BYTECODE_PATH) > 0;
+    if (access(LANA_COMPILER_BYTECODE_PATH, R_OK) == 0) {
+        return snprintf(out, out_size, "%s", LANA_COMPILER_BYTECODE_PATH) > 0;
     }
     if (strchr(argv0, '/') != NULL) {
         char *separator;
@@ -64,46 +106,93 @@ static bool find_compiler(const char *argv0, char *out, size_t out_size) {
 }
 
 static int compile_source_file(const char *compiler_path, const char *source_path, const char *output_path) {
-    SSChunk compiler_chunk, output_chunk; SSErrorInfo error = {0}; SSError result;
+    LanaChunk compiler_chunk, output_chunk; LanaErrorInfo error = {0}; LanaError result;
     char assembly_path[] = "/tmp/lana-assembly-XXXXXX"; int descriptor;
-    const char *arguments[2] = {source_path, assembly_path}; VM vm;
+    const char *arguments[2] = {source_path, assembly_path}; LanaVM vm;
     descriptor = mkstemp(assembly_path);
     if (descriptor < 0) { (void)fprintf(stderr, "cannot create compiler temporary file\n"); return 1; }
     (void)close(descriptor);
-    result = ss_chunk_read_file(&compiler_chunk, compiler_path, &error);
-    if (result != SS_OK) { (void)unlink(assembly_path); return report_error(&error); }
-    ss_vm_init(&vm, &compiler_chunk); vm.memory_limit = 256u * 1024u * 1024u; vm.instruction_limit = UINT64_C(50000000);
-    ss_vm_set_program_args(&vm, 2, arguments); result = ss_vm_run(&vm);
-    if (result != SS_OK) {
-        error = vm.error; ss_vm_free(&vm); ss_chunk_free(&compiler_chunk); (void)unlink(assembly_path); return report_error(&error);
+    result = lana_chunk_read_file(&compiler_chunk, compiler_path, &error);
+    if (result != LANA_OK) { (void)unlink(assembly_path); return report_error(&error); }
+    lana_vm_init(&vm, &compiler_chunk); vm.memory_limit = 256u * 1024u * 1024u; vm.instruction_limit = UINT64_C(50000000);
+    lana_vm_set_program_args(&vm, 2, arguments); result = lana_vm_run(&vm);
+    if (result != LANA_OK) {
+        error = vm.error; compiler_error_context(&error, source_path);
+        lana_vm_free(&vm); lana_chunk_free(&compiler_chunk); (void)unlink(assembly_path); return report_error(&error);
     }
-    ss_vm_free(&vm); ss_chunk_free(&compiler_chunk);
-    result = ss_assemble_file(assembly_path, &output_chunk, &error); (void)unlink(assembly_path);
-    if (result == SS_OK) result = ss_chunk_write_file(&output_chunk, output_path, &error);
-    if (result != SS_OK) return report_error(&error);
-    ss_chunk_free(&output_chunk); return 0;
+    lana_vm_free(&vm); lana_chunk_free(&compiler_chunk);
+    result = lana_assemble_file(assembly_path, &output_chunk, &error); (void)unlink(assembly_path);
+    if (result == LANA_OK) result = lana_chunk_write_file(&output_chunk, output_path, &error);
+    if (result != LANA_OK) return report_error(&error);
+    lana_chunk_free(&output_chunk); return 0;
 }
 
-static int report_error(const SSErrorInfo *error) {
-    (void)fprintf(stderr, "%s:%u: error[%s]: %s (instruction %zu, opcode %s)\n",
-                  error->function[0] == '\0' ? "<bytecode>" : error->function,
-                  error->line, ss_error_name(error->code), error->message,
-                  error->ip, ss_opcode_name(error->opcode));
+static int project_compile(const char *source, const char *output,
+                           void *context) {
+    return compile_source_file(context, source, output);
+}
+
+static int report_error(const LanaErrorInfo *error) {
+    size_t index;
+    const char *path = error->source.path[0] == '\0'
+                           ? (error->function[0] == '\0' ? "<bytecode>" : error->function)
+                           : error->source.path;
+    uint32_t start_line = error->source.start_line == 0u ? error->line : error->source.start_line;
+    (void)fprintf(stderr, "%s:%u:%u-%u:%u: error[%s/%s]: %s",
+                  path, start_line, error->source.start_column,
+                  error->source.end_line, error->source.end_column,
+                  lana_error_kind_name(error->kind), lana_error_name(error->code),
+                  error->message);
+    if (error->operation[0] != '\0')
+        (void)fprintf(stderr, " (operation %s)", error->operation);
+    (void)fprintf(stderr, " (instruction %zu, opcode %s)\n",
+                  error->ip, lana_opcode_name(error->opcode));
+    for (index = 0u; index < error->cause_count; ++index) {
+        const LanaErrorCause *cause = &error->causes[index];
+        (void)fprintf(stderr, "  caused by [%s/%s] %s: %s\n",
+                      lana_error_kind_name(cause->kind), lana_error_name(cause->code),
+                      cause->operation[0] == '\0' ? "unknown" : cause->operation,
+                      cause->message);
+    }
+    if (error->cause_chain_truncated) (void)fprintf(stderr, "  caused by: additional causes omitted\n");
+    if (error->resolution_reason != LANA_RESOLUTION_REASON_NONE) {
+        (void)fprintf(stderr, "  resolution: %s",
+                      lana_resolution_reason_name(error->resolution_reason));
+        if (error->has_remaining_alternatives)
+            (void)fprintf(stderr, ", remaining alternatives: %zu", error->remaining_alternatives);
+        (void)fputc('\n', stderr);
+    }
+    if (error->exact_support != LANA_EXACT_SUPPORT_UNKNOWN)
+        (void)fprintf(stderr, "  exact support: %s (%s)\n",
+                      lana_exact_support_name(error->exact_support),
+                      error->exact_support_detail);
+    if (error->cancellation.present)
+        (void)fprintf(stderr, "  cancellation: lineage %llu (%s)\n",
+                      (unsigned long long)error->cancellation.task_lineage,
+                      error->cancellation.reason);
+    if (error->resource_limit.present)
+        (void)fprintf(stderr, "  resource: %s limit %llu, observed %llu %s\n",
+                      lana_resource_kind_name(error->resource_limit.resource),
+                      (unsigned long long)error->resource_limit.limit,
+                      (unsigned long long)error->resource_limit.observed,
+                      error->resource_limit.unit);
     return 1;
 }
 
 static int assemble_command(int argc, char **argv) {
-    SSChunk chunk; SSErrorInfo error = {0}; SSError result;
+    LanaChunk chunk; LanaErrorInfo error = {0}; LanaError result;
     if (argc != 5 || strcmp(argv[3], "-o") != 0) { usage(stderr); return 2; }
-    result = ss_assemble_file(argv[2], &chunk, &error);
-    if (result == SS_OK) result = ss_chunk_write_file(&chunk, argv[4], &error);
-    if (result != SS_OK) return report_error(&error);
-    ss_chunk_free(&chunk); return 0;
+    result = lana_assemble_file(argv[2], &chunk, &error);
+    if (result == LANA_OK) result = lana_chunk_write_file(&chunk, argv[4], &error);
+    if (result != LANA_OK) return report_error(&error);
+    lana_chunk_free(&chunk); return 0;
 }
 
 static int load_command(int argc, char **argv, bool execute) {
-    SSChunk chunk; SSErrorInfo error = {0}; SSError result;
-    bool trace = false; bool stats = false; uint64_t seed = UINT64_C(0x4c414e41), instruction_limit = 0u; int index;
+    LanaChunk chunk; LanaErrorInfo error = {0}; LanaError result;
+    bool trace = false; bool stats = false; bool debug = false;
+    uint32_t break_line = 0u;
+    uint64_t seed = UINT64_C(0x4c414e41), instruction_limit = 0u; int index;
     size_t workers = 0u, max_tasks = 0u, memory_limit = 0u;
     int program_argc = 0; const char **program_argv = NULL;
     if (argc < 3) { usage(stderr); return 2; }
@@ -114,6 +203,15 @@ static int load_command(int argc, char **argv, bool execute) {
             break;
         }
         if (strcmp(argv[index], "--trace") == 0) trace = true;
+        else if (strcmp(argv[index], "--debug") == 0) debug = true;
+        else if (strcmp(argv[index], "--break") == 0 && index + 1 < argc) {
+            char *end; unsigned long parsed;
+            errno = 0; parsed = strtoul(argv[++index], &end, 10);
+            if (errno != 0 || *end != '\0' || parsed == 0u || parsed > UINT32_MAX) {
+                (void)fprintf(stderr, "invalid breakpoint line\n"); return 2;
+            }
+            break_line = (uint32_t)parsed; debug = true;
+        }
         else if (strcmp(argv[index], "--stats") == 0) stats = true;
         else if (strcmp(argv[index], "--seed") == 0 && index + 1 < argc) {
             char *end; errno = 0; seed = strtoull(argv[++index], &end, 10);
@@ -135,30 +233,35 @@ static int load_command(int argc, char **argv, bool execute) {
             if (is_workers) workers = (size_t)parsed; else max_tasks = (size_t)parsed;
         } else { usage(stderr); return 2; }
     }
-    result = ss_chunk_read_file(&chunk, argv[2], &error);
-    if (result != SS_OK) return report_error(&error);
-    if (!execute) ss_disassemble(&chunk, stdout);
+    result = lana_chunk_read_file(&chunk, argv[2], &error);
+    if (result != LANA_OK) return report_error(&error);
+    if (!execute) lana_disassemble(&chunk, stdout);
     else {
         struct timespec started, finished;
         uint64_t elapsed_ns;
-        VM vm; ss_vm_init(&vm, &chunk); vm.trace = trace; ss_vm_seed(&vm, seed);
+        LanaVM vm; lana_vm_init(&vm, &chunk); vm.trace = trace; lana_vm_seed(&vm, seed);
+        if (debug) {
+            vm.debug_hook = debugger_hook;
+            vm.debug_break_line = break_line;
+            vm.debug_step = break_line == 0u;
+        }
         if (memory_limit > 0u) vm.memory_limit = memory_limit;
         if (instruction_limit > 0u) vm.instruction_limit = instruction_limit;
-        if ((workers > 0u && ss_vm_set_worker_count(&vm, workers) != SS_OK) ||
-            (max_tasks > 0u && ss_vm_set_task_limit(&vm, max_tasks) != SS_OK)) {
-            ss_vm_free(&vm); ss_chunk_free(&chunk); return 1;
+        if ((workers > 0u && lana_vm_set_worker_count(&vm, workers) != LANA_OK) ||
+            (max_tasks > 0u && lana_vm_set_task_limit(&vm, max_tasks) != LANA_OK)) {
+            lana_vm_free(&vm); lana_chunk_free(&chunk); return 1;
         }
-        ss_vm_set_program_args(&vm, program_argc, program_argv);
+        lana_vm_set_program_args(&vm, program_argc, program_argv);
         (void)timespec_get(&started, TIME_UTC);
-        result = ss_vm_run(&vm);
+        result = lana_vm_run(&vm);
         (void)timespec_get(&finished, TIME_UTC);
         elapsed_ns = (uint64_t)(finished.tv_sec - started.tv_sec) * UINT64_C(1000000000) +
                      (uint64_t)(finished.tv_nsec - started.tv_nsec);
-        if (result != SS_OK) { error = vm.error; ss_vm_free(&vm); ss_chunk_free(&chunk); return report_error(&error); }
+        if (result != LANA_OK) { error = vm.error; lana_vm_free(&vm); lana_chunk_free(&chunk); return report_error(&error); }
         if (stats) {
             size_t opcode;
             (void)fprintf(stderr,
-                          "SSVM_STATS {\"instructions\":%llu,\"state_transitions\":%llu,"
+                          "LANAVM_STATS {\"instructions\":%llu,\"state_transitions\":%llu,"
                           "\"allocations\":%llu,\"allocated_bytes\":%zu,\"elapsed_ns\":%llu,\"opcodes\":{",
                           (unsigned long long)vm.instruction_count,
                           (unsigned long long)vm.state_transition_count,
@@ -166,20 +269,47 @@ static int load_command(int argc, char **argv, bool execute) {
                           (unsigned long long)elapsed_ns);
             for (opcode = 0; opcode < OP_COUNT; ++opcode) {
                 if (opcode != 0u) (void)fputc(',', stderr);
-                (void)fprintf(stderr, "\"%s\":%llu", ss_opcode_name((uint8_t)opcode),
+                (void)fprintf(stderr, "\"%s\":%llu", lana_opcode_name((uint8_t)opcode),
                               (unsigned long long)vm.opcode_counts[opcode]);
             }
             (void)fprintf(stderr, "}}\n");
         }
-        ss_vm_free(&vm);
+        lana_vm_free(&vm);
     }
-    ss_chunk_free(&chunk); return 0;
+    lana_chunk_free(&chunk); return 0;
 }
 
 int main(int argc, char **argv) {
     char compiler_path[4096];
     if (argc < 2) { usage(stderr); return 2; }
-    if (strcmp(argv[1], "version") == 0) { (void)printf("Lana %s (SSBC v5, C VM, native compiler)\n", LANA_VERSION); return 0; }
+    if (strcmp(argv[1], "version") == 0) { (void)printf("Lana %s (LABC v1, C VM, native compiler)\n", LANA_VERSION); return 0; }
+    if (strcmp(argv[1], "new") == 0) {
+        if (argc != 3) { usage(stderr); return 2; }
+        return lana_project_new(argv[2]);
+    }
+    if (strcmp(argv[1], "lsp") == 0) {
+        if (argc != 2) { usage(stderr); return 2; }
+        return lana_lsp_run(argv[0]);
+    }
+    if (strcmp(argv[1], "fmt") == 0 || strcmp(argv[1], "doc") == 0 ||
+        strcmp(argv[1], "build") == 0 || strcmp(argv[1], "test") == 0) {
+        if ((argc != 2 && !(argc == 3 && strcmp(argv[1], "fmt") == 0 &&
+                           strcmp(argv[2], "--check") == 0))) {
+            usage(stderr); return 2;
+        }
+        if (strcmp(argv[1], "fmt") == 0)
+            return lana_project_format(".", argc == 3);
+        if (strcmp(argv[1], "doc") == 0) return lana_project_document(".");
+        if (strcmp(argv[1], "test") == 0) return lana_project_test(".", argv[0]);
+        if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) {
+            (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1;
+        }
+        {
+            char output[4096];
+            return lana_project_build(".", project_compile, compiler_path,
+                                      output, sizeof(output));
+        }
+    }
     if (strcmp(argv[1], "compile") == 0) {
         if (argc != 5 || strcmp(argv[3], "-o") != 0) { usage(stderr); return 2; }
         if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) { (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1; }
@@ -187,12 +317,38 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "check") == 0) {
         char bytecode_path[] = "/tmp/lana-check-XXXXXX"; int descriptor, result;
-        if (argc != 3) { usage(stderr); return 2; }
         if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) { (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1; }
+        if (argc == 2) return lana_project_check(".", project_compile,
+                                                 compiler_path);
+        if (argc != 3) { usage(stderr); return 2; }
         descriptor = mkstemp(bytecode_path); if (descriptor < 0) return 1; (void)close(descriptor);
         result = compile_source_file(compiler_path, argv[2], bytecode_path); (void)unlink(bytecode_path); return result;
     }
     if (strcmp(argv[1], "asm") == 0) return assemble_command(argc, argv);
+    if (strcmp(argv[1], "debug") == 0) {
+        char bytecode_path[] = "/tmp/lana-debug-XXXXXX";
+        char *debug_argv[6] = {argv[0], "run-bytecode", bytecode_path,
+                               "--debug", NULL, NULL};
+        int descriptor; int result; int debug_argc = 4;
+        if ((argc != 3 && argc != 5) || !has_suffix(argv[2], ".lana") ||
+            (argc == 5 && strcmp(argv[3], "--break") != 0)) { usage(stderr); return 2; }
+        if (argc == 5) {
+            debug_argv[4] = "--break"; debug_argv[5] = argv[4]; debug_argc = 6;
+        }
+        if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) { (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1; }
+        descriptor = mkstemp(bytecode_path); if (descriptor < 0) return 1;
+        (void)close(descriptor);
+        result = compile_source_file(compiler_path, argv[2], bytecode_path);
+        if (result == 0) result = load_command(debug_argc, debug_argv, true);
+        (void)unlink(bytecode_path); return result;
+    }
+    if (strcmp(argv[1], "run") == 0 && argc == 2) {
+        char output[4096]; char *run_argv[3] = {argv[0], "run-bytecode", output};
+        if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) { (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1; }
+        if (lana_project_build(".", project_compile, compiler_path, output,
+                               sizeof(output)) != 0) return 1;
+        return load_command(3, run_argv, true);
+    }
     if (strcmp(argv[1], "run") == 0 && argc >= 3 && has_suffix(argv[2], ".lana")) {
         char bytecode_path[] = "/tmp/lana-program-XXXXXX"; char *source = argv[2]; int descriptor, result;
         if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) { (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1; }

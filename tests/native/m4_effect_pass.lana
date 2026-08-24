@@ -1,0 +1,3 @@
+let io_capability = capability("io");
+let deferred = planned_effect("io", io_capability);
+deferred;

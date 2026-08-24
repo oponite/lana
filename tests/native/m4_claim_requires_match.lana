@@ -1,0 +1,4 @@
+let asserted = claim(true, "sensor is active");
+if (asserted) {
+    print("unreachable");
+}

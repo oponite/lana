@@ -1,0 +1,14 @@
+let observed = evidence(0.75, "sensor-a");
+let record = derivation(observed);
+print(record["operation"]);
+print(explain(observed));
+
+fn worker_root() {
+    return evidence(1, "worker");
+}
+
+let worker = fork worker_root();
+let joined = join(worker);
+let joined_record = derivation(joined);
+print(joined_record["operation"]);
+print(joined_record["inputs"][0][1]);
