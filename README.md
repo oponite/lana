@@ -55,6 +55,112 @@ build/lanavm dis build/belief.labc
 build/lanavm run build/belief.labc --trace
 ```
 
+## Three small examples
+
+These examples introduce Lana in three steps:
+
+1. ordinary computation
+2. measuring one uncertain state
+3. combining independent evidence
+
+Run any example with:
+
+```bash
+build/lana run examples/01_counter.lana
+```
+
+### 1. Ordinary computation
+
+Lana supports familiar functions, variables, assignment, loops, and printing.
+
+```lana
+fn add(left, right) {
+    return left + right;
+}
+
+let total = add(1, 2);
+let step = 1;
+
+while (total < 5) {
+    total = total + step;
+}
+
+print(total);
+```
+
+Run it:
+
+```bash
+build/lana run examples/01_counter.lana
+```
+
+Output:
+
+```text
+5
+```
+
+Source: [`examples/01_counter.lana`](examples/01_counter.lana)
+
+### 2. Measure an uncertain state
+
+A `state` represents an uncertain binary event. The `p` field is its observable
+probability.
+
+```lana
+state belief = state(p: 0.75, d: 0.20);
+
+let probability = measure belief as probability;
+print(probability);
+```
+
+Run it:
+
+```bash
+build/lana run examples/02_belief_measurement.lana
+```
+
+Output:
+
+```text
+0.75
+```
+
+Source: [`examples/02_belief_measurement.lana`](examples/02_belief_measurement.lana)
+
+### 3. Combine independent evidence
+
+`append()` combines two states using Lana's independent probabilistic-OR rule.
+
+```lana
+state first_signal = state(p: 0.40, d: 0.20);
+state second_signal = state(p: 0.60, d: 0.30);
+
+let combined = append(first_signal, second_signal);
+let probability = measure combined as probability;
+print(probability);
+```
+
+The combined probability is:
+
+```text
+1 - (1 - 0.40) * (1 - 0.60) = 0.76
+```
+
+Run it:
+
+```bash
+build/lana run examples/03_combined_evidence.lana
+```
+
+Output:
+
+```text
+0.76
+```
+
+Source: [`examples/03_combined_evidence.lana`](examples/03_combined_evidence.lana)
+
 ## Optional integrations
 
 The source-install integrations connect Lana 1.0 to JSON subprocess callers,

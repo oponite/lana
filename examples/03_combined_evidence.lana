@@ -1,0 +1,7 @@
+// APPEND combines independent binary evidence.
+state first_signal = state(p: 0.40, d: 0.20);
+state second_signal = state(p: 0.60, d: 0.30);
+
+let combined = append(first_signal, second_signal);
+let probability = measure combined as probability;
+print(probability);
