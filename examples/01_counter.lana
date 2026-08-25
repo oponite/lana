@@ -1,0 +1,13 @@
+// Start with ordinary values, functions, and a loop.
+fn add(left, right) {
+    return left + right;
+}
+
+let total = add(1, 2);
+let step = 1;
+
+while (total < 5) {
+    total = total + step;
+}
+
+print(total);

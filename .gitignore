@@ -3,6 +3,7 @@ build-*/
 Testing/Temporary/
 .ollama/
 .DS_Store
+TODO.md
 .venv/
 .pytest_cache/
 __pycache__/

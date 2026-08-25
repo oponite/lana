@@ -1,0 +1,6 @@
+// A state represents an uncertain binary event.
+state belief = state(p: 0.75, d: 0.20);
+
+// Probability measurement is exact and does not change the state.
+let probability = measure belief as probability;
+print(probability);
