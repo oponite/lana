@@ -1,0 +1,69 @@
+import "./policy.lana" as policy;
+
+// Each adapter receives an externally computed, explicitly named metric. Lana
+// applies policy; it never treats an arbitrary number as a probability.
+
+fn decide(request, expected_kind, expected_metric, accept_action, reject_action, abstain_action, escalate_action) {
+    assert(request["schema"] == 1, "unsupported reference application schema");
+    assert(request["kind"] == expected_kind, "invalid reference application kind");
+    assert(request["metric"] == expected_metric, "unexpected metric semantics");
+    assert(string_length(request["source_assumptions"]) > 0, "source assumptions are required");
+    let settings = request["policy"];
+    let decision = policy.threshold(
+        request["evidence"],
+        settings["minimum"],
+        settings["current_time"],
+        settings["max_age"],
+        settings["minimum_confidence"]
+    );
+    let action = abstain_action;
+    if (decision["outcome"] == "accept") {
+        action = accept_action;
+    }
+    if (decision["outcome"] == "reject") {
+        action = reject_action;
+    }
+    if (decision["outcome"] == "escalate") {
+        action = escalate_action;
+    }
+    return {
+        "schema": 1,
+        "kind": string_concat(expected_kind, "_decision"),
+        "metric": expected_metric,
+        "source_assumptions": request["source_assumptions"],
+        "action": action,
+        "decision": decision
+    };
+}
+
+// Source: an external monitor computes availability_fraction from observed checks.
+fn service_health(request) {
+    return decide(
+        request, "service_health_request", "availability_fraction",
+        "serve", "defer_traffic", "inspect_service", "page_operator"
+    );
+}
+
+// Source: an external classifier provides classifier_score for a document route.
+fn document_routing(request) {
+    return decide(
+        request, "document_routing_request", "classifier_score",
+        "route_automatically", "human_review", "defer_routing", "human_review"
+    );
+}
+
+// Source: external fusion provides safety_margin; raw sensor readings stay outside Lana.
+fn sensor_fusion(request) {
+    return decide(
+        request, "sensor_fusion_request", "safety_margin",
+        "continue_operation", "hold_operation", "request_measurement", "inspect_sensor_conflict"
+    );
+}
+
+// Source: an external model provides forecast_confidence; this is advisory only.
+fn advisory_forecast(request) {
+    return decide(
+        request, "advisory_forecast_request", "forecast_confidence",
+        "publish_advisory", "do_not_publish", "defer_forecast", "review_model_evidence"
+    );
+}

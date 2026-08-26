@@ -1,0 +1,117 @@
+// position_review.lana -- advisory verdict for an open options position.
+//
+// Request:  {"schema":1, "kind":"position_review_request",
+//            "current_marks": {"quote_source", "history_rows"},
+//            "summary": {"strategy", "current_pnl",
+//                        "current_pnl_pct_of_debit", "managed_ev",
+//                        "probability_of_profit_pct", "p05_pnl", "net_delta",
+//                        "posture", "posture_reason"},
+//            "greeks": {"delta"},
+//            "time_to_expiry_days": <number>,
+//            "policy": {"profit_target_pct", "loss_limit_pct",
+//                       "adjust_delta_abs", "roll_dte", "minimum_managed_ev"}}
+// Response: {"schema":1, "kind":"position_review_decision", "action",
+//            "urgency", "rationale"}
+//
+// Gate precedence mirrors quant_lab.position_analyzer.analyze_position:
+// loss-limit close, then profit-target close, then delta adjust, then
+// calendar roll inside the roll window, else hold. This advisory verdict
+// never overrides the Python posture.
+
+import "bridge.lana" as bridge;
+
+fn gate_contract(request) {
+    assert(request["schema"] == 1, "unsupported position_review schema");
+    assert(map_has(request, "kind"), "kind is required");
+    assert(request["kind"] == "position_review_request", "invalid position_review kind");
+    assert(map_has(request, "summary"), "summary is required");
+    assert(map_has(request, "policy"), "policy is required");
+    return true;
+}
+
+fn abs_value(value) {
+    if (value < 0) {
+        return 0 - value;
+    }
+    return value;
+}
+
+fn decide(request) {
+    gate_contract(request);
+    let summary = request["summary"];
+    let policy = request["policy"];
+    let rationale = [];
+    let action = "hold";
+    let urgency = "low";
+
+    let pnl_pct = 0;
+    if (map_has(summary, "current_pnl_pct_of_debit")) {
+        pnl_pct = summary["current_pnl_pct_of_debit"];
+    }
+    let net_delta = 0;
+    if (map_has(summary, "net_delta")) {
+        net_delta = summary["net_delta"];
+    }
+    let dte = request["time_to_expiry_days"];
+    let strategy = "";
+    if (map_has(summary, "strategy")) {
+        strategy = summary["strategy"];
+    }
+
+    let decided = false;
+    if (pnl_pct <= 0 - policy["loss_limit_pct"]) {
+        action = "close";
+        urgency = "high";
+        array_push(rationale, "loss limit breached");
+        decided = true;
+    }
+    if (!decided) {
+        if (pnl_pct >= policy["profit_target_pct"]) {
+            action = "close";
+            urgency = "low";
+            array_push(rationale, "profit target reached");
+            decided = true;
+        }
+    }
+    if (!decided) {
+        if (abs_value(net_delta) >= policy["adjust_delta_abs"]) {
+            action = "adjust";
+            urgency = "medium";
+            array_push(rationale, "net delta limit breached");
+            decided = true;
+        }
+    }
+    if (!decided) {
+        if (strategy == "calendar") {
+            if (map_has(request, "time_to_expiry_days")) {
+                if (dte <= policy["roll_dte"]) {
+                    action = "roll";
+                    urgency = "medium";
+                    array_push(rationale, "front expiration is inside the roll window");
+                    decided = true;
+                }
+            }
+        }
+    }
+    if (!decided) {
+        if (map_has(summary, "managed_ev")) {
+            if (summary["managed_ev"] < policy["minimum_managed_ev"]) {
+                urgency = "medium";
+                array_push(rationale, "managed EV below policy floor while holding");
+            }
+        }
+    }
+    if (!decided) {
+        array_push(rationale, "no hard risk, delta, or calendar timing gate is breached");
+    }
+    return {
+        "schema": 1,
+        "kind": "position_review_decision",
+        "action": action,
+        "urgency": urgency,
+        "rationale": rationale
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(decide(request));

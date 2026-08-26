@@ -1,0 +1,27 @@
+import "./bridge.lana" as bridge;
+import "./replay.lana" as replay;
+
+fn handle(request) {
+    assert(request["schema"] == 1, "unsupported replay request schema");
+    assert(map_has(request, "kind"), "replay request kind is required");
+    if (request["kind"] == "threshold_authorization_request") {
+        return replay.threshold_authorization(
+            request["evidence"],
+            request["policy"]["minimum"],
+            request["policy"]["current_time"],
+            request["policy"]["max_age"],
+            request["policy"]["minimum_confidence"],
+            request["effect"]["kind"],
+            request["effect"]["payload"],
+            request["seed"]
+        );
+    }
+    if (request["kind"] == "threshold_authorization_replay") {
+        return replay.replay_threshold(request["record"]);
+    }
+    assert(false, "unsupported replay request kind");
+    return null;
+}
+
+let request = bridge.read_request();
+bridge.write_response(handle(request));

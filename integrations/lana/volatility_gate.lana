@@ -1,0 +1,54 @@
+// volatility_gate.lana -- deterministic admission gate for modeled volatility.
+// Request: {schema, kind, estimate, policy}
+// Response: {schema, kind, decision, reasons}
+
+import "bridge.lana" as bridge;
+
+fn decide(request) {
+    assert(request["schema"] == 1, "unsupported volatility schema");
+    assert(request["kind"] == "volatility_gate_request", "invalid volatility kind");
+    let estimate = request["estimate"];
+    let policy = request["policy"];
+    let reasons = [];
+    let passed = true;
+    if (estimate["realized"] <= 0) {
+        passed = false;
+        array_push(reasons, "volatility must be positive");
+    }
+    if (estimate["blended"] <= 0) {
+        passed = false;
+        array_push(reasons, "volatility must be positive");
+    }
+    if (estimate["lower"] > estimate["blended"]) {
+        passed = false;
+        array_push(reasons, "stress range must contain blended volatility");
+    }
+    if (estimate["upper"] < estimate["blended"]) {
+        passed = false;
+        array_push(reasons, "stress range must contain blended volatility");
+    }
+    if (estimate["blended"] < policy["min"]) {
+        passed = false;
+        array_push(reasons, "volatility is below policy minimum");
+    }
+    if (estimate["blended"] > policy["max"]) {
+        passed = false;
+        array_push(reasons, "volatility is above policy maximum");
+    }
+    if (passed) {
+        array_push(reasons, "volatility passed deterministic policy checks");
+    }
+    let decision = "reject";
+    if (passed) {
+        decision = "accept";
+    }
+    return {
+        "schema": 1,
+        "kind": "volatility_gate_decision",
+        "decision": decision,
+        "reasons": reasons
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(decide(request));

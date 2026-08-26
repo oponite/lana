@@ -1,0 +1,126 @@
+import "./bridge.lana" as bridge;
+
+fn require_probability(value, label) {
+    assert(value >= 0, label);
+    assert(value <= 1, label);
+    return value;
+}
+
+fn validate_model(model, feature_count, request_order) {
+    assert(array_length(model["feature_order"]) == feature_count, "model feature order mismatch");
+    assert(array_length(model["center"]) == feature_count, "model center mismatch");
+    assert(array_length(model["scale"]) == feature_count, "model scale mismatch");
+    assert(array_length(model["coefficients"]) == feature_count, "model coefficient mismatch");
+    let feature_index = 0;
+    while (feature_index < feature_count) {
+        assert(model["feature_order"][feature_index] == request_order[feature_index], "model feature order mismatch");
+        assert(model["scale"][feature_index] > 0, "model scale must be positive");
+        feature_index = feature_index + 1;
+    }
+    let breakpoints = model["calibration_breakpoints"];
+    let probabilities = model["calibration_probabilities"];
+    assert(array_length(breakpoints) > 0, "model calibration is empty");
+    assert(array_length(breakpoints) == array_length(probabilities), "model calibration length mismatch");
+    let index = 0;
+    while (index < array_length(breakpoints)) {
+        require_probability(probabilities[index], "calibration probability is outside [0,1]");
+        if (index > 0) {
+            assert(breakpoints[index] > breakpoints[index - 1], "calibration breakpoints must increase");
+            assert(probabilities[index] >= probabilities[index - 1], "calibration probabilities must increase");
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn calibrated(score, breakpoints, probabilities) {
+    if (score <= breakpoints[0]) {
+        return probabilities[0];
+    }
+    let index = 1;
+    while (index < array_length(breakpoints)) {
+        if (score <= breakpoints[index]) {
+            let left_score = breakpoints[index - 1];
+            let right_score = breakpoints[index];
+            let fraction = (score - left_score) / (right_score - left_score);
+            return probabilities[index - 1] + fraction * (probabilities[index] - probabilities[index - 1]);
+        }
+        index = index + 1;
+    }
+    return probabilities[array_length(probabilities) - 1];
+}
+
+fn passes_confidence_gate(metrics, policy) {
+    if (metrics["rows"] < policy["min_walk_forward_rows"]) {
+        return false;
+    }
+    if (metrics["brier_score"] >= metrics["constant_baseline_brier_score"]) {
+        return false;
+    }
+    if (metrics["log_loss"] >= metrics["constant_baseline_log_loss"]) {
+        return false;
+    }
+    if (metrics["calibration_error"] > policy["max_calibration_error"]) {
+        return false;
+    }
+    return true;
+}
+
+fn confidence_status(request) {
+    let policy = request["confidence_policy"];
+    if (!passes_confidence_gate(request["validation"]["up_1pct"], policy)) {
+        return "low";
+    }
+    if (!passes_confidence_gate(request["validation"]["down_1pct"], policy)) {
+        return "low";
+    }
+    return "high";
+}
+
+fn infer(request, target) {
+    let model = request["models"][target];
+    let features = request["features"];
+    let order = request["feature_order"];
+    validate_model(model, array_length(order), order);
+    let score = model["intercept"];
+    let index = 0;
+    while (index < array_length(order)) {
+        let value = features[order[index]];
+        assert(value == value, "feature is not a number");
+        score = score + ((value - model["center"][index]) / model["scale"][index]) * model["coefficients"][index];
+        index = index + 1;
+    }
+    return require_probability(
+        calibrated(score, model["calibration_breakpoints"], model["calibration_probabilities"]),
+        "inferred probability is outside [0,1]"
+    );
+}
+
+fn forecast(request) {
+    assert(request["schema"] == 1, "unsupported QQQ EOW request schema");
+    assert(request["kind"] == "qqq_eow_probability_request", "invalid QQQ EOW request kind");
+    assert(request["symbol"] == "QQQ", "request symbol must be QQQ");
+    assert(request["vix_symbol"] == "^VIX", "request VIX symbol must be ^VIX");
+    assert(request["reference_date"] != request["target_date"], "target date must differ from reference date");
+    assert(request["advisory_only"] == true, "forecast must be advisory-only");
+    let order = request["feature_order"];
+    assert(array_length(order) > 0, "feature order is empty");
+    let up = infer(request, "up_1pct");
+    let down = infer(request, "down_1pct");
+    return {
+        "schema": 1,
+        "kind": "qqq_eow_probability_forecast",
+        "symbol": request["symbol"],
+        "reference_date": request["reference_date"],
+        "target_date": request["target_date"],
+        "probability_up_1pct": up,
+        "probability_down_1pct": down,
+        "confidence_status": confidence_status(request),
+        "training_cutoff": request["training_cutoff"],
+        "data_hash": request["data_hash"],
+        "advisory_only": true
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(forecast(request));

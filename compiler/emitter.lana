@@ -499,6 +499,23 @@ fn emit_function_named(node, emitted_name, mappings) {
 
 fn emit_function(node) { return emit_function_named(node, node[1], array_new(0)); }
 
+fn merge_mappings(left, right) {
+    let merged = map_new();
+    let keys = map_keys(left);
+    let index = 0;
+    while (index < array_length(keys)) {
+        map_set(merged, keys[index], map_get(left, keys[index]));
+        index = index + 1;
+    }
+    keys = map_keys(right);
+    index = 0;
+    while (index < array_length(keys)) {
+        map_set(merged, keys[index], map_get(right, keys[index]));
+        index = index + 1;
+    }
+    return merged;
+}
+
 fn emit_program(program) {
     let sections = sb_new();
     sb_push(sections, ".version 1");
@@ -526,9 +543,11 @@ fn emit_modules(modules, root_index) {
         let module = items[module_index]; let function_index = 0;
         let module_index_str = number_to_string(module_index);
         let import_mappings = map_get(modules["import_mappings"], module_index_str);
+        let local_mappings = map_get(modules["mappings"], module_index_str);
+        let mappings = merge_mappings(local_mappings, import_mappings);
         while (function_index < array_length(module[2][1])) {
             let function_node = module[2][1][function_index];
-            sb_push(sections, emit_function_named(function_node, string_concat(module[1], function_node[1]), import_mappings)); sb_push(sections, "\n"); function_index = function_index + 1;
+            sb_push(sections, emit_function_named(function_node, string_concat(module[1], function_node[1]), mappings)); sb_push(sections, "\n"); function_index = function_index + 1;
         }
         module_index = module_index + 1;
     }

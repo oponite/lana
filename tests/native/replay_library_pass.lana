@@ -1,0 +1,27 @@
+import "../../integrations/lana/replay.lana" as replay;
+
+fn evidence_record(value, revision) {
+    return {
+        "schema": 1,
+        "status": "resolved",
+        "source": "replay-fixture",
+        "value": value,
+        "observed_at": 100,
+        "effective_at": 100,
+        "confidence": 0.90,
+        "exactness": "exact",
+        "revision": revision,
+        "provenance_id": "replay-fixture:1",
+        "dependency_ids": []
+    };
+}
+
+let record = replay.threshold_authorization(
+    evidence_record(0.80, 4), 0.70, 120, 30, 0.80, "io", {"job": "notify"}, 17
+);
+assert(record["authorization"]["authorized"], "accepted decision was not authorized");
+assert(record["decision"]["evidence"]["revision"] == 4, "record lost evidence revision");
+let replayed = replay.replay_threshold(record);
+assert(replayed["seed"] == 17, "replay lost the deterministic seed");
+assert(replayed["authorization"]["effect_payload"]["job"] == "notify", "replay lost effect payload");
+print("REPLAY_LIBRARY_PASS");

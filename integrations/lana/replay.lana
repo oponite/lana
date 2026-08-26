@@ -1,0 +1,48 @@
+import "./policy.lana" as policy;
+
+// A replay record captures the policy inputs and requested effect, but never
+// re-executes an effect. Replay checks that the recorded authorization follows
+// from the same evidence and fixed policy parameters.
+
+fn threshold_authorization(evidence, minimum, current_time, max_age, minimum_confidence, effect_kind, effect_payload, seed) {
+    let decision = policy.threshold(evidence, minimum, current_time, max_age, minimum_confidence);
+    return {
+        "schema": 1,
+        "kind": "threshold_authorization",
+        "policy": {
+            "minimum": minimum,
+            "current_time": current_time,
+            "max_age": max_age,
+            "minimum_confidence": minimum_confidence
+        },
+        "decision": decision,
+        "authorization": {
+            "authorized": decision["outcome"] == "accept",
+            "effect_kind": effect_kind,
+            "effect_payload": effect_payload
+        },
+        "seed": seed
+    };
+}
+
+fn replay_threshold(record) {
+    assert(record["schema"] == 1, "unsupported replay schema");
+    assert(record["kind"] == "threshold_authorization", "unsupported replay kind");
+    assert(map_has(record, "policy"), "replay policy is required");
+    assert(map_has(record, "decision"), "replay decision is required");
+    assert(map_has(record, "authorization"), "replay authorization is required");
+    let settings = record["policy"];
+    let expected = record["decision"];
+    let actual = policy.threshold(
+        expected["evidence"],
+        settings["minimum"],
+        settings["current_time"],
+        settings["max_age"],
+        settings["minimum_confidence"]
+    );
+    assert(actual["outcome"] == expected["outcome"], "replay decision outcome changed");
+    assert(actual["reason"] == expected["reason"], "replay decision reason changed");
+    let authorized = actual["outcome"] == "accept";
+    assert(record["authorization"]["authorized"] == authorized, "replay authorization changed");
+    return record;
+}

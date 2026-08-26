@@ -1,0 +1,45 @@
+// Versioned evidence records for Lana 1.0 integrations.
+// Validation preserves values exactly. In particular, false, null, zero, and
+// unresolved statuses remain distinct.
+
+fn known_status(status) {
+    if (status == "resolved") { return true; }
+    if (status == "unknown") { return true; }
+    if (status == "not_measured") { return true; }
+    if (status == "insufficient_evidence") { return true; }
+    return status == "conflict";
+}
+
+fn known_exactness(exactness) {
+    if (exactness == "exact") { return true; }
+    if (exactness == "sample") { return true; }
+    return exactness == "approximate";
+}
+
+fn validate(value) {
+    assert(map_has(value, "schema"), "evidence schema is required");
+    assert(value["schema"] == 1, "unsupported evidence schema");
+    assert(map_has(value, "status"), "evidence status is required");
+    assert(known_status(value["status"]), "unsupported evidence status");
+    assert(map_has(value, "source"), "evidence source is required");
+    assert(string_length(value["source"]) > 0, "evidence source is empty");
+    assert(map_has(value, "observed_at"), "evidence observed_at is required");
+    assert(value["observed_at"] >= 0, "evidence observed_at must be nonnegative");
+    assert(map_has(value, "effective_at"), "evidence effective_at is required");
+    assert(value["effective_at"] >= 0, "evidence effective_at must be nonnegative");
+    assert(map_has(value, "exactness"), "evidence exactness is required");
+    assert(known_exactness(value["exactness"]), "unsupported evidence exactness");
+    assert(map_has(value, "revision"), "evidence revision is required");
+    assert(value["revision"] >= 0, "evidence revision must be nonnegative");
+    assert(map_has(value, "confidence"), "evidence confidence is required");
+    assert(value["confidence"] >= 0, "evidence confidence must be nonnegative");
+    assert(value["confidence"] <= 1, "evidence confidence must not exceed one");
+    assert(map_has(value, "provenance_id"), "evidence provenance_id is required");
+    assert(string_length(value["provenance_id"]) > 0, "evidence provenance_id is empty");
+    assert(map_has(value, "dependency_ids"), "evidence dependency_ids are required");
+    assert(array_length(value["dependency_ids"]) >= 0, "evidence dependency_ids must be an array");
+    if (value["status"] == "resolved") {
+        assert(map_has(value, "value"), "resolved evidence value is required");
+    }
+    return value;
+}

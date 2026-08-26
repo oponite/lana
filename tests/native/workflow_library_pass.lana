@@ -1,0 +1,29 @@
+import "../../integrations/lana/workflow.lana" as workflow;
+
+fn evidence_record(value, revision) {
+    return {
+        "schema": 1,
+        "status": "resolved",
+        "source": "workflow-fixture",
+        "value": value,
+        "observed_at": 100,
+        "effective_at": 100,
+        "confidence": 0.90,
+        "exactness": "exact",
+        "revision": revision,
+        "provenance_id": "workflow-fixture:1",
+        "dependency_ids": []
+    };
+}
+
+let accepted_evidence = evidence_record(0.80, 4);
+let accepted = workflow.run_threshold_io_effect(accepted_evidence, 0.70, 120, 30, 0.80, 42);
+assert(accepted["authorized"], "accepted policy did not authorize the effect");
+assert(accepted["result"] == 42, "authorized effect returned the wrong value");
+assert(accepted["decision"]["evidence"]["revision"] == 4, "authorization lost evidence revision");
+assert(accepted["effect"].execution_count == 1, "effect executed more than once");
+
+let rejected = workflow.run_threshold_io_effect(evidence_record(0.60, 5), 0.70, 120, 30, 0.80, 42);
+assert(!rejected["authorized"], "rejected policy created a plan");
+assert(rejected["decision"]["outcome"] == "reject", "rejected policy lost its outcome");
+print("WORKFLOW_LIBRARY_PASS");

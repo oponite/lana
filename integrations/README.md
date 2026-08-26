@@ -17,6 +17,14 @@ printf '{"hello":"lana"}' |
 Install `integrations/python[mcp]` for `lana-mcp` or
 `integrations/python[jupyter]` for `%%lana`.
 
+The `qqq_eow_probability.lana` program is a deterministic JSON-bridge inference
+consumer for the Quant Research QQQ end-of-week probability artifact. Python
+retrieves data and fits/calibrates the model; Lana validates the request,
+calculates the calibrated probabilities, and writes an advisory-only response.
+Its `confidence_status` is deliberately binary: `high` is emitted only when
+the supplied walk-forward evidence passes every gate; all other cases emit
+`low`.
+
 ## Editors
 
 - `editors/vscode`: source-build VS Code extension.

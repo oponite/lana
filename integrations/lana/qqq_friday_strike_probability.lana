@@ -1,0 +1,114 @@
+import "./bridge.lana" as bridge;
+
+fn require_probability(value, label) {
+    assert(value >= 0, label);
+    assert(value <= 1, label);
+    return value;
+}
+
+fn abs_value(value) {
+    if (value < 0) { return 0 - value; }
+    return value;
+}
+
+fn validate_model(model, feature_count, request_order) {
+    assert(array_length(model["feature_order"]) == feature_count, "model feature order mismatch");
+    assert(array_length(model["center"]) == feature_count, "model center mismatch");
+    assert(array_length(model["scale"]) == feature_count, "model scale mismatch");
+    assert(array_length(model["coefficients"]) == feature_count, "model coefficient mismatch");
+    let index = 0;
+    while (index < feature_count) {
+        assert(model["feature_order"][index] == request_order[index], "model feature order mismatch");
+        assert(model["scale"][index] > 0, "model scale must be positive");
+        index = index + 1;
+    }
+    let breakpoints = model["calibration_breakpoints"];
+    let probabilities = model["calibration_probabilities"];
+    assert(array_length(breakpoints) > 0, "model calibration is empty");
+    assert(array_length(breakpoints) == array_length(probabilities), "model calibration length mismatch");
+    index = 0;
+    while (index < array_length(breakpoints)) {
+        require_probability(probabilities[index], "calibration probability is outside [0,1]");
+        if (index > 0) {
+            assert(breakpoints[index] > breakpoints[index - 1], "calibration breakpoints must increase");
+            assert(probabilities[index] >= probabilities[index - 1], "calibration probabilities must increase");
+        }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn calibrated(score, breakpoints, probabilities) {
+    if (score <= breakpoints[0]) { return probabilities[0]; }
+    let index = 1;
+    while (index < array_length(breakpoints)) {
+        if (score <= breakpoints[index]) {
+            let fraction = (score - breakpoints[index - 1]) / (breakpoints[index] - breakpoints[index - 1]);
+            return probabilities[index - 1] + fraction * (probabilities[index] - probabilities[index - 1]);
+        }
+        index = index + 1;
+    }
+    return probabilities[array_length(probabilities) - 1];
+}
+
+fn passes_confidence_gate(metrics, policy) {
+    if (metrics["rows"] < policy["min_walk_forward_rows"]) { return false; }
+    if (metrics["brier_score"] >= metrics["constant_baseline_brier_score"]) { return false; }
+    if (metrics["log_loss"] >= metrics["constant_baseline_log_loss"]) { return false; }
+    if (metrics["calibration_error"] > policy["max_calibration_error"]) { return false; }
+    return true;
+}
+
+fn infer(request) {
+    let model = request["model"];
+    let order = request["feature_order"];
+    validate_model(model, array_length(order), order);
+    let score = model["intercept"];
+    let index = 0;
+    while (index < array_length(order)) {
+        let value = request["features"][order[index]];
+        assert(value == value, "feature is not a number");
+        score = score + ((value - model["center"][index]) / model["scale"][index]) * model["coefficients"][index];
+        index = index + 1;
+    }
+    return require_probability(
+        calibrated(score, model["calibration_breakpoints"], model["calibration_probabilities"]),
+        "inferred probability is outside [0,1]"
+    );
+}
+
+fn forecast(request) {
+    assert(request["schema"] == 1, "unsupported Friday strike schema");
+    assert(request["kind"] == "qqq_friday_strike_probability_request", "invalid Friday strike kind");
+    assert(request["symbol"] == "QQQ", "request symbol must be QQQ");
+    assert(request["vix_symbol"] == "^VIX", "request VIX symbol must be ^VIX");
+    assert(request["reference_date"] != request["target_date"], "target date must differ from reference date");
+    assert(request["advisory_only"] == true, "forecast must be advisory-only");
+    assert(request["reference_open"] > 0, "reference open must be positive");
+    assert(request["strike"] > 0, "strike must be positive");
+    assert(abs_value(request["strike"] - request["reference_open"]) <= request["max_strike_offset"], "strike is outside allowed range");
+    let probability_above = infer(request);
+    let probability_below = require_probability(1 - probability_above, "below probability is outside [0,1]");
+    let confidence = "low";
+    if (passes_confidence_gate(request["validation"], request["confidence_policy"])) { confidence = "high"; }
+    return {
+        "schema": 1,
+        "kind": "qqq_friday_strike_probability_forecast",
+        "symbol": "QQQ",
+        "reference_date": request["reference_date"],
+        "target_date": request["target_date"],
+        "reference_open": request["reference_open"],
+        "strike": request["strike"],
+        "strike_offset_dollars": request["strike_offset_dollars"],
+        "strike_threshold_return": request["strike_threshold_return"],
+        "probability_close_above_strike": probability_above,
+        "probability_close_at_or_below_strike": probability_below,
+        "confidence_status": confidence,
+        "training_cutoff": request["training_cutoff"],
+        "data_hash": request["data_hash"],
+        "advisory_only": true
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(forecast(request));

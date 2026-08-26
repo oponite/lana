@@ -12,6 +12,8 @@ import tempfile
 import time
 from typing import Any, Mapping, Sequence
 
+from .evidence import validate_evidence
+
 
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -325,3 +327,28 @@ class BridgeRunner:
                 "stderr": completed.stderr,
                 "execution": execution,
             }
+
+    def run_evidence(
+        self,
+        program: str | os.PathLike[str],
+        evidence: Mapping[str, Any],
+        *,
+        seed: int | None = None,
+        memory_limit_mib: int | None = None,
+        instruction_limit: int | None = None,
+        workers: int | None = None,
+        max_tasks: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Run a program with one validated evidence record."""
+
+        return self.run(
+            program,
+            validate_evidence(evidence),
+            seed=seed,
+            memory_limit_mib=memory_limit_mib,
+            instruction_limit=instruction_limit,
+            workers=workers,
+            max_tasks=max_tasks,
+            timeout_seconds=timeout_seconds,
+        )

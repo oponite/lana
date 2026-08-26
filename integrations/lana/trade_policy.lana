@@ -1,0 +1,156 @@
+// trade_policy.lana -- advisory policy decision for a proposed options trade.
+//
+// Request:  {"schema":1, "kind":"trade_policy_request",
+//            "metrics": {"expiration_ev", "managed_ev",
+//                        "probability_of_profit_pct", "max_loss", "net_delta",
+//                        "net_vega", "net_theta", "iv_rank", "account_value"},
+//            "policy": {<gate name>: <limit>, ...}}
+// Response: {"schema":1, "kind":"trade_policy_decision", "decision", "gates",
+//            "confidence", "reasons"}
+//
+// Gate semantics mirror quant_lab.trade_evaluator.evaluate_trade exactly:
+// minimum_* gates require value >= limit; maximum_* gates require
+// value <= limit; maximum_loss compares |max_loss|; maximum_loss_pct_account
+// compares |max_loss| / account_value * 100; minimum_iv_rank_for_short_vega
+// applies only when net vega < 0 (short vega). The Python decision remains
+// authoritative; this program provides an advisory "take"/"skip"/"reduce"
+// verdict. "reduce" is returned when no hard (loss/EV) gate failed but at
+// least one soft gate failed. Confidence = fraction of evaluated gates that
+// pass (deterministic, documented here).
+
+import "bridge.lana" as bridge;
+
+fn gate_contract(request) {
+    assert(request["schema"] == 1, "unsupported trade_policy schema");
+    assert(map_has(request, "kind"), "kind is required");
+    assert(request["kind"] == "trade_policy_request", "invalid trade_policy kind");
+    assert(map_has(request, "metrics"), "metrics is required");
+    assert(map_has(request, "policy"), "policy is required");
+    return true;
+}
+
+fn abs_value(value) {
+    if (value < 0) {
+        return 0 - value;
+    }
+    return value;
+}
+
+fn detail_string(value, direction, limit) {
+    return string_concat(number_to_string(value), string_concat(direction, number_to_string(limit)));
+}
+
+fn record(gates, counters, name, value, limit, is_minimum, hard) {
+    let passed = false;
+    let direction = " <= ";
+    if (is_minimum) {
+        if (value >= limit) { passed = true; }
+        direction = " >= ";
+    } else {
+        if (value <= limit) { passed = true; }
+    }
+    array_push(gates, {"name": name, "passed": passed, "detail": detail_string(value, direction, limit)});
+    counters[0] = counters[0] + 1;
+    if (passed) {
+        counters[1] = counters[1] + 1;
+    } else {
+        if (hard) {
+            counters[2] = counters[2] + 1;
+        } else {
+            counters[3] = counters[3] + 1;
+        }
+    }
+    return true;
+}
+
+fn maybe_gate(metrics, policy, gates, counters, name, value, is_minimum, hard) {
+    if (map_has(policy, name)) {
+        record(gates, counters, name, value, policy[name], is_minimum, hard);
+    }
+    return true;
+}
+
+fn run_ev_gates(metrics, policy, gates, counters) {
+    maybe_gate(metrics, policy, gates, counters, "minimum_expiration_ev", metrics["expiration_ev"], true, true);
+    maybe_gate(metrics, policy, gates, counters, "minimum_managed_ev", metrics["managed_ev"], true, true);
+    maybe_gate(metrics, policy, gates, counters, "minimum_probability_of_profit_pct", metrics["probability_of_profit_pct"], true, false);
+    return true;
+}
+
+fn run_loss_gates(metrics, policy, gates, counters) {
+    maybe_gate(metrics, policy, gates, counters, "maximum_loss", abs_value(metrics["max_loss"]), false, true);
+    if (map_has(policy, "maximum_loss_pct_account")) {
+        if (map_has(metrics, "account_value")) {
+            let pct = abs_value(metrics["max_loss"]) / metrics["account_value"] * 100;
+            record(gates, counters, "maximum_loss_pct_account", pct, policy["maximum_loss_pct_account"], false, true);
+        }
+    }
+    return true;
+}
+
+fn run_greek_gates(metrics, policy, gates, counters) {
+    let vega = 0;
+    if (map_has(metrics, "net_vega")) {
+        vega = metrics["net_vega"];
+    }
+    if (map_has(policy, "minimum_iv_rank_for_short_vega")) {
+        if (vega < 0) {
+            if (map_has(metrics, "iv_rank")) {
+                record(gates, counters, "minimum_iv_rank_for_short_vega", metrics["iv_rank"], policy["minimum_iv_rank_for_short_vega"], true, false);
+            }
+        }
+    }
+    maybe_gate(metrics, policy, gates, counters, "minimum_delta", metrics["net_delta"], true, false);
+    maybe_gate(metrics, policy, gates, counters, "maximum_delta", metrics["net_delta"], false, false);
+    maybe_gate(metrics, policy, gates, counters, "minimum_vega", metrics["net_vega"], true, false);
+    maybe_gate(metrics, policy, gates, counters, "maximum_vega", metrics["net_vega"], false, false);
+    maybe_gate(metrics, policy, gates, counters, "minimum_theta", metrics["net_theta"], true, false);
+    maybe_gate(metrics, policy, gates, counters, "maximum_theta", metrics["net_theta"], false, false);
+    return true;
+}
+
+fn decide(request) {
+    gate_contract(request);
+    let metrics = request["metrics"];
+    let policy = request["policy"];
+    let gates = [];
+    let counters = [0, 0, 0, 0];
+    run_ev_gates(metrics, policy, gates, counters);
+    run_loss_gates(metrics, policy, gates, counters);
+    run_greek_gates(metrics, policy, gates, counters);
+    let evaluated = counters[0];
+    let passed_count = counters[1];
+    let failed_hard = counters[2];
+    let failed_soft = counters[3];
+    let reasons = [];
+    let decision = "take";
+    if (failed_hard > 0) {
+        decision = "skip";
+        array_push(reasons, "one or more loss/EV gates failed");
+    } else {
+        if (failed_soft > 0) {
+            decision = "reduce";
+            array_push(reasons, "soft gates failed; consider reducing size");
+        }
+    }
+    if (evaluated == 0) {
+        decision = "skip";
+        array_push(reasons, "no policy gates were evaluated");
+    }
+    let confidence = 1;
+    if (evaluated > 0) {
+        confidence = passed_count / evaluated;
+    }
+    array_push(reasons, string_concat("gates passed=", number_to_string(passed_count)));
+    return {
+        "schema": 1,
+        "kind": "trade_policy_decision",
+        "decision": decision,
+        "gates": gates,
+        "confidence": confidence,
+        "reasons": reasons
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(decide(request));

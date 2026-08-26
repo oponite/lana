@@ -1,0 +1,219 @@
+// sweep_judge.lana -- robustness judge for a bounded parameter sweep.
+//
+// Request:  {"schema":1, "kind":"sweep_judge_request",
+//            "variants": [{"id", <swept param field>, "sharpe",
+//                          "max_drawdown", "total_return_pct", "trade_count"}],
+//            "baseline_variant_id", "param_key",
+//            "policy": {"min_trades", "neighbor_tolerance",
+//                       "max_isolation_ratio"}}
+// Response: {"schema":1, "kind":"sweep_judge_verdict", "robust",
+//            "flagged_variants", "recommended_variant_id", "surface_score",
+//            "rationale"}
+//
+// Judges (variants must be pre-sorted by the swept numeric parameter):
+//   1. trade_count < policy.min_trades -> flagged (insufficient evidence).
+//   2. isolated-peak: the best variant (primary metric: sharpe when present,
+//      else total_return_pct) whose interior neighbors are NOT both within
+//      policy.neighbor_tolerance -> flagged (overfit).
+//   3. best-vs-median: excess = best metric - mean; when excess exceeds
+//      policy.max_isolation_ratio * mean absolute deviation AND the excess is
+//      at least policy.neighbor_tolerance, the best variant is flagged. This
+//      handles negative metrics by comparing distances, not ratios.
+// recommended_variant_id = best non-flagged variant (may equal best overall).
+// surface_score = mean absolute neighbor difference of the primary metric
+// (lower = smoother surface; documented here for stability).
+
+import "bridge.lana" as bridge;
+
+fn gate_contract(request) {
+    assert(request["schema"] == 1, "unsupported sweep_judge schema");
+    assert(map_has(request, "kind"), "kind is required");
+    assert(request["kind"] == "sweep_judge_request", "invalid sweep_judge kind");
+    assert(map_has(request, "variants"), "variants is required");
+    assert(map_has(request, "baseline_variant_id"), "baseline_variant_id is required");
+    assert(map_has(request, "policy"), "policy is required");
+    return true;
+}
+
+fn abs_value(value) {
+    if (value < 0) {
+        return 0 - value;
+    }
+    return value;
+}
+
+fn metric_of(variant) {
+    if (map_has(variant, "sharpe")) {
+        if (variant["sharpe"] != null) {
+            return variant["sharpe"];
+        }
+    }
+    return variant["total_return_pct"];
+}
+
+fn is_flagged(flagged, id) {
+    let index = 0;
+    while (index < array_length(flagged)) {
+        if (flagged[index] == id) {
+            return true;
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn flag_once(flagged, reasons, id, prefix) {
+    if (!is_flagged(flagged, id)) {
+        array_push(flagged, id);
+        array_push(reasons, string_concat(prefix, id));
+    }
+    return true;
+}
+
+fn find_best_index(variants) {
+    let best_index = 0;
+    let best_metric = metric_of(variants[0]);
+    let index = 1;
+    while (index < array_length(variants)) {
+        let metric = metric_of(variants[index]);
+        if (metric > best_metric) {
+            best_metric = metric;
+            best_index = index;
+        }
+        index = index + 1;
+    }
+    return best_index;
+}
+
+fn mean_metric(variants) {
+    let total = 0;
+    let index = 0;
+    while (index < array_length(variants)) {
+        total = total + metric_of(variants[index]);
+        index = index + 1;
+    }
+    return total / array_length(variants);
+}
+
+fn mean_abs_deviation(variants, mean) {
+    let total = 0;
+    let index = 0;
+    while (index < array_length(variants)) {
+        total = total + abs_value(metric_of(variants[index]) - mean);
+        index = index + 1;
+    }
+    return total / array_length(variants);
+}
+
+fn surface_score(variants) {
+    let changes = 0;
+    let pairs = 0;
+    let index = 1;
+    while (index < array_length(variants)) {
+        changes = changes + abs_value(metric_of(variants[index]) - metric_of(variants[index - 1]));
+        pairs = pairs + 1;
+        index = index + 1;
+    }
+    if (pairs > 0) {
+        return changes / pairs;
+    }
+    return 0;
+}
+
+fn judge(request) {
+    gate_contract(request);
+    let variants = request["variants"];
+    let policy = request["policy"];
+    let flagged = [];
+    let reasons = [];
+    let count = array_length(variants);
+    assert(count > 0, "sweep has no variants");
+
+    let index = 0;
+    while (index < count) {
+        let variant = variants[index];
+        if (map_has(variant, "trade_count")) {
+            if (variant["trade_count"] != null) {
+                if (variant["trade_count"] < policy["min_trades"]) {
+                    flag_once(flagged, reasons, variant["id"], "insufficient trades: ");
+                }
+            }
+        }
+        index = index + 1;
+    }
+
+    let best_index = find_best_index(variants);
+    let best_id = variants[best_index]["id"];
+    let best_metric = metric_of(variants[best_index]);
+
+    if (best_index > 0) {
+        if (best_index < count - 1) {
+            let drop_left = best_metric - metric_of(variants[best_index - 1]);
+            let drop_right = best_metric - metric_of(variants[best_index + 1]);
+            let isolated = false;
+            if (drop_left > policy["neighbor_tolerance"]) {
+                isolated = true;
+            } else {
+                if (drop_right > policy["neighbor_tolerance"]) {
+                    isolated = true;
+                }
+            }
+            if (isolated) {
+                flag_once(flagged, reasons, best_id, "isolated peak: ");
+            }
+        }
+    }
+
+    if (count > 2) {
+        let mean = mean_metric(variants);
+        let avg_dev = mean_abs_deviation(variants, mean);
+        let excess = best_metric - mean;
+        if (avg_dev > 0) {
+            if (excess > policy["max_isolation_ratio"] * avg_dev) {
+                if (excess > policy["neighbor_tolerance"]) {
+                    flag_once(flagged, reasons, best_id, "best-vs-mean spike: ");
+                }
+            }
+        }
+    }
+
+    let recommended = null;
+    let recommended_metric = 0;
+    index = 0;
+    while (index < count) {
+        let variant = variants[index];
+        if (!is_flagged(flagged, variant["id"])) {
+            if (recommended == null) {
+                recommended = variant["id"];
+                recommended_metric = metric_of(variant);
+            } else {
+                if (metric_of(variant) > recommended_metric) {
+                    recommended = variant["id"];
+                    recommended_metric = metric_of(variant);
+                }
+            }
+        }
+        index = index + 1;
+    }
+    if (recommended == null) {
+        recommended = best_id;
+        array_push(reasons, "every variant is flagged; reporting the raw best");
+    }
+
+    let robust = true;
+    if (array_length(flagged) > 0) {
+        robust = false;
+    }
+    return {
+        "schema": 1,
+        "kind": "sweep_judge_verdict",
+        "robust": robust,
+        "flagged_variants": flagged,
+        "recommended_variant_id": recommended,
+        "surface_score": surface_score(variants),
+        "rationale": reasons
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(judge(request));
