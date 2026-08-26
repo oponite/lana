@@ -1,0 +1,33 @@
+fn decide(features) {
+    let ticker = features["ticker"];
+    if (features["trading_days"] < 200) {
+        return [ticker, false, "needs at least 200 trading days"];
+    }
+    if (features["has_options"] != true) {
+        return [ticker, false, "has no listed options"];
+    }
+    if (features["share_cost"] > features["max_capital"]) {
+        return [ticker, false, "share cost exceeds max capital"];
+    }
+    if (features["average_dollar_volume"] < 10000000) {
+        return [ticker, false, "average dollar volume is below 10000000"];
+    }
+    if (features["one_year_return"] < -0.20) {
+        return [ticker, false, "one-year return is below -20%"];
+    }
+    if (features["max_drawdown"] < -0.35) {
+        return [ticker, false, "maximum drawdown is below -35%"];
+    }
+    if (features["annualized_volatility"] < 0.15) {
+        return [ticker, false, "volatility is below 15%"];
+    }
+    if (features["annualized_volatility"] > 0.60) {
+        return [ticker, false, "volatility is above 60%"];
+    }
+    return [ticker, true, "passes the version-0 wheel candidate screen"];
+}
+
+let argv = args();
+assert(array_length(argv) == 1, "usage: decision.lana JSON_PATH");
+let result = decide(json_parse(read_text(argv[0])));
+print(json_stringify(result));

@@ -1,0 +1,95 @@
+import "./evidence.lana" as evidence_contract;
+
+// Deterministic decision-policy helpers for Lana 1.0 integrations.
+// Evidence is an ordinary map. Its status remains explicit until Lana 2.0
+// provides algebraic data types and pattern matching.
+
+fn decision(outcome, reason, evidence) {
+    return {"outcome": outcome, "reason": reason, "evidence": evidence};
+}
+
+fn accept(reason, evidence) {
+    return decision("accept", reason, evidence);
+}
+
+fn reject(reason, evidence) {
+    return decision("reject", reason, evidence);
+}
+
+fn abstain(reason, evidence) {
+    return decision("abstain", reason, evidence);
+}
+
+fn escalate(reason, evidence) {
+    return decision("escalate", reason, evidence);
+}
+
+fn evidence_status(evidence) {
+    let validated = evidence_contract.validate(evidence);
+    return validated["status"];
+}
+
+fn evidence_is_stale(evidence, current_time, max_age) {
+    assert(map_has(evidence, "observed_at"), "evidence observed_at is required");
+    assert(max_age >= 0, "maximum evidence age must be nonnegative");
+    assert(current_time >= evidence["observed_at"], "current time precedes evidence");
+    return current_time - evidence["observed_at"] > max_age;
+}
+
+fn threshold(evidence, minimum, current_time, max_age, minimum_confidence) {
+    let status = evidence_status(evidence);
+    if (status == "conflict") { return escalate("evidence conflicts", evidence); }
+    if (status != "resolved") { return abstain("evidence is not resolved", evidence); }
+    let validated = evidence_contract.validate(evidence);
+    assert(minimum_confidence >= 0, "minimum confidence must be nonnegative");
+    assert(minimum_confidence <= 1, "minimum confidence must not exceed one");
+    if (evidence_is_stale(validated, current_time, max_age)) {
+        return abstain("evidence is stale", validated);
+    }
+    if (validated["confidence"] < minimum_confidence) {
+        return abstain("evidence confidence is too low", validated);
+    }
+    if (validated["value"] >= minimum) { return accept("threshold passed", validated); }
+    return reject("threshold failed", validated);
+}
+
+fn require_human_review(value, required) {
+    if (required) {
+        if (value["outcome"] == "accept") {
+            return escalate("human review is required", value["evidence"]);
+        }
+    }
+    return value;
+}
+
+fn fail_closed(reason, evidence) {
+    return reject(reason, evidence);
+}
+
+fn fail_open(reason, evidence) {
+    return accept(reason, evidence);
+}
+
+fn quorum(values, required) {
+    assert(required > 0, "quorum must be positive");
+    let accepts = 0;
+    let rejects = 0;
+    let index = 0;
+    while (index < array_length(values)) {
+        let outcome = values[index]["outcome"];
+        if (outcome == "escalate") {
+            return escalate("a quorum input requires escalation", values);
+        }
+        if (outcome == "accept") { accepts = accepts + 1; }
+        if (outcome == "reject") { rejects = rejects + 1; }
+        index = index + 1;
+    }
+    if (accepts >= required) {
+        if (rejects >= required) {
+            return escalate("quorum contains conflicting outcomes", values);
+        }
+    }
+    if (accepts >= required) { return accept("accept quorum reached", values); }
+    if (rejects >= required) { return reject("reject quorum reached", values); }
+    return abstain("quorum not reached", values);
+}

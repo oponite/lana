@@ -1,0 +1,86 @@
+import "../../integrations/lana/policy.lana" as policy;
+
+fn resolved_evidence(confidence, revision) {
+    return {
+        "status": "resolved",
+        "schema": 1,
+        "source": "fixture",
+        "value": 0.80,
+        "observed_at": 100,
+        "effective_at": 100,
+        "confidence": confidence,
+        "exactness": "exact",
+        "revision": revision,
+        "provenance_id": "fixture:resolved",
+        "dependency_ids": []
+    };
+}
+
+fn test_threshold() {
+    let resolved = resolved_evidence(0.90, 7);
+    let accepted = policy.threshold(resolved, 0.70, 120, 30, 0.80);
+    assert(accepted["outcome"] == "accept", "fresh evidence did not pass");
+    assert(accepted["evidence"]["revision"] == 7, "decision lost evidence revision");
+    let stale = policy.threshold(resolved, 0.70, 131, 30, 0.80);
+    assert(stale["outcome"] == "abstain", "stale evidence did not abstain");
+    let low_confidence = policy.threshold(resolved_evidence(0.70, 8), 0.70, 120, 30, 0.80);
+    assert(low_confidence["outcome"] == "abstain", "low confidence did not abstain");
+    return null;
+}
+
+fn test_unresolved_and_review() {
+    let missing = {
+        "schema": 1,
+        "status": "not_measured",
+        "source": "fixture",
+        "observed_at": 100,
+        "effective_at": 100,
+        "confidence": 0,
+        "exactness": "exact",
+        "revision": 9,
+        "provenance_id": "fixture:missing",
+        "dependency_ids": []
+    };
+    let absent = policy.threshold(missing, 0.70, 120, 30, 0.80);
+    assert(absent["outcome"] == "abstain", "unmeasured evidence did not abstain");
+    let conflict = {
+        "schema": 1,
+        "status": "conflict",
+        "source": "fixture",
+        "observed_at": 100,
+        "effective_at": 100,
+        "confidence": 0,
+        "exactness": "exact",
+        "revision": 9,
+        "provenance_id": "fixture:conflict",
+        "dependency_ids": ["fixture:left", "fixture:right"]
+    };
+    let escalated = policy.threshold(conflict, 0.70, 120, 30, 0.80);
+    assert(escalated["outcome"] == "escalate", "conflicting evidence did not escalate");
+    let accepted = policy.threshold(resolved_evidence(0.90, 9), 0.70, 120, 30, 0.80);
+    let reviewed = policy.require_human_review(accepted, true);
+    assert(reviewed["outcome"] == "escalate", "accepted decision skipped review");
+    assert(policy.fail_closed("source unavailable", missing)["outcome"] == "reject", "fail closed accepted");
+    assert(policy.fail_open("source unavailable", missing)["outcome"] == "accept", "fail open rejected");
+    return null;
+}
+
+fn test_quorum() {
+    let resolved = resolved_evidence(0.90, 10);
+    let accepted = policy.accept("threshold passed", resolved);
+    let rejected = policy.reject("threshold failed", resolved);
+    let quorum_accept = policy.quorum([accepted, accepted, rejected], 2);
+    assert(quorum_accept["outcome"] == "accept", "accept quorum failed");
+    let quorum_reject = policy.quorum([rejected, rejected, accepted], 2);
+    assert(quorum_reject["outcome"] == "reject", "reject quorum failed");
+    let quorum_wait = policy.quorum([accepted, rejected], 2);
+    assert(quorum_wait["outcome"] == "abstain", "incomplete quorum did not abstain");
+    let quorum_conflict = policy.quorum([accepted, accepted, rejected, rejected], 2);
+    assert(quorum_conflict["outcome"] == "escalate", "conflicting quorum did not escalate");
+    return null;
+}
+
+test_threshold();
+test_unresolved_and_review();
+test_quorum();
+print("POLICY_LIBRARY_PASS");

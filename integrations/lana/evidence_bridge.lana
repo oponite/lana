@@ -1,0 +1,6 @@
+import "./bridge.lana" as bridge;
+import "./evidence.lana" as evidence_contract;
+
+let request = bridge.read_request();
+let record = evidence_contract.validate(request);
+bridge.write_response({"schema": 1, "kind": "evidence", "record": record});

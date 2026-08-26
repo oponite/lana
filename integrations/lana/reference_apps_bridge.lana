@@ -1,0 +1,14 @@
+import "./bridge.lana" as bridge;
+import "./reference_apps.lana" as apps;
+
+fn handle(request) {
+    if (request["kind"] == "service_health_request") { return apps.service_health(request); }
+    if (request["kind"] == "document_routing_request") { return apps.document_routing(request); }
+    if (request["kind"] == "sensor_fusion_request") { return apps.sensor_fusion(request); }
+    if (request["kind"] == "advisory_forecast_request") { return apps.advisory_forecast(request); }
+    assert(false, "unsupported reference application kind");
+    return null;
+}
+
+let request = bridge.read_request();
+bridge.write_response(handle(request));

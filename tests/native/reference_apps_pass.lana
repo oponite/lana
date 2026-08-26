@@ -1,0 +1,35 @@
+import "../../integrations/lana/reference_apps.lana" as apps;
+
+fn evidence_record(value, status) {
+    let record = {
+        "schema": 1,
+        "status": status,
+        "source": "reference-fixture",
+        "observed_at": 100,
+        "effective_at": 100,
+        "exactness": "exact",
+        "revision": 1,
+        "confidence": 0.9,
+        "provenance_id": "reference-fixture:1",
+        "dependency_ids": []
+    };
+    if (status == "resolved") { record["value"] = value; }
+    return record;
+}
+
+fn request(kind, metric, value, status) {
+    return {
+        "schema": 1,
+        "kind": kind,
+        "metric": metric,
+        "source_assumptions": "fixture supplies the named metric",
+        "evidence": evidence_record(value, status),
+        "policy": {"minimum": 0.7, "current_time": 120, "max_age": 30, "minimum_confidence": 0.8}
+    };
+}
+
+assert(apps.service_health(request("service_health_request", "availability_fraction", 0.9, "resolved"))["action"] == "serve", "service health did not serve");
+assert(apps.document_routing(request("document_routing_request", "classifier_score", 0.6, "resolved"))["action"] == "human_review", "document routing did not review");
+assert(apps.sensor_fusion(request("sensor_fusion_request", "safety_margin", 0, "not_measured"))["action"] == "request_measurement", "sensor fusion did not defer");
+assert(apps.advisory_forecast(request("advisory_forecast_request", "forecast_confidence", 0.9, "conflict"))["action"] == "review_model_evidence", "forecast conflict did not escalate");
+print("REFERENCE_APPS_PASS");

@@ -1,0 +1,16 @@
+{
+  "annualized_volatility": 0.28,
+  "average_dollar_volume": 1000000000.0,
+  "has_options": true,
+  "max_capital": 25000.0,
+  "max_drawdown": -0.17,
+  "one_year_return": 0.12,
+  "option_expiration_count": 12,
+  "price": 200.0,
+  "schema": 1,
+  "share_cost": 20000.0,
+  "source": "yfinance",
+  "ticker": "AAPL",
+  "trading_days": 252,
+  "observed_at": "2026-01-01T00:00:00Z"
+}

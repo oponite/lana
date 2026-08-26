@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from lana_integrations.bridge import BridgeRunner, LanaCompatibilityError
+from lana_integrations.evidence import EvidenceValidationError
 
 
 def test_round_trip_and_separate_logs(fake_lana: Path, program: Path) -> None:
@@ -50,6 +51,13 @@ def test_plain_execution(fake_lana: Path, program: Path) -> None:
     envelope = BridgeRunner(fake_lana).run_plain(program)
     assert envelope["ok"] is True
     assert envelope["stdout"] == "plain output\n"
+
+
+def test_evidence_input_is_validated_before_execution(
+    fake_lana: Path, program: Path
+) -> None:
+    with pytest.raises(EvidenceValidationError, match="status"):
+        BridgeRunner(fake_lana).run_evidence(program, {"schema": 1, "status": "maybe"})
 
 
 def test_rejects_incompatible_version(tmp_path: Path) -> None:

@@ -1,0 +1,18 @@
+import "./policy.lana" as policy;
+
+// Planned effects remain inert until a definite policy result accepts them.
+
+fn run_threshold_io_effect(evidence, minimum, current_time, max_age, minimum_confidence, payload) {
+    let value = policy.threshold(evidence, minimum, current_time, max_age, minimum_confidence);
+    if (value["outcome"] != "accept") {
+        return {"authorized": false, "decision": value};
+    }
+    let plan = planned_effect("io", payload);
+    let result = execute_effect(plan);
+    return {
+        "authorized": true,
+        "decision": value,
+        "result": result,
+        "effect": effect_status(plan)
+    };
+}

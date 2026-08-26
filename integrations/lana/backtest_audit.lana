@@ -1,0 +1,278 @@
+// backtest_audit.lana -- admission gate for a completed quant-research run dir.
+//
+// Request:  {"schema":1, "kind":"backtest_audit_request", "summary",
+//            "data_manifest", "spec", "trades_agg", "equity_agg", "policy"}
+// Response: {"schema":1, "kind":"backtest_audit_verdict", "verdict",
+//            "violations", "warnings", "checked_rules"}
+//
+// Violations (verdict=fail): non-positive or missing costs, timestamp-ordering
+// violations, summary.total_return_pct that cannot be reproduced from the
+// equity curve within policy.return_tolerance (compared in percent), missing
+// data_manifest source hash or data cutoff, or a suppressed absolute return
+// while the benchmark is reported. Warnings flag empty runs, equity curves
+// with non-positive values, and an empty run with no trades (a legitimately
+// flat run warns rather than fails).
+//
+// Lana runtime notes for maintainers: equality against a map value is
+// unsupported, so presence checks use map_has; there is no "or" operator, so
+// combined conditions use nested ifs or helper fns. Keep functions below the
+// 256-register limit by splitting independent gate lists into helpers.
+
+import "bridge.lana" as bridge;
+
+fn gate_contract(request) {
+    assert(request["schema"] == 1, "unsupported backtest_audit schema");
+    assert(map_has(request, "kind"), "kind is required");
+    assert(request["kind"] == "backtest_audit_request", "invalid backtest_audit kind");
+    assert(map_has(request, "summary"), "summary is required");
+    assert(map_has(request, "data_manifest"), "data_manifest is required");
+    assert(map_has(request, "spec"), "spec is required");
+    assert(map_has(request, "trades_agg"), "trades_agg is required");
+    assert(map_has(request, "equity_agg"), "equity_agg is required");
+    assert(map_has(request, "policy"), "policy is required");
+    return true;
+}
+
+fn abs_value(value) {
+    if (value < 0) {
+        return 0 - value;
+    }
+    return value;
+}
+
+fn push_if_missing(container, key, violations, message) {
+    if (!map_has(container, key)) {
+        array_push(violations, message);
+    }
+    return true;
+}
+
+fn check_costs(request, violations, warnings) {
+    let spec = request["spec"];
+    let policy = request["policy"];
+    let required = false;
+    if (map_has(policy, "require_positive_costs")) {
+        if (policy["require_positive_costs"] == true) {
+            required = true;
+        }
+    }
+    if (required) {
+        let has_positive_cost = false;
+        if (map_has(spec, "fees_bps")) {
+            if (spec["fees_bps"] != null) {
+                if (spec["fees_bps"] > 0) {
+                    has_positive_cost = true;
+                }
+            }
+        }
+        if (map_has(spec, "slippage_bps")) {
+            if (spec["slippage_bps"] != null) {
+                if (spec["slippage_bps"] > 0) {
+                    has_positive_cost = true;
+                }
+            }
+        }
+        if (map_has(spec, "contract_fee_per_leg")) {
+            if (spec["contract_fee_per_leg"] != null) {
+                if (spec["contract_fee_per_leg"] > 0) {
+                    has_positive_cost = true;
+                }
+            }
+        }
+        if (has_positive_cost != true) {
+            array_push(violations, "at least one known cost input must be positive");
+        }
+    }
+    return true;
+}
+
+fn check_ordering(request, violations, warnings) {
+    let agg = request["trades_agg"];
+    if (map_has(agg, "all_ordering_ok")) {
+        if (agg["all_ordering_ok"] != true) {
+            array_push(violations, "trade timestamp ordering violated upstream");
+        }
+    } else {
+        array_push(violations, "trades_agg.all_ordering_ok missing");
+    }
+    if (map_has(agg, "violations_count")) {
+        let count = agg["violations_count"] + 0;
+        if (count != 0) {
+            array_push(violations, "trades_agg.violations_count must be 0");
+        }
+    } else {
+        array_push(violations, "trades_agg.violations_count missing");
+    }
+    return true;
+}
+
+fn check_equity(request, violations, warnings) {
+    let eq = request["equity_agg"];
+    let summary = request["summary"];
+    let policy = request["policy"];
+    if (!map_has(eq, "rows")) {
+        array_push(warnings, "equity row count missing");
+        return true;
+    }
+    let rows = eq["rows"] + 0;
+    if (rows == 0) {
+        array_push(warnings, "empty equity curve");
+        if (map_has(summary, "total_return_pct")) {
+            if (abs_value(summary["total_return_pct"] + 0) > 0.000001) {
+                array_push(violations, "empty equity curve with a nonzero reported return");
+            }
+        }
+        return true;
+    }
+    if (!map_has(eq, "start_value")) {
+        array_push(violations, "equity start value missing");
+        return true;
+    }
+    if (!map_has(eq, "end_value")) {
+        array_push(violations, "equity end value missing");
+        return true;
+    }
+    if (eq["start_value"] == null) {
+        array_push(violations, "equity start value missing");
+        return true;
+    }
+    if (eq["end_value"] == null) {
+        array_push(violations, "equity end value missing");
+        return true;
+    }
+    let start_value = eq["start_value"] + 0;
+    let end_value = eq["end_value"] + 0;
+    if (start_value <= 0) {
+        array_push(warnings, "equity curve starts at a non-positive value");
+        return true;
+    }
+    if (end_value <= 0) {
+        array_push(warnings, "equity curve ends at a non-positive value");
+        return true;
+    }
+    if (map_has(policy, "return_tolerance")) {
+        if (map_has(summary, "total_return_pct")) {
+            if (!map_has(request["spec"], "initial_capital")) {
+                array_push(warnings, "initial capital missing; return consistency not checked");
+            } else {
+                if (request["spec"]["initial_capital"] == null) {
+                    array_push(warnings, "initial capital is non-positive; return consistency not checked");
+                } else {
+                    let initial_capital = request["spec"]["initial_capital"] + 0;
+                    if (initial_capital <= 0) {
+                        array_push(warnings, "initial capital is non-positive; return consistency not checked");
+                    } else {
+                        let recomputed = ((end_value / initial_capital) - 1) * 100;
+                        let tolerance = policy["return_tolerance"] + 0;
+                        if (abs_value(recomputed - (summary["total_return_pct"] + 0)) > tolerance) {
+                            array_push(violations, "total_return_pct inconsistent with initial capital and ending equity");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+fn check_trades(request, violations, warnings) {
+    let agg = request["trades_agg"];
+    if (!map_has(agg, "count")) {
+        array_push(warnings, "trades count missing");
+        return true;
+    }
+    let trade_count = agg["count"] + 0;
+    if (trade_count == 0) {
+        array_push(warnings, "empty run (no trades)");
+    }
+    return true;
+}
+
+fn manifest_has_source_hash(manifest) {
+    if (map_has(manifest, "source_sha256")) {
+        if (manifest["source_sha256"] != "") {
+            return true;
+        }
+    }
+    if (map_has(manifest, "source_sha")) {
+        if (manifest["source_sha"] != "") {
+            return true;
+        }
+    }
+    if (map_has(manifest, "sources")) {
+        return true;
+    }
+    return false;
+}
+
+fn check_manifest(request, violations, warnings) {
+    let manifest = request["data_manifest"];
+    if (!manifest_has_source_hash(manifest)) {
+        array_push(violations, "data_manifest must include a source hash");
+    }
+    let cutoff = null;
+    if (map_has(manifest, "data_cutoff")) {
+        cutoff = manifest["data_cutoff"];
+    } else {
+        if (map_has(request["spec"], "data_cutoff")) {
+            cutoff = request["spec"]["data_cutoff"];
+        }
+    }
+    if (cutoff == null) {
+        array_push(violations, "data cutoff missing from manifest and spec");
+    }
+    return true;
+}
+
+fn check_absolute_return(request, violations, warnings) {
+    let summary = request["summary"];
+    let policy = request["policy"];
+    let required = false;
+    if (map_has(policy, "require_absolute_return_reporting")) {
+        if (policy["require_absolute_return_reporting"] == true) {
+            required = true;
+        }
+    }
+    if (required) {
+        let benchmark_present = false;
+        if (map_has(summary, "benchmark_return_pct")) {
+            benchmark_present = true;
+        }
+        if (map_has(summary, "benchmark_symbol")) {
+            benchmark_present = true;
+        }
+        if (benchmark_present) {
+            if (!map_has(summary, "total_return_pct")) {
+                array_push(violations, "absolute return must be reported alongside the benchmark");
+            }
+        }
+    }
+    return true;
+}
+
+fn audit(request) {
+    gate_contract(request);
+    let violations = [];
+    let warnings = [];
+    check_costs(request, violations, warnings);
+    check_ordering(request, violations, warnings);
+    check_equity(request, violations, warnings);
+    check_trades(request, violations, warnings);
+    check_manifest(request, violations, warnings);
+    check_absolute_return(request, violations, warnings);
+    let verdict = "pass";
+    if (array_length(violations) > 0) {
+        verdict = "fail";
+    }
+    return {
+        "schema": 1,
+        "kind": "backtest_audit_verdict",
+        "verdict": verdict,
+        "violations": violations,
+        "warnings": warnings,
+        "checked_rules": 6
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(audit(request));
