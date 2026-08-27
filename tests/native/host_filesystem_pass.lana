@@ -1,0 +1,22 @@
+let arguments = args();
+let root = arguments[0];
+let target = string_concat(root, "/lana-host-boundary-test");
+let entries = directory_list(root);
+let found_directory = false;
+let index = 0;
+while (index < array_length(entries)) {
+    let entry = entries[index];
+    if (map_get(entry, "kind") == "directory") {
+        found_directory = true;
+    }
+    index = index + 1;
+}
+assert(found_directory, "directory_list must return directory facts");
+assert(path_exists(root), "path_exists must find the test root");
+directory_create(target);
+assert(path_exists(target), "directory_create must create a directory");
+let file = string_concat(target, "/atomic.txt");
+write_text_atomic(file, "atomic");
+assert(read_text(file) == "atomic", "write_text_atomic must publish complete text");
+assert(!path_exists(string_concat(target, "/missing")), "path_exists must report missing paths");
+print("HOST_FILESYSTEM_PASS");

@@ -11,11 +11,16 @@ typedef struct {
 
 typedef int (*LanaProjectCompileFn)(const char *source, const char *output,
                                     void *context);
+typedef int (*LanaProjectPlanFn)(const char *directory, const char *output,
+                                 void *context);
 
 int lana_project_new(const char *directory);
 int lana_project_load(const char *directory, LanaProject *project);
 int lana_project_build(const char *directory, LanaProjectCompileFn compile,
                        void *context, char *output, size_t output_size);
+int lana_project_build_with_plan(const char *directory, LanaProjectPlanFn plan,
+                                 LanaProjectCompileFn compile, void *context,
+                                 char *output, size_t output_size);
 int lana_project_check(const char *directory, LanaProjectCompileFn compile,
                        void *context);
 int lana_project_test(const char *directory, const char *executable);

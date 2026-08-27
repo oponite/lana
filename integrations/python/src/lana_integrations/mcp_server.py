@@ -1,4 +1,4 @@
-"""Root-scoped stdio MCP server for Lana 1.0."""
+"""Root-scoped stdio MCP server for Lana 1.1 and compatible 1.0 runtimes."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def build_server(
     server = MCPServer(
         "lana",
         instructions=(
-            "Check and run Lana 1.0 programs beneath configured roots. "
+            "Check and run Lana 1.x programs beneath configured roots. "
             "Execution is local and may perform file effects."
         ),
     )

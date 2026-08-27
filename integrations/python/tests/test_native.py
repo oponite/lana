@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from lana_integrations.native import NativeBridge
+from lana_integrations.native import NativeBridge, _is_supported_version
+
+
+def test_supported_version_pattern() -> None:
+    assert _is_supported_version("1.0.9")
+    assert _is_supported_version("1.1.0")
+    assert not _is_supported_version("2.0.0")
 
 
 def test_ctypes_native_round_trip(tmp_path: Path) -> None:

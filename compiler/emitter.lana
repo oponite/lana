@@ -91,6 +91,10 @@ fn is_host_call(name) {
     if (name == "string_hex") { return true; } if (name == "string_join") { return true; }
     if (name == "array_length") { return true; } if (name == "string_unescape") { return true; }
     if (name == "path_resolve") { return true; }
+    if (name == "directory_list") { return true; } if (name == "directory_create") { return true; }
+    if (name == "path_exists") { return true; } if (name == "write_text_atomic") { return true; }
+    if (name == "hash_update") { return true; }
+    if (name == "hash_xor") { return true; }
     if (name == "json_parse") { return true; } if (name == "json_stringify") { return true; }
     if (name == "csv_read") { return true; } if (name == "csv_write") { return true; }
     return false;

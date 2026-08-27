@@ -9,6 +9,17 @@ fn threshold_authorization(evidence, minimum, current_time, max_age, minimum_con
     return {
         "schema": 1,
         "kind": "threshold_authorization",
+        "inputs": {
+            "evidence": evidence,
+            "policy": {
+                "minimum": minimum,
+                "current_time": current_time,
+                "max_age": max_age,
+                "minimum_confidence": minimum_confidence
+            },
+            "effect": {"kind": effect_kind, "payload": effect_payload},
+            "seed": seed
+        },
         "policy": {
             "minimum": minimum,
             "current_time": current_time,
@@ -31,15 +42,25 @@ fn replay_threshold(record) {
     assert(map_has(record, "policy"), "replay policy is required");
     assert(map_has(record, "decision"), "replay decision is required");
     assert(map_has(record, "authorization"), "replay authorization is required");
-    let settings = record["policy"];
     let expected = record["decision"];
+    let evidence = expected["evidence"];
+    let settings = record["policy"];
+    if (map_has(record, "inputs")) {
+        let inputs = record["inputs"];
+        evidence = inputs["evidence"];
+        assert(json_stringify(inputs["policy"]) == json_stringify(settings), "replay policy inputs changed");
+        assert(inputs["seed"] == record["seed"], "replay seed inputs changed");
+        assert(inputs["effect"]["kind"] == record["authorization"]["effect_kind"], "replay effect kind changed");
+        assert(json_stringify(inputs["effect"]["payload"]) == json_stringify(record["authorization"]["effect_payload"]), "replay effect payload changed");
+    }
     let actual = policy.threshold(
-        expected["evidence"],
+        evidence,
         settings["minimum"],
         settings["current_time"],
         settings["max_age"],
         settings["minimum_confidence"]
     );
+    assert(json_stringify(actual["evidence"]) == json_stringify(expected["evidence"]), "replay evidence changed");
     assert(actual["outcome"] == expected["outcome"], "replay decision outcome changed");
     assert(actual["reason"] == expected["reason"], "replay decision reason changed");
     let authorized = actual["outcome"] == "accept";

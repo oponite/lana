@@ -5,11 +5,14 @@
 #include <math.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <sys/types.h>
 
@@ -2694,6 +2697,216 @@ static bool nonnegative_integer(const Value *value) {
            value->as.number <= 9007199254740991.0;
 }
 
+typedef struct {
+    char **names;
+    size_t count;
+    size_t capacity;
+} HostDirectoryEntries;
+
+static void host_directory_entries_free(HostDirectoryEntries *entries) {
+    size_t index;
+    for (index = 0u; index < entries->count; ++index) free(entries->names[index]);
+    free(entries->names);
+    entries->names = NULL; entries->count = 0u; entries->capacity = 0u;
+}
+
+static int host_directory_entry_compare(const void *left, const void *right) {
+    return strcmp(*(const char *const *)left, *(const char *const *)right);
+}
+
+static char *host_string_copy(LanaVM *vm, const char *text) {
+    size_t length = strlen(text);
+    char *copy = lana_vm_alloc(vm, length + 1u);
+    if (copy != NULL) memcpy(copy, text, length + 1u);
+    return copy;
+}
+
+static LanaError host_hash_update(LanaVM *vm, const Value *seed,
+                                  const Value *text, Value *out) {
+    static const char digits[] = "0123456789abcdef";
+    uint64_t hash = 0u;
+    char *result;
+    size_t index;
+    if (seed->type != VAL_STRING || text->type != VAL_STRING ||
+        strlen(seed->as.string) != 16u) return LANA_ERR_TYPE;
+    for (index = 0u; index < 16u; ++index) {
+        unsigned char byte = (unsigned char)seed->as.string[index];
+        unsigned char value;
+        if (byte >= '0' && byte <= '9') value = (unsigned char)(byte - '0');
+        else if (byte >= 'a' && byte <= 'f') value = (unsigned char)(byte - 'a' + 10u);
+        else if (byte >= 'A' && byte <= 'F') value = (unsigned char)(byte - 'A' + 10u);
+        else return LANA_ERR_FORMAT;
+        hash = (hash << 4u) | value;
+    }
+    for (index = 0u; index < strlen(text->as.string); ++index) {
+        hash ^= (unsigned char)text->as.string[index];
+        hash *= UINT64_C(1099511628211);
+    }
+    result = lana_vm_alloc(vm, 17u);
+    if (result == NULL) return LANA_ERR_OOM;
+    for (index = 0u; index < 16u; ++index)
+        result[index] = digits[(hash >> ((15u - index) * 4u)) & 15u];
+    result[16] = '\0';
+    *out = lana_value_string(result);
+    return LANA_OK;
+}
+
+static LanaError host_hash_xor(LanaVM *vm, const Value *left,
+                               const Value *right, Value *out) {
+    char *result;
+    size_t index;
+    if (left->type != VAL_STRING || right->type != VAL_STRING ||
+        strlen(left->as.string) != 16u || strlen(right->as.string) != 16u)
+        return LANA_ERR_TYPE;
+    result = lana_vm_alloc(vm, 17u);
+    if (result == NULL) return LANA_ERR_OOM;
+    for (index = 0u; index < 16u; ++index) {
+        unsigned char l = (unsigned char)left->as.string[index];
+        unsigned char r = (unsigned char)right->as.string[index];
+        int high = (l >= '0' && l <= '9') ? l - '0' :
+                   (l >= 'a' && l <= 'f') ? l - 'a' + 10 :
+                   (l >= 'A' && l <= 'F') ? l - 'A' + 10 : -1;
+        int low = (r >= '0' && r <= '9') ? r - '0' :
+                  (r >= 'a' && r <= 'f') ? r - 'a' + 10 :
+                  (r >= 'A' && r <= 'F') ? r - 'A' + 10 : -1;
+        if (high < 0 || low < 0) return LANA_ERR_FORMAT;
+        result[index] = "0123456789abcdef"[high ^ low];
+    }
+    result[16] = '\0'; *out = lana_value_string(result); return LANA_OK;
+}
+
+static LanaError host_directory_list(LanaVM *vm, const Value *argument,
+                                     Value *out) {
+    DIR *directory;
+    struct dirent *entry;
+    HostDirectoryEntries entries = {0};
+    LanaArray *array;
+    size_t index;
+    if (argument->type != VAL_STRING) return LANA_ERR_TYPE;
+    directory = opendir(argument->as.string);
+    if (directory == NULL) return LANA_ERR_IO;
+    while ((entry = readdir(directory)) != NULL) {
+        char **grown;
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        if (entries.count == entries.capacity) {
+            size_t capacity = entries.capacity == 0u ? 8u : entries.capacity * 2u;
+            if (capacity <= entries.capacity || capacity > SIZE_MAX / sizeof(*grown)) {
+                (void)closedir(directory); host_directory_entries_free(&entries);
+                return LANA_ERR_LIMIT;
+            }
+            grown = realloc(entries.names, capacity * sizeof(*grown));
+            if (grown == NULL) {
+                (void)closedir(directory); host_directory_entries_free(&entries);
+                return LANA_ERR_OOM;
+            }
+            entries.names = grown; entries.capacity = capacity;
+        }
+        entries.names[entries.count] = strdup(entry->d_name);
+        if (entries.names[entries.count] == NULL) {
+            (void)closedir(directory); host_directory_entries_free(&entries);
+            return LANA_ERR_OOM;
+        }
+        ++entries.count;
+    }
+    if (closedir(directory) != 0) {
+        host_directory_entries_free(&entries); return LANA_ERR_IO;
+    }
+    qsort(entries.names, entries.count, sizeof(*entries.names),
+          host_directory_entry_compare);
+    array = lana_vm_alloc(vm, sizeof(*array));
+    if (array == NULL) { host_directory_entries_free(&entries); return LANA_ERR_OOM; }
+    array->count = entries.count; array->capacity = entries.count;
+    array->items = entries.count == 0u ? NULL :
+        lana_vm_alloc(vm, entries.count * sizeof(*array->items));
+    if (entries.count > 0u && array->items == NULL) {
+        host_directory_entries_free(&entries); return LANA_ERR_OOM;
+    }
+    for (index = 0u; index < entries.count; ++index) {
+        char path[PATH_MAX];
+        struct stat metadata;
+        LanaMap *map;
+        Value name;
+        Value kind;
+        LanaError error;
+        int written = snprintf(path, sizeof(path), "%s/%s",
+                               argument->as.string, entries.names[index]);
+        if (written < 0 || (size_t)written >= sizeof(path) ||
+            stat(path, &metadata) != 0) {
+            host_directory_entries_free(&entries); return LANA_ERR_IO;
+        }
+        error = lana_map_new(vm, 2u, &map);
+        if (error != LANA_OK) { host_directory_entries_free(&entries); return error; }
+        name = lana_value_string(host_string_copy(vm, entries.names[index]));
+        kind = lana_value_string(S_ISDIR(metadata.st_mode) ? "directory" : "file");
+        if (name.as.string == NULL ||
+            (error = lana_map_set(vm, map, "name", &name, true)) != LANA_OK ||
+            (error = lana_map_set(vm, map, "kind", &kind, true)) != LANA_OK) {
+            host_directory_entries_free(&entries);
+            return name.as.string == NULL ? LANA_ERR_OOM : error;
+        }
+        array->items[index] = lana_value_map(map);
+    }
+    host_directory_entries_free(&entries);
+    *out = lana_value_array(array);
+    return LANA_OK;
+}
+
+static LanaError host_directory_create(const Value *argument) {
+    struct stat metadata;
+    if (argument->type != VAL_STRING) return LANA_ERR_TYPE;
+    if (mkdir(argument->as.string, 0755) == 0) return LANA_OK;
+    if (errno != EEXIST || stat(argument->as.string, &metadata) != 0 ||
+        !S_ISDIR(metadata.st_mode)) return LANA_ERR_IO;
+    return LANA_OK;
+}
+
+static LanaError host_path_exists(const Value *argument, Value *out) {
+    struct stat metadata;
+    if (argument->type != VAL_STRING) return LANA_ERR_TYPE;
+    if (stat(argument->as.string, &metadata) == 0) {
+        *out = lana_value_bool(true); return LANA_OK;
+    }
+    if (errno == ENOENT) { *out = lana_value_bool(false); return LANA_OK; }
+    return LANA_ERR_IO;
+}
+
+static LanaError host_write_text_atomic(const Value *path,
+                                        const Value *contents) {
+    char *temporary;
+    size_t length, content_length;
+    int descriptor;
+    FILE *file = NULL;
+    bool success = false;
+    if (path->type != VAL_STRING || contents->type != VAL_STRING)
+        return LANA_ERR_TYPE;
+    length = strlen(path->as.string);
+    if (length > SIZE_MAX - sizeof(".lana-tmp-XXXXXX")) return LANA_ERR_LIMIT;
+    temporary = malloc(length + sizeof(".lana-tmp-XXXXXX"));
+    if (temporary == NULL) return LANA_ERR_OOM;
+    (void)snprintf(temporary, length + sizeof(".lana-tmp-XXXXXX"),
+                   "%s.lana-tmp-XXXXXX", path->as.string);
+    descriptor = mkstemp(temporary);
+    if (descriptor < 0) { free(temporary); return LANA_ERR_IO; }
+    file = fdopen(descriptor, "wb");
+    if (file == NULL) {
+        (void)close(descriptor); (void)unlink(temporary); free(temporary);
+        return LANA_ERR_IO;
+    }
+    content_length = strlen(contents->as.string);
+    {
+        bool write_ok = fwrite(contents->as.string, 1u, content_length, file) ==
+                        content_length;
+        int close_result = fclose(file);
+        file = NULL;
+        if (write_ok && close_result == 0 && rename(temporary, path->as.string) == 0)
+            success = true;
+    }
+    if (!success) (void)unlink(temporary);
+    free(temporary);
+    return success ? LANA_OK : LANA_ERR_IO;
+}
+
 static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *arguments,
                                  size_t argc, Value *out) {
     size_t index;
@@ -2731,6 +2944,24 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             if (fclose(file) != 0) return LANA_ERR_IO;
             return LANA_OK;
         }
+        case LANA_HOST_DIRECTORY_LIST:
+            if (argc != 1u) return LANA_ERR_TYPE;
+            return host_directory_list(vm, &arguments[0], out);
+        case LANA_HOST_DIRECTORY_CREATE:
+            if (argc != 1u) return LANA_ERR_TYPE;
+            return host_directory_create(&arguments[0]);
+        case LANA_HOST_PATH_EXISTS:
+            if (argc != 1u) return LANA_ERR_TYPE;
+            return host_path_exists(&arguments[0], out);
+        case LANA_HOST_WRITE_TEXT_ATOMIC:
+            if (argc != 2u) return LANA_ERR_TYPE;
+            return host_write_text_atomic(&arguments[0], &arguments[1]);
+        case LANA_HOST_HASH_UPDATE:
+            if (argc == 3u && arguments[2].type == VAL_STRING &&
+                strcmp(arguments[2].as.string, "xor") == 0)
+                return host_hash_xor(vm, &arguments[0], &arguments[1], out);
+            if (argc != 2u) return LANA_ERR_TYPE;
+            return host_hash_update(vm, &arguments[0], &arguments[1], out);
         case LANA_HOST_NOW: {
             struct timespec now;
             if (argc != 0u || timespec_get(&now, TIME_UTC) != TIME_UTC) return LANA_ERR_TYPE;

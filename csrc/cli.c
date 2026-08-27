@@ -105,22 +105,50 @@ static bool find_compiler(const char *argv0, char *out, size_t out_size) {
     return false;
 }
 
+static int run_compiler_program(const char *compiler_path, size_t argument_count,
+                                const char **arguments,
+                                LanaErrorInfo *error) {
+    LanaChunk compiler_chunk;
+    LanaVM vm;
+    LanaError result;
+    *error = (LanaErrorInfo){0};
+    result = lana_chunk_read_file(&compiler_chunk, compiler_path, error);
+    if (result != LANA_OK) return 1;
+    lana_vm_init(&vm, &compiler_chunk);
+    vm.memory_limit = 256u * 1024u * 1024u;
+    vm.instruction_limit = UINT64_C(50000000);
+    lana_vm_set_program_args(&vm, argument_count, arguments);
+    result = lana_vm_run(&vm);
+    if (result != LANA_OK) *error = vm.error;
+    lana_vm_free(&vm);
+    lana_chunk_free(&compiler_chunk);
+    return result == LANA_OK ? 0 : 1;
+}
+
+static int run_project_tool(const char *argv0, const char *mode,
+                            const char *argument) {
+    char compiler_path[4096];
+    const char *arguments[2] = {mode, argument};
+    LanaErrorInfo error = {0};
+    if (!find_compiler(argv0, compiler_path, sizeof(compiler_path))) {
+        (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1;
+    }
+    if (run_compiler_program(compiler_path, 2u, arguments, &error) != 0)
+        return report_error(&error);
+    return 0;
+}
+
 static int compile_source_file(const char *compiler_path, const char *source_path, const char *output_path) {
-    LanaChunk compiler_chunk, output_chunk; LanaErrorInfo error = {0}; LanaError result;
+    LanaChunk output_chunk; LanaErrorInfo error = {0}; LanaError result;
     char assembly_path[] = "/tmp/lana-assembly-XXXXXX"; int descriptor;
-    const char *arguments[2] = {source_path, assembly_path}; LanaVM vm;
+    const char *arguments[2] = {source_path, assembly_path};
     descriptor = mkstemp(assembly_path);
     if (descriptor < 0) { (void)fprintf(stderr, "cannot create compiler temporary file\n"); return 1; }
     (void)close(descriptor);
-    result = lana_chunk_read_file(&compiler_chunk, compiler_path, &error);
-    if (result != LANA_OK) { (void)unlink(assembly_path); return report_error(&error); }
-    lana_vm_init(&vm, &compiler_chunk); vm.memory_limit = 256u * 1024u * 1024u; vm.instruction_limit = UINT64_C(50000000);
-    lana_vm_set_program_args(&vm, 2, arguments); result = lana_vm_run(&vm);
-    if (result != LANA_OK) {
-        error = vm.error; compiler_error_context(&error, source_path);
-        lana_vm_free(&vm); lana_chunk_free(&compiler_chunk); (void)unlink(assembly_path); return report_error(&error);
+    if (run_compiler_program(compiler_path, 2u, arguments, &error) != 0) {
+        compiler_error_context(&error, source_path);
+        (void)unlink(assembly_path); return report_error(&error);
     }
-    lana_vm_free(&vm); lana_chunk_free(&compiler_chunk);
     result = lana_assemble_file(assembly_path, &output_chunk, &error); (void)unlink(assembly_path);
     if (result == LANA_OK) result = lana_chunk_write_file(&output_chunk, output_path, &error);
     if (result != LANA_OK) return report_error(&error);
@@ -130,6 +158,15 @@ static int compile_source_file(const char *compiler_path, const char *source_pat
 static int project_compile(const char *source, const char *output,
                            void *context) {
     return compile_source_file(context, source, output);
+}
+
+static int project_plan(const char *directory, const char *output,
+                        void *context) {
+    const char *arguments[3] = {"--project-plan", directory, output};
+    LanaErrorInfo error = {0};
+    if (run_compiler_program(context, 3u, arguments, &error) != 0)
+        return report_error(&error);
+    return 0;
 }
 
 static int report_error(const LanaErrorInfo *error) {
@@ -285,7 +322,16 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "version") == 0) { (void)printf("Lana %s (LABC v1, C VM, native compiler)\n", LANA_VERSION); return 0; }
     if (strcmp(argv[1], "new") == 0) {
         if (argc != 3) { usage(stderr); return 2; }
-        return lana_project_new(argv[2]);
+        if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) {
+            (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1;
+        }
+        {
+            const char *arguments[2] = {"--project-new", argv[2]};
+            LanaErrorInfo error = {0};
+            if (run_compiler_program(compiler_path, 2u, arguments, &error) != 0)
+                return report_error(&error);
+            return 0;
+        }
     }
     if (strcmp(argv[1], "lsp") == 0) {
         if (argc != 2) { usage(stderr); return 2; }
@@ -298,16 +344,18 @@ int main(int argc, char **argv) {
             usage(stderr); return 2;
         }
         if (strcmp(argv[1], "fmt") == 0)
-            return lana_project_format(".", argc == 3);
-        if (strcmp(argv[1], "doc") == 0) return lana_project_document(".");
+            return run_project_tool(argv[0], "--project-fmt", argc == 3 ? "check" : "write");
+        if (strcmp(argv[1], "doc") == 0)
+            return run_project_tool(argv[0], "--project-doc", ".");
         if (strcmp(argv[1], "test") == 0) return lana_project_test(".", argv[0]);
         if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) {
             (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1;
         }
         {
             char output[4096];
-            return lana_project_build(".", project_compile, compiler_path,
-                                      output, sizeof(output));
+            return lana_project_build_with_plan(".", project_plan,
+                                                project_compile, compiler_path,
+                                                output, sizeof(output));
         }
     }
     if (strcmp(argv[1], "compile") == 0) {
@@ -318,8 +366,9 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "check") == 0) {
         char bytecode_path[] = "/tmp/lana-check-XXXXXX"; int descriptor, result;
         if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) { (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1; }
-        if (argc == 2) return lana_project_check(".", project_compile,
-                                                 compiler_path);
+        if (argc == 2) return lana_project_build_with_plan(
+            ".", project_plan, project_compile, compiler_path,
+            (char[4096]){0}, 4096u);
         if (argc != 3) { usage(stderr); return 2; }
         descriptor = mkstemp(bytecode_path); if (descriptor < 0) return 1; (void)close(descriptor);
         result = compile_source_file(compiler_path, argv[2], bytecode_path); (void)unlink(bytecode_path); return result;
@@ -345,8 +394,9 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "run") == 0 && argc == 2) {
         char output[4096]; char *run_argv[3] = {argv[0], "run-bytecode", output};
         if (!find_compiler(argv[0], compiler_path, sizeof(compiler_path))) { (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1; }
-        if (lana_project_build(".", project_compile, compiler_path, output,
-                               sizeof(output)) != 0) return 1;
+        if (lana_project_build_with_plan(".", project_plan, project_compile,
+                                         compiler_path, output,
+                                         sizeof(output)) != 0) return 1;
         return load_command(3, run_argv, true);
     }
     if (strcmp(argv[1], "run") == 0 && argc >= 3 && has_suffix(argv[2], ".lana")) {
