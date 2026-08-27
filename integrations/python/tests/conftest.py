@@ -13,7 +13,7 @@ import time
 
 command = sys.argv[1]
 if command == "version":
-    print("Lana 1.0.9 (LABC v1, fake)")
+    print("Lana 1.1.0 (LABC v1, fake)")
     raise SystemExit(0)
 program = Path(sys.argv[2])
 if command == "check":

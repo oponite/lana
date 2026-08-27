@@ -6,7 +6,7 @@ Lana is a general-purpose language with:
   and normalized complex disposition
 - immutable lazy `STATE_DIST` values that compose states without sampling or
   mutation until explicitly measured or sampled
-- and ordinary numbers, booleans, strings, arrays, functions, tasks, and host
+- ordinary numbers, booleans, strings, arrays, functions, tasks, and host
   calls.
 
 ```lana
@@ -24,7 +24,7 @@ creates an immutable lazy distribution, and `sample()` returns a concrete state.
 
 Lana is personal-first: it is the language I use to build programs. It is also
 public because the language model and implementation are worth exploring. Issues
-and questions are welcome, and supported 1.0 defects will receive ongoing triage.
+and questions are welcome, and supported 1.x defects will receive ongoing triage.
 
 ## Install and run
 
@@ -163,7 +163,7 @@ Source: [`examples/03_combined_evidence.lana`](examples/03_combined_evidence.lan
 
 ## Optional integrations
 
-The source-install integrations connect Lana 1.0 to JSON subprocess callers,
+The source-install integrations connect Lana 1.1 to JSON subprocess callers,
 MCP hosts, Jupyter, VS Code, Neovim, and a narrow native C ABI without adding
 dependencies to the normal Lana build. Start with
 [`integrations/README.md`](integrations/README.md).
@@ -201,9 +201,9 @@ The authority order is:
 Benchmark programs are reproducible source evidence; generated reports and
 machine-local result snapshots are not part of the source release.
 
-## 1.0 maintenance policy
+## 1.1 maintenance policy
 
-The Lana language, compiler, bytecode, and VM feature set is frozen through
+The Lana 1.1 language, compiler, bytecode, and VM feature set is frozen through
 December 31, 2026 while development moves to programs built with Lana. During
 that period, documentation, support, and compatibility-preserving fixes for
 correctness, security, data loss, or installation failures remain in scope.

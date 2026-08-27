@@ -228,6 +228,13 @@ add_native_compile_failure(native_m9_discarded_information tests/native/m9_disca
 add_test(NAME native_run_source COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/examples/general.lana")
 add_test(NAME native_external_prediction_data COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/examples/external_prediction_data.lana")
 add_test(NAME native_imports COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/native/import_main.lana")
+add_test(NAME native_host_filesystem COMMAND lana run
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/native/host_filesystem_pass.lana" --
+    "${CMAKE_CURRENT_BINARY_DIR}")
+set_tests_properties(native_host_filesystem PROPERTIES
+    PASS_REGULAR_EXPRESSION "HOST_FILESYSTEM_PASS")
+add_test(NAME native_host_hash COMMAND lana run
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/native/host_hash_pass.lana")
 add_test(NAME native_import_cycle_rejected COMMAND lana check "${CMAKE_CURRENT_SOURCE_DIR}/tests/native/import_cycle_a.lana")
 set_tests_properties(native_import_cycle_rejected PROPERTIES WILL_FAIL TRUE)
 add_test(

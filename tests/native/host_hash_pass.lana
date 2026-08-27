@@ -1,0 +1,4 @@
+let seed = "cbf29ce484222325";
+assert(hash_update(seed, "hello") == "a430d84680aabd0b", "FNV-1a update");
+assert(hash_update(hash_update(seed, "hel"), "lo") == hash_update(seed, "hello"), "FNV-1a chaining");
+assert(hash_update("00000000000000ff", "000000000000000f", "xor") == "00000000000000f0", "hash XOR");

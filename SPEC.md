@@ -1,4 +1,4 @@
-# Lana 1.0 Source and Runtime Surface
+# Lana 1.1 Source and Runtime Surface
 
 ## Provenance expressions
 
@@ -79,7 +79,7 @@ and exposed negative zero is normalized to positive zero.
 
 Optional `timestamp`, `source`, `weight`, and `confidence` fields are metadata.
 Construction, assignment, history, and transforms preserve them. States created
-by an APPEND sampling kernel have empty metadata because Lana 1.0 defines no
+by an APPEND sampling kernel have empty metadata because Lana 1.1 defines no
 metadata propagation rule for APPEND.
 
 ## Distributions and observation
@@ -240,6 +240,19 @@ history, indexes, CLI commands, and task syntax retain their prior behavior.
 Forked tasks own independent VM heaps, budgets, error states, and RNG streams.
 Arguments and joined results are deep-copied; shared distribution subgraphs stay
 shared inside the receiving VM and are never shared across VMs.
+
+The filesystem host calls `directory_list(path)`, `directory_create(path)`,
+`path_exists(path)`, and `write_text_atomic(path, text)` are effectful local
+tooling boundaries. `directory_list` returns sorted maps with `name` and
+`kind` (`file` or `directory`); it does not expose directory entries on a
+failed read. `directory_create` is idempotent for an existing directory.
+`path_exists` returns false only for a missing path and reports other lookup
+failures. `write_text_atomic` publishes a complete replacement or reports an
+I/O failure without replacing the destination. `hash_update(seed_hex, text)`
+returns the exact lowercase 16-digit FNV-1a state for incremental deterministic
+tooling hashes. Its internal `"xor"` mode combines two such states for
+dependency lock identities; hash values remain strings so 64-bit results are
+never rounded through Lana numbers.
 
 Shared Information is created with `shared_information(value)`, which returns
 only an admin capability. `shared_grant(admin, "read"|"observe"|"admin")`

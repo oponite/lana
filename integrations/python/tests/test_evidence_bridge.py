@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,13 @@ def test_evidence_bridge_round_trip() -> None:
     assert envelope["ok"] is True
     assert envelope["result"] == {"schema": 1, "kind": "evidence", "record": record}
 
+    invalid = dict(record)
+    invalid["dependency_ids"] = ["fixture:7", "fixture:7"]
+    rejected = BridgeRunner(executable).run(
+        ROOT / "integrations" / "lana" / "evidence_bridge.lana", invalid
+    )
+    assert rejected["ok"] is False
+
 
 def test_replay_bridge_round_trip() -> None:
     executable = built_lana()
@@ -72,6 +80,14 @@ def test_replay_bridge_round_trip() -> None:
     )
     assert replayed["ok"] is True
     assert replayed["result"] == recorded["result"]
+
+    tampered = json.loads(json.dumps(recorded["result"]))
+    tampered["inputs"]["evidence"]["value"] = 0.6
+    rejected = runner.run(
+        ROOT / "integrations" / "lana" / "replay_bridge.lana",
+        {"schema": 1, "kind": "threshold_authorization_replay", "record": tampered},
+    )
+    assert rejected["ok"] is False
 
 
 @pytest.mark.parametrize(

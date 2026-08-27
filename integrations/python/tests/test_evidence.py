@@ -51,3 +51,20 @@ def test_rejects_implicit_status_and_duplicate_dependencies() -> None:
     record["dependency_ids"] = ["source:a", "source:a"]
     with pytest.raises(EvidenceValidationError, match="unique"):
         validate_evidence(record)
+
+
+@pytest.mark.parametrize("dependencies", [["source:a", ""], ["source:a", 3]])
+def test_rejects_invalid_dependency_identifiers(dependencies: list[object]) -> None:
+    record = evidence()
+    record["dependency_ids"] = dependencies
+    with pytest.raises(EvidenceValidationError, match="dependency_ids"):
+        validate_evidence(record)
+
+
+def test_preserves_optional_lifecycle_metadata() -> None:
+    record = evidence()
+    record["reliability"] = {"score": 0.8, "method": "calibrated_fixture"}
+    record["calibration"] = {"version": "fixture-1"}
+    validated = validate_evidence(record)
+    assert validated["reliability"] == record["reliability"]
+    assert validated["calibration"] == record["calibration"]

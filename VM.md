@@ -75,11 +75,12 @@ the active function and frame count; step, continue, and quit never reinterpret
 bytecode. The low-level trace uses the same instruction and line mapping.
 
 The self-hosted compiler runs as ordinary verified bytecode with explicit
-256 MiB memory and 50,000,000-instruction limits. `path_resolve` is the narrow C
-host boundary for canonical module paths; lexing, parsing, resolution, semantic
-IR lowering, LABC emission, import-cycle checks, and call remapping execute in
-Lana. Clean builds assemble the checked textual bootstrap artifact and require
-no Python runtime.
+256 MiB memory and 50,000,000-instruction limits. `path_resolve` and the
+effectful filesystem tooling calls are C host boundaries for OS facts and
+atomic file publication; project policy remains ordinary Lana code. Lexing,
+parsing, resolution, semantic IR lowering, LABC emission, import-cycle checks,
+and call remapping execute in Lana. Clean builds assemble the checked textual
+bootstrap artifact and require no Python runtime.
 
 ## Sample records
 

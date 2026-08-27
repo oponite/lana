@@ -124,6 +124,11 @@ fn host_effect(name) {
     if (name == "print") { return effects("io"); }
     if (name == "read_text") { return effects("io"); }
     if (name == "write_text") { return effects("io"); }
+    if (name == "directory_list") { return effects("io"); }
+    if (name == "directory_create") { return effects("io"); }
+    if (name == "path_exists") { return effects("io"); }
+    if (name == "write_text_atomic") { return effects("io"); }
+    if (name == "hash_update") { return effects("pure"); }
     if (name == "csv_read") { return effects("io"); }
     if (name == "csv_write") { return effects("io"); }
     if (name == "args") { return effects("external_call"); }
@@ -140,6 +145,11 @@ fn host_type(name) {
     if (name == "args") { return type_ordinary("array"); }
     if (name == "read_text") { return type_ordinary("string"); }
     if (name == "write_text") { return type_ordinary("null"); }
+    if (name == "directory_list") { return type_ordinary("array"); }
+    if (name == "directory_create") { return type_ordinary("null"); }
+    if (name == "path_exists") { return type_ordinary("bool"); }
+    if (name == "write_text_atomic") { return type_ordinary("null"); }
+    if (name == "hash_update") { return type_ordinary("string"); }
     if (name == "now") { return type_ordinary("number"); }
     if (name == "random") { return type_sample(type_ordinary("number"), "host:random", "random"); }
     if (name == "assert") { return type_ordinary("null"); }

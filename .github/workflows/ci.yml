@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+    tags: ["v*"]
+  schedule:
+    - cron: "23 4 * * 6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EXPECTED_VERSION: "1.1.0"
+
+jobs:
+  native:
+    name: Native (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Configure
+        env:
+          CC: ${{ matrix.compiler }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Check version and whitespace
+        run: |
+          build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          git diff --check
+
+  asan:
+    name: Address and undefined behavior sanitizers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_SANITIZERS=ON
+      - run: cmake --build build-asan --parallel
+      - run: ctest --test-dir build-asan --output-on-failure
+
+  tsan:
+    name: Thread sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_TSAN=ON
+      - run: cmake --build build-tsan --parallel
+      - run: ctest --test-dir build-tsan --output-on-failure
+
+  integrations:
+    name: Optional integrations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLANA_BUILD_INTEGRATIONS=ON
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+      - name: Test Python bridge and evidence contracts
+        run: |
+          python3 -m venv "$RUNNER_TEMP/lana-integrations-venv"
+          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test]'
+          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pytest -q integrations/python/tests
+
+  fuzz-pr:
+    name: Fuzz smoke test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
+      - run: cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
+      - run: build-fuzz/lana_bytecode_fuzz -max_total_time=30 -timeout=5
+
+  fuzz-scheduled:
+    name: Full fuzz test
+    if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
+      - run: cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
+      - run: build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5

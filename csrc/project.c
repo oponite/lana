@@ -243,11 +243,44 @@ static int copy_file(const char *source, const char *destination) {
     free(bytes); return 0;
 }
 
+static int project_finish_build(const char *directory, const LanaProject *project,
+                                uint64_t hash, const char *locked_dependencies,
+                                LanaProjectCompileFn compile, void *context,
+                                char *output, size_t output_size) {
+    char source_path[2048], lana_dir[2048], cache_dir[2048];
+    char build_dir[2048], cache_path[2048], lock_path[2048];
+    if (project == NULL || path_join(source_path, sizeof(source_path), directory,
+                                     project->entry) != 0) return 1;
+    if (path_join(lana_dir, sizeof(lana_dir), directory, ".lana") ||
+        make_directory(lana_dir) ||
+        path_join(cache_dir, sizeof(cache_dir), lana_dir, "cache") ||
+        make_directory(cache_dir) ||
+        path_join(build_dir, sizeof(build_dir), directory, "build") ||
+        make_directory(build_dir)) return 1;
+    if (snprintf(cache_path, sizeof(cache_path), "%s/%016llx.labc", cache_dir,
+                 (unsigned long long)hash) <= 0 ||
+        snprintf(output, output_size, "%s/%s.labc", build_dir, project->name) <= 0)
+        return 1;
+    if (access(cache_path, R_OK) != 0 && compile(source_path, cache_path, context) != 0)
+        return 1;
+    if (copy_file(cache_path, output) != 0) return 1;
+    if (path_join(lock_path, sizeof(lock_path), directory, "lana.lock") != 0)
+        return 1;
+    {
+        char lock[4608];
+        (void)snprintf(lock, sizeof(lock),
+            "schema = 1\nproject = \"%s\"\ncontent = \"%016llx\"\n%s",
+            project->name, (unsigned long long)hash, locked_dependencies);
+        if (write_text(lock_path, lock) != 0) return 1;
+    }
+    (void)printf("built %s\n", output);
+    return 0;
+}
+
 int lana_project_build(const char *directory, LanaProjectCompileFn compile,
                        void *context, char *output, size_t output_size) {
     LanaProject project;
-    char manifest_path[2048], source_path[2048], lana_dir[2048], cache_dir[2048];
-    char build_dir[2048], cache_path[2048], lock_path[2048];
+    char manifest_path[2048], source_path[2048];
     char locked_dependencies[4096] = "";
     char *manifest; char *source; size_t manifest_length, source_length;
     uint64_t hash = UINT64_C(1469598103934665603);
@@ -265,30 +298,40 @@ int lana_project_build(const char *directory, LanaProjectCompileFn compile,
         free(manifest); free(source); return 1;
     }
     free(manifest); free(source);
-    if (path_join(lana_dir, sizeof(lana_dir), directory, ".lana") ||
-        make_directory(lana_dir) ||
-        path_join(cache_dir, sizeof(cache_dir), lana_dir, "cache") ||
-        make_directory(cache_dir) ||
-        path_join(build_dir, sizeof(build_dir), directory, "build") ||
-        make_directory(build_dir)) return 1;
-    if (snprintf(cache_path, sizeof(cache_path), "%s/%016llx.labc", cache_dir,
-                 (unsigned long long)hash) <= 0 ||
-        snprintf(output, output_size, "%s/%s.labc", build_dir, project.name) <= 0)
-        return 1;
-    if (access(cache_path, R_OK) != 0 && compile(source_path, cache_path, context) != 0)
-        return 1;
-    if (copy_file(cache_path, output) != 0) return 1;
-    if (path_join(lock_path, sizeof(lock_path), directory, "lana.lock") != 0)
-        return 1;
-    {
-        char lock[4608];
-        (void)snprintf(lock, sizeof(lock),
-            "schema = 1\nproject = \"%s\"\ncontent = \"%016llx\"\n%s",
-            project.name, (unsigned long long)hash, locked_dependencies);
-        if (write_text(lock_path, lock) != 0) return 1;
+    return project_finish_build(directory, &project, hash, locked_dependencies,
+                                compile, context, output, output_size);
+}
+
+int lana_project_build_with_plan(const char *directory, LanaProjectPlanFn plan,
+                                 LanaProjectCompileFn compile, void *context,
+                                 char *output, size_t output_size) {
+    LanaProject project;
+    char plan_path[] = "/tmp/lana-project-plan-XXXXXX";
+    char content[32], locked_dependencies[4096] = "";
+    char *text; char *dependency; char *end;
+    unsigned long long parsed; int descriptor, result;
+    if (plan == NULL || lana_project_load(directory, &project) != 0) return 1;
+    descriptor = mkstemp(plan_path);
+    if (descriptor < 0) return 1;
+    (void)close(descriptor);
+    result = plan(directory, plan_path, context);
+    text = result == 0 ? read_text(plan_path, NULL) : NULL;
+    (void)unlink(plan_path);
+    if (text == NULL || quoted_value(text, "content", content, sizeof(content)) != 0 ||
+        strlen(content) != 16u) { free(text); return 1; }
+    errno = 0; parsed = strtoull(content, &end, 16);
+    if (errno != 0 || *end != '\0') { free(text); return 1; }
+    dependency = strstr(text, "\ndependency.");
+    if (dependency != NULL && strlen(dependency + 1u) >= sizeof(locked_dependencies)) {
+        free(text); return 1;
     }
-    (void)printf("built %s\n", output);
-    return 0;
+    if (dependency != NULL) (void)snprintf(locked_dependencies,
+                                            sizeof(locked_dependencies), "%s",
+                                            dependency + 1u);
+    free(text);
+    return project_finish_build(directory, &project, (uint64_t)parsed,
+                                locked_dependencies, compile, context, output,
+                                output_size);
 }
 
 int lana_project_check(const char *directory, LanaProjectCompileFn compile,

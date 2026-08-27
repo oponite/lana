@@ -7,10 +7,16 @@ from ctypes.util import find_library
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 
 LANA_BRIDGE_ABI_VERSION = 1
+_SUPPORTED_VERSION = re.compile(r"1\.(?:0|1)\.\d+")
+
+
+def _is_supported_version(version: str) -> bool:
+    return _SUPPORTED_VERSION.fullmatch(version) is not None
 
 
 class LanaBridgeOptions(ctypes.Structure):
@@ -61,7 +67,7 @@ class NativeBridge:
         self._library.lana_bridge_free.restype = None
         version = self._library.lana_bridge_version()
         self.version = version.decode("utf-8") if version else ""
-        if not self.version.startswith("1.0."):
+        if not _is_supported_version(self.version):
             raise RuntimeError(f"unsupported lana_bridge version: {self.version}")
 
     def run_labc(

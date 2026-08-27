@@ -1,4 +1,4 @@
-// Versioned evidence records for Lana 1.0 integrations.
+// Versioned evidence records for Lana 1.1 integrations and compatible 1.0 callers.
 // Validation preserves values exactly. In particular, false, null, zero, and
 // unresolved statuses remain distinct.
 
@@ -14,6 +14,21 @@ fn known_exactness(exactness) {
     if (exactness == "exact") { return true; }
     if (exactness == "sample") { return true; }
     return exactness == "approximate";
+}
+
+fn valid_dependency_ids(value) {
+    let dependencies = value["dependency_ids"];
+    let index = 0;
+    while (index < array_length(dependencies)) {
+        assert(string_length(dependencies[index]) > 0, "evidence dependency id is empty");
+        let other = 0;
+        while (other < index) {
+            assert(dependencies[index] != dependencies[other], "evidence dependency ids must be unique");
+            other = other + 1;
+        }
+        index = index + 1;
+    }
+    return true;
 }
 
 fn validate(value) {
@@ -38,6 +53,7 @@ fn validate(value) {
     assert(string_length(value["provenance_id"]) > 0, "evidence provenance_id is empty");
     assert(map_has(value, "dependency_ids"), "evidence dependency_ids are required");
     assert(array_length(value["dependency_ids"]) >= 0, "evidence dependency_ids must be an array");
+    valid_dependency_ids(value);
     if (value["status"] == "resolved") {
         assert(map_has(value, "value"), "resolved evidence value is required");
     }

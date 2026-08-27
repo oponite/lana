@@ -239,7 +239,8 @@ static int host_call_id(const char *name) {
         "planned_effect_status", "shared_information", "shared_grant",
         "shared_revoke", "shared_snapshot", "shared_at", "shared_observe",
         "shared_revision", "shared_identity", "shared_wait",
-        "information_inspect"
+        "information_inspect", "directory_list", "directory_create",
+        "path_exists", "write_text_atomic", "hash_update"
     };
     size_t index;
     for (index = 0; index < sizeof(names) / sizeof(names[0]); ++index)

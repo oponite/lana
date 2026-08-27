@@ -24,4 +24,5 @@ assert(record["decision"]["evidence"]["revision"] == 4, "record lost evidence re
 let replayed = replay.replay_threshold(record);
 assert(replayed["seed"] == 17, "replay lost the deterministic seed");
 assert(replayed["authorization"]["effect_payload"]["job"] == "notify", "replay lost effect payload");
+assert(replayed["inputs"]["policy"]["minimum"] == 0.70, "replay lost policy inputs");
 print("REPLAY_LIBRARY_PASS");

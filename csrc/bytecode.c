@@ -382,7 +382,7 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
                 break;
             case OP_HOST_CALL:
                 result = verify_register(error, ip, ins, ins->a);
-                if (result == LANA_OK && ins->b > LANA_HOST_INFORMATION_INSPECT)
+                if (result == LANA_OK && ins->b >= LANA_HOST_COUNT)
                     result = LANA_ERR_FORMAT;
                 if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->c + ins->imm > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
                 break;

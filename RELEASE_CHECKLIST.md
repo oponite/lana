@@ -1,4 +1,4 @@
-# Lana 1.0 Release Checklist
+# Lana 1.1 Release Checklist
 
 A release is ready only when all four gates pass from the exact candidate tree.
 Record command output; do not substitute earlier results.
@@ -15,7 +15,7 @@ git diff --check
 
 Required result: all tests pass, including the twice-repeated byte-stable native
 compiler bootstrap, generated-project workflow, imports, LSP, and debugger.
-`lana version` must report `1.0.0` and LABC v1.
+`lana version` must report `1.1.0` and LABC v1.
 
 ## 2. Memory and concurrency safety
 
@@ -67,3 +67,25 @@ Required result: both slices execute, the installed CLI finds its adjacent
 `lana-compiler.labc`, and a source program runs without using the build tree.
 Code signing and package-manager publication are distribution steps, not claims
 made by the source release.
+
+## 5. Optional integrations and release artifacts
+
+```bash
+python3 -m venv /tmp/lana-integrations-venv
+/tmp/lana-integrations-venv/bin/python -m pip install -e 'integrations/python[test]'
+/tmp/lana-integrations-venv/bin/python -m pytest -q integrations/python/tests
+
+cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release \
+  -DLANA_BUILD_INTEGRATIONS=ON
+cmake --build build-integrations --parallel
+ctest --test-dir build-integrations --output-on-failure
+```
+
+Required result: the Python bridge accepts Lana 1.0.x and 1.1.x with LABC v1,
+the native bridge reports ABI v1, and all integration tests pass.
+
+The release workflow downloads the macOS archive into a clean directory,
+checks its SHA-256 digest, extracts it, and runs both installed architecture
+slices against a copied example. It also checks the source archive digest,
+builds it in a clean directory, and runs the example before publication.
+Homebrew publication, signing, and notarization are deferred.

@@ -1,6 +1,6 @@
 import "./evidence.lana" as evidence_contract;
 
-// Deterministic decision-policy helpers for Lana 1.0 integrations.
+// Deterministic decision-policy helpers for Lana 1.1 integrations.
 // Evidence is an ordinary map. Its status remains explicit until Lana 2.0
 // provides algebraic data types and pattern matching.
 

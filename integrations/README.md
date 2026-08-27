@@ -1,6 +1,6 @@
 # Lana integrations
 
-These optional adapters preserve the Lana 1.0 language, LABC v1, and default
+These optional adapters preserve the Lana 1.1 language, LABC v1, and default
 dependency-free runtime.
 
 ## JSON, MCP, and Jupyter
@@ -45,5 +45,5 @@ This produces `liblana_bridge` and its ABI-v1 header. The facade runs
 precompiled LABC only. Python can load it through
 `lana_integrations.native.NativeBridge`.
 
-The integrations require Lana 1.0.x with LABC v1. Source installation is the
+The integrations require Lana 1.0.x or 1.1.x with LABC v1. Source installation is the
 supported first release; registry and packaged release publication are deferred.

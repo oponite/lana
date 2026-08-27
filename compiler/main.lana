@@ -51,7 +51,310 @@ fn load_module(path, prefix, modules, stack, root) {
     return module_index;
 }
 
-let argv = args(); assert(array_length(argv) == 2, "usage: lana-compiler <input.lana> <output.lasm>");
-let modules = map_new(); map_set(modules, "items", array_new(0)); map_set(modules, "mappings", map_new()); map_set(modules, "import_mappings", map_new());
-let root = load_module(argv[0], "", modules, array_new(0), true);
-write_text(argv[1], emitter.emit_modules(modules, root));
+fn project_name(path) {
+    let length = string_length(path); let start = 0; let index = 0;
+    while (index < length) {
+        if (string_byte_at(path, index) == 47) { start = index + 1; }
+        index = index + 1;
+    }
+    return string_slice(path, start, length);
+}
+
+fn project_path(root, relative) { return string_concat(root, "/", relative); }
+
+fn project_new(directory) {
+    let name = project_name(directory);
+    assert(name != "", "project directory must have a name");
+    assert(!path_exists(directory), string_concat("project directory already exists: ", directory));
+    directory_create(directory);
+    directory_create(project_path(directory, "src"));
+    directory_create(project_path(directory, "tests"));
+    write_text_atomic(project_path(directory, "lana.toml"), string_concat(
+        "schema = 1\nname = \"", name,
+        "\"\nversion = \"0.1.0\"\nentry = \"src/main.lana\"\n\n[dependencies]\n"));
+    write_text_atomic(project_path(directory, "src/belief.lana"),
+        "fn probability() {\n    state belief = state(p: 0.75, d: 0.25);\n    return measure belief as probability;\n}\n");
+    write_text_atomic(project_path(directory, "src/main.lana"),
+        "import \"./belief.lana\" as belief;\n\nfn main() { print(belief.probability()); }\nmain();\n");
+    write_text_atomic(project_path(directory, "tests/main_test.lana"),
+        "import \"../src/belief.lana\" as belief;\n\nassert(belief.probability() == 0.75, \"first program probability\");\n");
+    print(string_concat("created ", directory));
+}
+
+fn project_has_suffix(text, suffix) {
+    let text_length = string_length(text); let suffix_length = string_length(suffix);
+    if (text_length < suffix_length) { return false; }
+    return string_slice(text, text_length - suffix_length, text_length) == suffix;
+}
+
+fn project_lana_files(directory, files) {
+    let entries = directory_list(directory); let index = 0;
+    while (index < array_length(entries)) {
+        let entry = entries[index]; let name = map_get(entry, "name");
+        if (string_byte_at(name, 0) != 46) {
+            let path = project_path(directory, name);
+            if (map_get(entry, "kind") == "directory") {
+                if (name != "build") { if (name != "docs") { project_lana_files(path, files); } }
+            } else {
+                if (project_has_suffix(name, ".lana")) { array_push(files, path); }
+            }
+        }
+        index = index + 1;
+    }
+}
+
+fn project_text_less(left, right) {
+    let left_length = string_length(left); let right_length = string_length(right);
+    let length = left_length; let index = 0;
+    if (right_length < length) { length = right_length; }
+    while (index < length) {
+        let left_byte = string_byte_at(left, index); let right_byte = string_byte_at(right, index);
+        if (left_byte < right_byte) { return true; }
+        if (right_byte < left_byte) { return false; }
+        index = index + 1;
+    }
+    return left_length < right_length;
+}
+
+fn project_sort_files(files) {
+    let index = 1;
+    while (index < array_length(files)) {
+        let value = files[index]; let cursor = index; let destination = index; let scanning = true;
+        while (cursor > 0) {
+            if (scanning) {
+                if (project_text_less(value, files[cursor - 1])) {
+                    index_set(files, cursor, files[cursor - 1]); destination = cursor - 1;
+                } else { scanning = false; }
+            }
+            cursor = cursor - 1;
+        }
+        index_set(files, destination, value); index = index + 1;
+    }
+}
+
+fn project_hash_sources(directory, hash) {
+    let files = array_new(0); let index = 0;
+    project_lana_files(directory, files); project_sort_files(files);
+    while (index < array_length(files)) {
+        let path = files[index]; hash = hash_update(hash, path);
+        hash = hash_update(hash, read_text(path)); index = index + 1;
+    }
+    return hash;
+}
+
+fn project_dependency_line(line, hash, directory, locked) {
+    let line_length = string_length(line); let equals = 0; let cursor = 0;
+    let quote = line_length; let end = line_length; let name_end = 0;
+    while (cursor < line_length) {
+        if (string_byte_at(line, cursor) == 61) { equals = cursor; cursor = line_length; }
+        else { cursor = cursor + 1; }
+    }
+    if (equals == 0) { return hash; }
+    name_end = equals; cursor = equals;
+    while (cursor > 0) {
+        if (string_byte_at(line, cursor - 1) == 32) { name_end = cursor - 1; }
+        cursor = cursor - 1;
+    }
+    cursor = equals + 1;
+    while (cursor < line_length) {
+        if (string_byte_at(line, cursor) == 34) { quote = cursor; cursor = line_length; }
+        else { cursor = cursor + 1; }
+    }
+    if (quote == line_length) { return hash; }
+    cursor = quote + 1;
+    while (cursor < line_length) {
+        if (string_byte_at(line, cursor) == 34) { end = cursor; cursor = line_length; }
+        else { cursor = cursor + 1; }
+    }
+    if (end == line_length) { return hash; }
+    if (name_end == 0) { return hash; }
+    let name = string_slice(line, 0, name_end);
+    let relative = string_slice(line, quote + 1, end);
+    let path = project_path(directory, relative);
+    if (string_length(relative) > 0) {
+        if (string_byte_at(relative, 0) == 47) { path = relative; }
+    }
+    let dependency_manifest = read_text(project_path(path, "lana.toml"));
+    assert(project_has_schema(dependency_manifest), "invalid dependency schema");
+    let dependency_name = project_line_value(dependency_manifest, "name");
+    let dependency_version = project_line_value(dependency_manifest, "version");
+    let before = hash; hash = project_hash_sources(path, hash);
+    hash = hash_update(hash, dependency_name);
+    index_set(locked, 0, string_concat(locked[0], "dependency.", name, " = \"", dependency_version, ":", hash_update(before, hash, "xor"), "\"\n"));
+    return hash;
+}
+
+fn project_hash_plan(directory, output) {
+    let manifest = read_text(project_path(directory, "lana.toml"));
+    let entry = project_line_value(manifest, "entry");
+    let hash = "cbf29ce484222325"; let locked = [""];
+    assert(project_has_schema(manifest), "invalid lana.toml schema");
+    hash = hash_update(hash, manifest);
+    hash = hash_update(hash, read_text(project_path(directory, entry)));
+    hash = project_hash_sources(directory, hash);
+    let lines = project_lines(manifest); let index = 0; let dependencies = false;
+    while (index < array_length(lines)) {
+        let line = lines[index];
+        if (line == "[dependencies]") { dependencies = true; }
+        else {
+            if (string_length(line) > 0) {
+                if (string_byte_at(line, 0) == 91) { dependencies = false; }
+                else { if (dependencies) { hash = project_dependency_line(line, hash, directory, locked); } }
+            }
+        }
+        index = index + 1;
+    }
+    write_text_atomic(output, string_concat("content = \"", hash, "\"\n", locked[0]));
+}
+
+fn project_lines(text) {
+    let lines = array_new(0); let length = string_length(text); let start = 0; let index = 0;
+    while (index < length) {
+        if (string_byte_at(text, index) == 10) {
+            array_push(lines, string_slice(text, start, index)); start = index + 1;
+        }
+        index = index + 1;
+    }
+    if (start < length) { array_push(lines, string_slice(text, start, length)); }
+    return lines;
+}
+
+fn project_line_value(text, key) {
+    let lines = project_lines(text); let prefix = string_concat(key, " = \"");
+    let prefix_length = string_length(prefix); let index = 0;
+    while (index < array_length(lines)) {
+        let line = lines[index]; let line_length = string_length(line);
+        if (line_length >= prefix_length) {
+            if (string_slice(line, 0, prefix_length) == prefix) {
+                let cursor = prefix_length; let value_end = line_length; let searching = true;
+                while (cursor < line_length) {
+                    if (searching) {
+                        if (string_byte_at(line, cursor) == 34) {
+                            value_end = cursor; searching = false;
+                        } else { cursor = cursor + 1; }
+                    } else { cursor = line_length; }
+                }
+                if (!searching) { return string_slice(line, prefix_length, value_end); }
+            }
+        }
+        index = index + 1;
+    }
+    return "";
+}
+
+fn project_has_schema(text) {
+    let lines = project_lines(text); let index = 0;
+    while (index < array_length(lines)) {
+        if (lines[index] == "schema = 1") { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn project_format_text(source) {
+    let length = string_length(source); let result = ""; let read = 0;
+    if (length == 0) { return "\n"; }
+    while (read < length) {
+        let start = read; let scanning = true;
+        while (scanning) {
+            if (read >= length) { scanning = false; }
+            else {
+                if (string_byte_at(source, read) == 10) { scanning = false; }
+                else { read = read + 1; }
+            }
+        }
+        let end = read; let trimming = true;
+        while (trimming) {
+            if (end == start) { trimming = false; }
+            else {
+                let byte = string_byte_at(source, end - 1);
+                if (byte == 32) { end = end - 1; }
+                else {
+                    if (byte == 9) { end = end - 1; }
+                    else {
+                        if (byte == 13) { end = end - 1; }
+                        else { trimming = false; }
+                    }
+                }
+            }
+        }
+        result = string_concat(result, string_slice(source, start, end), "\n");
+        if (read < length) { read = read + 1; }
+    }
+    return result;
+}
+
+fn project_format(directory, mode) {
+    let files = array_new(0); let changed = false; let index = 0;
+    let source_directory = project_path(directory, "src");
+    let test_directory = project_path(directory, "tests");
+    if (path_exists(source_directory)) { project_lana_files(source_directory, files); }
+    if (path_exists(test_directory)) { project_lana_files(test_directory, files); }
+    while (index < array_length(files)) {
+        let path = files[index]; let source = read_text(path); let formatted = project_format_text(source);
+        if (source != formatted) {
+            changed = true;
+            if (mode == "write") { write_text_atomic(path, formatted); }
+        }
+        index = index + 1;
+    }
+    if (mode == "check") { if (changed) { assert(false, "format changes required"); } }
+    if (changed) { print("formatted"); } else { print("already formatted"); }
+}
+
+fn project_document(directory) {
+    let manifest_path = project_path(directory, "lana.toml");
+    assert(path_exists(manifest_path), "lana.toml not found");
+    let manifest = read_text(manifest_path);
+    let name = project_line_value(manifest, "name"); let version = project_line_value(manifest, "version");
+    let entry = project_line_value(manifest, "entry");
+    assert(project_has_schema(manifest), "invalid lana.toml schema");
+    assert(name != "", "invalid lana.toml schema"); assert(version != "", "invalid lana.toml schema");
+    assert(entry != "", "invalid lana.toml schema");
+    let source = read_text(project_path(directory, entry)); let output = string_concat(
+        "# ", name, " API\n\nVersion ", version, ".\n\n",
+        "## Language metadata\n\nTypes include `Information<T>`, `Claim<T, Proposition>`, `Sample<T>`, `PlannedEffect<T, Kind>`, `Result<T, E>`, task handles, and `SharedCapability<T, read|observe|admin>`. Effects are pure, observation, stochastic, I/O, mutation, task, and external-call. Compiler diagnostics use stable `LANA_ERR_*` codes and source spans.\n\n",
+        "```lana\nlet source = information(possibility([1, 2]));\nlet sample_record = sample(source);\nlet exact_value = sample_value(sample_record);\n```\n\n");
+    let lines = project_lines(source); let index = 0;
+    while (index < array_length(lines)) {
+        let line = lines[index]; let line_length = string_length(line);
+        if (line_length >= 3) {
+            if (string_slice(line, 0, 3) == "fn ") {
+                let cursor = 3; let brace = line_length; let searching = true;
+                while (cursor < line_length) {
+                    if (searching) {
+                        if (string_byte_at(line, cursor) == 123) { brace = cursor; searching = false; }
+                        else { cursor = cursor + 1; }
+                    } else { cursor = line_length; }
+                }
+                output = string_concat(output, "## `", string_slice(line, 3, brace), "`\n\n```lana\n", line, "\n```\n\n");
+            }
+        }
+        index = index + 1;
+    }
+    directory_create(project_path(directory, "docs"));
+    write_text_atomic(project_path(directory, "docs/api.md"), output);
+    print(string_concat("generated ", project_path(directory, "docs/api.md")));
+}
+
+let argv = args(); assert(array_length(argv) >= 2, "usage: lana-compiler <input.lana> <output.lasm>");
+if (argv[0] == "--project-plan") {
+    assert(array_length(argv) == 3, "usage: lana-compiler --project-plan <directory> <output>");
+    project_hash_plan(argv[1], argv[2]);
+} else {
+if (argv[0] == "--project-new") {
+    project_new(argv[1]);
+} else {
+    if (argv[0] == "--project-fmt") {
+        project_format(".", argv[1]);
+    } else {
+        if (argv[0] == "--project-doc") {
+            project_document(argv[1]);
+        } else {
+            let modules = map_new(); map_set(modules, "items", array_new(0)); map_set(modules, "mappings", map_new()); map_set(modules, "import_mappings", map_new());
+            let root = load_module(argv[0], "", modules, array_new(0), true);
+            write_text(argv[1], emitter.emit_modules(modules, root));
+        }
+    }
+}
+}

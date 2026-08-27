@@ -1,0 +1,164 @@
+name: Release Lana 1.1.0
+
+on:
+  push:
+    tags: ["v1.1.0"]
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_VERSION: "1.1.0"
+
+jobs:
+  linux:
+    name: Release gates (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify tag and version
+        run: |
+          version="$(tr -d '\n' < VERSION)"
+          test "$version" = "$EXPECTED_VERSION"
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "${{ github.ref_protected }}" = "true"
+      - name: Debug build and tests
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          git diff --check
+      - name: Address and undefined behavior sanitizers
+        run: |
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_SANITIZERS=ON
+          cmake --build build-asan --parallel
+          ctest --test-dir build-asan --output-on-failure
+      - name: Thread sanitizer
+        run: |
+          cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_TSAN=ON
+          cmake --build build-tsan --parallel
+          ctest --test-dir build-tsan --output-on-failure
+      - name: Ten-minute malformed-bytecode fuzz test
+        run: |
+          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
+          cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
+          build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5
+      - name: Optional integrations
+        run: |
+          cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release -DLANA_BUILD_INTEGRATIONS=ON
+          cmake --build build-integrations --parallel
+          ctest --test-dir build-integrations --output-on-failure
+          python3 -m venv "$RUNNER_TEMP/lana-integrations-venv"
+          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test]'
+          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pytest -q integrations/python/tests
+
+  macos:
+    name: Release gates (macOS universal)
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify tag and version
+        run: |
+          version="$(tr -d '\n' < VERSION)"
+          test "$version" = "$EXPECTED_VERSION"
+          test "$GITHUB_REF_NAME" = "v$version"
+      - name: Build and install universal binaries
+        run: |
+          cmake -S . -B build-universal -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64'
+          cmake --build build-universal --parallel
+          prefix="$RUNNER_TEMP/lana-install"
+          cmake --install build-universal --prefix "$prefix"
+          lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
+          lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
+          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          "$prefix/bin/lana" run examples/belief.lana
+          tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${EXPECTED_VERSION}-macos-universal.tar.gz" .
+          (
+            cd "$RUNNER_TEMP"
+            shasum -a 256 "lana-${EXPECTED_VERSION}-macos-universal.tar.gz" \
+              > "lana-${EXPECTED_VERSION}-macos-universal.tar.gz.sha256"
+          )
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lana-macos-universal
+          path: |
+            ${{ runner.temp }}/lana-1.1.0-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-1.1.0-macos-universal.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-macos-artifact:
+    name: Verify macOS release artifact
+    needs: macos
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: lana-macos-universal
+          path: ${{ runner.temp }}/lana-release-artifact
+      - name: Verify downloaded installed-prefix archive
+        run: |
+          artifact_dir="$RUNNER_TEMP/lana-release-artifact"
+          archive="lana-${EXPECTED_VERSION}-macos-universal.tar.gz"
+          (
+            cd "$artifact_dir"
+            shasum -a 256 -c "$archive.sha256"
+          )
+          prefix="$RUNNER_TEMP/lana-verified-install"
+          mkdir "$prefix"
+          tar -C "$prefix" -xzf "$artifact_dir/$archive"
+          lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
+          lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
+          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          cp examples/belief.lana "$prefix/belief.lana"
+          "$prefix/bin/lana" run "$prefix/belief.lana"
+
+  publish:
+    name: Publish GitHub Release
+    needs: [linux, verify-macos-artifact]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: lana-macos-universal
+          path: ${{ runner.temp }}/lana-release-files
+      - name: Build source archive and checksums
+        run: |
+          version="$(tr -d '\n' < VERSION)"
+          test "$version" = "$EXPECTED_VERSION"
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "${{ github.ref_protected }}" = "true"
+          git archive --format=tar.gz --prefix="lana-$version/" --output="$RUNNER_TEMP/lana-release-files/lana-$version-source.tar.gz" "$GITHUB_SHA"
+          rm "$RUNNER_TEMP/lana-release-files/lana-$version-macos-universal.tar.gz.sha256"
+          (
+            cd "$RUNNER_TEMP/lana-release-files"
+            sha256sum *.tar.gz > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+      - name: Verify source archive in a clean directory
+        run: |
+          source_root="$RUNNER_TEMP/lana-verified-source"
+          mkdir "$source_root"
+          tar -C "$source_root" -xzf "$RUNNER_TEMP/lana-release-files/lana-${EXPECTED_VERSION}-source.tar.gz"
+          cmake -S "$source_root/lana-${EXPECTED_VERSION}" -B "$source_root/build" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$source_root/build" --parallel
+          "$source_root/build/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          "$source_root/build/lana" run "$source_root/lana-${EXPECTED_VERSION}/examples/belief.lana"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Lana $EXPECTED_VERSION" \
+            --generate-notes \
+            "$RUNNER_TEMP/lana-release-files"/*
