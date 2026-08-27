@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "lana/vm.h"
 #include "lana/data.h"
 #include "lana/shared.h"
@@ -729,11 +731,13 @@ void lana_vm_init(LanaVM *vm, const LanaChunk *chunk) {
     vm->result = lana_value_null();
     vm->next_task_id = 1u;
     vm->next_group_id = 1u;
+    vm->configured_worker_count = 1u;
+#if defined(_SC_NPROCESSORS_ONLN)
     {
         long processors = sysconf(_SC_NPROCESSORS_ONLN);
         vm->configured_worker_count = processors > 0 && processors < 8 ? (size_t)processors : 8u;
-        if (vm->configured_worker_count == 0u) vm->configured_worker_count = 1u;
     }
+#endif
     vm->configured_task_limit = 64u;
     vm->path_limit = 64u;
     vm->active_path_count = 1u;
