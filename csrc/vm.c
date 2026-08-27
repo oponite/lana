@@ -1612,6 +1612,12 @@ static LanaError path_join(LanaVM *vm, uint32_t line) {
     return LANA_OK;
 }
 
+static void free_joint_names(char **names, size_t count) {
+    size_t index;
+    for (index = 0; index < count; ++index) free(names[index]);
+    free(names);
+}
+
 static LanaError parse_joint_names(const char *text, size_t expected,
                                  LanaJointKind *kind, char ***names_out,
                                  size_t *count_out) {
@@ -1635,10 +1641,10 @@ static LanaError parse_joint_names(const char *text, size_t expected,
     while (token != NULL) {
         size_t index;
         while (isspace((unsigned char)*token)) ++token;
-        if (*token == '\0') { free(names); free(copy); return LANA_ERR_FORMAT; }
+        if (*token == '\0') { free_joint_names(names, count); free(copy); return LANA_ERR_FORMAT; }
         for (index = 0; index < count; ++index)
-            if (strcmp(names[index], token) == 0) { free(names); free(copy); return LANA_ERR_INVALID_DEPENDENCY; }
-        if (count >= expected) { free(names); free(copy); return LANA_ERR_FORMAT; }
+            if (strcmp(names[index], token) == 0) { free_joint_names(names, count); free(copy); return LANA_ERR_INVALID_DEPENDENCY; }
+        if (count >= expected) { free_joint_names(names, count); free(copy); return LANA_ERR_FORMAT; }
         names[count] = malloc(strlen(token) + 1u);
         if (names[count] == NULL) { while (count > 0u) free(names[--count]); free(names); free(copy); return LANA_ERR_OOM; }
         strcpy(names[count++], token);
@@ -1649,12 +1655,6 @@ static LanaError parse_joint_names(const char *text, size_t expected,
     *names_out = names;
     *count_out = count;
     return LANA_OK;
-}
-
-static void free_joint_names(char **names, size_t count) {
-    size_t index;
-    for (index = 0; index < count; ++index) free(names[index]);
-    free(names);
 }
 
 LanaError lana_vm_joint_build(LanaVM *vm, const Value *values, size_t count,
