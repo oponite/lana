@@ -555,11 +555,12 @@ LanaError lana_chunk_read_file(LanaChunk *chunk, const char *path, LanaErrorInfo
         if (!read_u32(file, &length) || length > 1000000u) { result = LANA_ERR_FORMAT; goto failure; }
         function->name = malloc((size_t)length + 1u);
         if (function->name == NULL) { result = LANA_ERR_OOM; goto failure; }
+        ++chunk->function_count;
         if (fread(function->name, 1, length, file) != length || !read_u32(file, &function->entry) ||
             !read_u32(file, &function->register_count) || !read_u32(file, &function->arity)) {
             result = LANA_ERR_FORMAT; goto failure;
         }
-        function->name[length] = '\0'; ++chunk->function_count;
+        function->name[length] = '\0';
     }
     for (index = 0; index < instructions; ++index) {
         LanaInstruction ins = {0};
