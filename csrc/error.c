@@ -10,7 +10,12 @@ static void copy_text(char *destination, size_t capacity, const char *source) {
         destination[0] = '\0';
         return;
     }
-    (void)snprintf(destination, capacity, "%s", source);
+    {
+        size_t length = strlen(source);
+        if (length >= capacity) length = capacity - 1u;
+        memcpy(destination, source, length);
+        destination[length] = '\0';
+    }
 }
 
 const char *lana_error_name(LanaError error) {
