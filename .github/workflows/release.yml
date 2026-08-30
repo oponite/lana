@@ -1,14 +1,14 @@
-name: Release Lana 1.1.0
+name: Release Lana 1.1.1
 
 on:
   push:
-    tags: ["v1.1.0"]
+    tags: ["v1.1.1"]
 
 permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION: "1.1.0"
+  EXPECTED_VERSION: "1.1.1"
 
 jobs:
   linux:
@@ -86,8 +86,8 @@ jobs:
         with:
           name: lana-macos-universal
           path: |
-            ${{ runner.temp }}/lana-1.1.0-macos-universal.tar.gz
-            ${{ runner.temp }}/lana-1.1.0-macos-universal.tar.gz.sha256
+            ${{ runner.temp }}/lana-1.1.1-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-1.1.1-macos-universal.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -144,6 +144,36 @@ jobs:
             sha256sum *.tar.gz > SHA256SUMS
             sha256sum -c SHA256SUMS
           )
+      - name: Generate Homebrew formula artifact
+        run: |
+          source_archive="$RUNNER_TEMP/lana-release-files/lana-${EXPECTED_VERSION}-source.tar.gz"
+          source_sha256="$(sha256sum "$source_archive" | awk '{print $1}')"
+          formula="$RUNNER_TEMP/lana-release-files/lana.rb"
+          cat > "$formula" <<EOF
+          class Lana < Formula
+            desc "Verified register-based language with explicit uncertainty"
+            homepage "https://github.com/oponite/lana"
+            url "https://github.com/oponite/lana/releases/download/v${EXPECTED_VERSION}/lana-${EXPECTED_VERSION}-source.tar.gz"
+            sha256 "${source_sha256}"
+            license "Apache-2.0"
+
+            depends_on "cmake" => :build
+
+            def install
+              system "cmake", "-S", ".", "-B", "build", *std_cmake_args
+              system "cmake", "--build", "build", "--parallel"
+              system "cmake", "--install", "build"
+            end
+
+            test do
+              assert_match "Lana #{version} (LABC v1,", shell_output("#{bin}/lana version")
+              system bin/"lana", "new", "hello-lana"
+              system bin/"lana", "run", "hello-lana"
+            end
+          end
+          EOF
+          ruby -c "$formula"
+          test -s "$formula"
       - name: Verify source archive in a clean directory
         run: |
           source_root="$RUNNER_TEMP/lana-verified-source"

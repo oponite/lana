@@ -43,6 +43,9 @@ fn test_unresolved_and_review() {
     };
     let absent = policy.threshold(missing, 0.70, 120, 30, 0.80);
     assert(absent["outcome"] == "abstain", "unmeasured evidence did not abstain");
+    let requested = policy.request_more_evidence("sensor unavailable", missing);
+    assert(requested["outcome"] == "abstain", "evidence request did not abstain");
+    assert(requested["reason"] == "sensor unavailable", "evidence request lost its reason");
     let conflict = {
         "schema": 1,
         "status": "conflict",

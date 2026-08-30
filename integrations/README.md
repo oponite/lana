@@ -45,5 +45,17 @@ This produces `liblana_bridge` and its ABI-v1 header. The facade runs
 precompiled LABC only. Python can load it through
 `lana_integrations.native.NativeBridge`.
 
-The integrations require Lana 1.0.x or 1.1.x with LABC v1. Source installation is the
-supported first release; registry and packaged release publication are deferred.
+The integrations require Lana 1.0.x or 1.1.x with LABC v1. Source installation
+remains supported; packaged publication follows the corresponding Lana release.
+
+## Evidence lifecycle contract
+
+Schema-1 evidence keeps these fields distinct: `source`, `observed_at`,
+`effective_at`, `exactness`, `revision`, `confidence`, `provenance_id`, and
+`dependency_ids`. Optional `reliability` and `calibration` metadata is preserved
+without coercion. `observed_at` and `max_age` determine staleness; evidence is
+stale when `current_time - observed_at > max_age`. A policy result retains the
+validated evidence record, and replay validates that record, the policy inputs,
+the decision, and the requested effect without executing the effect. Low
+confidence produces `abstain`; `policy.request_more_evidence` is the explicit
+helper for the same non-executing outcome.

@@ -89,6 +89,22 @@ def test_replay_bridge_round_trip() -> None:
     )
     assert rejected["ok"] is False
 
+    tampered = json.loads(json.dumps(recorded["result"]))
+    tampered["inputs"]["policy"]["minimum"] = 0.9
+    rejected = runner.run(
+        ROOT / "integrations" / "lana" / "replay_bridge.lana",
+        {"schema": 1, "kind": "threshold_authorization_replay", "record": tampered},
+    )
+    assert rejected["ok"] is False
+
+    tampered = json.loads(json.dumps(recorded["result"]))
+    tampered["authorization"]["effect_payload"]["job"] = "delete"
+    rejected = runner.run(
+        ROOT / "integrations" / "lana" / "replay_bridge.lana",
+        {"schema": 1, "kind": "threshold_authorization_replay", "record": tampered},
+    )
+    assert rejected["ok"] is False
+
 
 @pytest.mark.parametrize(
     ("kind", "metric", "value", "status", "expected_action"),

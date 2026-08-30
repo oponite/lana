@@ -20,6 +20,10 @@ fn abstain(reason, evidence) {
     return decision("abstain", reason, evidence);
 }
 
+fn request_more_evidence(reason, evidence) {
+    return abstain(reason, evidence);
+}
+
 fn escalate(reason, evidence) {
     return decision("escalate", reason, evidence);
 }
