@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.1
+
+- Preserve the 1.1 evidence lifecycle contract across policy, replay, and
+  optional integration boundaries.
+- Add an explicit policy helper for requesting more evidence without
+  authorizing an effect.
+- Prepare the release metadata and validation surface for package distribution.
+
 ## 1.0.0
 
 - Establish the single LABC v1 format for Lana 1.0.

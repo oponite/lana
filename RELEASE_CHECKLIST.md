@@ -1,4 +1,4 @@
-# Lana 1.1 Release Checklist
+# Lana 1.1.1 Release Checklist
 
 A release is ready only when all four gates pass from the exact candidate tree.
 Record command output; do not substitute earlier results.
@@ -15,7 +15,7 @@ git diff --check
 
 Required result: all tests pass, including the twice-repeated byte-stable native
 compiler bootstrap, generated-project workflow, imports, LSP, and debugger.
-`lana version` must report `1.1.0` and LABC v1.
+`lana version` must report `1.1.1` and LABC v1.
 
 ## 2. Memory and concurrency safety
 
@@ -88,4 +88,6 @@ The release workflow downloads the macOS archive into a clean directory,
 checks its SHA-256 digest, extracts it, and runs both installed architecture
 slices against a copied example. It also checks the source archive digest,
 builds it in a clean directory, and runs the example before publication.
-Homebrew publication, signing, and notarization are deferred.
+Homebrew Core submission is an external publication step; the release workflow
+publishes a checksum-backed formula artifact. Signing and notarization remain
+deferred.
