@@ -1,0 +1,174 @@
+import "./integrations/lana/bridge.lana" as bridge;
+
+fn analyze(request) {
+    let bars = request["bars"];
+    let count = array_length(bars);
+
+    assert(count >= 4, "need at least 4 OHLCV bars");
+
+    let first_close = bars[0]["close"];
+    let last_close = bars[count - 1]["close"];
+
+    let up_closes = 0;
+    let down_closes = 0;
+
+    let first_half_range_total = 0;
+    let second_half_range_total = 0;
+
+    let first_half_volume_total = 0;
+    let second_half_volume_total = 0;
+
+    let first_half_count = 0;
+    let second_half_count = 0;
+
+    let i = 0;
+
+    while (i < count) {
+        let bar_high = bars[i]["high"];
+        let bar_low = bars[i]["low"];
+        let bar_volume = bars[i]["volume"];
+        let bar_range = bar_high - bar_low;
+
+        if (i < count / 2) {
+            first_half_range_total =
+                first_half_range_total + bar_range;
+
+            first_half_volume_total =
+                first_half_volume_total + bar_volume;
+
+            first_half_count =
+                first_half_count + 1;
+        }
+
+        if (i >= count / 2) {
+            second_half_range_total =
+                second_half_range_total + bar_range;
+
+            second_half_volume_total =
+                second_half_volume_total + bar_volume;
+
+            second_half_count =
+                second_half_count + 1;
+        }
+
+        if (i > 0) {
+            let prev_close = bars[i - 1]["close"];
+            let curr_close = bars[i]["close"];
+
+            if (curr_close > prev_close) {
+                up_closes = up_closes + 1;
+            }
+
+            if (curr_close < prev_close) {
+                down_closes = down_closes + 1;
+            }
+        }
+
+        i = i + 1;
+    }
+
+    let sequence_direction = "flat";
+
+    if (up_closes > down_closes) {
+        sequence_direction = "bullish";
+    }
+
+    if (down_closes > up_closes) {
+        sequence_direction = "bearish";
+    }
+
+    let return_pct =
+        ((last_close - first_close) / first_close) * 100;
+
+    let return_direction = "flat";
+
+    if (return_pct > 0) {
+        return_direction = "bullish";
+    }
+
+    if (return_pct < 0) {
+        return_direction = "bearish";
+    }
+
+    let divergence = "none";
+
+    if (sequence_direction == "bearish") {
+        if (return_direction == "bullish") {
+            divergence =
+                "bullish_return_bearish_sequence";
+        }
+    }
+
+    if (sequence_direction == "bullish") {
+        if (return_direction == "bearish") {
+            divergence =
+                "bearish_return_bullish_sequence";
+        }
+    }
+
+    let first_half_avg_range =
+        first_half_range_total / first_half_count;
+
+    let second_half_avg_range =
+        second_half_range_total / second_half_count;
+
+    let first_half_avg_volume =
+        first_half_volume_total / first_half_count;
+
+    let second_half_avg_volume =
+        second_half_volume_total / second_half_count;
+
+    let range_ratio =
+        second_half_avg_range / first_half_avg_range;
+
+    let volume_ratio =
+        second_half_avg_volume / first_half_avg_volume;
+
+    let volatility_direction = "stable";
+
+    if (range_ratio > 1) {
+        volatility_direction = "expanding";
+    }
+
+    if (range_ratio < 1) {
+        volatility_direction = "contracting";
+    }
+
+    let volume_direction = "stable";
+
+    if (volume_ratio > 1) {
+        volume_direction = "expanding";
+    }
+
+    if (volume_ratio < 1) {
+        volume_direction = "contracting";
+    }
+
+    return {
+        "symbol": request["symbol"],
+        "pattern": "ohlcv_window_structure",
+
+        "sequence_direction": sequence_direction,
+        "return_direction": return_direction,
+        "divergence": divergence,
+
+        "volume_direction": volume_direction,
+        "volatility_direction": volatility_direction,
+
+        "up_closes": up_closes,
+        "down_closes": down_closes,
+
+        "window_return_pct": return_pct,
+
+        "first_half_avg_range": first_half_avg_range,
+        "second_half_avg_range": second_half_avg_range,
+        "range_ratio": range_ratio,
+
+        "first_half_avg_volume": first_half_avg_volume,
+        "second_half_avg_volume": second_half_avg_volume,
+        "volume_ratio": volume_ratio
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(analyze(request));
