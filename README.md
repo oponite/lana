@@ -1,12 +1,18 @@
 # Lana
 
-Lana is a general-purpose language with:
+> A programming language for uncertainty computation.
+
+Lana is for personal projects and professional software that model uncertain
+evidence, probabilities, and outcomes as first-class values. Created and
+actively maintained by [Vijay Neelakantan](https://github.com/oponite).
+
+Lana includes:
 
 - an immutable density-operator primitive `STATE`, with an observable probability
   and normalized complex disposition
 - immutable lazy `STATE_DIST` values that compose states without sampling or
   mutation until explicitly measured or sampled
-- ordinary numbers, booleans, strings, arrays, functions, tasks, and host
+- and ordinary numbers, booleans, strings, arrays, functions, tasks, and host
   calls.
 
 ```lana
@@ -22,9 +28,9 @@ print(measure combined as probability);
 At `p = 0` or `p = 1`, the disposition is canonicalized to zero. `append()`
 creates an immutable lazy distribution, and `sample()` returns a concrete state.
 
-Lana is personal-first: it is the language I use to build programs. It is also
-public because the language model and implementation are worth exploring. Issues
-and questions are welcome, and supported 1.x defects will receive ongoing triage.
+Lana is a public, actively developed language project. Issues, questions, and
+focused pull requests are welcome. Changes to language behavior follow the
+authority order below and include tests or documentation when applicable.
 
 ## Install and run
 
@@ -163,7 +169,7 @@ Source: [`examples/03_combined_evidence.lana`](examples/03_combined_evidence.lan
 
 ## Optional integrations
 
-The source-install integrations connect Lana 1.1 to JSON subprocess callers,
+The source-install integrations connect Lana 1.0 to JSON subprocess callers,
 MCP hosts, Jupyter, VS Code, Neovim, and a narrow native C ABI without adding
 dependencies to the normal Lana build. Start with
 [`integrations/README.md`](integrations/README.md).
@@ -201,9 +207,8 @@ The authority order is:
 Benchmark programs are reproducible source evidence; generated reports and
 machine-local result snapshots are not part of the source release.
 
-## 1.1 maintenance policy
+## Development Policy
 
-The Lana 1.1 language, compiler, bytecode, and VM feature set is frozen through
-December 31, 2026 while development moves to programs built with Lana. During
-that period, documentation, support, and compatibility-preserving fixes for
-correctness, security, data loss, or installation failures remain in scope.
+The Lana language, compiler, bytecode, and VM are under active development.
+Changes preserve the documented authority order, compatibility expectations,
+correctness, security, and data integrity.

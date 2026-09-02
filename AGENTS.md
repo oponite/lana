@@ -96,9 +96,8 @@ assembly are not accepted or converted; rebuild them from source.
 - Benchmark result snapshots are machine-local evidence, not conformance.
 - Run `git diff --check`; there is no repository-wide formatter.
 
-## 1.0 support policy
+## Development policy
 
-Language, compiler, bytecode, and VM feature development is frozen through
-December 31, 2026 while the maintainer builds programs with Lana. Documentation,
-questions, and compatibility-preserving fixes for correctness, security, data
-loss, or installation failures remain supported.
+Language, compiler, bytecode, and VM development is active. Preserve the
+authority order, compatibility expectations, correctness, security, and data
+integrity. Add regression coverage for behavior changes.
