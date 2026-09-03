@@ -12,6 +12,7 @@ if(LANA_BUILD_INTEGRATIONS)
     add_executable(lana_bridge_tests integrations/native/test_bridge.c)
     target_link_libraries(lana_bridge_tests PRIVATE lana_bridge)
     target_compile_options(lana_bridge_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
+    target_compile_definitions(lana_bridge_tests PRIVATE LANA_VERSION="${LANA_VERSION}")
     add_test(NAME lana_native_bridge
         COMMAND "${CMAKE_COMMAND}"
             -DLANAVM=$<TARGET_FILE:lanavm>

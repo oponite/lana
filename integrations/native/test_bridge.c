@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
     FILE *request;
     int result;
     CHECK(argc == 4);
-    CHECK(strcmp(lana_bridge_version(), "1.1.1") == 0);
+    CHECK(strcmp(lana_bridge_version(), LANA_VERSION) == 0);
     request = fopen(argv[2], "wb");
     CHECK(request != NULL);
     CHECK(fwrite("{\"native\":true}", 1u, 15u, request) == 15u);
