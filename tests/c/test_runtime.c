@@ -38,6 +38,29 @@ static int test_state_construction(void) {
     return 0;
 }
 
+static int test_json_parse_clears_output_metadata(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    Value parsed = lana_value_null();
+
+    lana_chunk_init(&chunk);
+    lana_vm_init(&vm, &chunk);
+    parsed.derivation = (LanaDerivation *)&parsed;
+    parsed.reactive = (LanaReactive *)&parsed;
+    parsed.claim = (LanaClaim *)&parsed;
+    parsed.planned_effect = (LanaPlannedEffect *)&parsed;
+    CHECK(lana_json_parse(&vm, "[1,[2]]", &parsed) == LANA_OK);
+    CHECK(parsed.type == VAL_ARRAY);
+    CHECK(parsed.derivation == NULL && parsed.reactive == NULL);
+    CHECK(parsed.claim == NULL && parsed.planned_effect == NULL);
+    CHECK(parsed.as.array->items[1].type == VAL_ARRAY);
+    CHECK(parsed.as.array->items[1].derivation == NULL);
+    CHECK(parsed.as.array->items[1].reactive == NULL);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+    return 0;
+}
+
 static int test_state_canonicalization_and_transforms(void) {
     LanaState state, transformed;
     double c_re, c_im, expectation;
@@ -136,14 +159,15 @@ static int test_basis_measurement_and_estimation(void) {
     lana_vm_seed(&vm, 123u);
     CHECK(lana_vm_run(&vm) == LANA_OK);
     CHECK(vm.frames[0].registers[4].type == VAL_NUMBER);
-    CHECK(vm.frames[0].registers[4].as.number == 1.0);
+    CHECK(vm.frames[0].registers[4].as.number == 0.0);
     CHECK(vm.frames[0].registers[5].type == VAL_DISTRIBUTION);
-    CHECK(vm.frames[0].registers[5].as.distribution.p0 == 1.0);
-    CHECK(vm.frames[0].registers[5].as.distribution.p1 == 0.0);
-    CHECK(vm.frames[0].registers[6].as.number == 0.0);
+    CHECK(vm.frames[0].registers[5].as.distribution.p0 == 0.0);
+    CHECK(vm.frames[0].registers[5].as.distribution.p1 == 1.0);
+    CHECK(vm.frames[0].registers[6].as.number == 1.0);
     CHECK(vm.frames[0].registers[7].type == VAL_SAMPLE);
+    CHECK(vm.frames[0].registers[7].as.sample == 0);
     CHECK(fabs(vm.frames[0].registers[9].as.number -
-               (0.5 + sqrt(0.75 * 0.25))) < LANA_STATE_EPSILON);
+               (0.5 - sqrt(0.75 * 0.25))) < LANA_STATE_EPSILON);
     CHECK(vm.frames[0].registers[10].as.distribution.p0 == 0.5);
     CHECK(vm.frames[0].registers[10].as.distribution.p1 == 0.5);
     CHECK(vm.frames[0].registers[11].type == VAL_SAMPLE);
@@ -233,7 +257,10 @@ static int test_distribution_sharing_metadata_and_budget(void) {
     LanaStateDist *dirac, *shared_append, *outer, *transformed;
     LanaStateValue sampled;
     Value state_value_a, state_value_b, shared_value;
+    Value deep_value;
     double expectation;
+    size_t allocations_before;
+    unsigned depth;
     lana_chunk_init(&empty);
     lana_vm_init(&vm, &empty);
     CHECK(lana_state_make_complex(0.2, 0.5, 0.0, &state_a) == LANA_OK);
@@ -242,19 +269,35 @@ static int test_distribution_sharing_metadata_and_budget(void) {
     state_value_a.as.state.indexes.has_source = true;
     state_value_a.as.state.indexes.source = "captured";
     state_value_b = lana_value_state(state_b);
+    allocations_before = vm.allocation_count;
+    CHECK(lana_vm_state_dist_append(&vm, &state_value_a, &state_value_b, &shared_append) == LANA_OK);
+    CHECK(vm.allocation_count == allocations_before + 1u);
+    CHECK(shared_append->as.append.left.is_inline && shared_append->as.append.right.is_inline);
     CHECK(lana_vm_state_dist_dirac(&vm, &state_value_a.as.state, &dirac) == LANA_OK);
     CHECK(lana_vm_state_dist_transform(&vm, LANA_TRANSFORM_NEUTRALIZE, dirac, &transformed) == LANA_OK);
     CHECK(lana_vm_state_dist_sample(&vm, transformed, &sampled) == LANA_OK);
     CHECK(sampled.indexes.has_source && strcmp(sampled.indexes.source, "captured") == 0);
     CHECK(sampled.state.p == 0.2 && sampled.state.d_re == 0.0 && sampled.state.d_im == 0.0);
-    CHECK(lana_vm_state_dist_append(&vm, &state_value_a, &state_value_b, &shared_append) == LANA_OK);
     shared_value = lana_value_state_dist(shared_append);
     CHECK(lana_vm_state_dist_append(&vm, &shared_value, &shared_value, &outer) == LANA_OK);
-    CHECK(outer->as.append.left == shared_append && outer->as.append.right == shared_append);
+    CHECK(!outer->as.append.left.is_inline && !outer->as.append.right.is_inline &&
+          outer->as.append.left.as.node == shared_append &&
+          outer->as.append.right.as.node == shared_append);
     CHECK(lana_vm_state_dist_expected_probability(outer, &expectation) == LANA_OK);
     CHECK(fabs(expectation - (1.0 - 0.56 * 0.56)) < LANA_STATE_EPSILON);
     vm.instruction_count = vm.instruction_limit;
     CHECK(lana_vm_state_dist_sample(&vm, shared_append, &sampled) == LANA_ERR_BUDGET_EXHAUSTED);
+    vm.instruction_count = 0u;
+    deep_value = state_value_a;
+    for (depth = 0u; depth < LANA_STATE_DIST_DEPTH_LIMIT; ++depth) {
+        CHECK(lana_vm_state_dist_append(&vm, &deep_value, &state_value_b, &deep_value.as.state_dist) == LANA_OK);
+        deep_value.type = VAL_STATE_DIST;
+    }
+    CHECK(lana_vm_state_dist_expected_probability(deep_value.as.state_dist, &expectation) == LANA_OK);
+    CHECK(lana_vm_state_dist_append(&vm, &deep_value, &state_value_b, &deep_value.as.state_dist) == LANA_OK);
+    CHECK(lana_vm_state_dist_append(&vm, &deep_value, &state_value_b, &deep_value.as.state_dist) == LANA_OK);
+    CHECK(lana_vm_state_dist_expected_probability(deep_value.as.state_dist, &expectation) ==
+          LANA_ERR_INVALID_DISTRIBUTION);
     lana_vm_free(&vm);
     lana_chunk_free(&empty);
     return 0;
@@ -810,6 +853,7 @@ static int test_m6_reactive_observation_claim_and_effect_receipts(void) {
 
 int main(void) {
     CHECK(test_state_construction() == 0);
+    CHECK(test_json_parse_clears_output_metadata() == 0);
     CHECK(test_state_canonicalization_and_transforms() == 0);
     CHECK(test_distribution_runtime() == 0);
     CHECK(test_basis_measurement_and_estimation() == 0);

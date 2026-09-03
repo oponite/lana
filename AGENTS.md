@@ -1,3 +1,5 @@
+s
+
 # Working with Lana
 
 This file is the fastest entrypoint for a person or an AI coding tool. Start a

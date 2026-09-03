@@ -2,10 +2,6 @@
 
 > A programming language for uncertainty computation.
 
-Lana is for personal projects and professional software that model uncertain
-evidence, probabilities, and outcomes as first-class values. Created and
-actively maintained by [Vijay Neelakantan](https://github.com/oponite).
-
 Lana includes:
 
 - an immutable density-operator primitive `STATE`, with an observable probability
@@ -69,10 +65,10 @@ These examples introduce Lana in three steps:
 2. measuring one uncertain state
 3. combining independent evidence
 
-Run any example with:
+Run any tutorial example with:
 
 ```bash
-build/lana run examples/01_counter.lana
+build/lana run examples/tutorials/01_counter.lana
 ```
 
 ### 1. Ordinary computation
@@ -97,7 +93,7 @@ print(total);
 Run it:
 
 ```bash
-build/lana run examples/01_counter.lana
+build/lana run examples/tutorials/01_counter.lana
 ```
 
 Output:
@@ -106,7 +102,7 @@ Output:
 5
 ```
 
-Source: [`examples/01_counter.lana`](examples/01_counter.lana)
+Source: [`examples/tutorials/01_counter.lana`](examples/tutorials/01_counter.lana)
 
 ### 2. Measure an uncertain state
 
@@ -123,7 +119,7 @@ print(probability);
 Run it:
 
 ```bash
-build/lana run examples/02_belief_measurement.lana
+build/lana run examples/tutorials/02_belief_measurement.lana
 ```
 
 Output:
@@ -132,7 +128,7 @@ Output:
 0.75
 ```
 
-Source: [`examples/02_belief_measurement.lana`](examples/02_belief_measurement.lana)
+Source: [`examples/tutorials/02_belief_measurement.lana`](examples/tutorials/02_belief_measurement.lana)
 
 ### 3. Combine independent evidence
 
@@ -156,7 +152,7 @@ The combined probability is:
 Run it:
 
 ```bash
-build/lana run examples/03_combined_evidence.lana
+build/lana run examples/tutorials/03_combined_evidence.lana
 ```
 
 Output:
@@ -165,7 +161,7 @@ Output:
 0.76
 ```
 
-Source: [`examples/03_combined_evidence.lana`](examples/03_combined_evidence.lana)
+Source: [`examples/tutorials/03_combined_evidence.lana`](examples/tutorials/03_combined_evidence.lana)
 
 ## Optional integrations
 

@@ -1,6 +1,6 @@
 import "./syntax.lana" as syntax;
 
-fn emitter_new(namespace) { return [array_new(0), map_new(), 0, 0, namespace, map_new(), map_new()]; }
+fn emitter_new(namespace) { return [array_new(0), map_new(), 0, 0, namespace, map_new(), map_new(), 0]; }
 fn emit(context, line) { array_push(context[0], line); return null; }
 fn reg(number) { return string_concat("R", number_to_string(number)); }
 
@@ -23,6 +23,7 @@ fn new_label(context, kind) {
 fn symbol_add(context, name, register, information) {
     map_set(context[1], name, register);
     map_set(context[5], name, information);
+    if (register + 1 > context[7]) { context[7] = register + 1; }
     return register;
 }
 
@@ -471,6 +472,7 @@ fn emit_extended_statement(context, node) {
 }
 
 fn emit_statement(context, ir_node) {
+    context[2] = context[7];
     let node = ir_node[3]; emit(context, string_concat(".line ", number_to_string(node[array_length(node) - 1])));
     if (node[0] == 2) {
         let source = emit_expression(context, node[2]); let destination = new_register(context);

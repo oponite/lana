@@ -1,4 +1,0 @@
-state belief = state { p: 0.50, d: 0.20 };
-state evidence = state { p: 0.80, d: 0.40, timestamp: 0, confidence: 0.80 };
-apply evidence -> belief;
-print(measure belief as probability);

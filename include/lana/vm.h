@@ -115,6 +115,8 @@ struct LanaVM {
 };
 
 void lana_vm_init(LanaVM *vm, const LanaChunk *chunk);
+LanaVM *lana_vm_create(void);
+void lana_vm_destroy(LanaVM *vm);
 void lana_vm_seed(LanaVM *vm, uint64_t seed);
 void lana_vm_set_program_args(LanaVM *vm, int argc, const char **argv);
 LanaError lana_vm_set_worker_count(LanaVM *vm, size_t workers);

@@ -126,17 +126,19 @@ state function, validity guarantee, and exact expectation function.
 Basis-aware concrete-state measurement reconstructs
 `c = sqrt(p*(1-p)) * (d_re + i*d_im)`. With ordered bases
 `computational=(|0>,|1>)`, `x=(|+>,|->)`, and
-`y=(|+y>,|-y>)` where `|+y>=(|0>+i|1>)/sqrt(2)`, the basis-0 probabilities are
-`p`, `1/2 + Re(c)`, and `1/2 - Im(c)`, respectively. It is read-only.
+`y=(|+y>,|-y>)` where `|+y>=(|0>+i|1>)/sqrt(2)`, `q_B` is the probability of
+outcome `1`: `p`, `1/2 - Re(c)`, and `1/2 + Im(c)`, respectively. Probability
+mode returns `q_B`, distribution mode returns `distribution(1-q_B, q_B)`, and
+sample mode draws `Bernoulli(q_B)`. Measurement is read-only.
 
 Qualified basis-aware measurement of `STATE_DIST` supports exact sampling only:
-the VM samples one concrete state, computes its exact basis probability, and
-uses the existing PCG32 binary draw. Qualified probability/distribution modes
+the VM samples one concrete state, computes its exact outcome-1 probability
+`q_B`, and uses the existing PCG32 binary draw. Qualified probability/distribution modes
 return `LANA_ERR_UNSUPPORTED_EXACT_MEASUREMENT`.
 
 `estimate_measure` is the explicit approximate path. For each of `N` trials the
 VM consumes one instruction-budget unit, samples the existing distribution, and
-computes the exact basis probability of that sampled state. It returns the
+computes the exact outcome-1 probability `q_B` of that sampled state. It returns the
 arithmetic mean `q_hat`, or `distribution(1-q_hat, q_hat)`, only after all trials
 complete. Cancellation, memory errors, invalid distribution nodes, and budget
 exhaustion return an error and never expose a partial estimate. The VM's existing

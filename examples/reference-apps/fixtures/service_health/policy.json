@@ -1,0 +1,9 @@
+{
+  "policy_id": "service-health-policy",
+  "rule": {
+    "kind": "probability_at_least",
+    "field": "health_probability",
+    "threshold": 0.9,
+    "effect": "notify"
+  }
+}

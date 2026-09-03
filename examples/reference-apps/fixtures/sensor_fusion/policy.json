@@ -1,0 +1,9 @@
+{
+  "policy_id": "sensor-fusion-policy",
+  "rule": {
+    "kind": "probability_at_least",
+    "field": "fused_probability",
+    "threshold": 0.7,
+    "effect": "route"
+  }
+}

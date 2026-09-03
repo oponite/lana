@@ -1,0 +1,41 @@
+// Reference App: Service Health Monitor
+//
+// Compares a live service metric against a baseline, combines the two
+// readings, measures the resulting health probability, and writes a
+// decision-request for the bridge pipeline.
+
+import "../../integrations/lana/bridge.lana" as bridge;
+
+let request = bridge.read_request();
+let fixture_path = request["fixture"];
+let evidence = json_parse(read_text(fixture_path));
+
+let baseline = evidence["baseline"];
+let current = evidence["current"];
+
+state baseline_state = state(p: baseline["p"], d_re: baseline["d_re"], d_im: baseline["d_im"]);
+state current_state = state(p: current["p"], d_re: current["d_re"], d_im: current["d_im"]);
+
+let baseline_evidence = evidence(baseline_state, "baseline");
+let current_evidence = evidence(current_state, "current");
+
+let combined = append(baseline_evidence, current_evidence);
+let prob = measure combined as probability;
+let explanation = explain(current_evidence);
+let derivation_id = json_stringify(derivation(current_evidence)["id"]);
+
+let input = map_new();
+map_set(input, "health_probability", prob);
+
+let decision_request = map_new();
+map_set(decision_request, "schema", 1);
+map_set(decision_request, "target", "service_health");
+map_set(decision_request, "scope", "production");
+map_set(decision_request, "input", input);
+map_set(decision_request, "evidence_ids", "baseline,current");
+map_set(decision_request, "derivation_ids", derivation_id);
+map_set(decision_request, "relationship_resolution", "independent");
+map_set(decision_request, "reason", explanation);
+map_set(decision_request, "requested_evidence", "none");
+
+bridge.write_response(decision_request);

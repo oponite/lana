@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+- Add the durable decision pipeline: store, policy, ledger, claims, and effects.
+- Add dlopen adapter plugins (SQLite, HTTP/JSON) and a shared runtime for bindings.
+- Add four reference applications (sensor fusion, service health, doc router, advisory forecast) with fixtures.
+- Add the native bridge pipeline API (`lana_bridge_run_pipeline`) for durable decision execution.
+- Add state codec, bytecode codec, and SHA-256 support.
+- Add packaging and install verification (`package.sh`, `verify-install.sh`, local-install test).
+- Fix release-build test assertions and strict-warning issues across the C runtime.
+
 ## 1.1.1
 
 - Preserve the 1.1 evidence lifecycle contract across policy, replay, and

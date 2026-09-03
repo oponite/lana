@@ -121,7 +121,12 @@ x             = (|+>, |->)
 y             = (|+y>, |-y>)
 ```
 
-For a concrete `STATE`, all three modes are exact and read-only. A qualified
+For a concrete `STATE`, define `q_B` as the exact probability of outcome `1`.
+With `c = sqrt(p * (1 - p)) * (d_re + i * d_im)`, the values are
+`q_computational = p`, `q_x = 1/2 - Re(c)`, and `q_y = 1/2 + Im(c)`.
+Probability mode returns `q_B`, distribution mode returns
+`distribution(1 - q_B, q_B)`, and sample mode draws `Bernoulli(q_B)`.
+All three modes are exact and read-only. A qualified
 measurement of `STATE_DIST` supports only `sample`: it samples one concrete
 state from the distribution, then performs the selected exact basis
 measurement. Qualified `probability` and `distribution` on `STATE_DIST`
@@ -139,7 +144,7 @@ let d = estimate_measure dist in y as distribution with samples: 10000;
 
 `estimate_measure` accepts only a `STATE_DIST`, and `samples` must be a positive
 integer literal. It samples a concrete state `N` times, averages the exact
-basis-0 probability of each sampled state, and returns that average (or
+outcome-1 probability `q_B` of each sampled state, and returns that average (or
 `distribution(1-q_hat, q_hat)`). This is a deliberate Monte Carlo
 approximation, not the exact mathematical probability and not a hidden runtime
 optimization. The VM uses the configured seed and independent samples; larger
