@@ -1,0 +1,9 @@
+{
+  "policy_id": "advisory-forecast-policy",
+  "rule": {
+    "kind": "probability_at_least",
+    "field": "forecast_probability",
+    "threshold": 0.5,
+    "effect": "publish"
+  }
+}

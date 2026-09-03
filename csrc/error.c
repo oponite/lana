@@ -32,7 +32,13 @@ const char *lana_error_name(LanaError error) {
         "LANA_ERR_BUDGET_EXHAUSTED", "LANA_ERR_KEY", "LANA_ERR_PARSE",
         "LANA_ERR_ASSERTION", "LANA_ERR_INVALID_CONDITIONING",
         "LANA_ERR_UNRESOLVED_VALUE", "LANA_ERR_PATH_LIMIT",
-        "LANA_ERR_CAPABILITY", "LANA_ERR_CONFLICT"
+        "LANA_ERR_CAPABILITY", "LANA_ERR_CONFLICT", "LANA_ERR_NOT_FOUND",
+        "LANA_ERR_COMPACTED_HISTORY", "LANA_ERR_SCHEMA",
+        "LANA_ERR_UNSUPPORTED_VALUE", "LANA_ERR_CORRUPTION",
+        "LANA_ERR_INVALID_PARAMETERS", "LANA_ERR_CLAIM_MISMATCH",
+        "LANA_ERR_CLAIM_REVOKED", "LANA_ERR_CLAIM_EXPIRED",
+        "LANA_ERR_UNAUTHORIZED_ISSUER", "LANA_ERR_INTEGRITY",
+        "LANA_ERR_NO_MATCHING_EVENT"
     };
     if ((size_t)error >= sizeof(names) / sizeof(names[0])) return "LANA_ERR_UNKNOWN";
     return names[error];
@@ -79,6 +85,18 @@ LanaErrorKind lana_error_kind_from_code(LanaError error) {
         case LANA_ERR_KEY:
         case LANA_ERR_CAPABILITY:
         case LANA_ERR_CONFLICT:
+        case LANA_ERR_NOT_FOUND:
+        case LANA_ERR_COMPACTED_HISTORY:
+        case LANA_ERR_SCHEMA:
+        case LANA_ERR_UNSUPPORTED_VALUE:
+        case LANA_ERR_CORRUPTION:
+        case LANA_ERR_INVALID_PARAMETERS:
+        case LANA_ERR_CLAIM_MISMATCH:
+        case LANA_ERR_CLAIM_REVOKED:
+        case LANA_ERR_CLAIM_EXPIRED:
+        case LANA_ERR_UNAUTHORIZED_ISSUER:
+        case LANA_ERR_INTEGRITY:
+        case LANA_ERR_NO_MATCHING_EVENT:
             return LANA_ERROR_KIND_VALIDATION;
     }
     return LANA_ERROR_KIND_ASSERTION;

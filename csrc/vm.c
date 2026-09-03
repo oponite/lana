@@ -184,15 +184,20 @@ static void gc_trace_paths(LanaGC *gc, void *payload) {
 
 static void gc_trace_state_dist(LanaGC *gc, void *payload) {
     LanaStateDist *distribution = payload;
+    LanaDistOperand *operands;
     switch (distribution->kind) {
         case LANA_DIST_DIRAC:
             gc_mark_state_source(gc, &distribution->as.dirac);
             break;
         case LANA_DIST_APPEND:
-            gc_mark_object(gc, distribution->as.append.left, LANA_GC_STATE_DIST,
-                           gc_trace_state_dist);
-            gc_mark_object(gc, distribution->as.append.right, LANA_GC_STATE_DIST,
-                           gc_trace_state_dist);
+            operands = &distribution->as.append.left;
+            for (size_t index = 0u; index < 2u; ++index) {
+                if (operands[index].is_inline)
+                    gc_mark_state_source(gc, &operands[index].as.state);
+                else
+                    gc_mark_object(gc, operands[index].as.node, LANA_GC_STATE_DIST,
+                                   gc_trace_state_dist);
+            }
             break;
         case LANA_DIST_TRANSFORM:
             gc_mark_object(gc, distribution->as.transform.child, LANA_GC_STATE_DIST,
@@ -751,6 +756,19 @@ void lana_vm_init(LanaVM *vm, const LanaChunk *chunk) {
     lana_vm_seed(vm, UINT64_C(0x4c414e41));
 }
 
+LanaVM *lana_vm_create(void) {
+    LanaVM *vm = calloc(1u, sizeof(*vm));
+    if (vm == NULL) return NULL;
+    lana_vm_init(vm, NULL);
+    return vm;
+}
+
+void lana_vm_destroy(LanaVM *vm) {
+    if (vm == NULL) return;
+    lana_vm_free(vm);
+    free(vm);
+}
+
 void lana_vm_set_program_args(LanaVM *vm, int argc, const char **argv) {
     if (vm == NULL) return;
     vm->program_argc = argc;
@@ -940,11 +958,19 @@ static LanaError clone_state_dist_node(LanaVM *destination, const LanaStateDist 
             break;
         case LANA_DIST_APPEND:
             copy->as.append = source->as.append;
-            error = clone_state_dist_node(destination, source->as.append.left,
-                                          &copy->as.append.left, memo);
-            if (error == LANA_OK)
-                error = clone_state_dist_node(destination, source->as.append.right,
-                                              &copy->as.append.right, memo);
+            for (size_t index = 0u; index < 2u && error == LANA_OK; ++index) {
+                LanaDistOperand *operand = index == 0u
+                    ? &copy->as.append.left : &copy->as.append.right;
+                const LanaDistOperand *source_operand = index == 0u
+                    ? &source->as.append.left : &source->as.append.right;
+                if (source_operand->is_inline) {
+                    error = clone_state_value(destination, &source_operand->as.state,
+                                              &operand->as.state);
+                } else {
+                    error = clone_state_dist_node(destination, source_operand->as.node,
+                                                  &operand->as.node, memo);
+                }
+            }
             break;
         case LANA_DIST_TRANSFORM:
             copy->as.transform.transform_id = source->as.transform.transform_id;
@@ -3570,8 +3596,7 @@ static LanaError store_state(LanaVM *vm, uint32_t reg, LanaStateValue state) {
     LanaFrame *frame = current_frame(vm);
     LanaError error;
     if (!lana_state_valid(&state.state)) return LANA_ERR_INVALID_STATE;
-    frame->registers[reg].type = VAL_STATE;
-    frame->registers[reg].as.state = state;
+    frame->registers[reg] = (Value){.type = VAL_STATE, .as.state = state};
     vm->state_transition_count += 1u;
     error = history_append(vm, &frame->histories[reg], state);
     return error;
@@ -3589,12 +3614,16 @@ LanaError lana_vm_state_dist_dirac(LanaVM *vm, const LanaStateValue *state, Lana
     return LANA_OK;
 }
 
-static LanaError distribution_from_value(LanaVM *vm, const Value *value, LanaStateDist **out) {
+static LanaError distribution_from_value(const Value *value, LanaDistOperand *out) {
     if (value == NULL || out == NULL) return LANA_ERR_TYPE;
-    if (value->type == VAL_STATE)
-        return lana_vm_state_dist_dirac(vm, &value->as.state, out);
+    if (value->type == VAL_STATE) {
+        out->is_inline = true;
+        out->as.state = value->as.state;
+        return LANA_OK;
+    }
     if (value->type == VAL_STATE_DIST && value->as.state_dist != NULL) {
-        *out = value->as.state_dist;
+        out->is_inline = false;
+        out->as.node = value->as.state_dist;
         return LANA_OK;
     }
     return LANA_ERR_TYPE;
@@ -3608,9 +3637,9 @@ LanaError lana_vm_state_dist_append(LanaVM *vm, const Value *left, const Value *
     distribution = lana_vm_alloc(vm, sizeof(*distribution));
     if (distribution == NULL) return LANA_ERR_OOM;
     distribution->kind = LANA_DIST_APPEND;
-    error = distribution_from_value(vm, left, &distribution->as.append.left);
+    error = distribution_from_value(left, &distribution->as.append.left);
     if (error == LANA_OK)
-        error = distribution_from_value(vm, right, &distribution->as.append.right);
+        error = distribution_from_value(right, &distribution->as.append.right);
     if (error != LANA_OK) return error;
     distribution->as.append.has_cached_parameters = false;
     if (left->type == VAL_STATE && right->type == VAL_STATE) {
@@ -3643,42 +3672,94 @@ LanaError lana_vm_state_dist_transform(LanaVM *vm, uint32_t transform_id,
     return LANA_OK;
 }
 
-static LanaError expected_probability_recursive(const LanaStateDist *distribution,
-                                              double *out, size_t depth) {
-    double left, right;
-    LanaError error;
-    if (distribution == NULL || out == NULL || depth > 1024u)
+typedef struct {
+    const LanaStateDist *node;
+    unsigned stage;
+    double left;
+    double right;
+    LanaStateValue left_state;
+    LanaStateValue right_state;
+} LanaDistEvalFrame;
+
+static LanaDistEvalFrame dist_eval_frame(const LanaStateDist *node) {
+    LanaDistEvalFrame frame = {0};
+    frame.node = node;
+    return frame;
+}
+
+static LanaError expected_probability_operand(const LanaDistOperand *operand,
+                                              double *out) {
+    if (operand == NULL || out == NULL) return LANA_ERR_INVALID_DISTRIBUTION;
+    if (!operand->is_inline)
         return LANA_ERR_INVALID_DISTRIBUTION;
-    switch (distribution->kind) {
-        case LANA_DIST_DIRAC:
-            if (!lana_state_valid(&distribution->as.dirac.state))
-                return LANA_ERR_INVALID_DISTRIBUTION;
-            *out = distribution->as.dirac.state.p;
-            return LANA_OK;
-        case LANA_DIST_APPEND:
-            error = expected_probability_recursive(distribution->as.append.left,
-                                                   &left, depth + 1u);
-            if (error == LANA_OK)
-                error = expected_probability_recursive(distribution->as.append.right,
-                                                       &right, depth + 1u);
-            if (error != LANA_OK) return error;
-            *out = 1.0 - (1.0 - left) * (1.0 - right);
-            return isfinite(*out) && *out >= 0.0 && *out <= 1.0
-                       ? LANA_OK : LANA_ERR_INVALID_DISTRIBUTION;
-        case LANA_DIST_TRANSFORM:
-            error = expected_probability_recursive(distribution->as.transform.child,
-                                                   &left, depth + 1u);
-            if (error != LANA_OK) return error;
-            return lana_transform_expected_probability(
-                distribution->as.transform.transform_id, left, out);
-        default:
-            return LANA_ERR_INVALID_DISTRIBUTION;
-    }
+    if (!lana_state_valid(&operand->as.state.state))
+        return LANA_ERR_INVALID_DISTRIBUTION;
+    *out = operand->as.state.state.p;
+    return LANA_OK;
 }
 
 LanaError lana_vm_state_dist_expected_probability(const LanaStateDist *distribution,
                                               double *out) {
-    return expected_probability_recursive(distribution, out, 0u);
+    LanaDistEvalFrame stack[LANA_STATE_DIST_DEPTH_LIMIT + 1u];
+    size_t top = 0u;
+    double result = 0.0;
+    if (distribution == NULL || out == NULL) return LANA_ERR_INVALID_DISTRIBUTION;
+    stack[top++] = dist_eval_frame(distribution);
+    while (top > 0u) {
+        LanaDistEvalFrame *frame = &stack[top - 1u];
+        LanaError error;
+        if (frame->node == NULL) return LANA_ERR_INVALID_DISTRIBUTION;
+        if (frame->stage == 0u) {
+            if (frame->node->kind == LANA_DIST_DIRAC) {
+                if (!lana_state_valid(&frame->node->as.dirac.state))
+                    return LANA_ERR_INVALID_DISTRIBUTION;
+                result = frame->node->as.dirac.state.p;
+                --top;
+            } else if (frame->node->kind == LANA_DIST_APPEND) {
+                frame->stage = 1u;
+                if (frame->node->as.append.left.is_inline) {
+                    error = expected_probability_operand(&frame->node->as.append.left,
+                                                         &frame->left);
+                    if (error != LANA_OK) return error;
+                    frame->stage = 2u;
+                } else {
+                    if (top >= LANA_STATE_DIST_DEPTH_LIMIT + 1u) return LANA_ERR_INVALID_DISTRIBUTION;
+                    stack[top++] = dist_eval_frame(frame->node->as.append.left.as.node);
+                }
+            } else if (frame->node->kind == LANA_DIST_TRANSFORM) {
+                frame->stage = 4u;
+                if (top >= LANA_STATE_DIST_DEPTH_LIMIT + 1u) return LANA_ERR_INVALID_DISTRIBUTION;
+                stack[top++] = dist_eval_frame(frame->node->as.transform.child);
+            } else return LANA_ERR_INVALID_DISTRIBUTION;
+        } else if (frame->stage == 1u) {
+            frame->left = result;
+            frame->stage = 2u;
+        } else if (frame->stage == 2u) {
+            if (frame->node->as.append.right.is_inline) {
+                error = expected_probability_operand(&frame->node->as.append.right,
+                                                     &frame->right);
+                if (error != LANA_OK) return error;
+                frame->stage = 3u;
+            } else {
+                frame->stage = 3u;
+                if (top >= LANA_STATE_DIST_DEPTH_LIMIT + 1u) return LANA_ERR_INVALID_DISTRIBUTION;
+                stack[top++] = dist_eval_frame(frame->node->as.append.right.as.node);
+            }
+        } else if (frame->stage == 3u) {
+            if (!frame->node->as.append.right.is_inline) frame->right = result;
+            result = 1.0 - (1.0 - frame->left) * (1.0 - frame->right);
+            if (!isfinite(result) || result < 0.0 || result > 1.0)
+                return LANA_ERR_INVALID_DISTRIBUTION;
+            --top;
+        } else {
+            error = lana_transform_expected_probability(
+                frame->node->as.transform.transform_id, result, &result);
+            if (error != LANA_OK) return error;
+            --top;
+        }
+    }
+    *out = result;
+    return LANA_OK;
 }
 
 static LanaError consume_sampling_budget(LanaVM *vm) {
@@ -3721,32 +3802,65 @@ static LanaError sample_append_kernel(LanaVM *vm, const LanaStateValue *left,
 
 static LanaError sample_distribution_recursive(LanaVM *vm, const LanaStateDist *distribution,
                                              LanaStateValue *out, size_t depth) {
-    LanaStateValue left, right;
-    LanaError error;
-    if (distribution == NULL || out == NULL || depth > 1024u)
+    LanaDistEvalFrame stack[LANA_STATE_DIST_DEPTH_LIMIT + 1u];
+    LanaStateValue result_state;
+    size_t top = 0u;
+    if (distribution == NULL || out == NULL || depth > LANA_STATE_DIST_DEPTH_LIMIT)
         return LANA_ERR_INVALID_DISTRIBUTION;
-    switch (distribution->kind) {
-        case LANA_DIST_DIRAC:
-            if (!lana_state_valid(&distribution->as.dirac.state))
-                return LANA_ERR_INVALID_DISTRIBUTION;
-            *out = distribution->as.dirac;
-            return LANA_OK;
-        case LANA_DIST_APPEND:
-            error = sample_distribution_recursive(vm, distribution->as.append.left,
-                                                  &left, depth + 1u);
-            if (error == LANA_OK)
-                error = sample_distribution_recursive(vm, distribution->as.append.right,
-                                                      &right, depth + 1u);
-            return error == LANA_OK ? sample_append_kernel(vm, &left, &right, out) : error;
-        case LANA_DIST_TRANSFORM:
-            error = sample_distribution_recursive(vm, distribution->as.transform.child,
-                                                  out, depth + 1u);
+    stack[top++] = dist_eval_frame(distribution);
+    while (top > 0u) {
+        LanaDistEvalFrame *frame = &stack[top - 1u];
+        LanaError error;
+        if (frame->node == NULL) return LANA_ERR_INVALID_DISTRIBUTION;
+        if (frame->stage == 0u) {
+            if (frame->node->kind == LANA_DIST_DIRAC) {
+                if (!lana_state_valid(&frame->node->as.dirac.state))
+                    return LANA_ERR_INVALID_DISTRIBUTION;
+                result_state = frame->node->as.dirac;
+                --top;
+            } else if (frame->node->kind == LANA_DIST_APPEND) {
+                frame->stage = 1u;
+                if (frame->node->as.append.left.is_inline) {
+                    frame->left_state = frame->node->as.append.left.as.state;
+                    if (!lana_state_valid(&frame->left_state.state)) return LANA_ERR_INVALID_DISTRIBUTION;
+                    frame->stage = 2u;
+                } else {
+                    if (top >= LANA_STATE_DIST_DEPTH_LIMIT + 1u) return LANA_ERR_INVALID_DISTRIBUTION;
+                    stack[top++] = dist_eval_frame(frame->node->as.append.left.as.node);
+                }
+            } else if (frame->node->kind == LANA_DIST_TRANSFORM) {
+                frame->stage = 4u;
+                if (top >= LANA_STATE_DIST_DEPTH_LIMIT + 1u) return LANA_ERR_INVALID_DISTRIBUTION;
+                stack[top++] = dist_eval_frame(frame->node->as.transform.child);
+            } else return LANA_ERR_INVALID_DISTRIBUTION;
+        } else if (frame->stage == 1u) {
+            frame->left_state = result_state;
+            frame->stage = 2u;
+        } else if (frame->stage == 2u) {
+            if (frame->node->as.append.right.is_inline) {
+                frame->right_state = frame->node->as.append.right.as.state;
+                if (!lana_state_valid(&frame->right_state.state)) return LANA_ERR_INVALID_DISTRIBUTION;
+                frame->stage = 3u;
+            } else {
+                frame->stage = 3u;
+                if (top >= LANA_STATE_DIST_DEPTH_LIMIT + 1u) return LANA_ERR_INVALID_DISTRIBUTION;
+                stack[top++] = dist_eval_frame(frame->node->as.append.right.as.node);
+            }
+        } else if (frame->stage == 3u) {
+            if (!frame->node->as.append.right.is_inline) frame->right_state = result_state;
+            error = sample_append_kernel(vm, &frame->left_state, &frame->right_state,
+                                         &result_state);
             if (error != LANA_OK) return error;
-            return lana_transform_apply(distribution->as.transform.transform_id,
-                                         &out->state, &out->state);
-        default:
-            return LANA_ERR_INVALID_DISTRIBUTION;
+            --top;
+        } else {
+            error = lana_transform_apply(frame->node->as.transform.transform_id,
+                                         &result_state.state, &result_state.state);
+            if (error != LANA_OK) return error;
+            --top;
+        }
     }
+    *out = result_state;
+    return LANA_OK;
 }
 
 LanaError lana_vm_state_dist_sample(LanaVM *vm, const LanaStateDist *distribution,
@@ -4681,7 +4795,7 @@ LanaError lana_vm_run(LanaVM *vm) {
                 array->count = ins->c; array->capacity = ins->c; array->items = lana_vm_alloc(vm, ins->c * sizeof(*array->items));
                 if (array->items == NULL && ins->c > 0u) { error = LANA_ERR_OOM; break; }
                 if (ins->c > 0u) memcpy(array->items, &frame->registers[ins->b], ins->c * sizeof(*array->items));
-                frame->registers[ins->a].type = VAL_ARRAY; frame->registers[ins->a].as.array = array; break;
+                frame->registers[ins->a] = lana_value_array(array); break;
             }
             case OP_ARRAY_GET: case OP_ARRAY_SET: {
                 Value *array_value = &frame->registers[ins->a];
@@ -4727,8 +4841,7 @@ LanaError lana_vm_run(LanaVM *vm) {
                 error = start_task(vm, ins->b, &frame->registers[ins->c],
                                    &frame->histories[ins->c], ins->imm, &task);
                 if (error == LANA_OK) {
-                    frame->registers[ins->a].type = VAL_TASK;
-                    frame->registers[ins->a].as.task = task;
+                    frame->registers[ins->a] = (Value){.type = VAL_TASK, .as.task = task};
                     if (vm->trace) (void)printf("  forked task %llu\n", (unsigned long long)task->id);
                 }
                 break;
@@ -4787,8 +4900,7 @@ LanaError lana_vm_run(LanaVM *vm) {
                     }
                     for (index = 0; index < results->count; ++index)
                         inputs[index] = &results->items[index];
-                    frame->registers[ins->b].type = VAL_ARRAY;
-                    frame->registers[ins->b].as.array = results;
+                    frame->registers[ins->b] = lana_value_array(results);
                     error = attach_derivation(vm, &frame->registers[ins->b],
                         LANA_DERIVATION_OPERATION, "task_join_all", inputs,
                         results->count, "", ins->line, LANA_EXACTNESS_EXACT,

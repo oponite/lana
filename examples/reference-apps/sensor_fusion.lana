@@ -1,0 +1,41 @@
+// Reference App: Sensor Fusion
+//
+// Fuses two independent sensor readings into a single confidence, attaches
+// provenance to each reading, measures the fused probability, and writes a
+// decision-request for the bridge pipeline.
+
+import "../../integrations/lana/bridge.lana" as bridge;
+
+let request = bridge.read_request();
+let fixture_path = request["fixture"];
+let evidence = json_parse(read_text(fixture_path));
+
+let s1 = evidence["sensor1"];
+let s2 = evidence["sensor2"];
+
+state s1_state = state(p: s1["p"], d_re: s1["d_re"], d_im: s1["d_im"]);
+state s2_state = state(p: s2["p"], d_re: s2["d_re"], d_im: s2["d_im"]);
+
+let s1_evidence = evidence(s1_state, "sensor1");
+let s2_evidence = evidence(s2_state, "sensor2");
+
+let fused = append(s1_evidence, s2_evidence);
+let prob = measure fused as probability;
+let explanation = explain(s1_evidence);
+let derivation_id = json_stringify(derivation(s1_evidence)["id"]);
+
+let input = map_new();
+map_set(input, "fused_probability", prob);
+
+let decision_request = map_new();
+map_set(decision_request, "schema", 1);
+map_set(decision_request, "target", "sensor_fusion");
+map_set(decision_request, "scope", "production");
+map_set(decision_request, "input", input);
+map_set(decision_request, "evidence_ids", "sensor1,sensor2");
+map_set(decision_request, "derivation_ids", derivation_id);
+map_set(decision_request, "relationship_resolution", "independent");
+map_set(decision_request, "reason", explanation);
+map_set(decision_request, "requested_evidence", "none");
+
+bridge.write_response(decision_request);

@@ -59,11 +59,11 @@ LanaError lana_state_basis_probability(uint32_t basis, const LanaState *state,
             probability = state->p;
             break;
         case LANA_BASIS_X:
-            probability = 0.5 + c_re;
+            probability = 0.5 - c_re;
             break;
         case LANA_BASIS_Y:
-            /* |+y> = (|0> + i|1>) / sqrt(2), so P(+y) = 1/2 - Im(c). */
-            probability = 0.5 - c_im;
+            /* |-y> is outcome 1, so P(-y) = 1/2 + Im(c). */
+            probability = 0.5 + c_im;
             break;
         default:
             return LANA_ERR_MEASURE;

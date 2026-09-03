@@ -1,0 +1,9 @@
+{
+  "policy_id": "doc-router-policy",
+  "rule": {
+    "kind": "equals",
+    "field": "route",
+    "expected": "internal_archive",
+    "effect": "archive"
+  }
+}

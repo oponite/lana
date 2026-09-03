@@ -182,13 +182,23 @@ typedef enum {
     LANA_DIST_TRANSFORM
 } LanaStateDistKind;
 
+#define LANA_STATE_DIST_DEPTH_LIMIT 1024u
+
+typedef struct {
+    bool is_inline;
+    union {
+        LanaStateValue state;
+        LanaStateDist *node;
+    } as;
+} LanaDistOperand;
+
 struct LanaStateDist {
     LanaStateDistKind kind;
     union {
         LanaStateValue dirac;
         struct {
-            LanaStateDist *left;
-            LanaStateDist *right;
+            LanaDistOperand left;
+            LanaDistOperand right;
             bool has_cached_parameters;
             double p;
             double m_re;

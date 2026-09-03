@@ -1,0 +1,38 @@
+// Reference App: Document Router
+//
+// Routes a document based on its provenance and sensitivity. A trusted,
+// low-sensitivity document goes to the internal archive; anything else goes
+// to external review. The route is written into the decision-request and the
+// bridge policy decides whether the archive effect is authorized.
+
+import "../../integrations/lana/bridge.lana" as bridge;
+
+let request = bridge.read_request();
+let fixture_path = request["fixture"];
+let evidence = json_parse(read_text(fixture_path));
+
+let source = evidence["source"];
+let sensitivity = evidence["sensitivity"];
+
+let route = "external_review";
+if (source == "trusted_source") {
+    if (sensitivity == "low") {
+        route = "internal_archive";
+    }
+}
+
+let input = map_new();
+map_set(input, "route", route);
+
+let decision_request = map_new();
+map_set(decision_request, "schema", 1);
+map_set(decision_request, "target", "doc_router");
+map_set(decision_request, "scope", "document_ingest");
+map_set(decision_request, "input", input);
+map_set(decision_request, "evidence_ids", "source,sensitivity");
+map_set(decision_request, "derivation_ids", "route");
+map_set(decision_request, "relationship_resolution", "deterministic");
+map_set(decision_request, "reason", "routed by provenance and sensitivity");
+map_set(decision_request, "requested_evidence", "none");
+
+bridge.write_response(decision_request);

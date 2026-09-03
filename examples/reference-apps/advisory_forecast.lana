@@ -1,0 +1,38 @@
+// Reference App: Advisory Forecast
+//
+// Reads a trend series from CSV, builds a forecast state from the most
+// recent trend point, measures the forecast probability, and writes a
+// decision-request for the bridge pipeline.
+
+import "../../integrations/lana/bridge.lana" as bridge;
+
+let request = bridge.read_request();
+let fixture_path = request["fixture"];
+let trends = csv_read(fixture_path);
+
+let latest = trends[array_length(trends) - 1];
+let prob_value = json_parse(latest["probability"]);
+let conf_value = json_parse(latest["confidence"]);
+
+state forecast_state = state(p: prob_value, d_re: conf_value, d_im: 0.0);
+
+let forecast_evidence = evidence(forecast_state, "trend");
+let prob = measure forecast_evidence as probability;
+let explanation = explain(forecast_evidence);
+let derivation_id = json_stringify(derivation(forecast_evidence)["id"]);
+
+let input = map_new();
+map_set(input, "forecast_probability", prob);
+
+let decision_request = map_new();
+map_set(decision_request, "schema", 1);
+map_set(decision_request, "target", "advisory_forecast");
+map_set(decision_request, "scope", "quarterly");
+map_set(decision_request, "input", input);
+map_set(decision_request, "evidence_ids", "trend");
+map_set(decision_request, "derivation_ids", derivation_id);
+map_set(decision_request, "relationship_resolution", "independent");
+map_set(decision_request, "reason", explanation);
+map_set(decision_request, "requested_evidence", "none");
+
+bridge.write_response(decision_request);

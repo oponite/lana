@@ -200,8 +200,7 @@ static LanaError json_value(JsonParser *parser, unsigned depth, Value *out) {
         if (count > 0u && array->items == NULL) { free(temporary); return LANA_ERR_OOM; }
         if (count > 0u) memcpy(array->items, temporary, count * sizeof(*array->items));
         free(temporary);
-        out->type = VAL_ARRAY;
-        out->as.array = array;
+        *out = lana_value_array(array);
         return LANA_OK;
     }
     if (*parser->cursor == '{') {
@@ -328,7 +327,7 @@ LanaError lana_csv_read(LanaVM *vm, const char *path, Value *out) {
     array = lana_vm_alloc(vm, sizeof(*array)); if (array == NULL) { error = LANA_ERR_OOM; goto cleanup; }
     array->count = record_count > 0u ? record_count - 1u : 0u; array->capacity = array->count; array->items = array->count == 0u ? NULL : lana_vm_alloc(vm, array->count * sizeof(*array->items)); if (array->count > 0u && array->items == NULL) { error = LANA_ERR_OOM; goto cleanup; }
     for (row = 1u; row < record_count; ++row) { LanaMap *map; if (records[row].count != records[0].count) { error = LANA_ERR_PARSE; goto cleanup; } error = lana_map_new(vm, records[0].count, &map); if (error != LANA_OK) goto cleanup; for (column = 0; column < records[0].count; ++column) { char *stored = vm_string(vm, records[row].items[column], strlen(records[row].items[column])); Value value; if (stored == NULL) { error = LANA_ERR_OOM; goto cleanup; } value = lana_value_string(stored); error = lana_map_set(vm, map, records[0].items[column], &value, true); if (error != LANA_OK) goto cleanup; } array->items[row - 1u] = lana_value_map(map); }
-    out->type = VAL_ARRAY; out->as.array = array; error = LANA_OK;
+    *out = lana_value_array(array); error = LANA_OK;
 cleanup:
     while (record_count > 0u) fields_free(&records[--record_count]);
     free(records);

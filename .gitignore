@@ -1,10 +1,11 @@
 build/
 build-*/
+dist/
 Testing/Temporary/
 .ollama/
 .DS_Store
-TODO.md
 .venv/
+.venv-*/
 .pytest_cache/
 __pycache__/
 *.py[cod]
@@ -16,3 +17,7 @@ integrations/editors/vscode/*.vsix
 benchmark/results/
 vijay-docs/
 archive
+TODO.md
+REQUIREMENTS.md
+RELEASE_CHECKLIST.md
+ghost_*/

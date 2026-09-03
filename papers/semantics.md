@@ -266,7 +266,6 @@ failure result contains no partial computational value. Human rendering may add
 formatting, but it cannot discard these structured fields or change their
 meaning.
 
-
 ## 1. Mathematical Domains
 
 ### 1.1 STATE
@@ -409,7 +408,6 @@ and
 
 Section 5 defines the lifted forms acting on `STATE_DIST` values.
 
-
 ## 2. MEASURE
 
 ### 2.1 Definition
@@ -498,13 +496,13 @@ B_y=(|+y\rangle,|-y\rangle),
 ```
 
 Outcome $0$ always refers to the first vector in the named ordered basis. For
-$\rho$ with canonical off-diagonal value $c=\rho_{01}$, define the exact
-basis-0 probability $q_B(\rho)$ by
+$\rho$ with canonical off-diagonal value $c=\rho_{01}$, define $q_B(\rho)$ as
+the exact probability of outcome $1$ by
 
 ```math
 q_{\mathrm{computational}}(\rho)=p,
 \qquad
-q_x(\rho)=\frac12+\operatorname{Re}(c),
+q_x(\rho)=\frac12-\operatorname{Re}(c),
 \qquad
 q_y(\rho)=\frac12-\operatorname{Im}(c).
 ```
@@ -538,7 +536,6 @@ the exact mathematical probability $\int q_B(\rho)\,d\mu(\rho)$; accuracy is
 sample-count dependent. No confidence interval is part of the result. The
 runtime may use the existing seeded RNG and must not return a partial estimate
 when cancellation or a resource limit interrupts the trials.
-
 
 ## 3. TRANSFORM
 
@@ -680,7 +677,6 @@ Conjugation preserves $|d|$, so `INVERT` preserves the unit-disk and boundary
 invariants. `NEUTRALIZE` maps every disposition to the disk origin and
 preserves $p$. Their exact expected-probability rules are $q\mapsto1-q$ and
 $q\mapsto q$, respectively.
-
 
 ## 4. APPEND
 
@@ -936,7 +932,6 @@ $\square$
 
 **Explicit limitation (internal non-associativity).** Lana 1.0 supplies no theorem or modeling rule equating the internal distributions of `APPEND(APPEND(A,B),C)` and `APPEND(A,APPEND(B,C))`. They may differ.
 
-
 ## 5. Composition and Evaluation Semantics
 
 ### 5.1 Evaluation Order
@@ -1139,7 +1134,6 @@ The core mathematical operations have value semantics:
 
 VM register behavior cannot redefine these mathematical value semantics.
 
-
 ## 6. Boundary and Error Semantics
 
 ### 6.1 STATE Construction
@@ -1217,7 +1211,6 @@ Core operations are defined only over the domains declared in Sections 1 and 5. 
 ### 6.6 Numerical Failure
 
 The mathematical semantics use exact real and complex arithmetic. Finite-precision approximation does not change mathematical validity; implementation tolerances and required rejection behavior are specified in Section 7.3.
-
 
 ## 7. Implementation Correspondence
 
@@ -1322,10 +1315,418 @@ Lana 1.0 implements the density-operator representation and core operations
 defined above through one encoding, LABC v1. Other bytecode formats and
 operations are outside this semantics and are rejected.
 
+## 8. Post-freeze mathematical extensions
+
+This section defines the mathematical targets for Lana 2.0 after the 1.0
+feature freeze. It does not change the Lana 1.0 source language.
+It does not change LABC v1, the compiler, or the VM. An implementation MUST
+NOT expose an operation in this section as a 1.x compatibility feature.
+
+### 8.1 State coordinates and neutralization
+
+For $\rho\in\mathcal S$, let
+
+$$
+\operatorname{coord}(\rho)=(p,d)
+$$
+
+denote its canonical probability and normalized disposition coordinates from
+Section 1.1. This notation does not identify the pair $(p,d)$ with the density
+matrix $\rho$.
+
+Define neutralization by
+
+$$
+\operatorname{neutralize}(\rho)=
+\begin{pmatrix}
+1-p & 0\\
+0 & p
+\end{pmatrix}.
+$$
+
+Equivalently, neutralization maps canonical coordinates as
+
+$$
+(p,d)\mapsto(p,0).
+$$
+
+`neutralize` preserves $p$, sets $c$ and $d$ to zero, and returns a valid
+`STATE`. It is deterministic and does not mutate its input. Its derivation
+records the operation and input. It is idempotent:
+
+$$
+\operatorname{neutralize}(\operatorname{neutralize}(\rho))
+=\operatorname{neutralize}(\rho).
+$$
+
+### 8.2 Attenuation
+
+For $\rho\in\mathcal S$ with $\operatorname{coord}(\rho)=(p,d)$ and
+$f\in[0,1]$, define attenuation by the coordinate map
+
+$$
+\operatorname{coord}(\operatorname{attenuate}(\rho,f))=(p,fd).
+$$
+
+The result MUST be canonicalized as a valid `STATE`. The operation has the
+following laws:
+
+$$
+\operatorname{attenuate}(\rho,1)=\rho,
+$$
+
+$$
+\operatorname{attenuate}(\operatorname{attenuate}(\rho,f_1),f_2)
+=\operatorname{attenuate}(\rho,f_1f_2).
+$$
+
+At $f=0$, the result is `neutralize(\rho)`. Factors outside $[0,1]$ are
+errors. Non-finite factors are errors. Unsupported input representations are
+errors. This section does not
+define lifting over `STATE_DIST`. Do not use an implicit expected-value rule.
+
+### 8.3 Convex state mixing
+
+For $a,b\in\mathcal S$ and $w\in[0,1]$, define
+
+$$
+\operatorname{mix}(a,b,w)=wa+(1-w)b.
+$$
+
+This is a convex density-operator mixture. It is not evidence combination.
+The result is in $\mathcal S$. The inputs remain unchanged. The operation is
+read-only, except for its derivation record. The record contains both inputs,
+$w$, exactness, the operation, and the revision. Define a metadata policy.
+Do not copy metadata without that policy.
+
+The operation is weight-symmetric:
+
+$$
+\operatorname{mix}(a,b,w)=\operatorname{mix}(b,a,1-w).
+$$
+
+It is idempotent:
+
+$$
+\operatorname{mix}(a,a,w)=a.
+$$
+
+`STATE_DIST` inputs are not supported. Define dependency and correlation rules
+before you define their lifting semantics.
+
+### 8.4 Trace distance
+
+For $a,b\in\mathcal S$, define
+
+$$
+\operatorname{trace\_distance}(a,b)=\frac12\lVert a-b\rVert_1,
+$$
+
+where $\lVert X\rVert_1=\operatorname{Tr}(\sqrt{X^\dagger X})$. The result is
+real and lies in $[0,1]$. The operation is read-only. It produces provenance.
+
+The following laws MUST hold:
+
+$$
+\operatorname{trace\_distance}(a,b)=\operatorname{trace\_distance}(b,a),
+$$
+
+$$
+\operatorname{trace\_distance}(a,b)=0\iff a=b,
+$$
+
+$$
+\operatorname{trace\_distance}(a,c)
+\le\operatorname{trace\_distance}(a,b)+\operatorname{trace\_distance}(b,c).
+$$
+
+Distribution comparison is deferred. The name MUST remain `trace_distance`.
+The ambiguous name `distance` is not part of the semantic interface.
+
+### 8.5 Relationship-aware APPEND
+
+Section 4 defines only the independent APPEND operation in Lana 1.0. This
+relationship-aware extension is post-freeze Lana 2.0 semantics.
+
+These modes define overlap between two binary events. They do not define a
+general evidence-fusion operator.
+
+For binary events $A,B$ with observable probabilities $p_A,p_B$, let
+
+$$
+p_C=P(A\lor B),\qquad q=P(A\land B).
+$$
+
+Every non-synergistic relationship uses
+
+$$
+p_C=p_A+p_B-q.
+$$
+
+The valid overlap bounds are
+
+$$
+L=\max(0,p_A+p_B-1),\qquad U=\min(p_A,p_B),
+$$
+
+with
+
+$$
+L\le q\le U,
+$$
+
+and independent overlap $I=p_Ap_B$.
+
+#### Independent
+
+$$
+q=I=p_Ap_B,
+$$
+
+so
+
+$$
+p_C=1-(1-p_A)(1-p_B).
+$$
+
+This is exactly the Lana 1.0 rule in Section 4.
+
+#### Redundant event overlap
+
+`REDUNDANT(r)` means overlap greater than independent overlap. For
+$r\in[0,1)$,
+
+$$
+q=(1-r)I+rU,
+\qquad
+p_C=p_A+p_B-q.
+$$
+
+At $r=0$, this is independent. For $0<r<1$, this is partial redundant event
+overlap. Partial redundant overlap has no associativity rule.
+
+#### Full redundancy
+
+`FULL_REDUNDANCY` applies only when
+
+$$
+p_A=p_B,
+\qquad
+q=p_A.
+$$
+
+Under these conditions, $A=B$ almost surely. `FULL_REDUNDANCY` is commutative
+and idempotent. Its observable probability is associative only when every
+binary node has an applicable full-redundancy relationship. It is not a
+parameter value of `REDUNDANT(r)`.
+
+#### Complementary event overlap
+
+`COMPLEMENTARY(k)` means overlap less than independent overlap. For
+$k\in[0,1]$,
+
+$$
+q=(1-k)I+kL,
+\qquad
+p_C=p_A+p_B-q.
+$$
+
+At $k=0$ this is independent. At $k=1$,
+
+$$
+q=L,\qquad p_C=\min(1,p_A+p_B).
+$$
+
+At $k=1$, this is maximum feasible separation. Only maximum separation has
+observable-probability associativity. Partial complementary overlap has no
+associativity rule.
+
+#### Unified parameter
+
+A signed parameter $\lambda\in[-1,1)$ can represent independent, partial
+redundant, and complementary event overlap:
+
+$$
+q=
+\begin{cases}
+I+\lambda(U-I), & \lambda\ge0,\\
+I+(-\lambda)(L-I), & \lambda<0.
+\end{cases}
+$$
+
+$\lambda=-1$ is maximum feasible separation. $\lambda=0$ is independence.
+$0<\lambda<1$ is partial redundant overlap. `FULL_REDUNDANCY` is separate.
+$\lambda$ MUST NOT be described as Pearson correlation.
+
+#### Synergistic
+
+Synergy does not preserve the event meaning $C=A\lor B$. It requires an
+explicit base relationship, an interaction event $S_{AB}$, and
+$\eta\in[0,1]$. Let
+
+$$
+C_{\mathrm{base}}=A\lor B,
+\qquad
+p_{\mathrm{base}}=P(C_{\mathrm{base}}=1).
+$$
+
+The interaction event has these conditional probabilities:
+
+$$
+P(S_{AB}=1\mid C_{\mathrm{base}}=1)=0,
+\qquad
+P(S_{AB}=1\mid C_{\mathrm{base}}=0)=\eta.
+$$
+
+Define the synergistic output event as
+
+$$
+C=C_{\mathrm{base}}\lor S_{AB}.
+$$
+
+Then
+
+$$
+p_C=p_{\mathrm{base}}+\eta(1-p_{\mathrm{base}})
+=1-(1-\eta)(1-p_{\mathrm{base}}).
+$$
+
+The runtime MUST NOT infer $\eta$. Missing or unresolved base data is an
+error. Strength values below zero, above one, or non-finite are errors. At
+$\eta=0$, the result canonicalizes to the base relationship. It is not an
+active synergistic relationship. At $\eta=1$, $P(C=1)=1$. If
+$p_{\mathrm{base}}=1$, set $S_{AB}=0$ almost surely. The conditional
+probability on $C_{\mathrm{base}}=0$ is then not evaluated.
+
+#### Dispositions and output
+
+Relationship mode changes observable overlap only. It does not change the
+existing internal disposition construction:
+
+$$
+m_C=\frac{d_A+d_B}{2},\qquad
+\sigma_C=\frac{|d_A-d_B|}{2}.
+$$
+
+For each possible $d_C$, construct
+
+$$
+c_C=d_C\sqrt{p_C(1-p_C)},\qquad
+\rho_C=
+\begin{pmatrix}
+1-p_C & c_C\\
+c_C^* & p_C
+\end{pmatrix}.
+$$
+
+The result is a `STATE_DIST`. Each concrete state satisfies the existing STATE
+invariants. Relationship modes MUST NOT add disposition reinforcement,
+cancellation, attenuation, or interaction cross-terms. Add them only with a
+separate semantic definition.
+
+Independent, redundant, complementary, and full-redundancy modes are
+commutative. A synergistic mode is commutative only when its base relationship
+is commutative. The complete `STATE_DIST` operation has no general
+associativity or inverse law.
+
+#### Distributed inputs
+
+Let $\mu_A,\mu_B\in\operatorname{Dist}(\mathcal S)$ be the input state
+distributions. A relationship-aware operation requires an outer state coupling
+
+$$
+\pi\in\operatorname{Coupling}(\mu_A,\mu_B),
+$$
+
+whose marginals are $\mu_A$ and $\mu_B$. This coupling selects which concrete
+states occur together. Marginal distributions alone MUST NOT determine $\pi$.
+
+For each coupled pair $(\rho_A,\rho_B)$, the selected relationship $R$ defines
+an inner event overlap
+
+$$
+q_R(\rho_A,\rho_B)
+=P(A=1,B=1\mid\rho_A,\rho_B,R).
+$$
+
+For each pair, $q_R$ MUST satisfy the overlap bounds from this section. For a
+synergistic relationship, $q_R$ defines the base event $C_{\mathrm{base}}$.
+The interaction event then changes the output from $C_{\mathrm{base}}$ to $C$.
+
+The outer coupling $\pi$ and the inner overlap $q_R$ are different objects.
+Neither determines the other.
+
+Let $K_R(\rho_A,\rho_B;E)$ be the APPEND output kernel for a measurable set
+$E\subseteq\mathcal S$. The kernel uses $q_R$ to calculate the base output
+probability. A synergistic kernel then applies the interaction-event rule. The
+kernel uses the disposition construction in this section. The relationship-aware
+result is the distribution $\nu$ defined by
+
+$$
+\nu(E)=
+\int_{\mathcal S\times\mathcal S}
+K_R(\rho_A,\rho_B;E)\,d\pi(\rho_A,\rho_B).
+$$
+
+$K_R$ MUST be a Markov kernel. For each input pair, it is a probability
+distribution over output states. For each measurable $E$, it is measurable in
+the input pair. The overlap function $q_R$ MUST also be measurable.
+
+Every relationship-aware APPEND over `STATE_DIST` inputs requires an explicit
+or trusted coupling. If no applicable coupling exists, the operation is
+unresolved and MUST NOT construct a product coupling.
+
+A concrete `STATE` embeds as its Dirac distribution. This gives the unique
+outer coupling when both inputs are concrete, or when one input is concrete.
+
+#### Chaining
+
+Every binary APPEND node requires a relationship that applies to that node's
+two inputs. A relationship used to construct an intermediate APPEND result
+MUST NOT become the relationship between that result and a later input.
+
+For distributed inputs, every later binary node also requires its own explicit
+or trusted coupling. Pairwise relationships or couplings of earlier inputs do
+not determine the relationship or coupling for that later node.
+
+#### Relationship resolution boundary
+
+Mathematics is selected in this order:
+
+1. Explicit caller relationship.
+2. Trusted, subject-bound relationship metadata.
+3. Unresolved relationship.
+
+Do not infer a relationship from similarity, naming, provenance strings,
+observed correlation, model output, or agent judgment alone. Unresolved,
+conflicting, invalid, or unavailable relationships MUST NOT use
+relationship-specific probability mathematics.
+
+### 8.6 Statistical and surprisal semantics
+
+Future statistical operations MUST state `exact`, `modelled`, or `sampled`.
+A statistical result MUST preserve its method and assumptions. It MUST preserve
+the sample count and seed when applicable. It MUST preserve its uncertainty
+interval when available, provenance, and exactness status. Sampling never
+replaces an exact operation without an explicit rule.
+
+For a model event with probability $P$, surprisal is
+
+$$
+\operatorname{surprisal}(P)=-\log(P).
+$$
+
+The semantic definition MUST specify the logarithm base and units. It MUST
+specify the event, outcome, model identity, model version, precision,
+zero-probability behavior, and provenance. Surprisal is an analysis or routing
+signal. It cannot authorize an effect without an explicit policy.
 
 ## Appendix A — Canonical Equation Reference
 
-This appendix contains only equations that remain normative after the rewrite. The numbered sections are authoritative and include additional normative definitions for composition, lifting, errors, and evaluation.
+This appendix contains the canonical equations for the Lana 1.0 contract and
+the post-freeze 2.0 extensions in Section 8. The numbered sections are
+authoritative and include additional definitions for composition, lifting,
+errors, and evaluation.
 
 ### STATE
 
@@ -1510,27 +1911,27 @@ remain private reads and never enter shared observation history.
 
 This table records current instruction availability without making opcode encoding normative. Detailed instruction behavior and encoding remain in `BYTECODE.md`.
 
-| Semantic concept | Runtime responsibility | Current direct opcode |
-| --- | --- | --- |
-| `STATE` construction | Validate and create a concrete canonical `STATE` | `STATE_NEW` / `STATE_BUILD` |
-| `MEASURE` | Produce the computational-basis distribution without mutation | `MEASURE` |
-| Classical measurement sampling | Draw a binary scalar using the runtime RNG | `MEASURE` sample mode |
-| `TRANSFORM` | Execute an admissible $\Phi$ and reject invalid output | `TRANSFORM` |
-| `APPEND` | Construct the prescribed lazy `STATE_DIST` | `APPEND` |
-| `STATE_DIST` sampling | Evaluate and sample a lazy distribution | `SAMPLE_STATE_DIST` |
-| Named n-ary joint construction | Validate names and build an immutable joint law/view | `JOINT_BUILD` |
-| Joint projection | Return an immutable named projection | `JOINT_PROJECT` |
-| Joint conditioning | Refine by exact evidence or return an explicit error | `JOINT_CONDITION` |
-| Joint sampling | Return definite member values without mutation | `JOINT_SAMPLE` |
-| Singleton resolution | Return a definite value only for a singleton | `RESOLVE` |
-| Finite possibility | Validate nonempty support and preserve dependency | `POSSIBILITY_BUILD` |
-| Guarded branch execution | Snapshot, execute, and join bounded alternatives | `PATH_SPLIT` / `PATH_JOIN` |
-| Observation | Refine and record evidence after success | `OBSERVE` |
-| General supported sampling | Return one definite read-only result | `INFO_SAMPLE` |
-| Reactive ordinary Information | Retain pure dependencies and atomically publish affected values | Information host metadata over pure opcodes |
-| Runtime Claim | Retain value, proposition, exactness, tolerance, and source validity | Claim host calls |
-| Definite planned effect | Execute once per process-local plan identity and revision, then reuse its receipt | Planned-effect host calls |
-| Shared Information | Capability-checked effective-time replay and atomic process revision | Shared Information host calls |
-| Information inspection | Render runtime state from derivation and reactive metadata | `information_inspect` host call |
+| Semantic concept               | Runtime responsibility                                                            | Current direct opcode                       |
+| ------------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------- |
+| `STATE` construction         | Validate and create a concrete canonical`STATE`                                 | `STATE_NEW` / `STATE_BUILD`             |
+| `MEASURE`                    | Produce the computational-basis distribution without mutation                     | `MEASURE`                                 |
+| Classical measurement sampling | Draw a binary scalar using the runtime RNG                                        | `MEASURE` sample mode                     |
+| `TRANSFORM`                  | Execute an admissible$\Phi$ and reject invalid output                           | `TRANSFORM`                               |
+| `APPEND`                     | Construct the prescribed lazy`STATE_DIST`                                       | `APPEND`                                  |
+| `STATE_DIST` sampling        | Evaluate and sample a lazy distribution                                           | `SAMPLE_STATE_DIST`                       |
+| Named n-ary joint construction | Validate names and build an immutable joint law/view                              | `JOINT_BUILD`                             |
+| Joint projection               | Return an immutable named projection                                              | `JOINT_PROJECT`                           |
+| Joint conditioning             | Refine by exact evidence or return an explicit error                              | `JOINT_CONDITION`                         |
+| Joint sampling                 | Return definite member values without mutation                                    | `JOINT_SAMPLE`                            |
+| Singleton resolution           | Return a definite value only for a singleton                                      | `RESOLVE`                                 |
+| Finite possibility             | Validate nonempty support and preserve dependency                                 | `POSSIBILITY_BUILD`                       |
+| Guarded branch execution       | Snapshot, execute, and join bounded alternatives                                  | `PATH_SPLIT` / `PATH_JOIN`              |
+| Observation                    | Refine and record evidence after success                                          | `OBSERVE`                                 |
+| General supported sampling     | Return one definite read-only result                                              | `INFO_SAMPLE`                             |
+| Reactive ordinary Information  | Retain pure dependencies and atomically publish affected values                   | Information host metadata over pure opcodes |
+| Runtime Claim                  | Retain value, proposition, exactness, tolerance, and source validity              | Claim host calls                            |
+| Definite planned effect        | Execute once per process-local plan identity and revision, then reuse its receipt | Planned-effect host calls                   |
+| Shared Information             | Capability-checked effective-time replay and atomic process revision              | Shared Information host calls               |
+| Information inspection         | Render runtime state from derivation and reactive metadata                        | `information_inspect` host call           |
 
 No opcode is inferred from a semantic operation merely because the operation is normative.
