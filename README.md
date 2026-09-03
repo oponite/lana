@@ -8,7 +8,7 @@ Lana includes:
   and normalized complex disposition
 - immutable lazy `STATE_DIST` values that compose states without sampling or
   mutation until explicitly measured or sampled
-- and ordinary numbers, booleans, strings, arrays, functions, tasks, and host
+- ordinary numbers, booleans, strings, arrays, functions, tasks, and host
   calls.
 
 ```lana
@@ -165,7 +165,7 @@ Source: [`examples/tutorials/03_combined_evidence.lana`](examples/tutorials/03_c
 
 ## Optional integrations
 
-The source-install integrations connect Lana 1.0 to JSON subprocess callers,
+The source-install integrations connect Lana 1.2.0 to JSON subprocess callers,
 MCP hosts, Jupyter, VS Code, Neovim, and a narrow native C ABI without adding
 dependencies to the normal Lana build. Start with
 [`integrations/README.md`](integrations/README.md).
