@@ -13,6 +13,9 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+# Expose POSIX functions (strdup, dlopen) under strict C11 on glibc.
+add_compile_definitions(_DEFAULT_SOURCE)
+
 option(LANA_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(LANA_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(LANA_BUILD_FUZZERS "Build libFuzzer targets" OFF)
