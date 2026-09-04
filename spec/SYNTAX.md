@@ -1,7 +1,7 @@
 # Lana Syntax Design Principles
 
 This document is the design authority for Lana source syntax. `SPEC.md` is the
-1.x contract — the "what" of existing syntax. This document is the "how to
+2.0 contract — the "what" of existing syntax. This document is the "how to
 design new syntax": the principles every new or changed language construct MUST
 satisfy. New syntax must satisfy both.
 

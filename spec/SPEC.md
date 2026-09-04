@@ -1,4 +1,4 @@
-# Lana 1.1 Source and Runtime Surface
+# Lana 2.0 Source and Runtime Surface
 
 ## Provenance expressions
 
@@ -79,7 +79,7 @@ and exposed negative zero is normalized to positive zero.
 
 Optional `timestamp`, `source`, `weight`, and `confidence` fields are metadata.
 Construction, assignment, history, and transforms preserve them. States created
-by an APPEND sampling kernel have empty metadata because Lana 1.1 defines no
+by an APPEND sampling kernel have empty metadata because Lana 2.0 defines no
 metadata propagation rule for APPEND.
 
 ## Distributions and observation

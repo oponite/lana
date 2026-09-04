@@ -1,14 +1,14 @@
-name: Release Lana 1.2.0
+name: Release Lana 2.0.0
 
 on:
   push:
-    tags: ["v1.2.0"]
+    tags: ["v2.0.0"]
 
 permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION: "1.2.0"
+  EXPECTED_VERSION: "2.0.0"
 
 jobs:
   linux:
@@ -86,8 +86,8 @@ jobs:
         with:
           name: lana-macos-universal
           path: |
-            ${{ runner.temp }}/lana-1.2.0-macos-universal.tar.gz
-            ${{ runner.temp }}/lana-1.2.0-macos-universal.tar.gz.sha256
+            ${{ runner.temp }}/lana-2.0.0-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-2.0.0-macos-universal.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 

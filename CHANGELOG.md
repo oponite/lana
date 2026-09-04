@@ -1,7 +1,8 @@
 # Changelog
 
-## 1.2.0
+## 2.0.0
 
+- Introduce LABC v2, the Rust canonical VM, algebraic data types, evidence, and lazy datasets.
 - Add the durable decision pipeline: store, policy, ledger, claims, and effects.
 - Add dlopen adapter plugins (SQLite, HTTP/JSON) and a shared runtime for bindings.
 - Add four reference applications (sensor fusion, service health, doc router, advisory forecast) with fixtures.

@@ -1,6 +1,6 @@
 # Lana integrations
 
-This optional Python package connects Lana 1.x programs to subprocess callers,
+This optional Python package connects Lana 2.0 programs to subprocess callers,
 MCP hosts, and IPython. It does not add dependencies to Lana itself.
 
 ```bash
@@ -12,7 +12,7 @@ printf '{"message":"hello"}' |
 ```
 
 The `lana` executable is resolved from `--lana`, `LANA_EXECUTABLE`, then
-`PATH`. Only Lana 1.x reporting LABC v2 is accepted.
+`PATH`. Only Lana 2.0 reporting LABC v2 is accepted.
 
 The ergonomic `Lana` class prefers the native ctypes bridge when a compatible
 `liblana_bridge` is available and falls back to the subprocess bridge otherwise:

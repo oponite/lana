@@ -30,7 +30,7 @@ function M.setup(options)
             end
             if not compatible then
                 vim.notify(
-                    "Lana integration requires Lana 1.x with LABC v2: "
+                    "Lana integration requires Lana 2.0 with LABC v2: "
                         .. command[1],
                     vim.log.levels.ERROR
                 )

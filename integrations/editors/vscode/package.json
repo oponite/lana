@@ -1,8 +1,8 @@
 {
   "name": "lana-language-support",
   "displayName": "Lana Language Support",
-  "description": "Language Server Protocol support for Lana 1.x",
-  "version": "1.2.0",
+  "description": "Language Server Protocol support for Lana 2.0",
+  "version": "2.0.0",
   "publisher": "lana-language",
   "license": "Apache-2.0",
   "engines": {
@@ -40,7 +40,7 @@
         "lana.server.path": {
           "type": "string",
           "default": "lana",
-          "description": "Path to a Lana 1.x executable providing `lana lsp`."
+          "description": "Path to a Lana 2.0 executable providing `lana lsp`."
         }
       }
     }
