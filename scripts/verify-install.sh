@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 
 # Lana Installation Verification Script
 # Checks for the presence and basic functionality of the Lana toolchain.
