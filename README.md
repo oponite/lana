@@ -2,10 +2,48 @@
 
 > A programming language for uncertainty computation.
 
+## Why Lana
+
+Most software treats a decision as a function that returns an answer. Lana
+treats a decision as a *reasoned, auditable artifact*: uncertain inputs are
+combined under an explicit mathematical contract, and the path from evidence to
+outcome is recorded rather than hidden inside a black box.
+
+The problem Lana addresses is concrete. Teams that make consequential decisions
+under uncertainty — risk, forecasting, sensor fusion, service health, document
+routing, advisory support — usually reach for a model or a library. That works
+until someone asks *why* a decision was made, or *what evidence* it rested on,
+or *whether it can be reproduced*. A library gives you a number; it does not
+give you a first-class, testable, versionable account of the reasoning.
+
+Lana's answer is to make uncertain reasoning a language feature, not a library
+call:
+
+- **Explicit, explainable probability.** A `STATE` is an immutable
+  density-operator primitive: an observable probability `p` plus a normalized
+  complex disposition `d`. There is no hidden state, no implicit sampling.
+- **Evidence combination with a mathematical contract.** `append()` combines
+  independent evidence under a documented probabilistic rule. The result is a
+  lazy `STATE_DIST` that composes without sampling until you explicitly
+  `measure` or `sample` it.
+- **Durable, auditable decisions.** A decision pipeline — store, policy,
+  ledger, claims, and effects — records what was decided, on what evidence, and
+  what effect was authorized. Decisions can be replayed and validated without
+  re-executing their effects.
+- **A language, not a library.** Reasoning lives in ordinary, testable source
+  code with functions, types, and a compiler. It can be versioned, reviewed,
+  and conformance-tested like any other code.
+
+Lana is a public, actively developed language project. Issues, questions, and
+focused pull requests are welcome. Changes to language behavior follow the
+authority order below and include tests or documentation when applicable.
+
+## What Lana is
+
 Lana includes:
 
-- an immutable density-operator primitive `STATE`, with an observable probability
-  and normalized complex disposition
+- an immutable density-operator primitive `STATE`, with an observable
+  probability and normalized complex disposition
 - immutable lazy `STATE_DIST` values that compose states without sampling or
   mutation until explicitly measured or sampled
 - ordinary numbers, booleans, strings, arrays, functions, tasks, and host
@@ -24,29 +62,24 @@ print(measure combined as probability);
 At `p = 0` or `p = 1`, the disposition is canonicalized to zero. `append()`
 creates an immutable lazy distribution, and `sample()` returns a concrete state.
 
-Lana is a public, actively developed language project. Issues, questions, and
-focused pull requests are welcome. Changes to language behavior follow the
-authority order below and include tests or documentation when applicable.
+## Reference applications
 
-## Repository
+Four reference applications demonstrate the decision pipeline end to end, each
+with fixtures:
 
-- `compiler/` — the self-hosted Lana compiler.
-- `vm/` — canonical Rust `lana-vm` + `lana-bytecode`, plus the frozen C11
-  reference VM core.
-- `runtime/` — canonical Rust `lana-runtime` + `lana-ffi`, plus the C11
-  hardware boundary.
-- `tools/` — Rust `lana-cli` + `lana-fuzz` + `lana-wasm` (WebAssembly bindings),
-  plus the C11 CLI, LSP, and project tooling.
-- `spec/` — `SPEC.md`, `SYNTAX.md`, `BYTECODE.md`, `VM.md`.
-- `papers/` — `semantics.md` (1.0) and `semantics-2.md` (2.0), the mathematical
-  authorities.
-- `lip/` — Lana Improvement Proposals.
-- `stdlib/` — future Lana standard library.
-- `tests/` — unit, regression, and conformance suites.
-- `integrations/` — Python, editors, native ABI.
+- **Sensor fusion** — fuses two independent sensor readings into a single
+  confidence, attaches provenance to each reading, and measures the fused
+  probability.
+- **Service health** — compares a live metric against a baseline, combines the
+  two readings, and measures the resulting health probability.
+- **Document router** — routes a document by provenance and sensitivity, then
+  lets the policy decide whether the archive effect is authorized.
+- **Advisory forecast** — reads a trend series, builds a forecast state from
+  the latest point, and measures the forecast probability.
 
-Project governance: [GOVERNANCE.md](GOVERNANCE.md), [VERSIONING.md](VERSIONING.md),
-[CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md).
+Each reads a fixture, computes a probability or route, and writes a
+decision-request for the bridge pipeline. Sources live in
+[`examples/reference-apps/`](examples/reference-apps/).
 
 ## Install and run
 
@@ -187,6 +220,26 @@ Output:
 ```
 
 Source: [`examples/tutorials/03_combined_evidence.lana`](examples/tutorials/03_combined_evidence.lana)
+
+## Repository
+
+- `compiler/` — the self-hosted Lana compiler.
+- `vm/` — canonical Rust `lana-vm` + `lana-bytecode`, plus the frozen C11
+  reference VM core.
+- `runtime/` — canonical Rust `lana-runtime` + `lana-ffi`, plus the C11
+  hardware boundary.
+- `tools/` — Rust `lana-cli` + `lana-fuzz` + `lana-wasm` (WebAssembly bindings),
+  plus the C11 CLI, LSP, and project tooling.
+- `spec/` — `SPEC.md`, `SYNTAX.md`, `BYTECODE.md`, `VM.md`.
+- `papers/` — `semantics.md` (1.0) and `semantics-2.md` (2.0), the mathematical
+  authorities.
+- `lip/` — Lana Improvement Proposals.
+- `stdlib/` — future Lana standard library.
+- `tests/` — unit, regression, and conformance suites.
+- `integrations/` — Python, editors, native ABI.
+
+Project governance: [GOVERNANCE.md](GOVERNANCE.md), [VERSIONING.md](VERSIONING.md),
+[CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md).
 
 ## Optional integrations
 

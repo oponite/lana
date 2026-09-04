@@ -1,4 +1,4 @@
-# Required 1.1 branch checks
+# Required 2.0 branch checks
 
 Protect `main` and `dev` in the GitHub repository. Require pull requests, a
 branch that is up to date before merge, and these status checks:
