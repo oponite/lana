@@ -40,6 +40,8 @@ else()
         COMPILE_OPTIONS "-Wno-sign-compare")
 endif()
 
+check_c_compiler_flag("-Wno-format-truncation" LANA_HAS_FORMAT_TRUNCATION_FLAG)
+
 add_library(lanaruntime STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime PUBLIC ${LANA_INCLUDE_DIRS})
 target_link_libraries(lanaruntime PUBLIC Threads::Threads)
@@ -64,7 +66,11 @@ target_compile_options(lanavm PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_library(lanaruntime_release STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime_release PUBLIC ${LANA_INCLUDE_DIRS})
-target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-format-truncation -O3 -DNDEBUG)
+if(LANA_HAS_FORMAT_TRUNCATION_FLAG)
+    target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-format-truncation -O3 -DNDEBUG)
+else()
+    target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -O3 -DNDEBUG)
+endif()
 target_compile_definitions(lanaruntime_release PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
     LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
