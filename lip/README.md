@@ -33,11 +33,5 @@ do not alter the contracts above.
 
 ## Format
 
-Copy the structure of `LIP-001.md`. Every LIP carries: title, status, author,
+Copy [`TEMPLATE.md`](TEMPLATE.md). Every LIP carries: title, status, author,
 date, motivation, specification, rationale, compatibility, and test coverage.
-
-## Index
-
-- [LIP-001](LIP-001.md) — `probability(p)` constructor
-- [LIP-002](LIP-002.md) — lazy graph inspection
-- [LIP-003](LIP-003.md) — LABC v2 as the emitted bytecode format
