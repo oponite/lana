@@ -119,6 +119,8 @@ add_test(NAME native_probability_identity
 add_test(NAME native_run_source COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/examples/general.lana")
 add_test(NAME native_datasets_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/datasets_pass.lana")
 set_tests_properties(native_datasets_pass PROPERTIES PASS_REGULAR_EXPRESSION "DATASETS_PASS")
+add_test(NAME native_bootstrap_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/bootstrap_pass.lana")
+set_tests_properties(native_bootstrap_pass PROPERTIES PASS_REGULAR_EXPRESSION "BOOTSTRAP_PASS")
 add_test(NAME native_inspect_json COMMAND lana inspect "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/inspect_state_dist.lana")
 set_tests_properties(native_inspect_json PROPERTIES PASS_REGULAR_EXPRESSION "\"node_count\":3.*\"transform_count\":1")
 add_test(NAME native_inspect_dot COMMAND lana inspect "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/inspect_state_dist.lana" --format dot)

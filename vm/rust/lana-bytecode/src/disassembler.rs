@@ -159,6 +159,12 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
         OpCode::Force => {
             out.push_str(&format!("R{} <- force(R{}, index=R{})", ins.a, ins.b, ins.c));
         }
+        OpCode::Bootstrap => {
+            out.push_str(&format!(
+                "R{} <- bootstrap(R{}, B=R{}, function[{}])",
+                ins.a, ins.imm, ins.c, ins.b
+            ));
+        }
         OpCode::SampleStateDist => {
             out.push_str(&format!("R{} -> R{}", ins.a, ins.b));
         }

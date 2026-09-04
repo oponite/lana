@@ -84,6 +84,8 @@ pub enum OpCode {
     /* Lana 2.0 lazy bounded datasets. */
     Lazy,
     Force,
+    /* Lana 2.0 deterministic resampling. */
+    Bootstrap,
     Count,
 }
 
@@ -165,6 +167,7 @@ impl OpCode {
             AdtGet => "ADT_GET",
             Lazy => "LAZY",
             Force => "FORCE",
+            Bootstrap => "BOOTSTRAP",
             Count => "COUNT",
         }
     }

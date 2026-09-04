@@ -31,7 +31,8 @@ _Static_assert(OP_ADT_CASE == 68, "LABC v2 ADT_CASE value changed");
 _Static_assert(OP_ADT_GET == 69, "LABC v2 ADT_GET value changed");
 _Static_assert(OP_LAZY == 70, "LABC v2 LAZY value changed");
 _Static_assert(OP_FORCE == 71, "LABC v2 FORCE value changed");
-_Static_assert(OP_COUNT == 72, "LABC opcode count changed");
+_Static_assert(OP_BOOTSTRAP == 72, "LABC v2 BOOTSTRAP value changed");
+_Static_assert(OP_COUNT == 73, "LABC opcode count changed");
 
 #define CHECK(condition) do { if (!(condition)) { (void)fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__, __LINE__, #condition); return 1; } } while (0)
 

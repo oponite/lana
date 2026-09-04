@@ -1,0 +1,46 @@
+// Deterministic bootstrap resampling: bootstrap(data, statistic[, B]).
+// Returns a structured map with estimate, ci_low, ci_high, method, procedure,
+// sample_count, and seed. The statistic is a function of the data array.
+
+fn constant(data) {
+    return 42.0;
+}
+
+fn mean(data) {
+    let total = 0.0;
+    let i = 0;
+    while (i < array_length(data)) {
+        total = total + data[i];
+        i = i + 1;
+    }
+    return total / array_length(data);
+}
+
+// A constant statistic makes the estimate and confidence interval collapse to
+// the same value, so the result is fully deterministic.
+let data = [1.0, 2.0, 3.0];
+let r = bootstrap(data, constant, 100);
+assert(map_get(r, "estimate") == 42.0, "estimate must be 42");
+assert(map_get(r, "ci_low") == 42.0, "ci_low must be 42");
+assert(map_get(r, "ci_high") == 42.0, "ci_high must be 42");
+assert(map_get(r, "method") == "sampled", "method must be sampled");
+assert(map_get(r, "procedure") == "bootstrap", "procedure must be bootstrap");
+assert(map_get(r, "sample_count") == 100, "sample_count must be 100");
+
+// A real statistic (mean) resamples with replacement; the point estimate is
+// exact and the interval stays within the data range.
+let xs = [1.0, 2.0, 3.0, 4.0, 5.0];
+let m = bootstrap(xs, mean, 2000);
+let estimate = map_get(m, "estimate");
+let lo = map_get(m, "ci_low");
+let hi = map_get(m, "ci_high");
+assert(estimate == 3.0, "mean estimate must be 3.0");
+assert(lo >= 1.0, "ci_low must be within the data range");
+assert(hi <= 5.0, "ci_high must be within the data range");
+assert(lo <= hi, "ci_low must not exceed ci_high");
+
+// The two-argument form uses the system default resample count.
+let d = bootstrap(data, constant);
+assert(map_get(d, "sample_count") == 2000, "default B must be 2000");
+
+print("BOOTSTRAP_PASS");

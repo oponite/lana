@@ -109,7 +109,7 @@ const char *lana_opcode_name(uint8_t opcode) {
         "MAP", "SUPPORT", "EXPECT", "VALIDATE", "REVISION",
         "ATTENUATE", "TRACE_DISTANCE", "APPEND_REDUNDANT",
         "APPEND_FULL_REDUNDANCY", "APPEND_COMPLEMENTARY",
-        "ADT_BUILD", "ADT_CASE", "ADT_GET", "LAZY", "FORCE"
+        "ADT_BUILD", "ADT_CASE", "ADT_GET", "LAZY", "FORCE", "BOOTSTRAP"
     };
     return opcode < OP_COUNT ? names[opcode] : "UNKNOWN";
 }
@@ -480,6 +480,12 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
                 if (result == LANA_OK) result = verify_register(error, ip, ins, ins->c);
                 if (result == LANA_OK && ins->imm != 0u) result = LANA_ERR_FORMAT;
                 break;
+            case OP_BOOTSTRAP:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == LANA_OK && ins->b >= chunk->function_count) result = LANA_ERR_FORMAT;
+                if (result == LANA_OK) result = verify_register(error, ip, ins, ins->c);
+                if (result == LANA_OK) result = verify_register(error, ip, ins, ins->imm);
+                break;
             case OP_COUNT: result = LANA_ERR_OPCODE; break;
         }
         if (result != LANA_OK) {
@@ -761,6 +767,9 @@ void lana_disassemble_instruction(const LanaChunk *chunk, size_t offset, FILE *o
             break;
         case OP_FORCE:
             (void)fprintf(out, "R%u <- force(R%u, index=R%u)", ins->a, ins->b, ins->c);
+            break;
+        case OP_BOOTSTRAP:
+            (void)fprintf(out, "R%u <- bootstrap(R%u, B=R%u, function[%u])", ins->a, ins->imm, ins->c, ins->b);
             break;
         case OP_SAMPLE_STATE_DIST:
             (void)fprintf(out, "R%u -> R%u", ins->a, ins->b);

@@ -367,6 +367,7 @@ fn emit_call(context, node) {
     if (node[1] == "lazy") { return emit_lazy_force(context, node); }
     if (node[1] == "force") { return emit_lazy_force(context, node); }
     if (node[1] == "force_all") { return emit_lazy_force(context, node); }
+    if (node[1] == "bootstrap") { return emit_bootstrap(context, node); }
     let packed = emit_contiguous(context, node[2]); let destination = new_register(context);
     if (is_host_call(node[1])) {
         emit(context, string_concat("HOST_CALL ", node[1], " ", reg(packed[0]), " ", number_to_string(packed[1]), " ", reg(destination)));
@@ -445,6 +446,21 @@ fn emit_lazy_force(context, node) {
         return destination;
     }
     return emit_force_all(context, node[2][0]);
+}
+
+fn emit_bootstrap(context, node) {
+    assert(node[2][1][0] == 21, "bootstrap statistic must be a function name");
+    let data = emit_expression(context, node[2][0]);
+    let b = null;
+    if (array_length(node[2]) == 3) {
+        b = emit_expression(context, node[2][2]);
+    } else {
+        b = new_register(context);
+        emit(context, string_concat("LOAD_CONST ", reg(b), " 2000"));
+    }
+    let destination = new_register(context);
+    emit(context, string_concat("BOOTSTRAP ", reg(destination), " ", reg(data), " ", reg(b), " ", call_target(context, node[2][1][1])));
+    return destination;
 }
 
 fn emit_force_all(context, source_node) {

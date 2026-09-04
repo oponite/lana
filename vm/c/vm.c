@@ -5183,17 +5183,43 @@ static void trace_instruction(LanaVM *vm, size_t ip) {
     lana_disassemble_instruction(vm->chunk, ip, stdout);
 }
 
-LanaError lana_vm_run(LanaVM *vm) {
-    LanaError verify;
-    if (vm == NULL || vm->chunk == NULL) return LANA_ERR_FORMAT;
-    verify = lana_chunk_verify(vm->chunk, &vm->error);
-    if (verify != LANA_OK) return verify;
-    while (vm->running) {
-        LanaFrame *frame;
-        const LanaInstruction *ins;
-        size_t instruction_ip;
-        LanaError error = LANA_OK;
-        const char *error_message = NULL;
+static int compare_double(const void *a, const void *b) {
+    double x = *(const double *)a;
+    double y = *(const double *)b;
+    if (x < y) return -1;
+    if (x > y) return 1;
+    return 0;
+}
+
+static LanaError bootstrap_resample(LanaVM *vm, const LanaArray *data,
+                                    LanaArray **out) {
+    LanaArray *resampled;
+    size_t n = data->count;
+    size_t index;
+    resampled = lana_vm_alloc(vm, sizeof(*resampled));
+    if (resampled == NULL) return LANA_ERR_OOM;
+    resampled->count = n;
+    resampled->capacity = n;
+    resampled->items = lana_vm_alloc(vm, n * sizeof(*resampled->items));
+    if (resampled->items == NULL && n > 0u) return LANA_ERR_OOM;
+    for (index = 0; index < n; ++index) {
+        size_t draw = (size_t)lana_vm_random(vm) % n;
+        resampled->items[index] = data->items[draw];
+    }
+    *out = resampled;
+    return LANA_OK;
+}
+
+static LanaError run_function(LanaVM *vm, uint32_t function_index,
+                              const Value *arg, uint32_t scratch_register,
+                              Value *result);
+
+static LanaError vm_step(LanaVM *vm) {
+    LanaFrame *frame;
+    const LanaInstruction *ins;
+    size_t instruction_ip;
+    LanaError error = LANA_OK;
+    const char *error_message = NULL;
         if (!vm_gc_safepoint(vm))
             return vm_fail(vm, LANA_ERR_OOM, vm->ip, NULL,
                            "garbage collection failed");
@@ -5969,6 +5995,73 @@ LanaError lana_vm_run(LanaVM *vm) {
                 if (error != LANA_OK) break;
                 vm->ip = function->entry; break;
             }
+            case OP_BOOTSTRAP: {
+                const Value *data_value = &frame->registers[ins->imm];
+                const Value *b_value = &frame->registers[ins->c];
+                const LanaFunction *function;
+                LanaArray *data;
+                size_t n, b, index;
+                double estimate, ci_low, ci_high;
+                double *resamples;
+                size_t lo, hi;
+                LanaMap *map;
+                if (data_value->type != VAL_ARRAY || b_value->type != VAL_NUMBER) {
+                    error = LANA_ERR_TYPE; break;
+                }
+                if (b_value->as.number < 1.0 ||
+                    floor(b_value->as.number) != b_value->as.number ||
+                    b_value->as.number > (double)SIZE_MAX) {
+                    error = LANA_ERR_INVALID_PARAMETERS; break;
+                }
+                data = data_value->as.array;
+                n = data->count;
+                if (n == 0u) { error = LANA_ERR_INVALID_PARAMETERS; break; }
+                b = (size_t)b_value->as.number;
+                if (ins->b >= vm->chunk->function_count) { error = LANA_ERR_OPCODE; break; }
+                function = &vm->chunk->functions[ins->b];
+                if (function->arity != 1u) { error = LANA_ERR_TYPE; break; }
+                resamples = malloc(b * sizeof(*resamples));
+                if (resamples == NULL) { error = LANA_ERR_OOM; break; }
+                {
+                    Value result;
+                    error = run_function(vm, ins->b, data_value, ins->a, &result);
+                    if (error != LANA_OK) { free(resamples); break; }
+                    if (result.type != VAL_NUMBER) { free(resamples); error = LANA_ERR_TYPE; break; }
+                    estimate = result.as.number;
+                }
+                for (index = 0; index < b && error == LANA_OK; ++index) {
+                    LanaArray *resampled;
+                    Value resampled_value;
+                    Value result;
+                    error = bootstrap_resample(vm, data, &resampled);
+                    if (error != LANA_OK) break;
+                    resampled_value = lana_value_array(resampled);
+                    error = run_function(vm, ins->b, &resampled_value, ins->a, &result);
+                    if (error != LANA_OK) break;
+                    if (result.type != VAL_NUMBER) { error = LANA_ERR_TYPE; break; }
+                    resamples[index] = result.as.number;
+                }
+                if (error != LANA_OK) { free(resamples); break; }
+                qsort(resamples, b, sizeof(*resamples), compare_double);
+                lo = (size_t)(0.025 * (double)b);
+                hi = (size_t)(0.975 * (double)b);
+                if (lo >= b) lo = b - 1u;
+                if (hi >= b) hi = b - 1u;
+                ci_low = resamples[lo];
+                ci_high = resamples[hi];
+                free(resamples);
+                if ((error = lana_map_new(vm, 7u, &map)) != LANA_OK) break;
+                if ((error = map_put(vm, map, "estimate", lana_value_number(estimate))) != LANA_OK ||
+                    (error = map_put(vm, map, "ci_low", lana_value_number(ci_low))) != LANA_OK ||
+                    (error = map_put(vm, map, "ci_high", lana_value_number(ci_high))) != LANA_OK ||
+                    (error = map_put(vm, map, "method", lana_value_string("sampled"))) != LANA_OK ||
+                    (error = map_put(vm, map, "procedure", lana_value_string("bootstrap"))) != LANA_OK ||
+                    (error = map_put(vm, map, "sample_count", lana_value_number((double)b))) != LANA_OK ||
+                    (error = map_put(vm, map, "seed", lana_value_number((double)vm->root_seed))) != LANA_OK)
+                    break;
+                frame->registers[ins->a] = lana_value_map(map);
+                break;
+            }
             case OP_FORK: {
                 LanaTask *task;
                 size_t argument;
@@ -6158,6 +6251,48 @@ LanaError lana_vm_run(LanaVM *vm) {
             return vm_fail(vm, error, instruction_ip, ins,
                            error_message == NULL ? lana_error_name(error) : error_message);
         }
+    return LANA_OK;
+}
+
+static LanaError run_function(LanaVM *vm, uint32_t function_index,
+                              const Value *arg, uint32_t scratch_register,
+                              Value *result) {
+    const LanaFunction *function = &vm->chunk->functions[function_index];
+    LanaFrame *caller = current_frame(vm);
+    LanaFrame *callee;
+    size_t saved_frame_count = vm->frame_count;
+    size_t index;
+    if (function->arity != 1u) return LANA_ERR_TYPE;
+    if (vm->frame_count >= LANA_MAX_CALL_FRAMES) return LANA_ERR_LIMIT;
+    callee = &vm->frames[vm->frame_count++];
+    for (index = 0; index < function->register_count; ++index) {
+        callee->registers[index] = lana_value_null();
+        memset(&callee->histories[index], 0, sizeof(callee->histories[index]));
+    }
+    callee->return_ip = vm->ip;
+    callee->return_register = scratch_register;
+    callee->function = function_index;
+    callee->registers[0] = *arg;
+    vm->ip = function->entry;
+    while (vm->frame_count > saved_frame_count && vm->running) {
+        LanaError error = vm_step(vm);
+        if (error != LANA_OK) {
+            vm->frame_count = saved_frame_count;
+            return error;
+        }
+    }
+    *result = caller->registers[scratch_register];
+    return LANA_OK;
+}
+
+LanaError lana_vm_run(LanaVM *vm) {
+    LanaError verify;
+    if (vm == NULL || vm->chunk == NULL) return LANA_ERR_FORMAT;
+    verify = lana_chunk_verify(vm->chunk, &vm->error);
+    if (verify != LANA_OK) return verify;
+    while (vm->running) {
+        LanaError error = vm_step(vm);
+        if (error != LANA_OK) return error;
     }
     return LANA_OK;
 }
