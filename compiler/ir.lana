@@ -5,13 +5,13 @@ fn lower_expression(typed_expression) { return [200, typed_expression[0], typed_
 fn lower_statement(typed_statement) {
     let node = typed_statement[3];
     if (node[0] == 4) {
-        node = [4, node[1], lower_statements(resolver.resolve_list(node[2])), lower_statements(resolver.resolve_list(node[3])), node[4]];
+        node = [4, node[1], lower_statements(resolver.resolve_list(node[2])), lower_statements(resolver.resolve_list(node[3])), node[4], node[5]];
     }
     if (node[0] == 5) {
-        node = [5, node[1], lower_statements(resolver.resolve_list(node[2])), node[3]];
+        node = [5, node[1], lower_statements(resolver.resolve_list(node[2])), node[3], node[4]];
     }
     if (node[0] == 12) {
-        node = [12, lower_statements(resolver.resolve_list(node[1])), node[2]];
+        node = [12, lower_statements(resolver.resolve_list(node[1])), node[2], node[3]];
     }
     return [201, typed_statement[0], typed_statement[2], node];
 }
@@ -22,10 +22,10 @@ fn lower_statements(statements) {
     return result;
 }
 
-fn lower_function(function_node) { return [202, function_node[1], function_node[2], lower_statements(function_node[3]), function_node[4]]; }
+fn lower_function(function_node) { return [202, function_node[1], function_node[2], function_node[3], lower_statements(function_node[4]), function_node[5]]; }
 
 fn lower(program) {
     let functions = array_new(0); let index = 0;
     while (index < array_length(program[1])) { array_push(functions, lower_function(program[1][index])); index = index + 1; }
-    return [203, functions, lower_statements(program[2]), program[3]];
+    return [203, functions, lower_statements(program[2]), program[3], program[5]];
 }

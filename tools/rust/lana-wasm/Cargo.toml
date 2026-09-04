@@ -1,0 +1,15 @@
+[package]
+name = "lana-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly bindings for the Lana runtime (check/run/diagnostics)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lana-bytecode = { workspace = true }
+lana-vm = { workspace = true }
+lana-runtime = { workspace = true }
+wasm-bindgen = "=0.2.100"

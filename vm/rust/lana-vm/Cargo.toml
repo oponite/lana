@@ -1,0 +1,9 @@
+[package]
+name = "lana-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Canonical Rust register VM for Lana (phase 2 of the Rust runtime boundary)"
+
+[dependencies]
+lana-bytecode = { workspace = true }

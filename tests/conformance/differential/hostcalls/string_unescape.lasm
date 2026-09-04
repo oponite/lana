@@ -1,0 +1,8 @@
+.function main 0 8
+LOAD_STRING R0 615c6e62
+HOST_CALL string_unescape R0 1 R1
+PRINT R1
+LOAD_STRING R2 615c7462
+HOST_CALL string_unescape R2 1 R3
+PRINT R3
+RETURN R0

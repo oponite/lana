@@ -1,0 +1,21 @@
+.function main 0 16
+LOAD_CONST R0 tmpdir
+HOST_CALL directory_create R0 1 R1
+LOAD_CONST R2 tmpdir/a.txt
+LOAD_STRING R3 68656c6c6f20776f726c64
+HOST_CALL write_text R2 2 R4
+HOST_CALL read_text R2 1 R5
+PRINT R5
+HOST_CALL path_exists R2 1 R6
+PRINT R6
+LOAD_CONST R7 tmpdir/missing.txt
+HOST_CALL path_exists R7 1 R8
+PRINT R8
+LOAD_CONST R9 tmpdir/b.txt
+LOAD_STRING R10 61746f6d696320636f6e74656e74
+HOST_CALL write_text_atomic R9 2 R11
+HOST_CALL read_text R9 1 R12
+PRINT R12
+HOST_CALL directory_list R0 1 R13
+PRINT R13
+RETURN R0

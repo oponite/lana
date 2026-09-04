@@ -1,0 +1,9 @@
+state a = state(p: 0.4, d: 0.2);
+state b = state(p: 0.8, d: -0.1);
+let m = mix(a, b, 0.5);
+assert(m.p > 0.5999, "mix p must be the weighted average");
+assert(m.p < 0.6001, "mix p must be the weighted average");
+assert(m.d_re > 0.059, "mix d_re must match the worked example");
+assert(m.d_re < 0.060, "mix d_re must match the worked example");
+print(m.p);
+print(m.d_re);

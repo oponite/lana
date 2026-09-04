@@ -1,0 +1,53 @@
+type Maybe<T> = Some(T) | None;
+type Result<T, E> = Ok(T) | Error(E, T);
+
+fn identity<T>(value) { return value; }
+
+let x = Some(5);
+let y = None;
+let z = unknown;
+
+let a = match x {
+    Some(value) => value
+    None => 0
+    unknown => -1
+};
+assert(a == 5, "Some(5) must match Some(value)");
+
+let b = match y {
+    Some(value) => value
+    None => 0
+    unknown => -1
+};
+assert(b == 0, "None must match None");
+
+let c = match z {
+    Some(value) => value
+    None => 0
+    unknown => -1
+};
+assert(c == -1, "unknown must match unknown");
+
+let d = match z {
+    Some(value) => value
+    _ => 7
+};
+assert(d == 7, "wildcard must cover unknown");
+
+let r = Error("boom", 42);
+let e = match r {
+    Ok(v) => v
+    Error(msg, code) => code
+    unknown => -1
+};
+assert(e == 42, "multi-field variant must bind fields in order");
+
+let g = identity(Some(9));
+let h = match g {
+    Some(value) => value
+    None => 0
+    unknown => -1
+};
+assert(h == 9, "generic function must pass through an ADT value");
+
+print("ADT_PASS");

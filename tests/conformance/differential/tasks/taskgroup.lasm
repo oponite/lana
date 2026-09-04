@@ -1,0 +1,10 @@
+.function main 0 8
+TASKGROUP_ENTER
+FORK worker R1 0 R0
+TASKGROUP_EXIT
+LOAD_CONST R1 99
+PRINT R1
+RETURN R1
+.function worker 0 4
+loop:
+JUMP loop

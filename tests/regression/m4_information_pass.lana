@@ -1,0 +1,2 @@
+let unresolved = information(42);
+print(resolve(unresolved));

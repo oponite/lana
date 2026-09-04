@@ -1,0 +1,40 @@
+state a = state(p: 0.4, d: 0.2);
+state b = state(p: 0.8, d: -0.1);
+
+// MAP: lazy transform node over a distribution.
+let d1 = append(a, b);
+let d2 = map(d1, neutralize);
+let e2 = expect(d2, probability);
+assert(e2.value > 0.8799, "map must preserve exact expected probability");
+assert(e2.value < 0.8801, "map must preserve exact expected probability");
+
+// EXPECT: exact expected probability of the append.
+let e1 = expect(d1, probability);
+assert(e1.method == "exact", "expect must be marked exact");
+assert(e1.value > 0.8799, "expect value must be 1 - (1-0.4)(1-0.8)");
+assert(e1.value < 0.8801, "expect value must be 1 - (1-0.4)(1-0.8)");
+assert(e1.sample_count == null, "exact result has null sample_count");
+assert(e1.seed == null, "exact result has null seed");
+
+// SUPPORT: an append of identical states is deterministic -> singleton.
+state c = state(p: 0.5, d: 0.0);
+state d = state(p: 0.5, d: 0.0);
+let d3 = append(c, d);
+let s = support(d3, 4);
+assert(array_length(s) == 1, "support of deterministic append is a singleton");
+assert(s[0].p > 0.7499, "support state p must match the append result");
+assert(s[0].p < 0.7501, "support state p must match the append result");
+
+// VALIDATE: deterministic schema check.
+let schema = { type: "number", required: [], constraints: {min: 0.0, max: 1.0}, exactness: "exact", tolerance: 0.0 };
+let v_ok = validate(e1.value, schema);
+assert(v_ok.status == "valid", "in-range value must validate");
+let v_bad = validate(2.0, schema);
+assert(v_bad.status == "invalid", "out-of-range value must fail validation");
+assert(v_bad.reason == "above_maximum", "out-of-range reason must be above_maximum");
+
+// REVISION: a derived value carries a committed revision.
+let r = revision(d2);
+assert(r >= 0, "revision must be a non-negative commit sequence");
+
+print("ISA_OPS_PASS");

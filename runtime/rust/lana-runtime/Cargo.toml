@@ -1,0 +1,11 @@
+[package]
+name = "lana-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lana host calls, adapters, and durable pipeline (phase 2 of the Rust runtime boundary)"
+
+[dependencies]
+lana-bytecode = { workspace = true }
+lana-vm = { workspace = true }
+ed25519-compact = { version = "2.4.2", default-features = false, features = ["std"] }

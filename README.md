@@ -28,6 +28,26 @@ Lana is a public, actively developed language project. Issues, questions, and
 focused pull requests are welcome. Changes to language behavior follow the
 authority order below and include tests or documentation when applicable.
 
+## Repository
+
+- `compiler/` — the self-hosted Lana compiler.
+- `vm/` — canonical Rust `lana-vm` + `lana-bytecode`, plus the frozen C11
+  reference VM core.
+- `runtime/` — canonical Rust `lana-runtime` + `lana-ffi`, plus the C11
+  hardware boundary.
+- `tools/` — Rust `lana-cli` + `lana-fuzz` + `lana-wasm` (WebAssembly bindings),
+  plus the C11 CLI, LSP, and project tooling.
+- `spec/` — `SPEC.md`, `SYNTAX.md`, `BYTECODE.md`, `VM.md`.
+- `papers/` — `semantics.md` (1.0) and `semantics-2.md` (2.0), the mathematical
+  authorities.
+- `lip/` — Lana Improvement Proposals.
+- `stdlib/` — future Lana standard library.
+- `tests/` — unit, regression, and conformance suites.
+- `integrations/` — Python, editors, native ABI.
+
+Project governance: [GOVERNANCE.md](GOVERNANCE.md), [VERSIONING.md](VERSIONING.md),
+[CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md).
+
 ## Install and run
 
 ```bash
@@ -40,6 +60,11 @@ cmake --install build --prefix "$HOME/.local"
 
 The installed compile and run path consists of the C11 `lana`/`lanavm` binaries
 and the self-hosted Lana compiler bytecode. Python is not required.
+
+The canonical VM is the Rust runtime (crates `lana-bytecode`, `lana-vm`,
+`lana-runtime`, `lana-ffi`, `lana-cli` under `vm/rust/`, `runtime/rust/`, and
+`tools/rust/`). The C11 VM is retained as a frozen reference implementation for
+conformance comparison.
 
 For VM development:
 
@@ -195,10 +220,16 @@ inference belong in external programs that exchange ordinary Lana values.
 
 The authority order is:
 
-1. [papers/semantics.md](papers/semantics.md) — sole mathematical authority.
-2. [SPEC.md](SPEC.md) — source syntax and programmer-visible behavior.
-3. [BYTECODE.md](BYTECODE.md) — the single LABC v1 encoding.
-4. [VM.md](VM.md) — allocation, cloning, RNG, and budget architecture.
+1. [papers/semantics.md](papers/semantics.md) — mathematical authority for the
+   Lana 1.0 contract.
+2. [papers/semantics-2.md](papers/semantics-2.md) — mathematical authority for
+   the Lana 2.0 density-operator substrate and its operations.
+3. [SPEC.md](spec/SPEC.md) — source syntax and programmer-visible behavior.
+4. [BYTECODE.md](spec/BYTECODE.md) — the single LABC v1 encoding.
+5. [VM.md](spec/VM.md) — allocation, cloning, RNG, and budget architecture.
+
+New or changed source syntax must additionally satisfy
+[SYNTAX.md](spec/SYNTAX.md) — the syntax design principles.
 
 Benchmark programs are reproducible source evidence; generated reports and
 machine-local result snapshots are not part of the source release.
@@ -207,4 +238,6 @@ machine-local result snapshots are not part of the source release.
 
 The Lana language, compiler, bytecode, and VM are under active development.
 Changes preserve the documented authority order, compatibility expectations,
-correctness, security, and data integrity.
+correctness, security, and data integrity. Language, bytecode, and VM changes
+are proposed through the [LIP process](lip/README.md) and governed by
+[GOVERNANCE.md](GOVERNANCE.md).

@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "vm/rust/lana-bytecode",
+    "vm/rust/lana-vm",
+    "runtime/rust/lana-runtime",
+    "runtime/rust/lana-ffi",
+    "tools/rust/lana-cli",
+    "tools/rust/lana-fuzz",
+    "tools/rust/lana-wasm",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+lana-bytecode = { path = "vm/rust/lana-bytecode" }
+lana-vm = { path = "vm/rust/lana-vm" }
+lana-runtime = { path = "runtime/rust/lana-runtime" }
+lana-ffi = { path = "runtime/rust/lana-ffi" }
+
+# The parity gate (Section 4.5.4) measures the Rust VM against the C11
+# reference in release mode. LTO + single codegen unit + abort-on-panic close
+# the gap on the hot dispatch loop; the VM never unwinds across the FFI
+# boundary, so `panic = "abort"` is safe here.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

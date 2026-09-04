@@ -1,0 +1,14 @@
+[package]
+name = "lana-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "C ABI for the Rust Lana runtime (phase 2 of the Rust runtime boundary)"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+lana-bytecode = { workspace = true }
+lana-vm = { workspace = true }
+lana-runtime = { workspace = true }

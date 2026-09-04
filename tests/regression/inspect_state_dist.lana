@@ -1,0 +1,9 @@
+// LIP-002: a program that returns a state distribution so `lana inspect` can
+// serialize its DAG. The append/transform structure exercises every node kind
+// the serializer reports.
+state a = state(p: 0.2, d: 0.0);
+state b = state(p: 0.3, d: 0.0);
+let combined = append(a, b);
+transform combined with invert();
+let outer = append(combined, a);
+return outer;

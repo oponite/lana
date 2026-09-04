@@ -117,6 +117,7 @@ fn host_is_pure(name) {
     if (name == "string_join") { return true; }
     if (name == "array_length") { return true; }
     if (name == "string_unescape") { return true; }
+    if (name == "lazy_bound") { return true; }
     return false;
 }
 
@@ -129,6 +130,17 @@ fn host_effect(name) {
     if (name == "path_exists") { return effects("io"); }
     if (name == "write_text_atomic") { return effects("io"); }
     if (name == "hash_update") { return effects("pure"); }
+    if (name == "store_open") { return effects("io"); }
+    if (name == "store_put") { return effects("mutation"); }
+    if (name == "store_get") { return effects("io"); }
+    if (name == "store_delete") { return effects("mutation"); }
+    if (name == "store_commit") { return effects("mutation"); }
+    if (name == "store_scan") { return effects("io"); }
+    if (name == "store_current_revision") { return effects("io"); }
+    if (name == "policy_evaluate") { return effects("pure"); }
+    if (name == "policy_store_decision") { return effects("mutation"); }
+    if (name == "ledger_append") { return effects("mutation"); }
+    if (name == "ledger_query") { return effects("io"); }
     if (name == "csv_read") { return effects("io"); }
     if (name == "csv_write") { return effects("io"); }
     if (name == "args") { return effects("external_call"); }
@@ -150,6 +162,17 @@ fn host_type(name) {
     if (name == "path_exists") { return type_ordinary("bool"); }
     if (name == "write_text_atomic") { return type_ordinary("null"); }
     if (name == "hash_update") { return type_ordinary("string"); }
+    if (name == "store_open") { return type_ordinary("null"); }
+    if (name == "store_put") { return type_ordinary("null"); }
+    if (name == "store_get") { return type_unknown(); }
+    if (name == "store_delete") { return type_ordinary("null"); }
+    if (name == "store_commit") { return type_ordinary("number"); }
+    if (name == "store_scan") { return type_ordinary("array"); }
+    if (name == "store_current_revision") { return type_ordinary("number"); }
+    if (name == "policy_evaluate") { return type_unknown(); }
+    if (name == "policy_store_decision") { return type_ordinary("null"); }
+    if (name == "ledger_append") { return type_unknown(); }
+    if (name == "ledger_query") { return type_ordinary("array"); }
     if (name == "now") { return type_ordinary("number"); }
     if (name == "random") { return type_sample(type_ordinary("number"), "host:random", "random"); }
     if (name == "assert") { return type_ordinary("null"); }
@@ -160,6 +183,7 @@ fn host_type(name) {
     if (name == "array_length") { return type_ordinary("number"); }
     if (name == "string_length") { return type_ordinary("number"); }
     if (name == "number_to_string") { return type_ordinary("string"); }
+    if (name == "lazy_bound") { return type_ordinary("number"); }
     return type_unknown();
 }
 
@@ -200,11 +224,112 @@ fn environment_clone(environment) {
 }
 
 fn type_error(node, message) {
-    let line = node[array_length(node) - 1];
+    let line = node[array_length(node) - 2];
+    let column = node[array_length(node) - 1];
     let location = string_concat("type error at line ", number_to_string(line));
-    location = string_concat(location, " column 1: ");
+    location = string_concat(location, " column ");
+    location = string_concat(location, number_to_string(column));
+    location = string_concat(location, ": ");
     assert(false, string_concat(location, message));
     return null;
+}
+
+// Symbol table: accumulated during resolution for the LSP query mode. The box
+// holds [definitions, references]; definitions are [name, kind, type, line,
+// column] and references are [name, line, column]. Line/column are 1-based.
+// The box is carried inside the environment under a reserved key so it flows
+// through the existing environment threading without changing signatures.
+fn symbol_box_new() { return [array_new(0), array_new(0)]; }
+
+fn symbol_box_of(environment) {
+    if (!map_has(environment, "__symbols__")) { return null; }
+    return map_get(environment, "__symbols__");
+}
+
+fn symbol_add_definition(environment, name, kind, value_type, line, column) {
+    let box = symbol_box_of(environment);
+    if (box != null) { array_push(box[0], [name, kind, value_type, line, column]); }
+    return null;
+}
+
+fn symbol_add_reference(environment, name, line, column) {
+    let box = symbol_box_of(environment);
+    if (box != null) { array_push(box[1], [name, line, column]); }
+    return null;
+}
+
+// Type registry: accumulated during resolution for ADT declarations. The box
+// holds [variants, types]; variants maps a variant name to [type name, index,
+// field count] and types maps a type name to its ordered variant names. It is
+// carried inside the environment under a reserved key so it flows through the
+// existing environment threading without changing signatures.
+fn type_registry_new() { return [map_new(), map_new()]; }
+
+fn type_registry_of(environment) {
+    if (!map_has(environment, "__types__")) { return null; }
+    return map_get(environment, "__types__");
+}
+
+fn type_registry_add(registry, type_name, variant_name, index, field_count) {
+    map_set(registry[0], variant_name, [type_name, index, field_count]);
+    if (!map_has(registry[1], type_name)) { map_set(registry[1], type_name, array_new(0)); }
+    array_push(map_get(registry[1], type_name), variant_name);
+    return null;
+}
+
+fn type_registry_lookup_variant(registry, name) {
+    if (!map_has(registry[0], name)) { return null; }
+    return map_get(registry[0], name);
+}
+
+fn type_registry_variants_of(registry, type_name) {
+    if (!map_has(registry[1], type_name)) { return null; }
+    return map_get(registry[1], type_name);
+}
+
+fn type_to_string(value_type) {
+    let tag = type_tag(value_type);
+    if (tag == "ordinary") { return value_type[1]; }
+    if (tag == "information") { return string_concat("Information<", string_concat(type_to_string(value_type[1]), ">")); }
+    if (tag == "claim") { return string_concat("Claim<", string_concat(type_to_string(value_type[1]), string_concat(", ", string_concat(value_type[2], ">")))); }
+    if (tag == "sample") { return string_concat("Sample<", string_concat(type_to_string(value_type[1]), ">")); }
+    if (tag == "planned_effect") { return string_concat("PlannedEffect<", string_concat(type_to_string(value_type[1]), string_concat(", ", string_concat(value_type[2], ">")))); }
+    if (tag == "task_handle") { return string_concat("TaskHandle<", string_concat(type_to_string(value_type[1]), ">")); }
+    if (tag == "capability") { return string_concat("Capability<", string_concat(value_type[1], ">")); }
+    if (tag == "shared_capability") { return string_concat("SharedCapability<", string_concat(type_to_string(value_type[1]), string_concat(", ", string_concat(value_type[2], ">")))); }
+    if (tag == "result") { return string_concat("Result<", string_concat(type_to_string(value_type[1]), string_concat(", ", string_concat(type_to_string(value_type[2]), ">")))); }
+    return "unknown";
+}
+
+fn symbol_table_json(box) {
+    let result = map_new();
+    let definitions = array_new(0);
+    let references = array_new(0);
+    let index = 0;
+    while (index < array_length(box[0])) {
+        let def = box[0][index];
+        let entry = map_new();
+        map_set(entry, "name", def[0]);
+        map_set(entry, "kind", def[1]);
+        map_set(entry, "type", type_to_string(def[2]));
+        map_set(entry, "line", def[3]);
+        map_set(entry, "column", def[4]);
+        array_push(definitions, entry);
+        index = index + 1;
+    }
+    index = 0;
+    while (index < array_length(box[1])) {
+        let ref = box[1][index];
+        let entry = map_new();
+        map_set(entry, "name", ref[0]);
+        map_set(entry, "line", ref[1]);
+        map_set(entry, "column", ref[2]);
+        array_push(references, entry);
+        index = index + 1;
+    }
+    map_set(result, "definitions", definitions);
+    map_set(result, "references", references);
+    return result;
 }
 
 fn exact_type(value_type, operation, node) {
@@ -323,6 +448,65 @@ fn require_shared_permission(node, resolved, permission, message) {
     return resolved[0][1][1];
 }
 
+fn builtin_state_type(node, resolved) {
+    let name = node[1];
+    if (name == "mix") {
+        require_argument_count(name, resolved, 3);
+        return type_unknown();
+    }
+    if (name == "map") {
+        require_argument_count(name, resolved, 2);
+        if (node[2][1][0] != 21) { type_error(node, "map transform must be a bare identifier"); }
+        return type_unknown();
+    }
+    if (name == "support") {
+        require_argument_count(name, resolved, 2);
+        if (node[2][1][0] != 20) { type_error(node, "support limit must be a number literal"); }
+        if (node[2][1][1] != "number") { type_error(node, "support limit must be a number literal"); }
+        return type_unknown();
+    }
+    if (name == "expect") {
+        require_argument_count(name, resolved, 2);
+        if (node[2][1][0] != 21) { type_error(node, "expect observable must be a bare identifier"); }
+        return type_unknown();
+    }
+    if (name == "validate") {
+        require_argument_count(name, resolved, 2);
+        return type_unknown();
+    }
+    if (name == "revision") {
+        require_argument_count(name, resolved, 1);
+        return type_unknown();
+    }
+    if (name == "attenuate") {
+        require_argument_count(name, resolved, 2);
+        return type_unknown();
+    }
+    if (name == "trace_distance") {
+        require_argument_count(name, resolved, 2);
+        return type_ordinary("number");
+    }
+    return null;
+}
+
+fn builtin_lazy_type(node, resolved) {
+    let name = node[1];
+    if (name == "lazy") {
+        require_argument_count(name, resolved, 2);
+        if (node[2][0][0] != 21) { type_error(node, "lazy generator must be a function name"); }
+        return type_ordinary("lazy");
+    }
+    if (name == "force") {
+        require_argument_count(name, resolved, 2);
+        return type_unknown();
+    }
+    if (name == "force_all") {
+        require_argument_count(name, resolved, 1);
+        return type_ordinary("array");
+    }
+    return null;
+}
+
 fn builtin_shared_admin_type(node, resolved) {
     let name = node[1]; let value_type = null;
     if (name == "shared_information") { require_argument_count(name, resolved, 1); return type_shared_capability(information_value_type(resolved[0][1]), "admin"); }
@@ -392,6 +576,10 @@ fn builtin_call_type(node, resolved) {
     if (value_type != null) { return value_type; }
     value_type = builtin_effect_type(node, resolved);
     if (value_type != null) { return value_type; }
+    value_type = builtin_state_type(node, resolved);
+    if (value_type != null) { return value_type; }
+    value_type = builtin_lazy_type(node, resolved);
+    if (value_type != null) { return value_type; }
     value_type = builtin_shared_admin_type(node, resolved);
     if (value_type != null) { return value_type; }
     value_type = builtin_shared_access_type(node, resolved);
@@ -402,8 +590,23 @@ fn builtin_call_type(node, resolved) {
 }
 
 fn resolve_call(node, environment) {
+    symbol_add_reference(environment, node[1], node[3], node[4]);
     let resolved = resolve_arguments(node[2], environment);
     let effect_value = arguments_effect(resolved);
+    let registry = type_registry_of(environment);
+    if (registry != null) {
+        let variant = type_registry_lookup_variant(registry, node[1]);
+        if (variant != null) {
+            if (array_length(resolved) != variant[2]) {
+                let message = string_concat("variant ", node[1]);
+                message = string_concat(message, " expects ");
+                message = string_concat(message, number_to_string(variant[2]));
+                message = string_concat(message, " fields");
+                type_error(node, message);
+            }
+            return typed(node, type_ordinary(variant[0]), effect_value);
+        }
+    }
     let builtin_type = builtin_call_type(node, resolved);
     if (builtin_type != null) {
         if (node[1] == "execute_effect") { effect_value = effects_combine(effect_value, effects(resolved[0][1][2])); }
@@ -414,6 +617,60 @@ fn resolve_call(node, environment) {
     }
     effect_value = effects_combine(effect_value, host_effect(node[1]));
     return typed(node, host_type(node[1]), effect_value);
+}
+
+fn resolve_match(node, environment) {
+    let scrutinee = resolve_expression_with_environment(node[1], environment);
+    let registry = type_registry_of(environment);
+    let declared = null;
+    if (registry != null) {
+        if (type_tag(scrutinee[1]) == "ordinary") { declared = type_registry_variants_of(registry, scrutinee[1][1]); }
+    }
+    let covered = map_new(); let has_wildcard = false; let has_unknown = false; let index = 0;
+    while (index < array_length(node[2])) {
+        let pattern = node[2][index][0];
+        if (pattern[0] == "wildcard") { has_wildcard = true; }
+        else { if (pattern[0] == "unknown") { has_unknown = true; }
+        else {
+            if (registry != null) {
+                if (type_registry_lookup_variant(registry, pattern[1]) == null) {
+                    type_error(node, string_concat("unknown variant ", pattern[1]));
+                }
+            }
+            map_set(covered, pattern[1], true);
+        } }
+        index = index + 1;
+    }
+    if (declared != null) {
+        if (!has_wildcard) {
+            index = 0;
+            while (index < array_length(declared)) {
+                if (!map_has(covered, declared[index])) {
+                    type_error(node, string_concat("match is not exhaustive: missing variant ", declared[index]));
+                }
+                index = index + 1;
+            }
+            if (!has_unknown) { type_error(node, "match is not exhaustive: missing unknown case"); }
+        }
+    }
+    let result_type = type_unknown(); let effect_value = scrutinee[2]; let first = true; index = 0;
+    while (index < array_length(node[2])) {
+        let arm = node[2][index]; let pattern = arm[0]; let arm_env = environment_clone(environment);
+        if (pattern[0] == "variant") {
+            let bindings = pattern[2]; let binding_index = 0;
+            while (binding_index < array_length(bindings)) {
+                environment_set(arm_env, bindings[binding_index], type_unknown());
+                symbol_add_definition(arm_env, bindings[binding_index], "binding", type_unknown(), node[3], node[4]);
+                binding_index = binding_index + 1;
+            }
+        }
+        let body = resolve_expression_with_environment(arm[1], arm_env);
+        if (first) { result_type = body[1]; first = false; }
+        else { if (!type_compatible(result_type, body[1])) { result_type = type_unknown(); } }
+        effect_value = effects_combine(effect_value, body[2]);
+        index = index + 1;
+    }
+    return typed(node, result_type, effect_value);
 }
 
 fn resolve_structure_expression(node, environment) {
@@ -440,6 +697,14 @@ fn resolve_structure_expression(node, environment) {
     if (node[0] == 30) {
         let rows = resolve_expression_with_environment(node[2], environment);
         return typed(node, type_information(type_unknown()), rows[2]);
+    }
+    if (node[0] == 38) {
+        let effect_value = effects("pure"); let index = 1;
+        while (index <= 3) {
+            let item = resolve_expression_with_environment(node[index], environment);
+            effect_value = effects_combine(effect_value, item[2]); index = index + 1;
+        }
+        return typed(node, type_information(type_unknown()), effect_value);
     }
     return null;
 }
@@ -512,7 +777,19 @@ fn resolve_extended_expression(node, environment) {
 
 fn resolve_core_expression(node, environment) {
     if (node[0] == 20) { return typed(node, literal_type(node), effects("pure")); }
-    if (node[0] == 21) { return typed(node, environment_get(environment, node[1]), effects("pure")); }
+    if (node[0] == 21) {
+        let registry = type_registry_of(environment);
+        if (registry != null) {
+            let variant = type_registry_lookup_variant(registry, node[1]);
+            if (variant != null) {
+                if (variant[2] == 0) { return typed(node, type_ordinary(variant[0]), effects("pure")); }
+                type_error(node, string_concat("variant ", string_concat(node[1], " requires fields")));
+            }
+        }
+        symbol_add_reference(environment, node[1], node[2], node[3]); return typed(node, environment_get(environment, node[1]), effects("pure"));
+    }
+    if (node[0] == 40) { return resolve_match(node, environment); }
+    if (node[0] == 43) { return typed(node, type_unknown(), effects("pure")); }
     if (node[0] == 22) {
         let left = resolve_expression_with_environment(node[2], environment);
         let right = resolve_expression_with_environment(node[3], environment);
@@ -581,6 +858,7 @@ fn resolve_binding_statement(node, environment) {
     if (node[0] == 2) {
         let value = resolve_expression_with_environment(node[2], environment);
         environment_set(environment, node[1], value[1]);
+        symbol_add_definition(environment, node[1], "variable", value[1], node[3], node[4]);
         return [2, type_ordinary("statement"), value[2], node];
     }
     if (node[0] == 3) {
@@ -674,18 +952,44 @@ fn resolve_list_with_environment(nodes, environment) {
 
 fn resolve_list(nodes) { return resolve_list_with_environment(nodes, environment_new()); }
 
-fn resolve_function(node) {
+fn resolve_function(node, box, registry) {
     let environment = environment_new(); let index = 0;
-    while (index < array_length(node[2])) {
-        environment_set(environment, node[2][index], type_unknown()); index = index + 1;
+    map_set(environment, "__symbols__", box);
+    map_set(environment, "__types__", registry);
+    symbol_add_definition(environment, node[1], "function", type_ordinary("function"), node[5], node[6]);
+    while (index < array_length(node[3])) {
+        environment_set(environment, node[3][index], type_unknown());
+        symbol_add_definition(environment, node[3][index], "parameter", type_unknown(), node[5], node[6]);
+        index = index + 1;
     }
-    return [1, node[1], node[2], resolve_list_with_environment(node[3], environment), node[4]];
+    return [1, node[1], node[2], node[3], resolve_list_with_environment(node[4], environment), node[5]];
+}
+
+fn resolve_type_declaration(node, environment) {
+    let registry = type_registry_of(environment);
+    let name = node[1]; let variants = node[3]; let index = 0;
+    while (index < array_length(variants)) {
+        let variant = variants[index];
+        type_registry_add(registry, name, variant[1], index, array_length(variant[2]));
+        index = index + 1;
+    }
+    symbol_add_definition(environment, name, "type", type_ordinary(name), node[4], node[5]);
+    return null;
 }
 
 fn resolve_program(program) {
-    let functions = array_new(0); let index = 0;
-    while (index < array_length(program[1])) {
-        array_push(functions, resolve_function(program[1][index])); index = index + 1;
+    let box = symbol_box_new();
+    let registry = type_registry_new();
+    let top_environment = environment_new();
+    map_set(top_environment, "__symbols__", box);
+    map_set(top_environment, "__types__", registry);
+    let index = 0;
+    while (index < array_length(program[4])) {
+        resolve_type_declaration(program[4][index], top_environment); index = index + 1;
     }
-    return [100, functions, resolve_list_with_environment(program[2], environment_new()), program[3]];
+    let functions = array_new(0); index = 0;
+    while (index < array_length(program[1])) {
+        array_push(functions, resolve_function(program[1][index], box, registry)); index = index + 1;
+    }
+    return [100, functions, resolve_list_with_environment(program[2], top_environment), program[3], box, registry];
 }

@@ -1,0 +1,7 @@
+.function main 0 8
+FORK worker R1 0 R0
+FORK worker R2 0 R1
+HALT
+.function worker 0 4
+LOAD_CONST R0 1
+RETURN R0

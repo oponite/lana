@@ -1,0 +1,11 @@
+[package]
+name = "lana-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line driver for the Rust Lana runtime (phase 2 of the Rust runtime boundary)"
+
+[dependencies]
+lana-bytecode = { workspace = true }
+lana-vm = { workspace = true }
+lana-runtime = { workspace = true }

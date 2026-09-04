@@ -1,0 +1,26 @@
+let sampled = random();
+print(sample_value(sampled));
+let sample_info = sample_metadata(sampled);
+print(sample_info.operation);
+
+let asserted = claim(true, "sensor is active");
+print(claim_proposition(asserted));
+if (claim_value(asserted)) {
+    print("claim matched explicitly");
+}
+
+let unresolved = information(42);
+print(resolve(unresolved));
+
+let io_capability = capability("io");
+let deferred = planned_effect("io", io_capability);
+deferred;
+
+let success = result_ok(42);
+print(result_value(success));
+if (result_is_ok(success)) {
+    print("result matched explicitly");
+}
+
+let failure = result_error("offline");
+print(result_error_value(failure));

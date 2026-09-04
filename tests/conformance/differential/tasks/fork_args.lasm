@@ -1,0 +1,10 @@
+.function main 0 8
+LOAD_CONST R1 3
+LOAD_CONST R2 4
+FORK worker R1 2 R0
+JOIN R0 R3
+PRINT R3
+RETURN R3
+.function worker 2 4
+BINARY R0 add R1 R2
+RETURN R2

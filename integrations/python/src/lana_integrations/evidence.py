@@ -1,4 +1,4 @@
-"""Versioned evidence records for Lana 1.1 integrations and 1.0 callers."""
+"""Versioned evidence records for Lana 1.x integrations and callers."""
 
 from __future__ import annotations
 

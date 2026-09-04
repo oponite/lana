@@ -1,2 +1,0 @@
-let unknown = information(42);
-print(resolve(unknown));

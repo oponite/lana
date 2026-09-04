@@ -1,0 +1,4 @@
+let unresolved = information(true);
+if (unresolved) {
+    print("effect requires a definite guard");
+}

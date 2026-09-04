@@ -1,13 +1,13 @@
 #include "lana/bridge.h"
 
-#include "lana/bytecode.h"
-#include "lana/data.h"
-#include "lana/effects.h"
-#include "lana/error.h"
-#include "lana/ledger.h"
-#include "lana/sha256.h"
-#include "lana/store.h"
-#include "lana/vm.h"
+#include "bytecode.h"
+#include "data.h"
+#include "effects.h"
+#include "error.h"
+#include "ledger.h"
+#include "sha256.h"
+#include "store.h"
+#include "vm.h"
 
 #include <errno.h>
 #include <stdio.h>
