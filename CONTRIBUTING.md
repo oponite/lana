@@ -36,7 +36,6 @@ tests/conformance/differential/run_fuzz_diff.sh
 2. Bug fixes, documentation, and tooling do not.
 3. Every source, bytecode, compiler, or VM change requires focused regression
    coverage.
-4. A release is gated by `RELEASE_CHECKLIST.md`.
 
 ## Code style
 
@@ -53,4 +52,3 @@ Prefer existing patterns before adding dependencies.
 - [Governance](GOVERNANCE.md)
 - [Versioning](VERSIONING.md)
 - [LIP process](lip/README.md)
-- [Release checklist](RELEASE_CHECKLIST.md)

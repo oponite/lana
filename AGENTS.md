@@ -83,9 +83,9 @@ build/lanavm run build/belief.labc --trace
 
 ## Release gates
 
-Run `RELEASE_CHECKLIST.md` exactly. The native bootstrap CTest compiles the
-compiler twice and requires byte-identical output. Sanitizer configurations are
-mutually exclusive. The fuzz target is opt-in with `LANA_BUILD_FUZZERS=ON`.
+The native bootstrap CTest compiles the compiler twice and requires
+byte-identical output. Sanitizer configurations are mutually exclusive. The
+fuzz target is opt-in with `LANA_BUILD_FUZZERS=ON`.
 
 LABC v1 is the only supported bytecode format. Pre-release bytecode and textual
 assembly are not accepted or converted; rebuild them from source.
