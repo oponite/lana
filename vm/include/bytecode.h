@@ -159,6 +159,8 @@ typedef enum {
     LANA_HOST_LAZY_BOUND,
     /* Lana 2.0 declared correlation (bivariate Bernoulli joint law). */
     LANA_HOST_CORRELATED,
+    /* Lana 2.0 surprisal (natural-log information content in nats). */
+    LANA_HOST_SURPRISAL,
     LANA_HOST_COUNT
 } LanaHostCallId;
 

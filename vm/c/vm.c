@@ -3196,6 +3196,16 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             if (argc != 3u) return LANA_ERR_TYPE;
             return host_correlated(vm, &arguments[0], &arguments[1],
                                    &arguments[2], out);
+        case LANA_HOST_SURPRISAL: {
+            double probability, result;
+            if (argc != 1u || arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+            probability = arguments[0].as.number;
+            if (probability < 0.0) return LANA_ERR_INVALID_PARAMETERS;
+            result = -log(probability);
+            if (result == 0.0) result = 0.0; /* normalize -0.0 to 0.0 */
+            *out = lana_value_number(result);
+            return LANA_OK;
+        }
         case LANA_HOST_NOW: {
             struct timespec now;
             if (argc != 0u || timespec_get(&now, TIME_UTC) != TIME_UTC) return LANA_ERR_TYPE;

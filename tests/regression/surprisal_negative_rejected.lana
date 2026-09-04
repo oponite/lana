@@ -1,0 +1,3 @@
+// surprisal on a negative probability is LANA_ERR_INVALID_PARAMETERS.
+let s = surprisal(-0.5);
+print(s);

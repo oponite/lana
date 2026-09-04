@@ -49,7 +49,7 @@ const HOST_CALL_NAMES: &[&str] = &[
     "shared_revision", "shared_identity", "shared_wait",
     "information_inspect", "directory_list", "directory_create",
     "path_exists", "write_text_atomic", "hash_update", "lazy_bound",
-    "correlated",
+    "correlated", "surprisal",
     "store_open", "store_put", "store_get", "store_delete", "store_commit",
     "store_scan", "store_current_revision", "policy_evaluate",
     "policy_store_decision", "ledger_append", "ledger_query",

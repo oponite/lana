@@ -9,12 +9,12 @@ use crate::chunk::{Chunk, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
 use crate::opcode::{OpCode, LANA_MAX_REGISTERS};
 
-/// Maximum host-call id. The C11 reference caps this at 55 (54 built-in host
-/// calls, ids 0-54); the Rust VM adds 11 durable-pipeline host calls
-/// (store/policy/ledger, ids 55-65) behind the host-call extension, so the
+/// Maximum host-call id. The C11 reference caps this at 56 (55 built-in host
+/// calls, ids 0-55); the Rust VM adds 11 durable-pipeline host calls
+/// (store/policy/ledger, ids 56-66) behind the host-call extension, so the
 /// Rust verifier accepts the wider range. This is a deliberate, documented
 /// divergence from the frozen C11 verifier.
-pub const LANA_HOST_COUNT: u32 = 66;
+pub const LANA_HOST_COUNT: u32 = 67;
 
 const LANA_TRANSFORM_NEUTRALIZE: u32 = 1;
 const LANA_MEASURE_SAMPLE: u32 = 2;
