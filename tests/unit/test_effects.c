@@ -112,7 +112,7 @@ static void test_effect_failure_distinction(void) {
            strstr(history.records[0].value.as.string, "\"status\":0") != NULL);
     assert(history.records[1].value.type == VAL_STRING &&
            strstr(history.records[1].value.as.string, "\"status\":2") != NULL);
-    free(history.records);
+    lana_store_history_free(&history);
     lana_vm_free(&vm); assert(lana_store_close(store) == LANA_OK);
     cleanup_store(path);
     printf("Pass.\n");

@@ -61,6 +61,7 @@ typedef struct {
 } LanaStoreHistory;
 
 LanaError lana_store_history(LanaStore *store, const char *key, LanaStoreHistory *out_history);
+void lana_store_history_free(LanaStoreHistory *history);
 
 typedef struct {
     char *key;

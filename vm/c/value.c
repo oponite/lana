@@ -2,6 +2,7 @@
 #include "vm.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 Value lana_value_null(void) {
     Value value = {0};
@@ -214,5 +215,27 @@ void lana_value_print(const Value *value) {
                          value->as.lazy.function, value->as.lazy.bound);
             break;
         default: (void)printf("<invalid>"); break;
+    }
+}
+
+void lana_value_free(Value value) {
+    size_t index;
+    if (value.type == VAL_STRING) {
+        free((void *)value.as.string);
+    } else if (value.type == VAL_ARRAY && value.as.array != NULL) {
+        for (index = 0u; index < value.as.array->count; ++index)
+            lana_value_free(value.as.array->items[index]);
+        free(value.as.array->items);
+        free(value.as.array);
+    } else if (value.type == VAL_MAP && value.as.map != NULL) {
+        for (index = 0u; index < value.as.map->count; ++index) {
+            free((void *)value.as.map->entries[index].key);
+            if (value.as.map->entries[index].value != NULL) {
+                lana_value_free(*value.as.map->entries[index].value);
+                free(value.as.map->entries[index].value);
+            }
+        }
+        free(value.as.map->entries);
+        free(value.as.map);
     }
 }

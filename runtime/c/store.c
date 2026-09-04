@@ -283,25 +283,6 @@ corrupt:
     free(mutations); return LANA_ERR_CORRUPTION;
 }
 
-static void decoded_value_free(Value value) {
-    size_t index;
-    if (value.type == VAL_STRING) free((void *)value.as.string);
-    else if (value.type == VAL_ARRAY && value.as.array != NULL) {
-        for (index = 0u; index < value.as.array->count; ++index)
-            decoded_value_free(value.as.array->items[index]);
-        free(value.as.array->items); free(value.as.array);
-    } else if (value.type == VAL_MAP && value.as.map != NULL) {
-        for (index = 0u; index < value.as.map->count; ++index) {
-            free((void *)value.as.map->entries[index].key);
-            if (value.as.map->entries[index].value != NULL) {
-                decoded_value_free(*value.as.map->entries[index].value);
-                free(value.as.map->entries[index].value);
-            }
-        }
-        free(value.as.map->entries); free(value.as.map);
-    }
-}
-
 static LanaError read_exact(FILE *file, void *data, size_t length) {
     return fread(data, 1u, length, file) == length ? LANA_OK : LANA_ERR_CORRUPTION;
 }
@@ -342,7 +323,7 @@ static LanaError load_snapshot(LanaStore *store) {
     buffer = (LanaBuffer){payload, (size_t)length, (size_t)length};
     error = lana_codec_decode_document(&buffer, &value);
     if (error != LANA_OK || value.type != VAL_MAP) {
-        free(payload); decoded_value_free(value); return error == LANA_OK ? LANA_ERR_CORRUPTION : error;
+        free(payload); lana_value_free(value); return error == LANA_OK ? LANA_ERR_CORRUPTION : error;
     }
     for (index = 0u; index < value.as.map->count && error == LANA_OK; ++index) {
         LanaBuffer encoded = {0};
@@ -355,7 +336,7 @@ static LanaError load_snapshot(LanaStore *store) {
         }
         free(encoded.data);
     }
-    decoded_value_free(value); free(payload);
+    lana_value_free(value); free(payload);
     if (error == LANA_OK) store->current_rev = store->snapshot_rev;
     return error;
 }
@@ -646,7 +627,7 @@ LanaError lana_store_put_persistent_state(LanaStore *store, const char *key,
     buffer = (LanaBuffer){encoded, length, length};
     error = lana_codec_decode_document(&buffer, &value);
     if (error == LANA_OK) error = lana_store_put(store, key, value);
-    decoded_value_free(value); free(encoded);
+    lana_value_free(value); free(encoded);
     return error;
 }
 
@@ -708,6 +689,17 @@ LanaError lana_store_history(LanaStore *store, const char *key,
     out_history->count = count;
     pthread_mutex_unlock(&store->lock);
     return LANA_OK;
+}
+
+void lana_store_history_free(LanaStoreHistory *history) {
+    size_t index;
+    if (history == NULL) return;
+    for (index = 0u; index < history->count; ++index) {
+        free(history->records[index].key);
+        lana_value_free(history->records[index].value);
+    }
+    free(history->records);
+    memset(history, 0, sizeof(*history));
 }
 
 static int scan_record_compare(const void *left, const void *right) {

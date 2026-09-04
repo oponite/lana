@@ -326,5 +326,6 @@ Value lana_value_adt(LanaAdt *adt);
 Value lana_value_lazy(LanaLazy lazy);
 const char *lana_value_type_name(ValueType type);
 void lana_value_print(const Value *value);
+void lana_value_free(Value value);
 
 #endif

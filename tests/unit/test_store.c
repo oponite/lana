@@ -55,7 +55,7 @@ static void test_recovery_and_history(void) {
     assert(history.count == 2u);
     assert(history.records[0].revision == 1u);
     assert(history.records[1].revision == 2u);
-    free(history.records[0].key); free(history.records[1].key); free(history.records);
+    lana_store_history_free(&history);
     assert(lana_store_snapshot(store, &vm, &value, &revision) == LANA_OK);
     assert(value.type == VAL_MAP && revision.revision_id == 2u);
     assert(lana_store_compact(store, 0u, &revision) == LANA_OK);
