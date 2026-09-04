@@ -1,11 +1,12 @@
 # Lana Bytecode
 
-Lana 1.1 uses one binary format: **LABC v1**. `LABC` is the four-byte file
-magic. The next 32-bit little-endian field is always `1`. The loader rejects
-every other magic or version before execution.
+Lana 1.x uses one binary format: **LABC v2**. `LABC` is the four-byte file
+magic. The next 32-bit little-endian field is `2` for new artifacts. The
+dual-version loader accepts both v1 and v2 chunks and rejects every other magic
+or version before execution.
 
-This is a clean compatibility boundary. Lana 1.1 neither reads nor converts
-artifacts made by pre-release toolchains. Recompile source with Lana 1.1.
+This is a clean compatibility boundary. Lana 1.x neither reads nor converts
+artifacts made by pre-release toolchains. Recompile source with Lana 1.x.
 
 ## Layout
 
@@ -17,24 +18,24 @@ serialized.
 
 ## Instruction set
 
-LABC v1 includes the complete Lana 1.1 runtime surface: state construction and
+LABC v2 includes the complete Lana 1.x runtime surface: state construction and
 transformation, lazy state distributions, basis measurement and estimation,
 arrays and maps, functions, tasks, host boundaries, Information values,
 provenance, claims, planned effects, and shared Information capabilities.
 
-Opcodes have stable numeric values within Lana 1.1. Their names and operands
+Opcodes have stable numeric values within Lana 1.x. Their names and operands
 are defined by `vm/include/bytecode.h`; the verifier checks register ranges,
 constant types, function metadata, jump targets, host-call IDs, and every
 instruction-specific operand rule before the VM executes a chunk.
 
 ## Assembly
 
-Textual assembly uses `.lasm` and must begin with `.version 1` when a version
-directive is supplied. The assembler emits LABC v1 only. The native compiler
-and its bootstrap artifact follow the same rule.
+Textual assembly uses `.lasm` and may begin with `.version 1` or `.version 2`
+when a version directive is supplied. The assembler emits LABC v2 by default.
+The native compiler and its bootstrap artifact follow the same rule.
 
 ```text
-.version 1
+.version 2
 STATE_NEW R0 0.5 0.2 0.0
 MEASURE R0 R1 probability
 HALT

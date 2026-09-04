@@ -158,7 +158,7 @@ involving `STATE_DIST` raises `LANA_ERR_UNSUPPORTED_OPERATION`.
 
 ## Information and named joints
 
-The source-level Information forms are lowered to LABC v1:
+The source-level Information forms are lowered to LABC v2:
 
 ```lana
 let product = joint independent { x: a, y: b };
