@@ -3,6 +3,12 @@
 
 find_package(SQLite3)
 if(SQLite3_FOUND)
+    if(NOT TARGET SQLite3::SQLite3)
+        add_library(SQLite3::SQLite3 UNKNOWN IMPORTED)
+        set_target_properties(SQLite3::SQLite3 PROPERTIES
+            IMPORTED_LOCATION "${SQLite3_LIBRARIES}"
+            INTERFACE_INCLUDE_DIRECTORIES "${SQLite3_INCLUDE_DIRS}")
+    endif()
     add_library(lana_adapter_sqlite SHARED runtime/c/adapters/sqlite_adapter.c)
     target_include_directories(lana_adapter_sqlite PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/runtime/c/adapters)

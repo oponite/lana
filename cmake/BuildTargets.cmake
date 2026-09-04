@@ -30,8 +30,15 @@ set(LANA_RUNTIME_SOURCES
     runtime/c/adapters.c
 )
 
-set_source_files_properties(runtime/c/vendor/tweetnacl.c PROPERTIES
-    COMPILE_OPTIONS "-Wno-sign-compare;-Wno-unterminated-string-initialization")
+include(CheckCCompilerFlag)
+check_c_compiler_flag("-Wno-unterminated-string-initialization" LANA_HAS_UNTERMINATED_STRING_FLAG)
+if(LANA_HAS_UNTERMINATED_STRING_FLAG)
+    set_source_files_properties(runtime/c/vendor/tweetnacl.c PROPERTIES
+        COMPILE_OPTIONS "-Wno-sign-compare;-Wno-unterminated-string-initialization")
+else()
+    set_source_files_properties(runtime/c/vendor/tweetnacl.c PROPERTIES
+        COMPILE_OPTIONS "-Wno-sign-compare")
+endif()
 
 add_library(lanaruntime STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime PUBLIC ${LANA_INCLUDE_DIRS})
