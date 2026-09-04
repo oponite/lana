@@ -1,0 +1,16 @@
+// Surprisal: natural-log information content in nats, surprisal(P) = -ln(P).
+// surprisal(0) is +inf and is reported as such, never as a finite substitute.
+
+let s = surprisal(0.25);
+assert(s > 1.386, "surprisal(0.25) must be > 1.386");
+assert(s < 1.387, "surprisal(0.25) must be < 1.387");
+
+// surprisal(1) is 0: a certain event carries no information.
+let certain = surprisal(1.0);
+assert(certain == 0.0, "surprisal(1.0) must be 0");
+
+// surprisal(0) is +inf.
+let impossible = surprisal(0.0);
+assert(impossible > 1000.0, "surprisal(0.0) must be +inf");
+
+print("SURPRISAL_PASS");

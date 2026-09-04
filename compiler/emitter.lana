@@ -107,6 +107,7 @@ fn is_host_call(name) {
     if (name == "json_parse") { return true; } if (name == "json_stringify") { return true; }
     if (name == "csv_read") { return true; } if (name == "csv_write") { return true; }
     if (name == "lazy_bound") { return true; }
+    if (name == "surprisal") { return true; }
     return false;
 }
 

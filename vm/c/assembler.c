@@ -246,7 +246,7 @@ static int host_call_id(const char *name) {
         "shared_revision", "shared_identity", "shared_wait",
         "information_inspect", "directory_list", "directory_create",
         "path_exists", "write_text_atomic", "hash_update", "lazy_bound",
-        "correlated"
+        "correlated", "surprisal"
     };
     size_t index;
     for (index = 0; index < sizeof(names) / sizeof(names[0]); ++index)

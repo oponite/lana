@@ -346,21 +346,25 @@ pub const LANA_HOST_LAZY_BOUND: u32 = 53;
 // backend runs identically under both.
 pub const LANA_HOST_CORRELATED: u32 = 54;
 
-// Durable-pipeline host calls (Rust-only). The C11 VM is frozen at 55 host
-// calls (ids 0-54); these IDs exist only in the Rust VM and are dispatched
+// Lana 2.0 surprisal (natural-log information content in nats). Present in
+// both the C11 VM and the Rust VM at id 55.
+pub const LANA_HOST_SURPRISAL: u32 = 55;
+
+// Durable-pipeline host calls (Rust-only). The C11 VM is frozen at 56 host
+// calls (ids 0-55); these IDs exist only in the Rust VM and are dispatched
 // through the host-call extension registered by the CLI (see
 // `set_host_call_extension`).
-pub const LANA_HOST_STORE_OPEN: u32 = 55;
-pub const LANA_HOST_STORE_PUT: u32 = 56;
-pub const LANA_HOST_STORE_GET: u32 = 57;
-pub const LANA_HOST_STORE_DELETE: u32 = 58;
-pub const LANA_HOST_STORE_COMMIT: u32 = 59;
-pub const LANA_HOST_STORE_SCAN: u32 = 60;
-pub const LANA_HOST_STORE_CURRENT_REVISION: u32 = 61;
-pub const LANA_HOST_POLICY_EVALUATE: u32 = 62;
-pub const LANA_HOST_POLICY_STORE_DECISION: u32 = 63;
-pub const LANA_HOST_LEDGER_APPEND: u32 = 64;
-pub const LANA_HOST_LEDGER_QUERY: u32 = 65;
+pub const LANA_HOST_STORE_OPEN: u32 = 56;
+pub const LANA_HOST_STORE_PUT: u32 = 57;
+pub const LANA_HOST_STORE_GET: u32 = 58;
+pub const LANA_HOST_STORE_DELETE: u32 = 59;
+pub const LANA_HOST_STORE_COMMIT: u32 = 60;
+pub const LANA_HOST_STORE_SCAN: u32 = 61;
+pub const LANA_HOST_STORE_CURRENT_REVISION: u32 = 62;
+pub const LANA_HOST_POLICY_EVALUATE: u32 = 63;
+pub const LANA_HOST_POLICY_STORE_DECISION: u32 = 64;
+pub const LANA_HOST_LEDGER_APPEND: u32 = 65;
+pub const LANA_HOST_LEDGER_QUERY: u32 = 66;
 
 /// The shared-information identity and commit-revision counters, matching the
 /// `next_shared_identity` / `next_commit_revision` atomics in `runtime/c/shared.c`.
@@ -4939,6 +4943,23 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 *out = Value::joint(joint);
+                LanaError::Ok
+            }
+            LANA_HOST_SURPRISAL => {
+                if argc != 1 {
+                    return LanaError::Type;
+                }
+                let ValueKind::Number(probability) = arguments[0].kind else {
+                    return LanaError::Type;
+                };
+                if probability < 0.0 {
+                    return LanaError::InvalidParameters;
+                }
+                let result = -probability.ln();
+                // Normalize -0.0 to 0.0 so surprisal(1.0) prints as "0" in both
+                // VMs (C11's %.17g renders -0.0 as "-0").
+                let result = if result == 0.0 { 0.0 } else { result };
+                *out = Value::number(result);
                 LanaError::Ok
             }
             LANA_HOST_NOW => {

@@ -118,6 +118,7 @@ fn host_is_pure(name) {
     if (name == "array_length") { return true; }
     if (name == "string_unescape") { return true; }
     if (name == "lazy_bound") { return true; }
+    if (name == "surprisal") { return true; }
     return false;
 }
 
@@ -184,6 +185,7 @@ fn host_type(name) {
     if (name == "string_length") { return type_ordinary("number"); }
     if (name == "number_to_string") { return type_ordinary("string"); }
     if (name == "lazy_bound") { return type_ordinary("number"); }
+    if (name == "surprisal") { return type_ordinary("number"); }
     return type_unknown();
 }
 
