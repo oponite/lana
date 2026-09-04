@@ -45,7 +45,7 @@ def build_server(
             "ok": True,
             "result": {
                 "lana_version": runner.version,
-                "labc_version": 1,
+                "labc_version": 2,
                 "executable": runner.executable,
             },
         }

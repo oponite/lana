@@ -62,17 +62,17 @@ def test_evidence_input_is_validated_before_execution(
 
 def test_rejects_incompatible_version(tmp_path: Path) -> None:
     executable = tmp_path / "lana"
-    executable.write_text("#!/bin/sh\necho 'Lana 2.0.0 (LABC v2)'\n", encoding="utf-8")
+    executable.write_text("#!/bin/sh\necho 'Lana 1.2.0 (LABC v1)'\n", encoding="utf-8")
     executable.chmod(0o755)
     with pytest.raises(LanaCompatibilityError):
         BridgeRunner(executable)
 
 
-@pytest.mark.parametrize("version", ["1.0.9", "1.1.0"])
-def test_accepts_compatible_labc_v1_versions(tmp_path: Path, version: str) -> None:
+@pytest.mark.parametrize("version", ["1.0.9", "1.1.0", "1.2.0"])
+def test_accepts_compatible_labc_v2_versions(tmp_path: Path, version: str) -> None:
     executable = tmp_path / "lana"
     executable.write_text(
-        f"#!/bin/sh\necho 'Lana {version} (LABC v1, fake)'\n", encoding="utf-8"
+        f"#!/bin/sh\necho 'Lana {version} (LABC v2, fake)'\n", encoding="utf-8"
     )
     executable.chmod(0o755)
     assert BridgeRunner(executable).version == version

@@ -27,7 +27,7 @@ Resolve disagreements in this order:
 
 1. `papers/semantics.md` — mathematical meaning.
 2. `spec/SPEC.md` — source syntax and programmer-visible behavior.
-3. `spec/BYTECODE.md` — the one LABC v1 encoding.
+3. `spec/BYTECODE.md` — the one LABC v2 encoding.
 4. `spec/VM.md` — runtime architecture and resource behavior.
 
 New or changed source syntax must additionally satisfy `spec/SYNTAX.md` — the

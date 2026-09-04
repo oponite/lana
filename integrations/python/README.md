@@ -12,7 +12,7 @@ printf '{"message":"hello"}' |
 ```
 
 The `lana` executable is resolved from `--lana`, `LANA_EXECUTABLE`, then
-`PATH`. Only Lana 1.x reporting LABC v1 is accepted.
+`PATH`. Only Lana 1.x reporting LABC v2 is accepted.
 
 The ergonomic `Lana` class prefers the native ctypes bridge when a compatible
 `liblana_bridge` is available and falls back to the subprocess bridge otherwise:
