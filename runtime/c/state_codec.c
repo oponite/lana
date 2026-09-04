@@ -75,19 +75,6 @@ static bool map_has_exact_keys(const LanaMap *map, const char *const *keys, size
     return true;
 }
 
-static void decoded_free(Value value) {
-    size_t index;
-    if (value.type == VAL_STRING) free((void *)value.as.string);
-    else if (value.type == VAL_MAP && value.as.map != NULL) {
-        for (index = 0u; index < value.as.map->count; ++index) {
-            free((void *)value.as.map->entries[index].key);
-            decoded_free(*value.as.map->entries[index].value);
-            free(value.as.map->entries[index].value);
-        }
-        free(value.as.map->entries); free(value.as.map);
-    }
-}
-
 static LanaError parse_u64(const Value *value, uint64_t *out) {
     char *end;
     unsigned long long parsed;
@@ -199,6 +186,6 @@ LanaError lana_persistent_state_decode(const void *buf, size_t len,
 bad:
     error = LANA_ERR_SCHEMA;
 done:
-    lana_persistent_state_free(&decoded); decoded_free(root);
+    lana_persistent_state_free(&decoded); lana_value_free(root);
     return error;
 }

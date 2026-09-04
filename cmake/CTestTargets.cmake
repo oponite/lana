@@ -51,6 +51,9 @@ if(LANA_BUILD_FUZZERS)
     add_library(lanaruntime_fuzz STATIC ${LANA_RUNTIME_SOURCES})
     target_include_directories(lanaruntime_fuzz PUBLIC ${LANA_INCLUDE_DIRS})
     target_link_libraries(lanaruntime_fuzz PUBLIC Threads::Threads)
+    target_compile_definitions(lanaruntime_fuzz PRIVATE
+        LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+        LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
     target_compile_options(lanaruntime_fuzz PRIVATE
         -Wall -Wextra -Wpedantic -Werror
         -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer)

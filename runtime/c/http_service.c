@@ -6,6 +6,7 @@
  */
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -28,6 +29,18 @@ static const char *status_text(int status) {
     }
 }
 
+static void write_all(int client, const char *data, size_t length) {
+    while (length != 0u) {
+        ssize_t written = write(client, data, length);
+        if (written > 0) {
+            data += written;
+            length -= (size_t)written;
+        } else if (written < 0 && errno != EINTR) {
+            return;
+        }
+    }
+}
+
 static void send_response(int client, int status, const char *body, size_t length) {
     char header[512];
     int header_length = snprintf(header, sizeof(header),
@@ -38,8 +51,9 @@ static void send_response(int client, int status, const char *body, size_t lengt
         "Connection: close\r\n"
         "\r\n",
         status, status_text(status), length);
-    if (header_length > 0) (void)write(client, header, (size_t)header_length);
-    if (length != 0u) (void)write(client, body, length);
+    if (header_length > 0 && (size_t)header_length < sizeof(header))
+        write_all(client, header, (size_t)header_length);
+    if (length != 0u) write_all(client, body, length);
 }
 
 static void send_json_error(int client, int status, const char *code, const char *message) {
