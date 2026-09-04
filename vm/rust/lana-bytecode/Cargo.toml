@@ -1,0 +1,8 @@
+[package]
+name = "lana-bytecode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LABC v2 format, loader, verifier, assembler, and disassembler"
+
+[dependencies]

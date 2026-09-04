@@ -11,5 +11,6 @@ npm run compile
 Run the extension from VS Code's Extension Development Host or build a local
 VSIX with `npm run package`. Set `lana.server.path` when `lana` is not on PATH.
 
-The Lana 1.1 server currently diagnoses files saved on disk. Unsaved-buffer
-diagnostics are not promised by this integration.
+The Lana 1.x server diagnoses both saved files and unsaved buffers, and
+provides hover, completion, go-to-definition, find-references, and rename via
+the in-process compiler service.

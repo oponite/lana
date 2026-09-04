@@ -1,0 +1,10 @@
+.function main 0 8
+LOAD_CONST R0 42
+HOST_CALL information_new R0 1 R1
+HOST_CALL information_inspect R1 1 R2
+PRINT R2
+LOAD_CONST R3 hello
+HOST_CALL information_new R3 1 R4
+HOST_CALL information_inspect R4 1 R5
+PRINT R5
+RETURN R0

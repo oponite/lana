@@ -95,6 +95,7 @@ fn scan_symbol(source, offset, line, column) {
         let pair = string_slice(source, offset, offset + 2);
         if (pair == "->") { text = pair; } if (pair == "==") { text = pair; }
         if (pair == "!=") { text = pair; } if (pair == "<=") { text = pair; } if (pair == ">=") { text = pair; }
+        if (pair == "=>") { text = pair; }
     }
     let size = string_length(text);
     return [offset + size, column + size, token("symbol", text, line, column)];

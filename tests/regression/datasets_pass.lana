@@ -1,0 +1,22 @@
+// Lazy bounded datasets: lazy(fn, bound), force(ds, i), force_all(ds).
+fn double(index) {
+    return index * 2;
+}
+
+let ds = lazy(double, 5);
+let x = force(ds, 3);
+assert(x == 6, "force(ds, 3) must be 6");
+
+let xs = force_all(ds);
+assert(array_length(xs) == 5, "force_all must materialize 5 elements");
+assert(xs[0] == 0, "element 0 must be 0");
+assert(xs[4] == 8, "element 4 must be 8");
+
+// Declared correlation: full correlation makes x and y always agree.
+state a = probability(0.5);
+state b = probability(0.5);
+let corr = correlated(a, b, 1.0);
+let draw = sample_value(sample(corr));
+assert(draw[0] == draw[1], "full correlation must make x and y agree");
+
+print("DATASETS_PASS");

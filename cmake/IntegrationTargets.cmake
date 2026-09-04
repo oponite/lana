@@ -3,7 +3,7 @@ if(LANA_BUILD_INTEGRATIONS)
     add_library(lana_bridge SHARED integrations/native/lana_bridge.c)
     target_include_directories(lana_bridge PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/integrations/native/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        ${LANA_INCLUDE_DIRS})
     target_link_libraries(lana_bridge PRIVATE lanaruntime m)
     target_compile_options(lana_bridge PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_compile_definitions(lana_bridge PRIVATE LANA_VERSION="${LANA_VERSION}")

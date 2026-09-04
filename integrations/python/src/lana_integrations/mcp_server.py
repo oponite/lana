@@ -1,4 +1,4 @@
-"""Root-scoped stdio MCP server for Lana 1.1 and compatible 1.0 runtimes."""
+"""Root-scoped stdio MCP server for Lana 1.x runtimes."""
 
 from __future__ import annotations
 

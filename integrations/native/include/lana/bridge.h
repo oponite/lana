@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "lana/policy.h"
+#include "policy.h"
 
 #define LANA_BRIDGE_ABI_VERSION 1u
 

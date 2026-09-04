@@ -1,0 +1,58 @@
+// Lana 2.0 operations: attenuate, trace_distance, relationship-aware append.
+// Exercises the source syntax end-to-end (parser -> resolver -> emitter -> VM).
+
+state a = state(p: 0.4, d: 0.2);
+state b = state(p: 0.8, d: -0.1);
+
+// ATTENUATE: probability invariant, disposition scaled by the factor.
+let faded = attenuate a by 0.5;
+assert(faded.p > 0.3999, "attenuate must preserve p");
+assert(faded.p < 0.4001, "attenuate must preserve p");
+assert(faded.d_re > 0.0999, "attenuate must scale d_re by the factor");
+assert(faded.d_re < 0.1001, "attenuate must scale d_re by the factor");
+
+// ATTENUATE lifts lazily over a STATE_DIST: expected probability is invariant.
+let dist = append(a, b);
+let faded_dist = attenuate dist by 0.5;
+let e_faded = expect(faded_dist, probability);
+assert(e_faded.value > 0.8799, "attenuate must preserve expected probability");
+assert(e_faded.value < 0.8801, "attenuate must preserve expected probability");
+
+// TRACE_DISTANCE: N=1 formula over two concrete states.
+let d = trace_distance a b;
+assert(d > 0.4231, "trace_distance must match the N=1 formula");
+assert(d < 0.4232, "trace_distance must match the N=1 formula");
+
+// APPEND independent: q = p_a * p_b, p_C = p_a + p_b - q = 0.88.
+let ind = append a with b as independent;
+let e_ind = expect(ind, probability);
+assert(e_ind.value > 0.8799, "independent append p must be 0.88");
+assert(e_ind.value < 0.8801, "independent append p must be 0.88");
+
+// APPEND redundant r=0.8: q = (1-r)*I + r*min(p_a,p_b) = 0.384, p_C = 0.816.
+let red = append a with b as redundant 0.8;
+let e_red = expect(red, probability);
+assert(e_red.value > 0.8159, "redundant append p must be 0.816");
+assert(e_red.value < 0.8161, "redundant append p must be 0.816");
+
+// APPEND complementary k=0.3: q = (1-k)*I + k*max(0,p_a+p_b-1) = 0.284, p_C = 0.916.
+let comp = append a with b as complementary 0.3;
+let e_comp = expect(comp, probability);
+assert(e_comp.value > 0.9159, "complementary append p must be 0.916");
+assert(e_comp.value < 0.9161, "complementary append p must be 0.916");
+
+// APPEND full_redundancy: requires p_a == p_b, q = p_a, p_C = p_a.
+state c = state(p: 0.5, d: 0.0);
+state d2 = state(p: 0.5, d: 0.0);
+let full = append c with d2 as full_redundancy;
+let e_full = expect(full, probability);
+assert(e_full.value > 0.4999, "full_redundancy append p must be 0.5");
+assert(e_full.value < 0.5001, "full_redundancy append p must be 0.5");
+
+// Deprecated append(a, b) form remains equivalent to independent.
+let legacy = append(a, b);
+let e_legacy = expect(legacy, probability);
+assert(e_legacy.value > 0.8799, "legacy append must equal independent");
+assert(e_legacy.value < 0.8801, "legacy append must equal independent");
+
+print("OPERATIONS2_PASS");

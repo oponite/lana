@@ -1,33 +1,43 @@
-fn program(functions, statements, imports) { return [0, functions, statements, imports]; }
-fn function_node(name, parameters, body, line) { return [1, name, parameters, body, line]; }
-fn let_node(name, value, line) { return [2, name, value, line]; }
-fn assign_node(target, value, line) { return [3, target, value, line]; }
-fn if_node(predicate, then_body, else_body, line) { return [4, predicate, then_body, else_body, line]; }
-fn while_node(predicate, body, line) { return [5, predicate, body, line]; }
-fn return_node(value, line) { return [6, value, line]; }
-fn expression_node(value, line) { return [7, value, line]; }
-fn print_node(value, line) { return [8, value, line]; }
-fn state_node(name, fields, line) { return [9, name, fields, line]; }
-fn history_node(target, policy, amount, line) { return [10, target, policy, amount, line]; }
-fn transform_node(target, name, line) { return [11, target, name, line]; }
-fn taskgroup_node(body, line) { return [12, body, line]; }
-fn cancel_node(task, line) { return [13, task, line]; }
+fn program(functions, statements, imports, types) { return [0, functions, statements, imports, types]; }
+fn function_node(name, type_params, parameters, body, line, column) { return [1, name, type_params, parameters, body, line, column]; }
+fn let_node(name, value, line, column) { return [2, name, value, line, column]; }
+fn assign_node(target, value, line, column) { return [3, target, value, line, column]; }
+fn if_node(predicate, then_body, else_body, line, column) { return [4, predicate, then_body, else_body, line, column]; }
+fn while_node(predicate, body, line, column) { return [5, predicate, body, line, column]; }
+fn return_node(value, line, column) { return [6, value, line, column]; }
+fn expression_node(value, line, column) { return [7, value, line, column]; }
+fn print_node(value, line, column) { return [8, value, line, column]; }
+fn state_node(name, fields, line, column) { return [9, name, fields, line, column]; }
+fn history_node(target, policy, amount, line, column) { return [10, target, policy, amount, line, column]; }
+fn transform_node(target, name, line, column) { return [11, target, name, line, column]; }
+fn taskgroup_node(body, line, column) { return [12, body, line, column]; }
+fn cancel_node(task, line, column) { return [13, task, line, column]; }
 
-fn literal_node(kind, value, line) { return [20, kind, value, line]; }
-fn name_node(name, line) { return [21, name, line]; }
-fn binary_node(operator, left, right, line) { return [22, operator, left, right, line]; }
-fn unary_node(operator, value, line) { return [23, operator, value, line]; }
-fn call_node(name, arguments, line) { return [24, name, arguments, line]; }
-fn array_node(items, line) { return [25, items, line]; }
-fn index_node(value, index, line) { return [26, value, index, line]; }
-fn field_node(value, field, line) { return [27, value, field, line]; }
-fn map_node(entries, line) { return [28, entries, line]; }
-fn joint_node(kind, names, values, line) { return [29, kind, names, values, line]; }
-fn finite_joint_node(names, rows, line) { return [30, names, rows, line]; }
-fn information_node(operation, arguments, line) { return [31, operation, arguments, line]; }
-fn measure_node(source, basis, mode, line) { return [32, source, basis, mode, line]; }
-fn estimate_measure_node(source, basis, mode, sample_count, line) { return [33, source, basis, mode, sample_count, line]; }
-fn history_value_node(operation, source, line) { return [34, operation, source, line]; }
-fn fork_node(name, arguments, line) { return [35, name, arguments, line]; }
-fn join_node(operation, task, line) { return [36, operation, task, line]; }
-fn join_timeout_node(task, timeout, line) { return [37, task, timeout, line]; }
+fn literal_node(kind, value, line, column) { return [20, kind, value, line, column]; }
+fn name_node(name, line, column) { return [21, name, line, column]; }
+fn binary_node(operator, left, right, line, column) { return [22, operator, left, right, line, column]; }
+fn unary_node(operator, value, line, column) { return [23, operator, value, line, column]; }
+fn call_node(name, arguments, line, column) { return [24, name, arguments, line, column]; }
+fn array_node(items, line, column) { return [25, items, line, column]; }
+fn index_node(value, index, line, column) { return [26, value, index, line, column]; }
+fn field_node(value, field, line, column) { return [27, value, field, line, column]; }
+fn map_node(entries, line, column) { return [28, entries, line, column]; }
+fn joint_node(kind, names, values, line, column) { return [29, kind, names, values, line, column]; }
+fn finite_joint_node(names, rows, line, column) { return [30, names, rows, line, column]; }
+fn information_node(operation, arguments, line, column) { return [31, operation, arguments, line, column]; }
+fn measure_node(source, basis, mode, line, column) { return [32, source, basis, mode, line, column]; }
+fn estimate_measure_node(source, basis, mode, sample_count, line, column) { return [33, source, basis, mode, sample_count, line, column]; }
+fn history_value_node(operation, source, line, column) { return [34, operation, source, line, column]; }
+fn fork_node(name, arguments, line, column) { return [35, name, arguments, line, column]; }
+fn join_node(operation, task, line, column) { return [36, operation, task, line, column]; }
+fn join_timeout_node(task, timeout, line, column) { return [37, task, timeout, line, column]; }
+fn correlated_node(x, y, d, line, column) { return [38, x, y, d, line, column]; }
+fn match_node(value, arms, line, column) { return [40, value, arms, line, column]; }
+fn type_node(name, params, variants, line, column) { return [41, name, params, variants, line, column]; }
+fn variant_node(name, fields, line, column) { return [42, name, fields, line, column]; }
+fn unknown_node(line, column) { return [43, line, column]; }
+
+fn match_arm(pattern, body) { return [pattern, body]; }
+fn pattern_variant(name, bindings) { return ["variant", name, bindings]; }
+fn pattern_wildcard() { return ["wildcard"]; }
+fn pattern_unknown() { return ["unknown"]; }

@@ -1,5 +1,3 @@
-s
-
 # Working with Lana
 
 This file is the fastest entrypoint for a person or an AI coding tool. Start a
@@ -28,22 +26,30 @@ state construction, module imports, measurement, and assertions.
 Resolve disagreements in this order:
 
 1. `papers/semantics.md` — mathematical meaning.
-2. `SPEC.md` — source syntax and programmer-visible behavior.
-3. `BYTECODE.md` — the one LABC v1 encoding.
-4. `VM.md` — runtime architecture and resource behavior.
+2. `spec/SPEC.md` — source syntax and programmer-visible behavior.
+3. `spec/BYTECODE.md` — the one LABC v1 encoding.
+4. `spec/VM.md` — runtime architecture and resource behavior.
+
+New or changed source syntax must additionally satisfy `spec/SYNTAX.md` — the
+syntax design principles (SYNTAX-1..12 + Acceptance Principle).
 
 Do not invent semantics from an implementation detail. Change the highest
 applicable authority first when intentionally changing the language.
 
 ## Repository map
 
-- `csrc/`: C11 runtime, VM, CLI, assembler, tooling, and project commands.
-- `include/lana/`: public C API.
+- `vm/`: canonical Rust `lana-vm` + `lana-bytecode` crates, plus the frozen C11
+  reference VM core (`vm/c/`, `vm/include/`).
+- `runtime/`: canonical Rust `lana-runtime` + `lana-ffi` crates, plus the C11
+  hardware boundary (`runtime/c/`, `runtime/include/`).
+- `tools/`: Rust `lana-cli` + `lana-fuzz` crates, plus the C11 CLI, LSP, and
+  project tooling (`tools/c/`, `tools/include/`).
 - `compiler/*.lana`: self-hosted compiler source.
 - `compiler/bootstrap/compiler.lasm`: checked, reproducible bootstrap artifact.
 - `examples/`: runnable Lana and LABC examples.
-- `tests/c/`: runtime and public-API tests.
-- `tests/native/`: source-language pass/fail fixtures.
+- `tests/unit/`: runtime and public-API tests.
+- `tests/regression/`: source-language pass/fail fixtures.
+- `tests/conformance/`: differential conformance harness (C11 vs Rust).
 
 ## Daily commands
 
@@ -91,8 +97,8 @@ assembly are not accepted or converted; rebuild them from source.
 - C names use `snake_case`; public types use `Lana...`; public functions use
   `lana_...`; constants use `LANA_...`.
 - Lana uses lowercase `snake_case`, semicolons, and small explicit functions.
-- Add C regressions in `tests/c/`; add language fixtures in `tests/native/` and
-  register them in `CMakeLists.txt`.
+- Add C regressions in `tests/unit/`; add language fixtures in
+  `tests/regression/` and register them in `cmake/CTestTargets.cmake`.
 - Never weaken compiler limits: 256 MiB and 50,000,000 instructions. Exhaustion
   is an error and must not expose partial bytecode.
 - Benchmark result snapshots are machine-local evidence, not conformance.

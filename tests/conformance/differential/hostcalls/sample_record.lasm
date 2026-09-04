@@ -1,0 +1,7 @@
+.function main 0 8
+LOAD_CONST R0 42
+LOAD_CONST R1 sample_source
+LOAD_CONST R2 sample_op
+HOST_CALL sample_record R0 3 R3
+PRINT R3
+RETURN R0

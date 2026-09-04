@@ -1,0 +1,10 @@
+.function main 0 8
+FORK worker R1 0 R0
+FORK worker R2 0 R1
+ARRAY_NEW R2 R0 2
+JOIN_ALL R2 R3
+PRINT R3
+RETURN R3
+.function worker 0 4
+LOAD_CONST R0 9
+RETURN R0

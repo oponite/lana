@@ -1,6 +1,6 @@
 import "./syntax.lana" as syntax;
 
-fn emitter_new(namespace) { return [array_new(0), map_new(), 0, 0, namespace, map_new(), map_new(), 0]; }
+fn emitter_new(namespace, registry) { return [array_new(0), map_new(), 0, 0, namespace, map_new(), map_new(), 0, registry]; }
 fn emit(context, line) { array_push(context[0], line); return null; }
 fn reg(number) { return string_concat("R", number_to_string(number)); }
 
@@ -44,9 +44,11 @@ fn expression_is_information(context, node) {
     if (node[0] == 28) {
         let index = 0; while (index < array_length(node[1])) { if (expression_is_information(context, node[1][index][1])) { return true; } index = index + 1; }
     }
-    if (node[0] == 29) { return true; } if (node[0] == 30) { return true; }
+    if (node[0] == 29) { return true; } if (node[0] == 30) { return true; } if (node[0] == 38) { return true; }
     if (node[0] == 31) {
-        if (node[1] == "append") { return false; } if (node[1] == "sample") { return false; }
+        if (node[1] == "append") { return false; } if (node[1] == "append_redundant") { return false; }
+        if (node[1] == "append_full_redundancy") { return false; } if (node[1] == "append_complementary") { return false; }
+        if (node[1] == "sample") { return false; }
         if (node[1] == "resolve") { return false; } return true;
     }
     return false;
@@ -96,8 +98,15 @@ fn is_host_call(name) {
     if (name == "path_exists") { return true; } if (name == "write_text_atomic") { return true; }
     if (name == "hash_update") { return true; }
     if (name == "hash_xor") { return true; }
+    if (name == "store_open") { return true; } if (name == "store_put") { return true; }
+    if (name == "store_get") { return true; } if (name == "store_delete") { return true; }
+    if (name == "store_commit") { return true; } if (name == "store_scan") { return true; }
+    if (name == "store_current_revision") { return true; }
+    if (name == "policy_evaluate") { return true; } if (name == "policy_store_decision") { return true; }
+    if (name == "ledger_append") { return true; } if (name == "ledger_query") { return true; }
     if (name == "json_parse") { return true; } if (name == "json_stringify") { return true; }
     if (name == "csv_read") { return true; } if (name == "csv_write") { return true; }
+    if (name == "lazy_bound") { return true; }
     return false;
 }
 
@@ -144,6 +153,60 @@ fn emit_contiguous(context, arguments) {
     return [base, array_length(values)];
 }
 
+fn adt_variant_lookup(registry, name) {
+    if (registry == null) { return null; }
+    if (!map_has(registry[0], name)) { return null; }
+    return map_get(registry[0], name);
+}
+
+fn emit_adt_build(context, variant_index, arguments) {
+    let packed = emit_contiguous(context, arguments); let destination = new_register(context);
+    emit(context, string_concat("ADT_BUILD ", reg(destination), " ", reg(packed[0]), " ", number_to_string(packed[1]), " ", number_to_string(variant_index)));
+    return destination;
+}
+
+fn emit_match(context, node) {
+    let scrutinee = emit_expression(context, node[1]);
+    let end = new_label(context, "matchend"); let result = new_register(context);
+    let arms = node[2]; let labels = array_new(0); let index = 0;
+    while (index < array_length(arms)) { array_push(labels, new_label(context, "arm")); index = index + 1; }
+    let default_label = null; index = 0;
+    while (index < array_length(arms)) {
+        let pattern = arms[index][0];
+        if (pattern[0] == "variant") {
+            let variant = adt_variant_lookup(context[8], pattern[1]);
+            assert(variant != null, string_concat("unknown variant ", pattern[1]));
+            emit(context, string_concat("ADT_CASE ", reg(scrutinee), " ", number_to_string(variant[1]), " ", labels[index]));
+        } else {
+            if (pattern[0] == "unknown") { emit(context, string_concat("ADT_CASE ", reg(scrutinee), " 4294967295 ", labels[index])); }
+            else { default_label = labels[index]; }
+        }
+        index = index + 1;
+    }
+    if (default_label == null) { default_label = end; }
+    emit(context, string_concat("JUMP ", default_label));
+    index = 0;
+    while (index < array_length(arms)) {
+        let arm = arms[index]; let pattern = arm[0];
+        emit(context, string_concat(labels[index], ":"));
+        if (pattern[0] == "variant") {
+            let bindings = pattern[2]; let binding_index = 0;
+            while (binding_index < array_length(bindings)) {
+                let field = new_register(context);
+                emit(context, string_concat("ADT_GET ", reg(field), " ", reg(scrutinee), " ", number_to_string(binding_index)));
+                symbol_add(context, bindings[binding_index], field, false);
+                binding_index = binding_index + 1;
+            }
+        }
+        let value = emit_expression(context, arm[1]);
+        emit(context, string_concat("MOVE ", reg(result), " ", reg(value)));
+        emit(context, string_concat("JUMP ", end));
+        index = index + 1;
+    }
+    emit(context, string_concat(end, ":"));
+    return result;
+}
+
 fn emit_literal(context, node) {
     let destination = new_register(context);
     if (node[1] == "string") {
@@ -160,7 +223,7 @@ fn emit_literal(context, node) {
 }
 
 fn emit_tagged_pair(context, tag, value) {
-    let arguments = [syntax.literal_node("bool", tag, 0), value];
+    let arguments = [syntax.literal_node("bool", tag, 0, 0), value];
     let packed = emit_contiguous(context, arguments); let destination = new_register(context);
     emit(context, string_concat("ARRAY_NEW ", reg(destination), " ", reg(packed[0]), " 2"));
     return destination;
@@ -173,15 +236,15 @@ fn emit_pair(context, left, right) {
 }
 
 fn emit_pair_index(context, value, index) {
-    let arguments = [value, syntax.literal_node("number", number_to_string(index), 0)];
+    let arguments = [value, syntax.literal_node("number", number_to_string(index), 0, 0)];
     let packed = emit_contiguous(context, arguments); let destination = new_register(context);
     emit(context, string_concat("HOST_CALL index_get ", reg(packed[0]), " 2 ", reg(destination)));
     return destination;
 }
 
 fn emit_sample_record(context, source, dependency, operation) {
-    let dependency_register = emit_literal(context, syntax.literal_node("string", dependency, 0));
-    let operation_register = emit_literal(context, syntax.literal_node("string", operation, 0));
+    let dependency_register = emit_literal(context, syntax.literal_node("string", dependency, 0, 0));
+    let operation_register = emit_literal(context, syntax.literal_node("string", operation, 0, 0));
     let base = context[2]; let destination = new_register(context);
     emit(context, string_concat("MOVE ", reg(destination), " ", reg(source)));
     destination = new_register(context);
@@ -194,7 +257,7 @@ fn emit_sample_record(context, source, dependency, operation) {
 }
 
 fn emit_map_field(context, source, field) {
-    let field_register = emit_literal(context, syntax.literal_node("string", field, 0));
+    let field_register = emit_literal(context, syntax.literal_node("string", field, 0, 0));
     let base = context[2]; let destination = new_register(context);
     emit(context, string_concat("MOVE ", reg(destination), " ", reg(source)));
     destination = new_register(context);
@@ -244,8 +307,66 @@ fn emit_shared_builtin(context, node) {
 }
 
 fn emit_call(context, node) {
+    let variant = adt_variant_lookup(context[8], node[1]);
+    if (variant != null) { return emit_adt_build(context, variant[1], node[2]); }
     if (is_shared_builtin(node[1])) { return emit_shared_builtin(context, node); }
     if (is_type_builtin(node[1])) { return emit_type_builtin(context, node); }
+    if (node[1] == "mix") {
+        let left = emit_expression(context, node[2][0]);
+        let right = emit_expression(context, node[2][1]);
+        let weight = emit_expression(context, node[2][2]);
+        let destination = new_register(context);
+        emit(context, string_concat("MIX ", reg(destination), " ", reg(left), " ", reg(right), " ", reg(weight)));
+        return destination;
+    }
+    if (node[1] == "map") {
+        let source = emit_expression(context, node[2][0]);
+        let destination = new_register(context);
+        emit(context, string_concat("MAP ", reg(destination), " ", reg(source), " ", node[2][1][1]));
+        return destination;
+    }
+    if (node[1] == "support") {
+        let source = emit_expression(context, node[2][0]);
+        let destination = new_register(context);
+        emit(context, string_concat("SUPPORT ", reg(destination), " ", reg(source), " ", node[2][1][2]));
+        return destination;
+    }
+    if (node[1] == "expect") {
+        let source = emit_expression(context, node[2][0]);
+        let destination = new_register(context);
+        emit(context, string_concat("EXPECT ", reg(destination), " ", reg(source), " ", node[2][1][1]));
+        return destination;
+    }
+    if (node[1] == "validate") {
+        let value = emit_expression(context, node[2][0]);
+        let schema = emit_expression(context, node[2][1]);
+        let destination = new_register(context);
+        emit(context, string_concat("VALIDATE ", reg(destination), " ", reg(value), " ", reg(schema)));
+        return destination;
+    }
+    if (node[1] == "revision") {
+        let source = emit_expression(context, node[2][0]);
+        let destination = new_register(context);
+        emit(context, string_concat("REVISION ", reg(destination), " ", reg(source)));
+        return destination;
+    }
+    if (node[1] == "attenuate") {
+        let source = emit_expression(context, node[2][0]);
+        let factor = emit_expression(context, node[2][1]);
+        let destination = new_register(context);
+        emit(context, string_concat("ATTENUATE ", reg(destination), " ", reg(source), " ", reg(factor)));
+        return destination;
+    }
+    if (node[1] == "trace_distance") {
+        let left = emit_expression(context, node[2][0]);
+        let right = emit_expression(context, node[2][1]);
+        let destination = new_register(context);
+        emit(context, string_concat("TRACE_DISTANCE ", reg(destination), " ", reg(left), " ", reg(right)));
+        return destination;
+    }
+    if (node[1] == "lazy") { return emit_lazy_force(context, node); }
+    if (node[1] == "force") { return emit_lazy_force(context, node); }
+    if (node[1] == "force_all") { return emit_lazy_force(context, node); }
     let packed = emit_contiguous(context, node[2]); let destination = new_register(context);
     if (is_host_call(node[1])) {
         emit(context, string_concat("HOST_CALL ", node[1], " ", reg(packed[0]), " ", number_to_string(packed[1]), " ", reg(destination)));
@@ -285,7 +406,7 @@ fn emit_index(context, node) {
 fn emit_map(context, node) {
     let arguments = array_new(0); let index = 0;
     while (index < array_length(node[1])) {
-        array_push(arguments, syntax.literal_node("string", node[1][index][0], node[2]));
+        array_push(arguments, syntax.literal_node("string", node[1][index][0], node[2], node[3]));
         array_push(arguments, node[1][index][1]); index = index + 1;
     }
     let packed = emit_contiguous(context, arguments); let destination = new_register(context);
@@ -303,9 +424,76 @@ fn emit_finite_joint(context, node) {
     emit(context, string_concat("JOINT_BUILD_FINITE ", reg(rows), " ", reg(destination), " ", string_join(node[1], ";"))); return destination;
 }
 
+fn emit_correlated(context, node) {
+    let packed = emit_contiguous(context, [node[1], node[2], node[3]]); let destination = new_register(context);
+    emit(context, string_concat("HOST_CALL correlated ", reg(packed[0]), " 3 ", reg(destination))); return destination;
+}
+
+fn emit_lazy_force(context, node) {
+    if (node[1] == "lazy") {
+        assert(node[2][0][0] == 21, "lazy generator must be a function name");
+        let bound = emit_expression(context, node[2][1]);
+        let destination = new_register(context);
+        emit(context, string_concat("LAZY ", reg(destination), " ", call_target(context, node[2][0][1]), " ", reg(bound)));
+        return destination;
+    }
+    if (node[1] == "force") {
+        let source = emit_expression(context, node[2][0]);
+        let index = emit_expression(context, node[2][1]);
+        let destination = new_register(context);
+        emit(context, string_concat("FORCE ", reg(destination), " ", reg(source), " ", reg(index)));
+        return destination;
+    }
+    return emit_force_all(context, node[2][0]);
+}
+
+fn emit_force_all(context, source_node) {
+    let source = emit_expression(context, source_node);
+    let result = new_register(context);
+    emit(context, string_concat("ARRAY_NEW ", reg(result), " ", reg(context[2]), " 0"));
+    let index = new_register(context);
+    emit(context, string_concat("LOAD_CONST ", reg(index), " 0"));
+    let one = new_register(context);
+    emit(context, string_concat("LOAD_CONST ", reg(one), " 1"));
+    let bound_base = context[2]; let bound = new_register(context);
+    emit(context, string_concat("MOVE ", reg(bound), " ", reg(source)));
+    bound = new_register(context);
+    emit(context, string_concat("HOST_CALL lazy_bound ", reg(bound_base), " 1 ", reg(bound)));
+    let start = new_label(context, "force_all"); let end = new_label(context, "endforce_all");
+    emit(context, string_concat(start, ":"));
+    let condition = new_register(context);
+    emit(context, string_concat("COMPARE ", reg(index), " < ", reg(bound), " ", reg(condition)));
+    emit(context, string_concat("JUMP_IF_FALSE ", reg(condition), " ", end));
+    let element = new_register(context);
+    emit(context, string_concat("FORCE ", reg(element), " ", reg(source), " ", reg(index)));
+    let push_base = context[2]; let push = new_register(context);
+    emit(context, string_concat("MOVE ", reg(push), " ", reg(result)));
+    push = new_register(context);
+    emit(context, string_concat("MOVE ", reg(push), " ", reg(element)));
+    let ignored = new_register(context);
+    emit(context, string_concat("HOST_CALL array_push ", reg(push_base), " 2 ", reg(ignored)));
+    let next = new_register(context);
+    emit(context, string_concat("BINARY ", reg(index), " + ", reg(one), " ", reg(next)));
+    emit(context, string_concat("MOVE ", reg(index), " ", reg(next)));
+    emit(context, string_concat("JUMP ", start));
+    emit(context, string_concat(end, ":"));
+    return result;
+}
+
 fn emit_append(context, arguments) {
     let left = emit_expression(context, arguments[0]); let right = emit_expression(context, arguments[1]); let destination = new_register(context);
     emit(context, string_concat("APPEND ", reg(left), " ", reg(right), " ", reg(destination))); return destination;
+}
+
+fn emit_append_relationship(context, opcode, arguments) {
+    let left = emit_expression(context, arguments[0]); let right = emit_expression(context, arguments[1]); let destination = new_register(context);
+    if (array_length(arguments) > 2) {
+        let strength = emit_expression(context, arguments[2]);
+        emit(context, string_concat(opcode, " ", reg(left), " ", reg(right), " ", reg(destination), " ", reg(strength)));
+    } else {
+        emit(context, string_concat(opcode, " ", reg(left), " ", reg(right), " ", reg(destination)));
+    }
+    return destination;
 }
 
 fn emit_joint_refinement(context, operation, arguments) {
@@ -342,6 +530,9 @@ fn emit_provenance(context, operation, arguments) {
 
 fn emit_information(context, node) {
     if (node[1] == "append") { return emit_append(context, node[2]); }
+    if (node[1] == "append_redundant") { return emit_append_relationship(context, "APPEND_REDUNDANT", node[2]); }
+    if (node[1] == "append_full_redundancy") { return emit_append_relationship(context, "APPEND_FULL_REDUNDANCY", node[2]); }
+    if (node[1] == "append_complementary") { return emit_append_relationship(context, "APPEND_COMPLEMENTARY", node[2]); }
     if (node[1] == "project") { return emit_joint_refinement(context, node[1], node[2]); }
     if (node[1] == "condition") { return emit_joint_refinement(context, node[1], node[2]); }
     if (node[1] == "rename") { return emit_joint_refinement(context, node[1], node[2]); }
@@ -402,17 +593,24 @@ fn emit_extended_expression(context, node) {
     if (node[0] == 35) { return emit_task_expression(context, node); }
     if (node[0] == 36) { return emit_task_expression(context, node); }
     if (node[0] == 37) { return emit_task_expression(context, node); }
+    if (node[0] == 38) { return emit_correlated(context, node); }
     assert(false, "unsupported expression in native emitter"); return 0;
 }
 
 fn emit_expression(context, node) {
     if (node[0] == 20) { return emit_literal(context, node); }
-    if (node[0] == 21) { return symbol_find(context, node[1]); }
+    if (node[0] == 21) {
+        let variant = adt_variant_lookup(context[8], node[1]);
+        if (variant != null) { return emit_adt_build(context, variant[1], array_new(0)); }
+        return symbol_find(context, node[1]);
+    }
     if (node[0] == 22) { return emit_binary(context, node); }
     if (node[0] == 23) { return emit_unary(context, node); }
     if (node[0] == 24) { return emit_call(context, node); }
     if (node[0] == 25) { return emit_array(context, node); }
     if (node[0] == 26) { return emit_index(context, node); }
+    if (node[0] == 40) { return emit_match(context, node); }
+    if (node[0] == 43) { return emit_adt_build(context, 4294967295, array_new(0)); }
     return emit_extended_expression(context, node);
 }
 
@@ -473,7 +671,7 @@ fn emit_extended_statement(context, node) {
 
 fn emit_statement(context, ir_node) {
     context[2] = context[7];
-    let node = ir_node[3]; emit(context, string_concat(".line ", number_to_string(node[array_length(node) - 1])));
+    let node = ir_node[3]; emit(context, string_concat(".line ", number_to_string(node[array_length(node) - 2])));
     if (node[0] == 2) {
         let source = emit_expression(context, node[2]); let destination = new_register(context);
         symbol_add(context, node[1], destination, expression_is_information(context, node[2])); emit(context, string_concat("MOVE ", reg(destination), " ", reg(source))); return null;
@@ -492,18 +690,18 @@ fn emit_statements(context, statements) {
     return null;
 }
 
-fn emit_function_named(node, emitted_name, mappings) {
-    let context = emitter_new(emitted_name); context[6] = mappings; let index = 0;
-    while (index < array_length(node[2])) { symbol_add(context, node[2][index], index, false); context[2] = index + 1; index = index + 1; }
-    emit_statements(context, node[3]);
+fn emit_function_named(node, emitted_name, mappings, registry) {
+    let context = emitter_new(emitted_name, registry); context[6] = mappings; let index = 0;
+    while (index < array_length(node[3])) { symbol_add(context, node[3][index], index, false); context[2] = index + 1; index = index + 1; }
+    emit_statements(context, node[4]);
     let empty = new_register(context); emit(context, string_concat("LOAD_CONST ", reg(empty), " null")); emit(context, string_concat("RETURN ", reg(empty)));
     let header_sb = sb_new();
-    sb_push(header_sb, ".function "); sb_push(header_sb, emitted_name); sb_push(header_sb, " "); sb_push(header_sb, number_to_string(array_length(node[2]))); sb_push(header_sb, " "); sb_push(header_sb, number_to_string(context[2])); sb_push(header_sb, "\n");
+    sb_push(header_sb, ".function "); sb_push(header_sb, emitted_name); sb_push(header_sb, " "); sb_push(header_sb, number_to_string(array_length(node[3]))); sb_push(header_sb, " "); sb_push(header_sb, number_to_string(context[2])); sb_push(header_sb, "\n");
     sb_push(header_sb, string_join(context[0], "\n"));
     return sb_join(header_sb);
 }
 
-fn emit_function(node) { return emit_function_named(node, node[1], array_new(0)); }
+fn emit_function(node, registry) { return emit_function_named(node, node[1], array_new(0), registry); }
 
 fn merge_mappings(left, right) {
     let merged = map_new();
@@ -524,13 +722,13 @@ fn merge_mappings(left, right) {
 
 fn emit_program(program) {
     let sections = sb_new();
-    sb_push(sections, ".version 1");
+    sb_push(sections, ".version 2");
     sb_push(sections, "\n");
     if (array_length(program[1]) > 0) { sb_push(sections, "JUMP __main\n"); }
     let index = 0;
-    while (index < array_length(program[1])) { sb_push(sections, emit_function(program[1][index])); sb_push(sections, "\n"); index = index + 1; }
+    while (index < array_length(program[1])) { sb_push(sections, emit_function(program[1][index], program[4])); sb_push(sections, "\n"); index = index + 1; }
     if (array_length(program[1]) > 0) { sb_push(sections, "__main:\n"); }
-    let main = emitter_new("main"); emit_statements(main, program[2]); emit(main, "HALT");
+    let main = emitter_new("main", program[4]); emit_statements(main, program[2]); emit(main, "HALT");
     sb_push(sections, string_join(main[0], "\n"));
     sb_push(sections, "\n");
     return sb_join(sections);
@@ -538,7 +736,7 @@ fn emit_program(program) {
 
 fn emit_modules(modules, root_index) {
     let sections = sb_new();
-    sb_push(sections, ".version 1");
+    sb_push(sections, ".version 2");
     sb_push(sections, "\n");
     let items = modules["items"];
     let function_count = 0; let module_index = 0;
@@ -553,12 +751,12 @@ fn emit_modules(modules, root_index) {
         let mappings = merge_mappings(local_mappings, import_mappings);
         while (function_index < array_length(module[2][1])) {
             let function_node = module[2][1][function_index];
-            sb_push(sections, emit_function_named(function_node, string_concat(module[1], function_node[1]), mappings)); sb_push(sections, "\n"); function_index = function_index + 1;
+            sb_push(sections, emit_function_named(function_node, string_concat(module[1], function_node[1]), mappings, module[2][4])); sb_push(sections, "\n"); function_index = function_index + 1;
         }
         module_index = module_index + 1;
     }
     if (function_count > 0) { sb_push(sections, "__main:\n"); }
-    let root = items[root_index]; let main = emitter_new("main"); main[6] = root[3]; emit_statements(main, root[2][2]); emit(main, "HALT");
+    let root = items[root_index]; let main = emitter_new("main", root[2][4]); main[6] = root[3]; emit_statements(main, root[2][2]); emit(main, "HALT");
     sb_push(sections, string_join(main[0], "\n"));
     sb_push(sections, "\n");
     return sb_join(sections);

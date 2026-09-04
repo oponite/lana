@@ -1,0 +1,11 @@
+.function main 0 8
+LOAD_CONST R0 42
+LOAD_CONST R1 claim_prop
+HOST_CALL claim_new R0 2 R2
+HOST_CALL claim_value R2 1 R3
+PRINT R3
+HOST_CALL claim_proposition R2 1 R4
+PRINT R4
+HOST_CALL claim_status R2 1 R5
+PRINT R5
+RETURN R0

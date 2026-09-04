@@ -1,0 +1,25 @@
+.function main 0 16
+LOAD_CONST R0 42
+HOST_CALL shared_information R0 1 R1
+HOST_CALL shared_identity R1 1 R2
+PRINT R2
+HOST_CALL shared_revision R1 1 R3
+PRINT R3
+LOAD_CONST R2 read
+HOST_CALL shared_grant R1 2 R4
+LOAD_CONST R2 observe
+HOST_CALL shared_grant R1 2 R5
+HOST_CALL shared_snapshot R4 1 R6
+PRINT R6
+LOAD_CONST R6 42
+LOAD_CONST R7 1
+HOST_CALL shared_observe R5 3 R8
+PRINT R8
+HOST_CALL shared_revision R4 1 R9
+PRINT R9
+HOST_CALL shared_snapshot R4 1 R10
+PRINT R10
+LOAD_CONST R5 0
+HOST_CALL shared_at R4 2 R11
+PRINT R11
+RETURN R0

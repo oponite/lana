@@ -1,0 +1,17 @@
+// LIP-001: probability(p) is shorthand for state(p: p, d: 0.0).
+state a = probability(0.5);
+state b = state(p: 0.5, d: 0.0);
+let pa = measure a as probability;
+let pb = measure b as probability;
+assert(pa == pb, "probability(p) must equal state(p: p, d: 0.0)");
+assert(pa > 0.4999, "probability must be 0.5");
+assert(pa < 0.5001, "probability must be 0.5");
+
+// A probability expression may be any expression, not just a literal.
+let q = 0.25;
+state c = probability(q);
+let pc = measure c as probability;
+assert(pc > 0.2499, "probability(q) must be 0.25");
+assert(pc < 0.2501, "probability(q) must be 0.25");
+
+print("PROBABILITY_CONSTRUCTOR_PASS");

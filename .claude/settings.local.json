@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./lanavm_release run *)",
+      "Bash(echo \"exit: $?\")",
+      "Read(//tmp/**)"
+    ]
+  },
+  "skillOverrides": {
+    "voice-profile": "off"
+  }
+}

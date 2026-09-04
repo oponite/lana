@@ -1,0 +1,13 @@
+.function main 0 12
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 foo
+HOST_CALL array_push R1 2 R3
+LOAD_CONST R4 bar
+HOST_CALL array_push R3 2 R5
+LOAD_CONST R6 baz
+HOST_CALL array_push R5 2 R7
+LOAD_CONST R8 -
+HOST_CALL string_join R7 2 R9
+PRINT R9
+RETURN R0

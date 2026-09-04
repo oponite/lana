@@ -17,7 +17,7 @@ function compatibleVersion(command: string): string | undefined {
     return undefined;
   }
   const output = completed.stdout.trim();
-  return /^Lana 1\.(?:0|1)\.\d+ \(LABC v1,/.test(output) ? output : undefined;
+  return /^Lana 1\.\d+\.\d+ \(LABC v1,/.test(output) ? output : undefined;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -25,7 +25,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const command = configuration.get<string>("server.path", "lana");
   if (!compatibleVersion(command)) {
     const action = await vscode.window.showErrorMessage(
-      `Lana Language Support requires Lana 1.0.x or 1.1.x with LABC v1. Could not use: ${command}`,
+      `Lana Language Support requires Lana 1.x with LABC v1. Could not use: ${command}`,
       "Open Settings",
     );
     if (action === "Open Settings") {

@@ -1,0 +1,6 @@
+.function main 0 4
+LOAD_CONST R0 true
+LOAD_CONST R1 ok
+HOST_CALL assert R0 2 R2
+PRINT R2
+RETURN R0

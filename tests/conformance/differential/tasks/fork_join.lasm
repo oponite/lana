@@ -1,0 +1,8 @@
+.function main 0 8
+FORK worker R1 0 R0
+JOIN R0 R1
+PRINT R1
+RETURN R1
+.function worker 0 4
+LOAD_CONST R0 42
+RETURN R0

@@ -1,9 +1,9 @@
 #include "lana/bridge.h"
 
-#include "lana/data.h"
-#include "lana/error.h"
-#include "lana/store.h"
-#include "lana/vm.h"
+#include "data.h"
+#include "error.h"
+#include "store.h"
+#include "vm.h"
 
 #include <stdio.h>
 #include <stdlib.h>

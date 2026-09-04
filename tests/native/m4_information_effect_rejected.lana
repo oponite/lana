@@ -1,4 +1,0 @@
-let unknown = information(true);
-if (unknown) {
-    print("effect requires a definite guard");
-}
