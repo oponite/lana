@@ -1320,8 +1320,9 @@ An implementation conforms when its observable results agree with this document,
 ### 7.6 Encoding Boundary
 
 Lana 1.0 implements the density-operator representation and core operations
-defined above through one encoding, LABC v1. Other bytecode formats and
-operations are outside this semantics and are rejected.
+defined above through one encoding, LABC v2. The dual-version loader accepts
+both v1 and v2 chunks. Other bytecode formats and operations are outside this
+semantics and are rejected.
 
 ## 8. Post-freeze mathematical extensions
 
