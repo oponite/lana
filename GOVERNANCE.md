@@ -23,12 +23,6 @@ before implementation.
 
 Bug fixes, documentation, and tooling do not require a LIP.
 
-## Release gate
-
-A release is ready only when the gates in `RELEASE_CHECKLIST.md` pass from the
-exact candidate tree: build and self-hosting, memory and concurrency safety,
-malformed-bytecode resilience, and universal clean install.
-
 ## Compatibility promises
 
 - LABC v1 and v2 chunks are both accepted by the dual-version loader.
