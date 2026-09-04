@@ -40,3 +40,4 @@ date, motivation, specification, rationale, compatibility, and test coverage.
 
 - [LIP-001](LIP-001.md) — `probability(p)` constructor
 - [LIP-002](LIP-002.md) — lazy graph inspection
+- [LIP-003](LIP-003.md) — LABC v2 as the emitted bytecode format

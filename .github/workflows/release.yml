@@ -1,14 +1,14 @@
-name: Release Lana 1.1.1
+name: Release Lana 1.2.0
 
 on:
   push:
-    tags: ["v1.1.1"]
+    tags: ["v1.2.0"]
 
 permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION: "1.1.1"
+  EXPECTED_VERSION: "1.2.0"
 
 jobs:
   linux:
@@ -28,7 +28,7 @@ jobs:
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
           cmake --build build --parallel
           ctest --test-dir build --output-on-failure
-          build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           git diff --check
       - name: Address and undefined behavior sanitizers
         run: |
@@ -73,8 +73,8 @@ jobs:
           cmake --install build-universal --prefix "$prefix"
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
           lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
-          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
-          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           "$prefix/bin/lana" run examples/belief.lana
           tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${EXPECTED_VERSION}-macos-universal.tar.gz" .
           (
@@ -86,8 +86,8 @@ jobs:
         with:
           name: lana-macos-universal
           path: |
-            ${{ runner.temp }}/lana-1.1.1-macos-universal.tar.gz
-            ${{ runner.temp }}/lana-1.1.1-macos-universal.tar.gz.sha256
+            ${{ runner.temp }}/lana-1.2.0-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-1.2.0-macos-universal.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -114,8 +114,8 @@ jobs:
           tar -C "$prefix" -xzf "$artifact_dir/$archive"
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
           lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
-          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
-          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           cp examples/belief.lana "$prefix/belief.lana"
           "$prefix/bin/lana" run "$prefix/belief.lana"
 
@@ -173,7 +173,7 @@ jobs:
             end
 
             test do
-              assert_match "Lana #{version} (LABC v1,", shell_output("#{bin}/lana version")
+              assert_match "Lana #{version} (LABC v2,", shell_output("#{bin}/lana version")
               system bin/"lana", "new", "hello-lana"
               Dir.chdir("hello-lana") do
                 system bin/"lana", "build"
@@ -191,7 +191,7 @@ jobs:
           tar -C "$source_root" -xzf "$RUNNER_TEMP/lana-release-files/lana-${EXPECTED_VERSION}-source.tar.gz"
           cmake -S "$source_root/lana-${EXPECTED_VERSION}" -B "$source_root/build" -DCMAKE_BUILD_TYPE=Release
           cmake --build "$source_root/build" --parallel
-          "$source_root/build/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          "$source_root/build/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           "$source_root/build/lana" run "$source_root/lana-${EXPECTED_VERSION}/examples/belief.lana"
       - name: Publish release
         env:
