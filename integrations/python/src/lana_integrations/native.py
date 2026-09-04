@@ -12,7 +12,7 @@ from typing import Any
 
 
 LANA_BRIDGE_ABI_VERSION = 1
-_SUPPORTED_VERSION = re.compile(r"1\.\d+\.\d+")
+_SUPPORTED_VERSION = re.compile(r"2\.\d+\.\d+")
 
 
 def _is_supported_version(version: str) -> bool:

@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  EXPECTED_VERSION: "1.2.0"
+  EXPECTED_VERSION: "2.0.0"
 
 jobs:
   native:

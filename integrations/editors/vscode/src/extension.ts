@@ -25,7 +25,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const command = configuration.get<string>("server.path", "lana");
   if (!compatibleVersion(command)) {
     const action = await vscode.window.showErrorMessage(
-      `Lana Language Support requires Lana 1.x with LABC v2. Could not use: ${command}`,
+      `Lana Language Support requires Lana 2.0 with LABC v2. Could not use: ${command}`,
       "Open Settings",
     );
     if (action === "Open Settings") {

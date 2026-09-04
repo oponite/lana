@@ -1,12 +1,12 @@
 # Lana Bytecode
 
-Lana 1.x uses one binary format: **LABC v2**. `LABC` is the four-byte file
+Lana 2.0 uses one binary format: **LABC v2**. `LABC` is the four-byte file
 magic. The next 32-bit little-endian field is `2` for new artifacts. The
 dual-version loader accepts both v1 and v2 chunks and rejects every other magic
 or version before execution.
 
-This is a clean compatibility boundary. Lana 1.x neither reads nor converts
-artifacts made by pre-release toolchains. Recompile source with Lana 1.x.
+This is a clean compatibility boundary. Lana 2.0 neither reads nor converts
+artifacts made by pre-release toolchains. Recompile source with Lana 2.0.
 
 ## Layout
 
@@ -18,12 +18,12 @@ serialized.
 
 ## Instruction set
 
-LABC v2 includes the complete Lana 1.x runtime surface: state construction and
+LABC v2 includes the complete Lana 2.0 runtime surface: state construction and
 transformation, lazy state distributions, basis measurement and estimation,
 arrays and maps, functions, tasks, host boundaries, Information values,
 provenance, claims, planned effects, and shared Information capabilities.
 
-Opcodes have stable numeric values within Lana 1.x. Their names and operands
+Opcodes have stable numeric values within Lana 2.0. Their names and operands
 are defined by `vm/include/bytecode.h`; the verifier checks register ranges,
 constant types, function metadata, jump targets, host-call IDs, and every
 instruction-specific operand rule before the VM executes a chunk.

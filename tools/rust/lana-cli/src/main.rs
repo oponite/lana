@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use lana_bytecode::{Chunk, LanaError, LanaErrorInfo, OpCode, Value};
 use lana_vm::Vm;
 
-const LANA_VERSION: &str = "1.2.0";
+const LANA_VERSION: &str = "2.0.0";
 
 /// Full usage text, mirroring `usage()` in `tools/c/cli.c` (with `lanavm` folded
 /// into the single `lana` binary).

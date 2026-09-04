@@ -164,7 +164,7 @@ cmake --build build-integrations --parallel
 ctest --test-dir build-integrations --output-on-failure
 ```
 
-Required result: the Python bridge accepts Lana 1.x with LABC v2, the native
+Required result: the Python bridge accepts Lana 2.0 with LABC v2, the native
 bridge reports ABI v1, and all integration tests pass.
 
 The release workflow downloads the macOS archive into a clean directory, checks
