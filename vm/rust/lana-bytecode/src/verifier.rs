@@ -308,6 +308,14 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
                 result = Err(LanaError::Format);
             }
         }
+        Bootstrap => {
+            check(&mut result, &mut error, ip, ins, ins.a);
+            if result.is_ok() && ins.b >= chunk.functions.len() as u32 {
+                result = Err(LanaError::Format);
+            }
+            check(&mut result, &mut error, ip, ins, ins.c);
+            check(&mut result, &mut error, ip, ins, ins.imm);
+        }
         SampleStateDist => {
             check(&mut result, &mut error, ip, ins, ins.a);
             check(&mut result, &mut error, ip, ins, ins.b);

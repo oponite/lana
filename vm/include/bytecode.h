@@ -93,6 +93,8 @@ typedef enum {
     /* Lana 2.0 lazy bounded datasets. */
     OP_LAZY,
     OP_FORCE,
+    /* Lana 2.0 deterministic resampling. */
+    OP_BOOTSTRAP,
     OP_COUNT
 } OpCode;
 

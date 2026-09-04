@@ -562,6 +562,20 @@ static LanaError emit_line(LanaChunk *chunk, char **tokens, size_t count, uint32
         ins.b = b;
         ins.c = c;
         ins.imm = 0u;
+    } else if (strcmp(tokens[0], "BOOTSTRAP") == 0) {
+        size_t function_index;
+        EXPECT(5); REG(tokens[1], a); REG(tokens[2], b); REG(tokens[3], c);
+        for (function_index = 0; function_index < chunk->function_count; ++function_index)
+            if (strcmp(tokens[4], chunk->functions[function_index].name) == 0) break;
+        if (function_index == chunk->function_count) {
+            if (*function_fixup_count >= LANA_ASSEMBLER_MAX_FIXUPS ||
+                strlen(tokens[4]) >= sizeof(function_fixups[0].name)) return LANA_ERR_LIMIT;
+            strcpy(function_fixups[*function_fixup_count].name, tokens[4]);
+            function_fixups[*function_fixup_count].instruction = (uint32_t)chunk->code_count;
+            ++*function_fixup_count;
+            function_index = 0u;
+        }
+        ins.opcode = OP_BOOTSTRAP; ins.a = a; ins.b = (uint32_t)function_index; ins.c = c; ins.imm = b;
     } else if (strcmp(tokens[0], "JOINT_BUILD") == 0) {
         uint32_t joint_count;
         EXPECT(5); REG(tokens[1], a); REG(tokens[2], b);

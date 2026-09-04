@@ -1265,6 +1265,50 @@ impl<'a> Vm<'a> {
         LanaError::Ok
     }
 
+    /// Run a single-argument function to completion, mirroring the nested
+    /// execution loop used by `OP_BOOTSTRAP`. The result is written to
+    /// `scratch_register` in the caller frame and copied to `result`.
+    fn run_function(&mut self, function_index: u32, arg: &Value, scratch_register: u32, result: &mut Value) -> LanaError {
+        let arity = self.chunk.functions[function_index as usize].arity;
+        let entry = self.chunk.functions[function_index as usize].entry as usize;
+        if arity != 1 {
+            return LanaError::Type;
+        }
+        if self.frames.len() >= LANA_MAX_CALL_FRAMES as usize {
+            return LanaError::Limit;
+        }
+        let saved_frame_count = self.frames.len();
+        let mut callee = Frame::new(self.max_registers[function_index as usize]);
+        callee.return_ip = self.ip;
+        callee.return_register = scratch_register;
+        callee.function = function_index;
+        callee.registers[0] = arg.clone();
+        self.frames.push(callee);
+        self.ip = entry;
+        while self.frames.len() > saved_frame_count && self.running {
+            if self.ip >= self.chunk.code.len() {
+                self.frames.truncate(saved_frame_count);
+                return LanaError::Jump;
+            }
+            let old_count = self.instruction_count;
+            self.instruction_count += 1;
+            if old_count >= self.instruction_limit {
+                self.frames.truncate(saved_frame_count);
+                return LanaError::Limit;
+            }
+            let instruction = self.chunk.code[self.ip];
+            self.ip += 1;
+            self.opcode_counts[instruction.opcode as usize] += 1;
+            let error = self.execute(&instruction);
+            if error != LanaError::Ok {
+                self.frames.truncate(saved_frame_count);
+                return error;
+            }
+        }
+        *result = self.frames[saved_frame_count - 1].registers[scratch_register as usize].clone();
+        LanaError::Ok
+    }
+
     /// Dispatch one instruction, mirroring the `switch` in `lana_vm_run`.
     fn execute(&mut self, ins: &Instruction) -> LanaError {
         use OpCode::*;
@@ -1716,6 +1760,79 @@ impl<'a> Vm<'a> {
                 callee.histories[0] = self.current_frame().histories[ins.c as usize].clone();
                 self.frames.push(callee);
                 self.ip = function_def.entry as usize;
+                LanaError::Ok
+            }
+            Bootstrap => {
+                let data_value = self.current_frame().registers[ins.imm as usize].clone();
+                let b_value = self.current_frame().registers[ins.c as usize].clone();
+                let ValueKind::Array(ref data_arc) = data_value.kind else {
+                    return LanaError::Type;
+                };
+                let ValueKind::Number(b) = b_value.kind else {
+                    return LanaError::Type;
+                };
+                if !b.is_finite() || b < 1.0 || b.floor() != b || b > usize::MAX as f64 {
+                    return LanaError::InvalidParameters;
+                }
+                let b = b as usize;
+                let data = data_arc.lock().unwrap().items.clone();
+                let n = data.len();
+                if n == 0 {
+                    return LanaError::InvalidParameters;
+                }
+                if ins.b as usize >= self.chunk.functions.len() {
+                    return LanaError::Opcode;
+                }
+                if self.chunk.functions[ins.b as usize].arity != 1 {
+                    return LanaError::Type;
+                }
+                let estimate = {
+                    let mut result = Value::null();
+                    let error = self.run_function(ins.b, &data_value, ins.a, &mut result);
+                    if error != LanaError::Ok {
+                        return error;
+                    }
+                    let ValueKind::Number(value) = result.kind else {
+                        return LanaError::Type;
+                    };
+                    value
+                };
+                let mut resamples = Vec::with_capacity(b);
+                for _ in 0..b {
+                    let mut items = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        let draw = (self.rng.random() as usize) % n;
+                        items.push(data[draw].clone());
+                    }
+                    let resampled = Value::array(Arc::new(Mutex::new(Array { items })));
+                    let mut result = Value::null();
+                    let error = self.run_function(ins.b, &resampled, ins.a, &mut result);
+                    if error != LanaError::Ok {
+                        return error;
+                    }
+                    let ValueKind::Number(value) = result.kind else {
+                        return LanaError::Type;
+                    };
+                    resamples.push(value);
+                }
+                resamples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let lo = ((0.025 * b as f64) as usize).min(b - 1);
+                let hi = ((0.975 * b as f64) as usize).min(b - 1);
+                let ci_low = resamples[lo];
+                let ci_high = resamples[hi];
+                if self.alloc_bytes(std::mem::size_of::<crate::value::Map>()) != LanaError::Ok {
+                    return LanaError::Oom;
+                }
+                let mut map = crate::value::Map::new(7);
+                map.set(Arc::from("estimate"), Value::number(estimate), false).ok();
+                map.set(Arc::from("ci_low"), Value::number(ci_low), false).ok();
+                map.set(Arc::from("ci_high"), Value::number(ci_high), false).ok();
+                map.set(Arc::from("method"), Value::string(Arc::from("sampled")), false).ok();
+                map.set(Arc::from("procedure"), Value::string(Arc::from("bootstrap")), false).ok();
+                map.set(Arc::from("sample_count"), Value::number(b as f64), false).ok();
+                map.set(Arc::from("seed"), Value::number(self.root_seed as f64), false).ok();
+                self.current_frame_mut().registers[ins.a as usize] =
+                    Value::map(Arc::new(Mutex::new(map)));
                 LanaError::Ok
             }
             Return => {

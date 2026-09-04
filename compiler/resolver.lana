@@ -507,6 +507,15 @@ fn builtin_lazy_type(node, resolved) {
     return null;
 }
 
+fn builtin_bootstrap_type(node, resolved) {
+    let name = node[1];
+    if (name != "bootstrap") { return null; }
+    let count = array_length(resolved);
+    if (count != 2) { if (count != 3) { type_error(node, "bootstrap requires 2 or 3 arguments"); } }
+    if (node[2][1][0] != 21) { type_error(node, "bootstrap statistic must be a function name"); }
+    return type_ordinary("map");
+}
+
 fn builtin_shared_admin_type(node, resolved) {
     let name = node[1]; let value_type = null;
     if (name == "shared_information") { require_argument_count(name, resolved, 1); return type_shared_capability(information_value_type(resolved[0][1]), "admin"); }
@@ -579,6 +588,8 @@ fn builtin_call_type(node, resolved) {
     value_type = builtin_state_type(node, resolved);
     if (value_type != null) { return value_type; }
     value_type = builtin_lazy_type(node, resolved);
+    if (value_type != null) { return value_type; }
+    value_type = builtin_bootstrap_type(node, resolved);
     if (value_type != null) { return value_type; }
     value_type = builtin_shared_admin_type(node, resolved);
     if (value_type != null) { return value_type; }

@@ -726,6 +726,36 @@ fn emit_line(
             ins.c = c;
             ins.imm = 0;
         }
+        "BOOTSTRAP" => {
+            expect(5)?;
+            let a = reg(tokens[1])?;
+            let b = reg(tokens[2])?;
+            let c = reg(tokens[3])?;
+            let function_index = match chunk.functions.iter().position(|f| f.name == tokens[4]) {
+                Some(index) => index as u32,
+                None => {
+                    if function_fixups.len() >= LANA_ASSEMBLER_MAX_FIXUPS || tokens[4].len() >= 64 {
+                        return Err(LanaErrorInfo::new(
+                            LanaError::Limit,
+                            ip,
+                            OpCode::Nop as u8,
+                            line,
+                            "too many function fixups",
+                        ));
+                    }
+                    function_fixups.push(FunctionFixup {
+                        name: tokens[4].to_string(),
+                        instruction: chunk.code.len() as u32,
+                    });
+                    0
+                }
+            };
+            ins.opcode = OpCode::Bootstrap;
+            ins.a = a;
+            ins.b = function_index;
+            ins.c = c;
+            ins.imm = b;
+        }
         "JOINT_BUILD" => {
             expect(5)?;
             let a = reg(tokens[1])?;
