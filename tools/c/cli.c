@@ -292,7 +292,7 @@ static int inspect_command(int argc, char **argv) {
 int main(int argc, char **argv) {
     char compiler_path[4096];
     if (argc < 2) { usage(stderr); return 2; }
-    if (strcmp(argv[1], "version") == 0) { (void)printf("Lana %s (LABC v1, C VM, native compiler)\n", LANA_VERSION); return 0; }
+    if (strcmp(argv[1], "version") == 0) { (void)printf("Lana %s (LABC v2, C VM, native compiler)\n", LANA_VERSION); return 0; }
     if (strcmp(argv[1], "new") == 0) {
         if (argc != 3) { usage(stderr); return 2; }
         if (!lana_compiler_find(argv[0], compiler_path, sizeof(compiler_path))) {

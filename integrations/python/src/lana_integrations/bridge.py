@@ -17,11 +17,11 @@ from .evidence import validate_evidence
 
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 30.0
-_VERSION_PATTERN = re.compile(r"^Lana (1\.\d+\.\d+) \(LABC v1,")
+_VERSION_PATTERN = re.compile(r"^Lana (1\.\d+\.\d+) \(LABC v2,")
 
 
 class LanaCompatibilityError(RuntimeError):
-    """Raised when the selected executable is not supported Lana 1.x with LABC v1."""
+    """Raised when the selected executable is not supported Lana 1.x with LABC v2."""
 
 
 def _error_envelope(
@@ -91,7 +91,7 @@ class BridgeRunner:
         if completed.returncode != 0 or match is None:
             detail = output or completed.stderr.strip() or "no version output"
             raise LanaCompatibilityError(
-                f"expected Lana 1.x with LABC v1; got: {detail}"
+                f"expected Lana 1.x with LABC v2; got: {detail}"
             )
         return match.group(1)
 

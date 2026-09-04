@@ -225,7 +225,7 @@ The authority order is:
 2. [papers/semantics-2.md](papers/semantics-2.md) — mathematical authority for
    the Lana 2.0 density-operator substrate and its operations.
 3. [SPEC.md](spec/SPEC.md) — source syntax and programmer-visible behavior.
-4. [BYTECODE.md](spec/BYTECODE.md) — the single LABC v1 encoding.
+4. [BYTECODE.md](spec/BYTECODE.md) — the single LABC v2 encoding.
 5. [VM.md](spec/VM.md) — allocation, cloning, RNG, and budget architecture.
 
 New or changed source syntax must additionally satisfy

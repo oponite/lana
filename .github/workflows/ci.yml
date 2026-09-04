@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  EXPECTED_VERSION: "1.1.1"
+  EXPECTED_VERSION: "1.2.0"
 
 jobs:
   native:
@@ -38,7 +38,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
       - name: Check version and whitespace
         run: |
-          build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v1,"
+          build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           git diff --check
 
   asan:
