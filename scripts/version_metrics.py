@@ -16,6 +16,7 @@ VERSIONS = {
     "1.0.0": "20d512bb8c71c28ccbf75818322168853a62699b",
     "1.1.0": "9f307c40f532aa57e63ebf73def6f77f88078f42",
     "2.0.0": "39f802e6eb7ac5303a256cc5361610bc50e10296",
+    "2.0.1": "dfec8b6bea5a330e48203601820f0e6c1427bfb1",
 }
 TASKS = ("construction", "transform", "append", "measurement", "sampling", "combined")
 
@@ -138,7 +139,7 @@ def build(out, version, commit, corpus):
     build_dir = directory / "build"
     run(["cmake", "-S", checkout, "-B", build_dir, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_ARCHITECTURES=arm64", "-DCMAKE_C_COMPILER=" + run(["xcrun", "--find", "clang"]).strip()], log=directory / "configure.log")
     run(["cmake", "--build", build_dir, "--target", "lana", "--parallel", "4"], log=directory / "build.log")
-    include = ["-DLANA_OLD_HEADERS", "-I", checkout / "include"] if version != "2.0.0" else ["-I", checkout / "vm/include", "-I", checkout / "runtime/include", "-I", checkout / "tools/include"]
+    include = ["-DLANA_OLD_HEADERS", "-I", checkout / "include"] if version < "2.0.0" else ["-I", checkout / "vm/include", "-I", checkout / "runtime/include", "-I", checkout / "tools/include"]
     run(["xcrun", "clang", "-std=c11", "-D_DARWIN_C_SOURCE", "-O3", "-DNDEBUG", "-Wall", "-Wextra", "-Wpedantic", "-Werror", *include,
          ROOT / "scripts/version_metrics_driver.c", build_dir / "liblanaruntime.a", "-lm", "-lpthread", "-o", directory / "driver"], log=directory / "driver-build.log")
     for task in (*TASKS, "smoke"):
