@@ -2,16 +2,13 @@
 
 > A programming language for uncertainty computation.
 
-## Why Lana
-
 Most software treats a decision as a function that returns an answer. Lana
 treats a decision as a *reasoned, auditable artifact*: uncertain inputs are
 combined under an explicit mathematical contract, and the path from evidence to
 outcome is recorded rather than hidden inside a black box.
 
 The problem Lana addresses is concrete. Teams that make consequential decisions
-under uncertainty — risk, forecasting, sensor fusion, service health, document
-routing, advisory support — usually reach for a model or a library. That works
+under uncertainty — risk, forecasting, service health — usually reach for a model or a library. That works
 until someone asks *why* a decision was made, or *what evidence* it rested on,
 or *whether it can be reproduced*. A library gives you a number; it does not
 give you a first-class, testable, versionable account of the reasoning.
@@ -38,9 +35,9 @@ Lana is a public, actively developed language project. Issues, questions, and
 focused pull requests are welcome. Changes to language behavior follow the
 authority order below and include tests or documentation when applicable.
 
-## What Lana is
+## Batteries Included
 
-Lana includes:
+Lana comes with:
 
 - an immutable density-operator primitive `STATE`, with an observable
   probability and normalized complex disposition
