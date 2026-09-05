@@ -350,7 +350,7 @@ pub const LANA_HOST_CORRELATED: u32 = 54;
 // both the C11 VM and the Rust VM at id 55.
 pub const LANA_HOST_SURPRISAL: u32 = 55;
 
-// Durable-pipeline host calls (Rust-only). The C11 VM is frozen at 56 host
+// Durable-pipeline host calls (Rust-only). The C11 VM implements 56 host
 // calls (ids 0-55); these IDs exist only in the Rust VM and are dispatched
 // through the host-call extension registered by the CLI (see
 // `set_host_call_extension`).

@@ -136,7 +136,7 @@ static char *run_program(const char *labc_path, const char *request_path,
     if (options != NULL) {
         if (options->seed != 0u) lana_vm_seed(&vm, options->seed);
         if (options->instruction_limit != 0u) vm.instruction_limit = options->instruction_limit;
-        if (options->memory_limit_bytes != 0u) vm.memory_limit = options->memory_limit_bytes;
+        if (options->memory_limit_bytes != 0u) lana_vm_set_memory_limit(&vm, options->memory_limit_bytes);
         if ((options->workers != 0u &&
              lana_vm_set_worker_count(&vm, options->workers) != LANA_OK) ||
             (options->max_tasks != 0u &&

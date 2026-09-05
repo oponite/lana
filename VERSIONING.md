@@ -22,9 +22,9 @@ field is `2` for new artifacts.
 
 ## Runtime version
 
-The canonical runtime is the Rust implementation. The C11 VM is a frozen
-reference implementation retained for conformance comparison; it is not
-independently versioned.
+The canonical runtime is the Rust implementation. The C11 VM is an
+actively-developed reference implementation retained for conformance
+comparison; it is versioned under the language version.
 
 ## Compatibility
 

@@ -38,7 +38,7 @@ applicable authority first when intentionally changing the language.
 
 ## Repository map
 
-- `vm/`: canonical Rust `lana-vm` + `lana-bytecode` crates, plus the frozen C11
+- `vm/`: canonical Rust `lana-vm` + `lana-bytecode` crates, plus the C11
   reference VM core (`vm/c/`, `vm/include/`).
 - `runtime/`: canonical Rust `lana-runtime` + `lana-ffi` crates, plus the C11
   hardware boundary (`runtime/c/`, `runtime/include/`).

@@ -899,7 +899,7 @@ static int test_vm_gc_roots_cycles_and_cancellation(void) {
     CHECK(vm.gc.last_reclaimed_objects >= 6u);
     CHECK(vm.allocated_bytes == 0u);
 
-    vm.memory_limit = 64u;
+    lana_vm_set_memory_limit(&vm, 64u);
     CHECK(lana_vm_alloc(&vm, 32u) != NULL);
     atomic_store(&vm.cancelled, true);
     CHECK(lana_vm_run(&vm) == LANA_ERR_CANCELLED);
@@ -909,12 +909,12 @@ static int test_vm_gc_roots_cycles_and_cancellation(void) {
     lana_vm_free(&vm);
 
     lana_vm_init(&vm, &chunk);
-    vm.memory_limit = 64u;
+    lana_vm_set_memory_limit(&vm, 64u);
     text = lana_vm_alloc(&vm, 32u);
     CHECK(text != NULL);
     memset(text, 'x', 32u);
     vm.frames[0].registers[0] = lana_value_string(text);
-    vm.memory_limit = 16u;
+    lana_vm_set_memory_limit(&vm, 16u);
     CHECK(lana_vm_run(&vm) == LANA_ERR_OOM);
     CHECK(vm.gc.last_reclaimed_objects == 0u);
     CHECK(vm.frames[0].registers[0].as.string[0] == 'x');

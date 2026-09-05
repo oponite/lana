@@ -469,6 +469,16 @@ bool lana_vm_collect(LanaVM *vm) {
     return collected && vm->allocated_bytes <= vm->memory_limit;
 }
 
+void lana_vm_set_memory_limit(LanaVM *vm, size_t memory_limit) {
+    size_t threshold;
+    if (vm == NULL) return;
+    vm->memory_limit = memory_limit;
+    vm->gc.memory_limit = memory_limit;
+    threshold = memory_limit / 2u;
+    if (threshold == 0u && memory_limit > 0u) threshold = 1u;
+    vm->gc.collection_threshold = threshold;
+}
+
 size_t lana_vm_root_push(LanaVM *vm, Value *value) {
     if (vm == NULL) return SIZE_MAX;
     return lana_gc_root_push(&vm->gc, value, gc_trace_value_pointer);
@@ -497,30 +507,36 @@ void lana_vm_write_barrier_value(LanaVM *vm, void *owner,
 }
 
 static bool vm_gc_safepoint(LanaVM *vm) {
-    size_t threshold;
     if (vm == NULL) return false;
-    vm->gc.memory_limit = vm->memory_limit;
-    threshold = vm->memory_limit / 2u;
-    if (threshold == 0u && vm->memory_limit > 0u) threshold = 1u;
-    vm->gc.collection_threshold = threshold;
-    lana_gc_release_native(&vm->gc);
-    if ((vm->gc.allocated_bytes >= threshold && vm->gc.allocated_bytes > 0u) ||
-        vm->gc.allocated_bytes > vm->memory_limit) {
+    if (vm->gc.native_allocations != NULL)
+        lana_gc_release_native(&vm->gc);
+    if (vm->gc.allocated_bytes > vm->gc.memory_limit) {
+        /* Hard limit: full collection, never delayed. */
         lana_gc_set_deferred(&vm->gc, false);
         if (!lana_gc_collect_young(&vm->gc)) {
             lana_gc_set_deferred(&vm->gc, true);
             return false;
         }
-        if (vm->gc.allocated_bytes > vm->memory_limit &&
+        if (vm->gc.allocated_bytes > vm->gc.memory_limit &&
             !lana_gc_collect(&vm->gc)) {
             lana_gc_set_deferred(&vm->gc, true);
             return false;
         }
+        lana_gc_set_deferred(&vm->gc, true);
+    } else if ((vm->instruction_count & 255u) == 0u &&
+               vm->gc.allocated_bytes >= vm->gc.collection_threshold &&
+               vm->gc.allocated_bytes > 0u) {
+        /* Proactive young collection, throttled to every 256 instructions. */
+        lana_gc_set_deferred(&vm->gc, false);
+        if (!lana_gc_collect_young(&vm->gc)) {
+            lana_gc_set_deferred(&vm->gc, true);
+            return false;
+        }
+        lana_gc_set_deferred(&vm->gc, true);
     }
-    lana_gc_set_deferred(&vm->gc, true);
     vm->allocated_bytes = vm->gc.allocated_bytes;
     vm->allocation_count = vm->gc.allocation_count;
-    return vm->allocated_bytes <= vm->memory_limit;
+    return vm->allocated_bytes <= vm->gc.memory_limit;
 }
 
 static const char *derivation_kind_name(LanaDerivationKind kind) {
@@ -2692,7 +2708,7 @@ static LanaError start_task(LanaVM *parent, uint32_t function_index,
     task->child->frames[0].function = function_index;
     task->child->task_id = task->id;
     task->child->instruction_limit = parent->instruction_limit;
-    task->child->memory_limit = parent->memory_limit;
+    lana_vm_set_memory_limit(task->child, parent->memory_limit);
     task->child->trace = parent->trace;
     task->child->lineage = mix64(parent->lineage ^ ++parent->spawn_counter);
     lana_vm_seed(task->child, mix64(parent->root_seed ^ task->child->lineage));
@@ -5241,7 +5257,7 @@ static LanaError vm_step(LanaVM *vm) {
             return vm_fail(vm, LANA_ERR_JUMP, vm->ip, NULL, "instruction pointer is out of range");
         instruction_ip = vm->ip;
         ins = &vm->chunk->code[vm->ip++];
-        ++vm->opcode_counts[ins->opcode];
+        if (vm->profile_opcodes) ++vm->opcode_counts[ins->opcode];
         frame = current_frame(vm);
         if (vm->debug_hook != NULL &&
             (vm->debug_step || (vm->debug_break_line != 0u &&

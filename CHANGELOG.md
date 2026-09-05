@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.1
+
+- Restore state-core throughput: safepoint fast path, throttled proactive
+  young collection, and gated opcode profiling in the C11 VM.
+- Unfreeze the C11 VM: it is now actively developed and versioned under the
+  language version (LABC bytecode format and language contract unchanged).
+- Add `PERFORMANCE.md` documenting state-core, DRAM-transfer, compiler-bootstrap,
+  GC-pause, and dispatch-fix measurements.
+
 ## 2.0.0
 
 - Introduce LABC v2, the Rust canonical VM, algebraic data types, evidence, and lazy datasets.

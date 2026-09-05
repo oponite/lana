@@ -51,7 +51,7 @@ int lana_compiler_run(const char *compiler_path, size_t argument_count,
     result = lana_chunk_read_file(&compiler_chunk, compiler_path, error);
     if (result != LANA_OK) return 1;
     lana_vm_init(&vm, &compiler_chunk);
-    vm.memory_limit = 256u * 1024u * 1024u;
+    lana_vm_set_memory_limit(&vm, 256u * 1024u * 1024u);
     vm.instruction_limit = UINT64_C(50000000);
     lana_vm_set_program_args(&vm, argument_count, arguments);
     result = lana_vm_run(&vm);
