@@ -210,13 +210,13 @@ static int load_command(int argc, char **argv, bool execute) {
     else {
         struct timespec started, finished;
         uint64_t elapsed_ns;
-        LanaVM vm; lana_vm_init(&vm, &chunk); vm.trace = trace; lana_vm_seed(&vm, seed);
+        LanaVM vm; lana_vm_init(&vm, &chunk); vm.trace = trace; vm.profile_opcodes = stats; lana_vm_seed(&vm, seed);
         if (debug) {
             vm.debug_hook = debugger_hook;
             vm.debug_break_line = break_line;
             vm.debug_step = break_line == 0u;
         }
-        if (memory_limit > 0u) vm.memory_limit = memory_limit;
+        if (memory_limit > 0u) lana_vm_set_memory_limit(&vm, memory_limit);
         if (instruction_limit > 0u) vm.instruction_limit = instruction_limit;
         if ((workers > 0u && lana_vm_set_worker_count(&vm, workers) != LANA_OK) ||
             (max_tasks > 0u && lana_vm_set_task_limit(&vm, max_tasks) != LANA_OK)) {

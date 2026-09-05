@@ -79,6 +79,7 @@ struct LanaVM {
     uint64_t instruction_limit;
     uint64_t instruction_count;
     uint64_t opcode_counts[OP_COUNT];
+    bool profile_opcodes;
     uint64_t state_transition_count;
     uint64_t allocation_count;
     size_t memory_limit;
@@ -126,6 +127,7 @@ void lana_vm_seed(LanaVM *vm, uint64_t seed);
 void lana_vm_set_program_args(LanaVM *vm, int argc, const char **argv);
 LanaError lana_vm_set_worker_count(LanaVM *vm, size_t workers);
 LanaError lana_vm_set_task_limit(LanaVM *vm, size_t tasks);
+void lana_vm_set_memory_limit(LanaVM *vm, size_t memory_limit);
 void lana_vm_free(LanaVM *vm);
 LanaError lana_vm_run(LanaVM *vm);
 void *lana_vm_alloc(LanaVM *vm, size_t size);

@@ -13,7 +13,7 @@ use crate::opcode::{OpCode, LANA_MAX_REGISTERS};
 /// calls, ids 0-55); the Rust VM adds 11 durable-pipeline host calls
 /// (store/policy/ledger, ids 56-66) behind the host-call extension, so the
 /// Rust verifier accepts the wider range. This is a deliberate, documented
-/// divergence from the frozen C11 verifier.
+/// divergence from the C11 verifier.
 pub const LANA_HOST_COUNT: u32 = 67;
 
 const LANA_TRANSFORM_NEUTRALIZE: u32 = 1;

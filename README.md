@@ -96,7 +96,7 @@ and the self-hosted Lana compiler bytecode. Python is not required.
 
 The canonical VM is the Rust runtime (crates `lana-bytecode`, `lana-vm`,
 `lana-runtime`, `lana-ffi`, `lana-cli` under `vm/rust/`, `runtime/rust/`, and
-`tools/rust/`). The C11 VM is retained as a frozen reference implementation for
+`tools/rust/`). The C11 VM is retained as a reference implementation for
 conformance comparison.
 
 For VM development:
@@ -224,7 +224,7 @@ Source: [`examples/tutorials/03_combined_evidence.lana`](examples/tutorials/03_c
 ## Repository
 
 - `compiler/` — the self-hosted Lana compiler.
-- `vm/` — canonical Rust `lana-vm` + `lana-bytecode`, plus the frozen C11
+- `vm/` — canonical Rust `lana-vm` + `lana-bytecode`, plus the C11
   reference VM core.
 - `runtime/` — canonical Rust `lana-runtime` + `lana-ffi`, plus the C11
   hardware boundary.
