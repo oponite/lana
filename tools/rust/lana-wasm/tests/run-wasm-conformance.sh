@@ -17,6 +17,11 @@
 
 set -euo pipefail
 
+# Prefer the rustup-managed cargo/rustc (which has the wasm32 std installed)
+# over any Homebrew rust on PATH, so the build targets the same toolchain that
+# the WASI runner uses. Mirrors run-wasi-conformance.sh.
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+
 REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 cd "$REPO_ROOT"
 
