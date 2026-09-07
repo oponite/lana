@@ -1,0 +1,30 @@
+import "../../stdlib/collections.lana" as collections;
+
+let xs = array_new(0);
+array_push(xs, 1);
+array_push(xs, 2);
+array_push(xs, 3);
+
+let total = 0;
+for x in collections.iter(xs) {
+    total = total + x;
+}
+assert(total == 6, "iter sum");
+
+let idx = 0;
+for p in collections.enumerate(xs) {
+    assert(p[0] == idx, "enumerate index");
+    assert(p[1] == xs[idx], "enumerate value");
+    idx = idx + 1;
+}
+
+let ys = array_new(0);
+array_push(ys, 10);
+array_push(ys, 20);
+let zsum = 0;
+for p in collections.zip(xs, ys) {
+    zsum = zsum + p[0] + p[1];
+}
+assert(zsum == 1 + 10 + 2 + 20, "zip sum");
+
+print("M22_ITER_PASS");

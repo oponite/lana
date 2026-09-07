@@ -1,0 +1,19 @@
+// std/iterators — lazy iterators over arrays.
+// `iter`, `enumerate`, and `zip` are generator functions defined in
+// std/collections and re-exported here. `map`, `filter`, and `reduce` are
+// compiler builtins that capture a function name at compile time (Lana has no
+// first-class function values), so they are available without an import.
+
+import "std/collections" as collections;
+
+fn iter(xs) {
+    return collections.iter(xs);
+}
+
+fn enumerate(xs) {
+    return collections.enumerate(xs);
+}
+
+fn zip(a, b) {
+    return collections.zip(a, b);
+}

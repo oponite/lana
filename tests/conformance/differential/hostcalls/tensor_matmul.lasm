@@ -1,0 +1,115 @@
+.function main 0 16
+# dot product: [1,2,3] . [4,5,6] = 32 (rank-zero tensor)
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 1
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 2
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 3
+HOST_CALL array_push R1 2 R1
+HOST_CALL tensor R1 1 R3
+HOST_CALL array_new R0 1 R6
+LOAD_CONST R7 4
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R7 5
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R7 6
+HOST_CALL array_push R6 2 R6
+HOST_CALL tensor R6 1 R4
+HOST_CALL tensor_matmul R3 2 R5
+PRINT R5
+# 2d x 2d: [[1,2],[3,4]] . [[5,6],[7,8]] = [[19,22],[43,50]]
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 1
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 2
+HOST_CALL array_push R1 2 R1
+HOST_CALL array_new R0 1 R4
+LOAD_CONST R5 3
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 4
+HOST_CALL array_push R4 2 R4
+HOST_CALL array_new R0 1 R7
+MOVE R8 R1
+HOST_CALL array_push R7 2 R7
+MOVE R8 R4
+HOST_CALL array_push R7 2 R7
+HOST_CALL tensor R7 1 R9
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 5
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 6
+HOST_CALL array_push R1 2 R1
+HOST_CALL array_new R0 1 R4
+LOAD_CONST R5 7
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 8
+HOST_CALL array_push R4 2 R4
+HOST_CALL array_new R0 1 R7
+MOVE R8 R1
+HOST_CALL array_push R7 2 R7
+MOVE R8 R4
+HOST_CALL array_push R7 2 R7
+HOST_CALL tensor R7 1 R10
+HOST_CALL tensor_matmul R9 2 R11
+PRINT R11
+# vector-matrix: [1,2,3] . [[1,2],[3,4],[5,6]] = [22,28]
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 1
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 2
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 3
+HOST_CALL array_push R1 2 R1
+HOST_CALL tensor R1 1 R3
+HOST_CALL array_new R0 1 R4
+LOAD_CONST R5 1
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 2
+HOST_CALL array_push R4 2 R4
+HOST_CALL array_new R0 1 R7
+LOAD_CONST R8 3
+HOST_CALL array_push R7 2 R7
+LOAD_CONST R8 4
+HOST_CALL array_push R7 2 R7
+HOST_CALL array_new R0 1 R12
+LOAD_CONST R13 5
+HOST_CALL array_push R12 2 R12
+LOAD_CONST R13 6
+HOST_CALL array_push R12 2 R12
+HOST_CALL array_new R0 1 R13
+MOVE R14 R4
+HOST_CALL array_push R13 2 R13
+MOVE R14 R7
+HOST_CALL array_push R13 2 R13
+MOVE R14 R12
+HOST_CALL array_push R13 2 R13
+HOST_CALL tensor R13 1 R4
+HOST_CALL tensor_matmul R3 2 R5
+PRINT R5
+# matrix-vector: [[1,2,3],[4,5,6]] . [1,2,3] = [14,32]
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 1
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 2
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 3
+HOST_CALL array_push R1 2 R1
+HOST_CALL array_new R0 1 R4
+LOAD_CONST R5 4
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 5
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 6
+HOST_CALL array_push R4 2 R4
+HOST_CALL array_new R0 1 R7
+MOVE R8 R1
+HOST_CALL array_push R7 2 R7
+MOVE R8 R4
+HOST_CALL array_push R7 2 R7
+HOST_CALL tensor R7 1 R9
+HOST_CALL tensor R1 1 R10
+HOST_CALL tensor_matmul R9 2 R11
+PRINT R11
+RETURN R0

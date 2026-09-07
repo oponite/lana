@@ -1,0 +1,16 @@
+import "std/collections" as collections;
+import "std/string" as string;
+import "std/math" as math;
+
+let s = collections.set_new();
+s = collections.set_add(s, "a");
+s = collections.set_add(s, "b");
+assert(collections.set_contains(s, "a") == true, "set contains a");
+assert(collections.set_contains(s, "z") == false, "set lacks z");
+
+assert(string.split("a,b,c", ",")[1] == "b", "split");
+assert(string.trim("  x  ") == "x", "trim");
+assert(math.abs(-4) == 4, "abs");
+assert(math.clamp(10, 0, 5) == 5, "clamp");
+
+print("STD_IMPORT_PASS");

@@ -1,0 +1,50 @@
+// LIP-006: auditable, replayable training primitive.
+
+fn model(params, x) { return params * x; }
+fn loss(y, target) { return sum((y - target) * (y - target)); }
+
+let train_cap = capability("train");
+let use = grant(train_cap, "use");
+
+// SGD (no momentum) on a single point: w=0, x=1, target=2, lr=0.1.
+// loss = (w*1 - 2)^2, grad = 2*1*(w*1-2) = -4 at w=0.
+// w_new = 0 - 0.1*(-4) = 0.4.
+let opt = sgd(0.1, 0.0);
+let data = [[tensor([1.0]), tensor([2.0])]];
+let init = tensor([0.0]);
+let result = train(model, data, loss, opt, init, 1, 1);
+let w = result.params;
+assert(w[0] == 0.4, "sgd trained weight");
+
+// Step history: exactly one step, with parameters, gradient, and provenance.
+assert(array_length(result.steps) == 1, "one step");
+let step0 = result.steps[0];
+assert(step0.epoch == 0, "step epoch");
+assert(step0.batch == 0, "step batch");
+let step_params = step0.parameters;
+assert(step_params[0] == 0.4, "step params");
+let step_grad = step0.gradient;
+assert(step_grad[0] == -4.0, "step gradient");
+
+// Adam on the same point: m_hat = -4, v_hat = 16, so
+// w_new = 0 - 0.001 * (-4) / (sqrt(16) + 1e-8) ~= 0.001.
+let adam_opt = adam(0.001, 0.9, 0.999, 0.00000001);
+let adam_result = train(model, data, loss, adam_opt, init, 1, 1);
+let aw = adam_result.params;
+assert(aw[0] > 0.0009, "adam trained weight lower bound");
+assert(aw[0] < 0.0011, "adam trained weight upper bound");
+
+// Adam step history records the optimizer state (m, v, t). The raw moments
+// are IEEE 754 binary64: m = (1 - beta1) * g = -0.3999999999999999 and
+// v = (1 - beta2) * g^2 = 0.016000000000000014, so compare within tolerance.
+let astep = adam_result.steps[0];
+let astate = astep.optimizer_state;
+assert(astate.t == 1, "adam step t");
+let am = astate.m;
+assert(am[0] < -0.3999, "adam step m lower bound");
+assert(am[0] > -0.4001, "adam step m upper bound");
+let av = astate.v;
+assert(av[0] > 0.0159, "adam step v lower bound");
+assert(av[0] < 0.0161, "adam step v upper bound");
+
+print("LIP006_TRAIN_PASS");

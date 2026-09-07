@@ -1,0 +1,6 @@
+.function main 0 4
+LOAD_CONST R0 1
+HOST_CALL tensor R0 1 R1
+LOAD_CONST R2 0
+HOST_CALL tensor_sum R1 2 R3
+RETURN R3

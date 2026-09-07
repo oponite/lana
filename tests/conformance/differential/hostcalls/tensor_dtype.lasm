@@ -1,0 +1,57 @@
+.function main 0 20
+# LIP-027: dtype(t) reporting and f16/bf16 rounding of literals. Both VMs must
+# produce byte-identical output for construction at each dtype.
+# Build [0.1] in R1.
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 0.1
+HOST_CALL array_push R1 2 R1
+# Default dtype is f64.
+HOST_CALL tensor R1 1 R3
+HOST_CALL tensor_dtype R3 1 R4
+PRINT R4
+# f32.
+LOAD_STRING R2 663332
+HOST_CALL tensor R1 2 R3
+HOST_CALL tensor_dtype R3 1 R4
+PRINT R4
+# f16.
+LOAD_STRING R2 663136
+HOST_CALL tensor R1 2 R3
+HOST_CALL tensor_dtype R3 1 R4
+PRINT R4
+# bf16.
+LOAD_STRING R2 62663136
+HOST_CALL tensor R1 2 R3
+HOST_CALL tensor_dtype R3 1 R4
+PRINT R4
+# f16 rounding of 0.1 -> 0.0999755859375 (round-to-nearest-even).
+LOAD_STRING R2 663136
+HOST_CALL tensor R1 2 R3
+HOST_CALL tensor_sum R3 1 R4
+PRINT R4
+# bf16 rounding of 3.14159 -> 3.140625.
+HOST_CALL array_new R0 1 R5
+LOAD_CONST R6 3.14159
+HOST_CALL array_push R5 2 R5
+LOAD_STRING R6 62663136
+HOST_CALL tensor R5 2 R7
+HOST_CALL tensor_sum R7 1 R8
+PRINT R8
+# zeros/ones/eye dtype:.
+HOST_CALL array_new R0 1 R9
+LOAD_CONST R10 2
+HOST_CALL array_push R9 2 R9
+LOAD_STRING R10 663332
+HOST_CALL tensor_zeros R9 2 R11
+HOST_CALL tensor_dtype R11 1 R12
+PRINT R12
+HOST_CALL tensor_ones R9 2 R11
+HOST_CALL tensor_dtype R11 1 R12
+PRINT R12
+LOAD_CONST R13 2
+LOAD_STRING R14 663332
+HOST_CALL tensor_eye R13 2 R15
+HOST_CALL tensor_dtype R15 1 R16
+PRINT R16
+RETURN R0

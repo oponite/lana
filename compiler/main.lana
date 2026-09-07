@@ -32,7 +32,18 @@ fn load_module(path, prefix, modules, stack, root) {
     let import_names = map_new();
     let import_index = 0;
     while (import_index < array_length(syntax_tree[3])) {
-        let imported = syntax_tree[3][import_index]; let target = path_resolve(canonical, imported[0]);
+        let imported = syntax_tree[3][import_index];
+        let target = imported[0];
+        let is_std = false;
+        if (string_length(imported[0]) >= 4) {
+            if (string_slice(imported[0], 0, 4) == "std/") { is_std = true; }
+        }
+        if (is_std) {
+            let rest = string_slice(imported[0], 4, string_length(imported[0]));
+            target = string_concat(map_get(modules, "stdlib_dir"), "/", rest, ".lana");
+        } else {
+            target = path_resolve(canonical, imported[0]);
+        }
         let child_prefix = string_concat("__m", number_to_string(array_length(modules["items"])), "__");
         let child_index = load_module(target, child_prefix, modules, next_stack, false);
         let child_record = modules["items"][child_index];
@@ -184,6 +195,13 @@ fn project_dependency_line(line, hash, directory, locked) {
     return hash;
 }
 
+fn project_hash_stdlib(hash) {
+    let stdlib_dir = getenv("LANA_STDLIB_DIR");
+    if (stdlib_dir == "") { stdlib_dir = "stdlib"; }
+    if (path_exists(stdlib_dir)) { hash = project_hash_sources(stdlib_dir, hash); }
+    return hash;
+}
+
 fn project_hash_plan(directory, output) {
     let manifest = read_text(project_path(directory, "lana.toml"));
     let entry = project_line_value(manifest, "entry");
@@ -192,6 +210,7 @@ fn project_hash_plan(directory, output) {
     hash = hash_update(hash, manifest);
     hash = hash_update(hash, read_text(project_path(directory, entry)));
     hash = project_hash_sources(directory, hash);
+    hash = project_hash_stdlib(hash);
     let lines = project_lines(manifest); let index = 0; let dependencies = false;
     while (index < array_length(lines)) {
         let line = lines[index];
@@ -359,6 +378,9 @@ if (argv[0] == "--project-new") {
             write_text(argv[2], json_stringify(resolver.symbol_table_json(semantic_ir[4])));
         } else {
             let modules = map_new(); map_set(modules, "items", array_new(0)); map_set(modules, "mappings", map_new()); map_set(modules, "import_mappings", map_new());
+            let stdlib_dir = getenv("LANA_STDLIB_DIR");
+            if (stdlib_dir == "") { stdlib_dir = "stdlib"; }
+            map_set(modules, "stdlib_dir", stdlib_dir);
             let root = load_module(argv[0], "", modules, array_new(0), true);
             write_text(argv[1], emitter.emit_modules(modules, root));
         }

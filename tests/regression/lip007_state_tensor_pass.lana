@@ -1,0 +1,68 @@
+// LIP-007: differentiable STATE tensors.
+
+// Construction: I/2 and |0><0|.
+let s0 = state_tensor([[[0.5, 0.0], [0.0, 0.5]]]);
+let s1 = state_tensor([[[1.0, 0.0], [0.0, 0.0]]]);
+assert(dtype(s0) == "complex", "state dtype is complex");
+assert(ndim(s0) == 3, "state ndim");
+assert(shape(s0)[0] == 1, "state batch");
+assert(shape(s0)[1] == 2, "state rows");
+assert(shape(s0)[2] == 2, "state cols");
+
+let pov = povm([tensor([[1.0, 0.0], [0.0, 0.0]]), tensor([[0.0, 0.0], [0.0, 1.0]])]);
+
+// append: p_C = p_A + p_B - p_A*p_B = 0.5 + 1 - 0.5 = 1.0.
+let a = append(s0, s1);
+let qa = measure(a, pov);
+assert(qa[0][0] == 1.0, "append p_C");
+assert(qa[0][1] == 0.0, "append 1-p_C");
+
+// measure: I/2 gives [0.5, 0.5].
+let q0 = measure(s0, pov);
+assert(q0[0][0] == 0.5, "measure p0");
+assert(q0[0][1] == 0.5, "measure p1");
+
+// transform: identity channel leaves I/2 unchanged.
+let chan = channel([tensor([[1.0, 0.0], [0.0, 1.0]])]);
+let t = transform(s0, chan);
+let qt = measure(t, pov);
+assert(qt[0][0] == 0.5, "transform p0");
+assert(qt[0][1] == 0.5, "transform p1");
+
+// grad of sum(measure(s, pov)) is a complex tensor of the state's shape
+// (exact values are asserted byte-identically in the differential fixtures).
+fn loss_measure(s) {
+    let p = povm([tensor([[1.0, 0.0], [0.0, 0.0]]), tensor([[0.0, 0.0], [0.0, 1.0]])]);
+    return sum(measure(s, p));
+}
+let gm = grad(loss_measure, s0);
+assert(dtype(gm) == "complex", "grad measure dtype");
+assert(ndim(gm) == 3, "grad measure ndim");
+assert(shape(gm)[0] == 1, "grad measure batch");
+assert(shape(gm)[1] == 2, "grad measure rows");
+assert(shape(gm)[2] == 2, "grad measure cols");
+
+// grad of sum(measure(append(s,s), pov) * [1,0]) is a complex tensor.
+fn loss_append(s) {
+    let c = append(s, s);
+    let p = povm([tensor([[1.0, 0.0], [0.0, 0.0]]), tensor([[0.0, 0.0], [0.0, 1.0]])]);
+    let q = measure(c, p);
+    let w = tensor([1.0, 0.0]);
+    return sum(q * w);
+}
+let ga = grad(loss_append, s0);
+assert(dtype(ga) == "complex", "grad append dtype");
+assert(ndim(ga) == 3, "grad append ndim");
+
+// grad of sum(measure(transform(s, chan), pov)) is a complex tensor.
+fn loss_transform(s) {
+    let c = channel([tensor([[1.0, 0.0], [0.0, 1.0]])]);
+    let t = transform(s, c);
+    let p = povm([tensor([[1.0, 0.0], [0.0, 0.0]]), tensor([[0.0, 0.0], [0.0, 1.0]])]);
+    return sum(measure(t, p));
+}
+let gt = grad(loss_transform, s0);
+assert(dtype(gt) == "complex", "grad transform dtype");
+assert(ndim(gt) == 3, "grad transform ndim");
+
+print("LIP007_STATE_TENSOR_PASS");

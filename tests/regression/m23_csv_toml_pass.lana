@@ -1,0 +1,34 @@
+import "std/csv" as csv;
+import "std/toml" as toml;
+
+// CSV text codec (LIP-023 §5).
+let csv_rows = csv.parse("a,b,c\n1,2,3");
+assert(csv_rows[0] == true, "csv parse ok");
+assert(array_length(csv_rows[1]) == 2, "csv two rows");
+assert(csv_rows[1][0][0] == "a", "csv row0 col0");
+assert(csv_rows[1][1][2] == "3", "csv row1 col2");
+assert(csv.stringify([["a", "b"], ["1", "2"]]) == "a,b\n1,2", "csv stringify");
+assert(csv.stringify([["a,b", "c"]]) == "\"a,b\",c", "csv quote comma");
+assert(csv.stringify([["a\"b"]]) == "\"a\"\"b\"", "csv quote escape");
+let csv_round = csv.parse(csv.stringify([["x", "y,z"], ["1", "2"]]));
+assert(csv_round[0] == true, "csv roundtrip ok");
+assert(csv_round[1][0][1] == "y,z", "csv roundtrip quoted");
+
+// TOML text codec (LIP-023 §5).
+let toml_text = "schema = 1\nname = \"demo\"\nversion = \"1.0.0\"\n\n[dependencies]\nlana-http = \"1.2.0\"\n";
+let toml_map = toml.parse(toml_text);
+assert(toml_map[0] == true, "toml parse ok");
+let toml_root = toml_map[1];
+assert(map_get(toml_root, "schema") == 1, "toml schema number");
+assert(map_get(toml_root, "name") == "demo", "toml name string");
+assert(map_get(map_get(toml_root, "dependencies"), "lana-http") == "1.2.0", "toml section");
+let toml_round = toml.parse(toml.stringify(toml_root));
+assert(toml_round[0] == true, "toml roundtrip ok");
+assert(map_get(toml_round[1], "name") == "demo", "toml roundtrip name");
+assert(map_get(map_get(toml_round[1], "dependencies"), "lana-http") == "1.2.0", "toml roundtrip dep");
+
+// Invalid input yields a tagged error, not a crash.
+let bad = toml.parse("name = ");
+assert(bad[0] == false, "toml invalid value error");
+
+print("M23_CSV_TOML_PASS");

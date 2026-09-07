@@ -1,0 +1,18 @@
+.function main 0 16
+LOAD_CONST R0 42
+HOST_CALL shared_information R0 1 R1
+HOST_CALL shared_identity R1 1 R2
+PRINT R2
+LOAD_CONST R2 use
+HOST_CALL grant R1 2 R3
+HOST_CALL shared_identity R3 1 R4
+PRINT R4
+LOAD_CONST R2 admin
+HOST_CALL grant R1 2 R5
+HOST_CALL shared_identity R5 1 R6
+PRINT R6
+HOST_CALL revoke R3 1 R7
+PRINT R7
+HOST_CALL revoke R5 1 R8
+PRINT R8
+RETURN R0

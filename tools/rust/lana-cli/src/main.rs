@@ -159,6 +159,25 @@ fn find_compiler() -> Option<PathBuf> {
     None
 }
 
+/// Point the compiler at the installed stdlib, mirroring `set_stdlib_dir` in
+/// `tools/c/compiler_service.c`: `<prefix>/bin/lana-compiler.labc` →
+/// `<prefix>/share/lana/stdlib`, set only when that directory exists and never
+/// overriding a user-supplied value.
+fn set_stdlib_dir(compiler: &Path) {
+    if std::env::var("LANA_STDLIB_DIR").is_ok() {
+        return;
+    }
+    if let Some(dir) = compiler
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("share/lana/stdlib"))
+    {
+        if dir.is_dir() {
+            std::env::set_var("LANA_STDLIB_DIR", dir);
+        }
+    }
+}
+
 /// Run the compiler bytecode on the Rust VM with the given program args,
 /// mirroring `run_compiler_program` in `tools/c/cli.c`.
 fn run_compiler_program(compiler: &Path, args: &[String]) -> Result<(), CliError> {
@@ -170,6 +189,7 @@ fn run_compiler_program(compiler: &Path, args: &[String]) -> Result<(), CliError
     let chunk = lana_bytecode::loader::load(&bytes)
         .map_err(|info| CliError::Load { path: path_str, info })?;
     let mut vm = Vm::new(&chunk);
+    set_stdlib_dir(compiler);
     vm.set_program_args(args);
     let result = vm.run();
     if result != LanaError::Ok {

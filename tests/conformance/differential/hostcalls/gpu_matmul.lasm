@@ -1,0 +1,39 @@
+.function main 0 16
+# 2d x 2d: [[1,2],[3,4]] . [[5,6],[7,8]] = [[19,22],[43,50]] in float32
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 1
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 2
+HOST_CALL array_push R1 2 R1
+HOST_CALL array_new R0 1 R4
+LOAD_CONST R5 3
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 4
+HOST_CALL array_push R4 2 R4
+HOST_CALL array_new R0 1 R7
+MOVE R8 R1
+HOST_CALL array_push R7 2 R7
+MOVE R8 R4
+HOST_CALL array_push R7 2 R7
+HOST_CALL tensor R7 1 R9
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 5
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 6
+HOST_CALL array_push R1 2 R1
+HOST_CALL array_new R0 1 R4
+LOAD_CONST R5 7
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 8
+HOST_CALL array_push R4 2 R4
+HOST_CALL array_new R0 1 R7
+MOVE R8 R1
+HOST_CALL array_push R7 2 R7
+MOVE R8 R4
+HOST_CALL array_push R7 2 R7
+HOST_CALL tensor R7 1 R10
+LOAD_STRING R11 666c6f61743332
+HOST_CALL gpu_matmul R9 3 R12
+PRINT R12
+RETURN R0

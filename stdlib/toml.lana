@@ -1,0 +1,158 @@
+// std/toml — TOML text codecs (LIP-023 §5) for the schema-1 `lana.toml`
+// dialect: flat `key = value` lines, `[section]` headers, string/number/bool
+// values, and `#` comments. `parse` returns Result<map, E> as a tagged pair
+// `[true, map]` / `[false, error]`; `stringify` returns deterministic text.
+
+import "std/string" as string;
+
+fn find_byte(text, byte, start) {
+    let i = start;
+    let n = string_length(text);
+    while (i < n) {
+        if (string_byte_at(text, i) == byte) { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn section_map(root, name) {
+    if (map_has(root, name)) { return map_get(root, name); }
+    let section = map_new();
+    map_set(root, name, section);
+    return section;
+}
+
+// Parse a double-quoted string value (text starts with the opening quote);
+// returns the unescaped content, or null on error.
+fn parse_string(text) {
+    let n = string_length(text);
+    let i = 1;
+    let raw = "";
+    let closed = false;
+    while (i < n) {
+        let c = string_byte_at(text, i);
+        if (c == 92) {
+            if (i + 1 < n) {
+                raw = string_concat(raw, string_slice(text, i, i + 2));
+                i = i + 2;
+            } else {
+                return null;
+            }
+        } else {
+            if (c == 34) {
+                closed = true;
+                i = n;
+            } else {
+                raw = string_concat(raw, string_slice(text, i, i + 1));
+                i = i + 1;
+            }
+        }
+    }
+    if (!closed) { return null; }
+    return string_unescape(raw);
+}
+
+// Parse a scalar value; returns the value, or null on error.
+fn parse_value(text) {
+    if (string_length(text) == 0) { return null; }
+    if (string_byte_at(text, 0) == 34) { return parse_string(text); }
+    if (text == "true") { return true; }
+    if (text == "false") { return false; }
+    let parsed = string_to_number(text);
+    if (parsed[0]) { return parsed[1]; }
+    return null;
+}
+
+fn parse(text) {
+    let root = map_new();
+    let current = root;
+    let lines = string.split(text, "\n");
+    let i = 0;
+    while (i < array_length(lines)) {
+        let line = string.trim(lines[i]);
+        if (string_length(line) > 0) {
+            if (string_byte_at(line, 0) != 35) {
+                if (string_byte_at(line, 0) == 91) {
+                    let close = find_byte(line, 93, 1);
+                    if (close < 0) { return result_error("unterminated section header"); }
+                    let name = string.trim(string_slice(line, 1, close));
+                    current = section_map(root, name);
+                } else {
+                    let eq = find_byte(line, 61, 0);
+                    if (eq < 0) { return result_error("expected '=' in line"); }
+                    let key = string.trim(string_slice(line, 0, eq));
+                    let value_text = string.trim(string_slice(line, eq + 1, string_length(line)));
+                    let value = parse_value(value_text);
+                    if (value == null) { return result_error("invalid value"); }
+                    map_set(current, key, value);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return result_ok(root);
+}
+
+fn escape_string(text) {
+    let result = "";
+    let i = 0;
+    let n = string_length(text);
+    while (i < n) {
+        let c = string_byte_at(text, i);
+        if (c == 34) { result = string_concat(result, "\\\""); }
+        else {
+            if (c == 92) { result = string_concat(result, "\\\\"); }
+            else { result = string_concat(result, string_slice(text, i, i + 1)); }
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+fn stringify_value(value) {
+    let t = type_of(value);
+    if (t == "string") { return string_concat("\"", string_concat(escape_string(value), "\"")); }
+    if (t == "number") { return number_to_string(value); }
+    if (t == "bool") {
+        if (value) { return "true"; }
+        return "false";
+    }
+    return "\"\"";
+}
+
+fn stringify_section(map) {
+    let result = "";
+    let keys = map_keys(map);
+    let i = 0;
+    while (i < array_length(keys)) {
+        result = string_concat(result, keys[i]);
+        result = string_concat(result, " = ");
+        result = string_concat(result, stringify_value(map_get(map, keys[i])));
+        result = string_concat(result, "\n");
+        i = i + 1;
+    }
+    return result;
+}
+
+fn stringify(map) {
+    let result = "";
+    let keys = map_keys(map);
+    let i = 0;
+    while (i < array_length(keys)) {
+        let key = keys[i];
+        let value = map_get(map, key);
+        if (type_of(value) == "map") {
+            result = string_concat(result, "[");
+            result = string_concat(result, key);
+            result = string_concat(result, "]\n");
+            result = string_concat(result, stringify_section(value));
+        } else {
+            result = string_concat(result, key);
+            result = string_concat(result, " = ");
+            result = string_concat(result, stringify_value(value));
+            result = string_concat(result, "\n");
+        }
+        i = i + 1;
+    }
+    return result;
+}

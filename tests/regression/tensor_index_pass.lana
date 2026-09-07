@@ -1,0 +1,59 @@
+// LIP-004: tensor indexing and slicing produce views and scalars.
+
+// Single integer position selects a row view sharing the buffer.
+let t = tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+let row = t[1];
+assert(ndim(row) == 1, "row ndim");
+assert(shape(row)[0] == 3, "row shape");
+assert(sum(row) == 15.0, "row sum");
+let neg_row = t[-1];
+assert(sum(neg_row) == 15.0, "negative row sum");
+
+// A full set of integer positions selects one element as a number.
+assert(t[1, 2] == 6.0, "full position element");
+assert(t[-1, -3] == 4.0, "wrapped position element");
+
+// Slices keep their axis and may be non-contiguous.
+let col = t[0:2, 1];
+assert(ndim(col) == 1, "column ndim");
+assert(shape(col)[0] == 2, "column shape");
+assert(sum(col) == 7.0, "column sum follows strides");
+
+// Fewer positions than the rank keep trailing axes whole.
+let block = t[0:2];
+assert(ndim(block) == 2, "block ndim");
+assert(sum(block) == 21.0, "block sum");
+
+// Mixed positions: an integer drops its axis, a slice keeps it.
+let tail = t[1, 0:2];
+assert(ndim(tail) == 1, "mixed ndim");
+assert(sum(tail) == 9.0, "mixed sum");
+
+// Views chain: selecting a view again reads through offset and strides.
+assert(col[1] == 5.0, "view of view element");
+assert(sum(col[0:2]) == 7.0, "view of view sum");
+
+// Arithmetic over non-contiguous views follows their strides.
+assert(sum(col + col) == 14.0, "strided elementwise");
+
+// Slice bounds clamp and never range-error; start > end is an empty axis.
+assert(sum(t[5:10]) == 0.0, "clamped past end is empty");
+assert(sum(t[-10:10]) == 21.0, "clamped negative is whole");
+assert(sum(t[1:0]) == 0.0, "start past end is empty");
+
+// Lifetime: views of discarded tensors keep their shared buffer alive while
+// in use, under allocation churn.
+let churn = ones([64, 64]);
+let corner = churn[0:2, 0:2];
+let index = 0;
+while (index < 200) {
+    let scratch = zeros([8, 8]);
+    index = index + 1;
+}
+assert(sum(corner) == 4.0, "view survives churn");
+
+// Arrays still take exactly one position.
+let values = [10.0, 20.0, 30.0];
+assert(values[1] == 20.0, "array position");
+
+print("TENSOR_INDEX_PASS");

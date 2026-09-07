@@ -1,0 +1,11 @@
+// LIP-013: a Sequential connection whose shapes do not match is a compile error.
+
+type Layer = Dense(in: Shape, out: Shape, weights: Tensor<[in, out]>) | Conv(in: Shape, out: Shape, kernel: Shape) | Relu(shape: Shape);
+type Model = Sequential(Layer, Layer) | Residual(Layer, Layer) | Branch(Layer, Layer, Layer);
+
+let d1 = Dense([2], [3], tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]));
+let d2 = Dense([4], [2], tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]]));
+
+// d1 outputs [3] but d2 expects input [4]: connection shape mismatch.
+let m = Sequential(d1, d2);
+print(m);

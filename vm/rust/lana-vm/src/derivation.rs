@@ -6,7 +6,9 @@
 //! graph is a DAG (inputs reference pre-existing derivations), so `Arc`
 //! without cycle collection is sound.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use crate::value::Tensor;
 
 /// How a value was derived, matching `LanaDerivationKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +71,18 @@ pub struct Derivation {
     pub details: Arc<str>,
     pub outcome: DerivationOutcome,
     pub reason: Arc<str>,
+    /// LIP-011 reverse-mode autodiff fields, mirroring the `ad_*` fields of
+    /// `LanaDerivation` in `vm/include/value.h`. `ad_op` is -1 for a leaf
+    /// (input) node; 0=add 1=sub 2=mul 3=div 4=matmul 5=sum 6=mean. `ad_grad`
+    /// is the accumulated cotangent, mutated in place by the backward pass, so
+    /// it is guarded by a `Mutex` (the C11 VM mutates `ad_grad->data` directly).
+    pub ad_op: i32,
+    pub ad_a: Option<Arc<Tensor>>,
+    pub ad_b: Option<Arc<Tensor>>,
+    pub ad_a_deriv: Option<Arc<Derivation>>,
+    pub ad_b_deriv: Option<Arc<Derivation>>,
+    pub ad_grad: Arc<Mutex<Option<Tensor>>>,
+    pub ad_axis: i32,
 }
 
 /// The stable kind name, matching `derivation_kind_name` in `vm/c/vm.c`.
@@ -160,6 +174,13 @@ mod tests {
             details: Arc::from(""),
             outcome,
             reason: Arc::from("none"),
+            ad_op: -1,
+            ad_a: None,
+            ad_b: None,
+            ad_a_deriv: None,
+            ad_b_deriv: None,
+            ad_grad: Arc::new(Mutex::new(None)),
+            ad_axis: -1,
         }
     }
 

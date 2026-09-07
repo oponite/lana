@@ -1,0 +1,122 @@
+// std/datetime — wall-clock time over the `now` host call.
+// `now()` returns the Unix timestamp (seconds since the epoch) as a number.
+// `add_duration` shifts a timestamp by a number of seconds.
+// `format_timestamp` renders a timestamp as UTC ISO 8601
+// (`YYYY-MM-DDTHH:MM:SSZ`); `parse_timestamp` is its inverse, returning
+// `Result<number, string>`. Calendar math uses floor division (`idiv`/`mod`),
+// so negative timestamps (before 1970) round-trip correctly.
+
+import "./math.lana" as math;
+
+fn now() {
+    return now();
+}
+
+fn add_duration(timestamp, seconds) {
+    return timestamp + seconds;
+}
+
+fn pad2(n) {
+    if (n < 10) { return string_concat("0", number_to_string(n)); }
+    return number_to_string(n);
+}
+
+fn pad4(n) {
+    if (n < 10) { return string_concat("000", number_to_string(n)); }
+    if (n < 100) { return string_concat("00", number_to_string(n)); }
+    if (n < 1000) { return string_concat("0", number_to_string(n)); }
+    return number_to_string(n);
+}
+
+// Days since 1970-01-01 -> [year, month, day] in the proleptic Gregorian
+// calendar (Howard Hinnant's civil_from_days).
+fn civil_from_days(z) {
+    z = z + 719468;
+    let era = math.idiv(z, 146097);
+    let doe = math.mod(z, 146097);
+    let yoe = math.idiv(doe - math.idiv(doe, 1460) + math.idiv(doe, 36524) - math.idiv(doe, 146096), 365);
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + math.idiv(yoe, 4) - math.idiv(yoe, 100));
+    let mp = math.idiv(5 * doy + 2, 153);
+    let d = doy - math.idiv(153 * mp + 2, 5) + 1;
+    let m = mp + 3;
+    if (mp >= 10) { m = mp - 9; }
+    if (m <= 2) { y = y + 1; }
+    return [y, m, d];
+}
+
+// [year, month, day] -> days since 1970-01-01 (Hinnant's days_from_civil).
+fn days_from_civil(y, m, d) {
+    if (m <= 2) { y = y - 1; }
+    let era = math.idiv(y, 400);
+    let yoe = y - era * 400;
+    let mp = m + 9;
+    if (m > 2) { mp = m - 3; }
+    let doy = math.idiv(153 * mp + 2, 5) + d - 1;
+    let doe = yoe * 365 + math.idiv(yoe, 4) - math.idiv(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+
+fn format_timestamp(ts) {
+    let days = math.idiv(ts, 86400);
+    let secs = math.mod(ts, 86400);
+    let h = math.idiv(secs, 3600);
+    let m = math.idiv(math.mod(secs, 3600), 60);
+    let s = math.mod(secs, 60);
+    let date = civil_from_days(days);
+    let result = pad4(date[0]);
+    result = string_concat(result, "-");
+    result = string_concat(result, pad2(date[1]));
+    result = string_concat(result, "-");
+    result = string_concat(result, pad2(date[2]));
+    result = string_concat(result, "T");
+    result = string_concat(result, pad2(h));
+    result = string_concat(result, ":");
+    result = string_concat(result, pad2(m));
+    result = string_concat(result, ":");
+    result = string_concat(result, pad2(s));
+    return string_concat(result, "Z");
+}
+
+// Parse a UTC ISO 8601 timestamp `YYYY-MM-DDTHH:MM:SSZ` into a Unix timestamp
+// (seconds since the epoch). Returns `Result<number, string>`. Field ranges are
+// validated; day-in-month validity (e.g. Feb 30) is not checked.
+fn parse_timestamp(text) {
+    if (string_length(text) != 20) { return result_error("invalid timestamp"); }
+    if (string_byte_at(text, 4) != 45) { return result_error("invalid timestamp"); }
+    if (string_byte_at(text, 7) != 45) { return result_error("invalid timestamp"); }
+    if (string_byte_at(text, 10) != 84) { return result_error("invalid timestamp"); }
+    if (string_byte_at(text, 13) != 58) { return result_error("invalid timestamp"); }
+    if (string_byte_at(text, 16) != 58) { return result_error("invalid timestamp"); }
+    if (string_byte_at(text, 19) != 90) { return result_error("invalid timestamp"); }
+    let y = string_to_number(string_slice(text, 0, 4));
+    let mo = string_to_number(string_slice(text, 5, 7));
+    let d = string_to_number(string_slice(text, 8, 10));
+    let h = string_to_number(string_slice(text, 11, 13));
+    let mi = string_to_number(string_slice(text, 14, 16));
+    let s = string_to_number(string_slice(text, 17, 19));
+    if (!result_is_ok(y)) { return result_error("invalid timestamp"); }
+    if (!result_is_ok(mo)) { return result_error("invalid timestamp"); }
+    if (!result_is_ok(d)) { return result_error("invalid timestamp"); }
+    if (!result_is_ok(h)) { return result_error("invalid timestamp"); }
+    if (!result_is_ok(mi)) { return result_error("invalid timestamp"); }
+    if (!result_is_ok(s)) { return result_error("invalid timestamp"); }
+    let yv = result_value(y);
+    let mov = result_value(mo);
+    let dv = result_value(d);
+    let hv = result_value(h);
+    let miv = result_value(mi);
+    let sv = result_value(s);
+    if (mov < 1) { return result_error("invalid timestamp"); }
+    if (mov > 12) { return result_error("invalid timestamp"); }
+    if (dv < 1) { return result_error("invalid timestamp"); }
+    if (dv > 31) { return result_error("invalid timestamp"); }
+    if (hv < 0) { return result_error("invalid timestamp"); }
+    if (hv > 23) { return result_error("invalid timestamp"); }
+    if (miv < 0) { return result_error("invalid timestamp"); }
+    if (miv > 59) { return result_error("invalid timestamp"); }
+    if (sv < 0) { return result_error("invalid timestamp"); }
+    if (sv > 59) { return result_error("invalid timestamp"); }
+    let days = days_from_civil(yv, mov, dv);
+    return result_ok(days * 86400 + hv * 3600 + miv * 60 + sv);
+}

@@ -32,7 +32,14 @@ _Static_assert(OP_ADT_GET == 69, "LABC v2 ADT_GET value changed");
 _Static_assert(OP_LAZY == 70, "LABC v2 LAZY value changed");
 _Static_assert(OP_FORCE == 71, "LABC v2 FORCE value changed");
 _Static_assert(OP_BOOTSTRAP == 72, "LABC v2 BOOTSTRAP value changed");
-_Static_assert(OP_COUNT == 73, "LABC opcode count changed");
+_Static_assert(OP_LOAD_FUNCTION == 73, "LABC v2 LOAD_FUNCTION value changed");
+_Static_assert(OP_GENERATOR == 74, "LABC v3 GENERATOR value changed");
+_Static_assert(OP_YIELD == 75, "LABC v3 YIELD value changed");
+_Static_assert(OP_NEXT == 76, "LABC v3 NEXT value changed");
+_Static_assert(OP_ASYNC == 77, "LABC v4 ASYNC value changed");
+_Static_assert(OP_AWAIT == 78, "LABC v4 AWAIT value changed");
+_Static_assert(OP_RUN_ASYNC == 79, "LABC v4 RUN_ASYNC value changed");
+_Static_assert(OP_COUNT == 80, "LABC opcode count changed");
 
 #define CHECK(condition) do { if (!(condition)) { (void)fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__, __LINE__, #condition); return 1; } } while (0)
 
@@ -73,6 +80,53 @@ static int test_json_parse_clears_output_metadata(void) {
     CHECK(parsed.as.array->items[1].type == VAL_ARRAY);
     CHECK(parsed.as.array->items[1].derivation == NULL);
     CHECK(parsed.as.array->items[1].reactive == NULL);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+    return 0;
+}
+
+static int test_json_large_integer_duplicate_keys_and_sorted_stringify(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    Value parsed = lana_value_null();
+    Value stringified = lana_value_null();
+    LanaMap *map;
+    Value one = lana_value_number(1.0);
+    Value two = lana_value_number(2.0);
+    size_t offset = 0u;
+
+    lana_chunk_init(&chunk);
+    lana_vm_init(&vm, &chunk);
+
+    /* Large integer beyond 2^53 is preserved as a string. */
+    CHECK(lana_json_parse(&vm, "9007199254740993", &parsed) == LANA_OK);
+    CHECK(parsed.type == VAL_STRING);
+    CHECK(strcmp(parsed.as.string, "9007199254740993") == 0);
+
+    /* A 16-digit integer at or below 2^53 stays a number. */
+    CHECK(lana_json_parse(&vm, "9007199254740992", &parsed) == LANA_OK);
+    CHECK(parsed.type == VAL_NUMBER);
+    CHECK(parsed.as.number == 9007199254740992.0);
+
+    /* Duplicate keys: last occurrence wins. */
+    CHECK(lana_json_parse(&vm, "{\"a\":1,\"a\":2}", &parsed) == LANA_OK);
+    CHECK(parsed.type == VAL_MAP);
+    CHECK(parsed.as.map->count == 1u);
+    CHECK(parsed.as.map->entries[0].value->type == VAL_NUMBER);
+    CHECK(parsed.as.map->entries[0].value->as.number == 2.0);
+
+    /* Stringify sorts object keys. */
+    CHECK(lana_map_new(&vm, 2u, &map) == LANA_OK);
+    CHECK(lana_map_set(&vm, map, "b", &two, false) == LANA_OK);
+    CHECK(lana_map_set(&vm, map, "a", &one, false) == LANA_OK);
+    { Value map_value = lana_value_map(map);
+      CHECK(lana_json_stringify(&vm, &map_value, &stringified) == LANA_OK); }
+    CHECK(strcmp(stringified.as.string, "{\"a\":1,\"b\":2}") == 0);
+
+    /* Invalid JSON reports a byte offset. */
+    CHECK(lana_json_parse_offset(&vm, "[1,2] x", &parsed, &offset) == LANA_ERR_PARSE);
+    CHECK(offset == 6u);
+
     lana_vm_free(&vm);
     lana_chunk_free(&chunk);
     return 0;
@@ -259,7 +313,7 @@ static int test_exact_distribution_rejection_and_limits(void) {
     chunk.code[0] = instruction(OP_ESTIMATE_MEASURE_PROBABILITY, 0, 1,
                                  LANA_MEASURE_BASIS_X, 0);
     CHECK(lana_chunk_verify(&chunk, &error) == LANA_ERR_FORMAT);
-    chunk.version = 3u;
+    chunk.version = 5u;
     chunk.code[0] = instruction(OP_MEASURE_BASIS, 0, 1, LANA_MEASURE_BASIS_X,
                                  LANA_MEASURE_PROBABILITY);
     CHECK(lana_chunk_verify(&chunk, &error) == LANA_ERR_FORMAT);
@@ -366,9 +420,13 @@ static int test_verifier_rejects_bad_opcode_and_jump(void) {
     chunk.code[0] = instruction(OP_JUMP, 0, 0, 0, 99u);
     CHECK(lana_chunk_verify(&chunk, &error) == LANA_ERR_JUMP);
     chunk.code[0] = instruction(OP_HALT, 0, 0, 0, 0);
-    chunk.version = LABC_VERSION + 1u;
+    chunk.version = LABC_VERSION_4 + 1u;
     CHECK(lana_chunk_verify(&chunk, &error) == LANA_ERR_FORMAT);
     chunk.version = LABC_VERSION_1;
+    CHECK(lana_chunk_verify(&chunk, &error) == LANA_OK);
+    chunk.version = LABC_VERSION_3;
+    CHECK(lana_chunk_verify(&chunk, &error) == LANA_OK);
+    chunk.version = LABC_VERSION_4;
     CHECK(lana_chunk_verify(&chunk, &error) == LANA_OK);
     lana_chunk_free(&chunk);
     return 0;
@@ -380,6 +438,15 @@ static int test_labc_host_calls_are_contiguous(void) {
     CHECK(LANA_HOST_SAMPLE_RECORD == LANA_HOST_ARGS + 29);
     CHECK(LANA_HOST_DIRECTORY_LIST == LANA_HOST_INFORMATION_INSPECT + 1);
     CHECK(LANA_HOST_WRITE_TEXT_ATOMIC == LANA_HOST_DIRECTORY_LIST + 3);
+    CHECK(LANA_HOST_GETENV == LANA_HOST_SET_DIFFERENCE + 1);
+    CHECK(LANA_HOST_RANDOM_SEED == LANA_HOST_GETENV + 1);
+    CHECK(LANA_HOST_FLOOR == LANA_HOST_RANDOM_SEED + 1);
+    CHECK(LANA_HOST_FORMAT == LANA_HOST_TYPE_OF + 1);
+    CHECK(LANA_HOST_FORMAT_NUMBER == LANA_HOST_FORMAT + 1);
+    CHECK(LANA_HOST_CHAR_LENGTH == LANA_HOST_FORMAT_NUMBER + 1);
+    CHECK(LANA_HOST_STRING_CODEPOINT_SLICE == LANA_HOST_CHAR_LENGTH + 1);
+    CHECK(LANA_HOST_TO_UPPER == LANA_HOST_STRING_CODEPOINT_SLICE + 1);
+    CHECK(LANA_HOST_TO_LOWER == LANA_HOST_TO_UPPER + 1);
     return 0;
 }
 
@@ -473,6 +540,97 @@ static int test_lazy_datasets(void) {
     {
         LanaErrorInfo error = {0};
         CHECK(lana_chunk_verify(&chunk, &error) == LANA_OK);
+    }
+    lana_chunk_free(&chunk);
+    return 0;
+}
+
+static int test_generator_suspension(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    uint32_t ten, twenty, fn_index, main_entry;
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION_3;
+
+    /* Generator function (arity 0): yields 10, then 20, then returns. */
+    CHECK(add_number(&chunk, 10.0, &ten) == 0);
+    CHECK(add_number(&chunk, 20.0, &twenty) == 0);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 1, 0, 0, ten)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_YIELD, 0, 1, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 1, 0, 0, twenty)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_YIELD, 0, 1, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_RETURN, 0, 0, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_add_function(&chunk, "gen", 0u, 2u, 0u, &fn_index) == LANA_OK);
+    CHECK(fn_index == 0u);
+
+    /* Main: create the generator, then next() it three times. */
+    main_entry = (uint32_t)chunk.code_count;
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_GENERATOR, 1, fn_index, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_NEXT, 1, 2, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_NEXT, 1, 3, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_NEXT, 1, 4, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    chunk.entry = main_entry;
+
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_OK);
+    /* The generator value is suspended, not executed, until next(). */
+    CHECK(vm.frames[0].registers[1].type == VAL_GENERATOR);
+    CHECK(vm.frames[0].registers[1].as.generator->function == 0u);
+    /* First next() yields result_ok(10). */
+    CHECK(vm.frames[0].registers[2].type == VAL_ARRAY);
+    CHECK(vm.frames[0].registers[2].as.array->count == 2u);
+    CHECK(vm.frames[0].registers[2].as.array->items[0].as.boolean);
+    CHECK(vm.frames[0].registers[2].as.array->items[1].as.number == 10.0);
+    /* Second next() yields result_ok(20). */
+    CHECK(vm.frames[0].registers[3].as.array->items[0].as.boolean);
+    CHECK(vm.frames[0].registers[3].as.array->items[1].as.number == 20.0);
+    /* Third next() after return yields result_error("exhausted"). */
+    CHECK(!vm.frames[0].registers[4].as.array->items[0].as.boolean);
+    CHECK(strcmp(vm.frames[0].registers[4].as.array->items[1].as.string, "exhausted") == 0);
+    CHECK(vm.frames[0].registers[1].as.generator->exhausted);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    /* next() on a non-generator operand returns LANA_ERR_TYPE. */
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION_3;
+    CHECK(add_number(&chunk, 0.0, &ten) == 0);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 1, 0, 0, ten)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_NEXT, 1, 2, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_ERR_TYPE);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    /* Verifier accepts GENERATOR/YIELD/NEXT in a v3 chunk. */
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION_3;
+    CHECK(lana_chunk_add_function(&chunk, "gen", 0u, 2u, 0u, &fn_index) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_YIELD, 0, 1, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_RETURN, 0, 0, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_GENERATOR, 1, fn_index, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_NEXT, 1, 2, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    {
+        LanaErrorInfo error = {0};
+        CHECK(lana_chunk_verify(&chunk, &error) == LANA_OK);
+    }
+    lana_chunk_free(&chunk);
+
+    /* Verifier rejects GENERATOR/YIELD/NEXT in a v2 chunk. */
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+    CHECK(lana_chunk_add_function(&chunk, "gen", 0u, 2u, 0u, &fn_index) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_YIELD, 0, 1, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_RETURN, 0, 0, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_GENERATOR, 1, fn_index, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_NEXT, 1, 2, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    {
+        LanaErrorInfo error = {0};
+        CHECK(lana_chunk_verify(&chunk, &error) == LANA_ERR_OPCODE);
     }
     lana_chunk_free(&chunk);
     return 0;
@@ -1051,9 +1209,517 @@ static int test_m6_reactive_observation_claim_and_effect_receipts(void) {
     return 0;
 }
 
+static int test_set_operations(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    uint32_t a, b, z, forty_two;
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("a"), &a) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("b"), &b) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("z"), &z) == LANA_OK);
+    CHECK(add_number(&chunk, 42.0, &forty_two) == 0);
+
+    /* set_new -> R1 (empty). */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 1, LANA_HOST_SET_NEW, 0, 0)) == LANA_OK);
+    /* set_add(R1, "a") -> R2 = {a}. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 2, 0, 0, a)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 3, LANA_HOST_SET_ADD, 1, 2)) == LANA_OK);
+    /* set_add(R3, "b") -> R4 = {a, b}. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 4, 0, 0, b)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 5, LANA_HOST_SET_ADD, 3, 2)) == LANA_OK);
+    /* set_add(R5, "a") again -> R6 = {a, b} (idempotent). */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 6, 0, 0, a)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 7, LANA_HOST_SET_ADD, 5, 2)) == LANA_OK);
+    /* set_contains(R7, "a") -> R8 = true. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 8, 0, 0, a)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 9, LANA_HOST_SET_CONTAINS, 7, 2)) == LANA_OK);
+    /* set_contains(R7, "z") -> R10 = false. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 8, 0, 0, z)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 10, LANA_HOST_SET_CONTAINS, 7, 2)) == LANA_OK);
+    /* set_add(R1, 42) -> R11 = {42}. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 2, 0, 0, forty_two)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 11, LANA_HOST_SET_ADD, 1, 2)) == LANA_OK);
+    /* set_contains(R11, 42) -> R12 = true. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 12, 0, 0, forty_two)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 13, LANA_HOST_SET_CONTAINS, 11, 2)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_OK);
+    CHECK(vm.frames[0].registers[1].type == VAL_SET);
+    CHECK(vm.frames[0].registers[1].as.set->count == 0u);
+    CHECK(vm.frames[0].registers[3].type == VAL_SET);
+    CHECK(vm.frames[0].registers[3].as.set->count == 1u);
+    CHECK(strcmp(vm.frames[0].registers[3].as.set->items[0].as.string, "a") == 0);
+    CHECK(vm.frames[0].registers[5].type == VAL_SET);
+    CHECK(vm.frames[0].registers[5].as.set->count == 2u);
+    CHECK(vm.frames[0].registers[7].type == VAL_SET);
+    CHECK(vm.frames[0].registers[7].as.set->count == 2u);
+    CHECK(vm.frames[0].registers[9].type == VAL_BOOL);
+    CHECK(vm.frames[0].registers[9].as.boolean == true);
+    CHECK(vm.frames[0].registers[10].type == VAL_BOOL);
+    CHECK(vm.frames[0].registers[10].as.boolean == false);
+    CHECK(vm.frames[0].registers[11].type == VAL_SET);
+    CHECK(vm.frames[0].registers[11].as.set->count == 1u);
+    CHECK(vm.frames[0].registers[11].as.set->items[0].as.number == 42.0);
+    CHECK(vm.frames[0].registers[13].type == VAL_BOOL);
+    CHECK(vm.frames[0].registers[13].as.boolean == true);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    /* set_union / set_intersect / set_difference. */
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("a"), &a) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("b"), &b) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("c"), &z) == LANA_OK);
+    /* R1 = {a, b}. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 1, LANA_HOST_SET_NEW, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 2, 0, 0, a)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 3, LANA_HOST_SET_ADD, 1, 2)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 4, 0, 0, b)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 5, LANA_HOST_SET_ADD, 3, 2)) == LANA_OK);
+    /* R6 = {b, c}. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 6, LANA_HOST_SET_NEW, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 7, 0, 0, b)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 8, LANA_HOST_SET_ADD, 6, 2)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 9, 0, 0, z)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 10, LANA_HOST_SET_ADD, 8, 2)) == LANA_OK);
+    /* Move R10 -> R6 so the two sets are consecutive for the binary set ops. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_MOVE, 6, 10, 0, 0)) == LANA_OK);
+    /* union(R5, R6) -> R11 = {a, b, c}. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 11, LANA_HOST_SET_UNION, 5, 2)) == LANA_OK);
+    /* intersect(R5, R6) -> R12 = {b}. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 12, LANA_HOST_SET_INTERSECT, 5, 2)) == LANA_OK);
+    /* difference(R5, R6) -> R13 = {a}. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 13, LANA_HOST_SET_DIFFERENCE, 5, 2)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_OK);
+    CHECK(vm.frames[0].registers[11].type == VAL_SET);
+    CHECK(vm.frames[0].registers[11].as.set->count == 3u);
+    CHECK(vm.frames[0].registers[12].type == VAL_SET);
+    CHECK(vm.frames[0].registers[12].as.set->count == 1u);
+    CHECK(strcmp(vm.frames[0].registers[12].as.set->items[0].as.string, "b") == 0);
+    CHECK(vm.frames[0].registers[13].type == VAL_SET);
+    CHECK(vm.frames[0].registers[13].as.set->count == 1u);
+    CHECK(strcmp(vm.frames[0].registers[13].as.set->items[0].as.string, "a") == 0);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    /* STATE insertion is rejected with LANA_ERR_TYPE. */
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+    CHECK(add_number(&chunk, 0.5, &a) == 0);
+    CHECK(add_number(&chunk, 0.0, &b) == 0);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 1, LANA_HOST_SET_NEW, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_STATE_NEW, 2, a, b, b)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 3, LANA_HOST_SET_ADD, 1, 2)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_ERR_TYPE);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    return 0;
+}
+
+static int test_getenv_host_call(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    uint32_t name, missing;
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("LANA_TEST_GETENV"), &name) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("LANA_TEST_GETENV_UNSET"), &missing) == LANA_OK);
+
+    /* getenv("LANA_TEST_GETENV") -> R1 = "hello". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 1, 0, 0, name)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 2, LANA_HOST_GETENV, 1, 1)) == LANA_OK);
+    /* getenv("LANA_TEST_GETENV_UNSET") -> R3 = "". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 3, 0, 0, missing)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 4, LANA_HOST_GETENV, 3, 1)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+
+    CHECK(setenv("LANA_TEST_GETENV", "hello", 1) == 0);
+    CHECK(unsetenv("LANA_TEST_GETENV_UNSET") == 0);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_OK);
+    CHECK(vm.frames[0].registers[2].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[2].as.string, "hello") == 0);
+    CHECK(vm.frames[0].registers[4].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[4].as.string, "") == 0);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+    CHECK(unsetenv("LANA_TEST_GETENV") == 0);
+
+    return 0;
+}
+
+static int test_random_seed_and_floor(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    uint32_t pos, neg, seed;
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+
+    CHECK(add_number(&chunk, 3.7, &pos) == 0);
+    CHECK(add_number(&chunk, -1.2, &neg) == 0);
+    CHECK(add_number(&chunk, 42.0, &seed) == 0);
+
+    /* floor(3.7) -> R1 = 3.0. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 0, 0, 0, pos)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 1, LANA_HOST_FLOOR, 0, 1)) == LANA_OK);
+    /* floor(-1.2) -> R3 = -2.0. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 2, 0, 0, neg)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 3, LANA_HOST_FLOOR, 2, 1)) == LANA_OK);
+    /* random_seed(42) -> R5 = null. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 4, 0, 0, seed)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 5, LANA_HOST_RANDOM_SEED, 4, 1)) == LANA_OK);
+    /* random() -> R6 in [0, 1). */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 6, LANA_HOST_RANDOM, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_OK);
+    CHECK(vm.frames[0].registers[1].type == VAL_NUMBER);
+    CHECK(vm.frames[0].registers[1].as.number == 3.0);
+    CHECK(vm.frames[0].registers[3].type == VAL_NUMBER);
+    CHECK(vm.frames[0].registers[3].as.number == -2.0);
+    CHECK(vm.frames[0].registers[5].type == VAL_NULL);
+    CHECK(vm.frames[0].registers[6].type == VAL_NUMBER);
+    CHECK(vm.frames[0].registers[6].as.number >= 0.0);
+    CHECK(vm.frames[0].registers[6].as.number < 1.0);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    return 0;
+}
+
+static int test_string_to_number_and_type_of(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    uint32_t num, bad, num_val, str_val;
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("42"), &num) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("abc"), &bad) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(42.0), &num_val) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("x"), &str_val) == LANA_OK);
+
+    /* string_to_number("42") -> R1 = [true, 42.0]. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 1, 0, 0, num)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 2, LANA_HOST_STRING_TO_NUMBER, 1, 1)) == LANA_OK);
+    /* string_to_number("abc") -> R3 = [false, "invalid number"]. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 3, 0, 0, bad)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 4, LANA_HOST_STRING_TO_NUMBER, 3, 1)) == LANA_OK);
+    /* type_of(42) -> R5 = "number". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 5, 0, 0, num_val)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 6, LANA_HOST_TYPE_OF, 5, 1)) == LANA_OK);
+    /* type_of("x") -> R7 = "string". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 7, 0, 0, str_val)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 8, LANA_HOST_TYPE_OF, 7, 1)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_OK);
+    CHECK(vm.frames[0].registers[2].type == VAL_ARRAY);
+    CHECK(vm.frames[0].registers[2].as.array->count == 2u);
+    CHECK(vm.frames[0].registers[2].as.array->items[0].type == VAL_BOOL);
+    CHECK(vm.frames[0].registers[2].as.array->items[0].as.boolean == true);
+    CHECK(vm.frames[0].registers[2].as.array->items[1].type == VAL_NUMBER);
+    CHECK(vm.frames[0].registers[2].as.array->items[1].as.number == 42.0);
+    CHECK(vm.frames[0].registers[4].type == VAL_ARRAY);
+    CHECK(vm.frames[0].registers[4].as.array->items[0].as.boolean == false);
+    CHECK(vm.frames[0].registers[4].as.array->items[1].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[4].as.array->items[1].as.string, "invalid number") == 0);
+    CHECK(vm.frames[0].registers[6].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[6].as.string, "number") == 0);
+    CHECK(vm.frames[0].registers[8].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[8].as.string, "string") == 0);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    return 0;
+}
+
+static int test_format_host_calls(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    uint32_t fmt, num, ok, num2, prec2, prec0, fmt3, t, n, five, fmt1, one, two;
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("value: {} ({})"), &fmt) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(3.14), &num) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("ok"), &ok) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(3.14159), &num2) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(2.0), &prec2) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(0.0), &prec0) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("{} {} {}"), &fmt3) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_bool(true), &t) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_null(), &n) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(5.0), &five) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("{}"), &fmt1) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(1.0), &one) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(2.0), &two) == LANA_OK);
+
+    /* format("value: {} ({})", 3.14, "ok") -> R4 = "value: 3.1400000000000001 (ok)". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 1, 0, 0, fmt)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 2, 0, 0, num)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 3, 0, 0, ok)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 4, LANA_HOST_FORMAT, 1, 3)) == LANA_OK);
+    /* format_number(3.14159) -> R6 = "3.1415899999999999" (round-trip). */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 5, 0, 0, num2)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 6, LANA_HOST_FORMAT_NUMBER, 5, 1)) == LANA_OK);
+    /* format_number(3.14159, 2) -> R9 = "3.14". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 7, 0, 0, num2)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 8, 0, 0, prec2)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 9, LANA_HOST_FORMAT_NUMBER, 7, 2)) == LANA_OK);
+    /* format_number(3.14159, 0) -> R12 = "3". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 10, 0, 0, num2)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 11, 0, 0, prec0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 12, LANA_HOST_FORMAT_NUMBER, 10, 2)) == LANA_OK);
+    /* format("{} {} {}", true, null, 5) -> R17 = "true null 5". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 13, 0, 0, fmt3)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 14, 0, 0, t)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 15, 0, 0, n)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 16, 0, 0, five)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 17, LANA_HOST_FORMAT, 13, 4)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_OK);
+    CHECK(vm.frames[0].registers[4].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[4].as.string, "value: 3.1400000000000001 (ok)") == 0);
+    CHECK(vm.frames[0].registers[6].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[6].as.string, "3.1415899999999999") == 0);
+    CHECK(vm.frames[0].registers[9].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[9].as.string, "3.14") == 0);
+    CHECK(vm.frames[0].registers[12].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[12].as.string, "3") == 0);
+    CHECK(vm.frames[0].registers[17].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[17].as.string, "true null 5") == 0);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    /* format("{}", 1, 2) — too many args — is a Format error, not a crash. */
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("{}"), &fmt1) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(1.0), &one) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(2.0), &two) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 1, 0, 0, fmt1)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 2, 0, 0, one)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 3, 0, 0, two)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 4, LANA_HOST_FORMAT, 1, 3)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_ERR_FORMAT);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    return 0;
+}
+
+static int test_unicode_host_calls(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    uint32_t hello, hello_upper, sharp_s, dotted_i, dotless_i, final_sigma, cap_sharp_s;
+    uint32_t he_llo, emoji, truncated, bad_byte, zero, two;
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+
+    /* Golden vectors (shared with the Rust mirror test). */
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("hello"), &hello) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("HELLO"), &hello_upper) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("Stra\303\237e"), &sharp_s) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\304\260"), &dotted_i) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\304\261"), &dotless_i) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\317\202"), &final_sigma) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\341\272\236"), &cap_sharp_s) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("h\303\251llo"), &he_llo) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\360\237\230\200"), &emoji) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\303"), &truncated) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\377"), &bad_byte) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(0.0), &zero) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(2.0), &two) == LANA_OK);
+
+    /* char_length("hello") -> R1 = 5. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 0, 0, 0, hello)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 1, LANA_HOST_CHAR_LENGTH, 0, 1)) == LANA_OK);
+    /* char_length("héllo") -> R3 = 5 (é is one code point). */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 2, 0, 0, he_llo)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 3, LANA_HOST_CHAR_LENGTH, 2, 1)) == LANA_OK);
+    /* char_length("😀") -> R5 = 1. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 4, 0, 0, emoji)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 5, LANA_HOST_CHAR_LENGTH, 4, 1)) == LANA_OK);
+    /* string_codepoint_slice("héllo", 0, 2) -> R9 = "hé". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 6, 0, 0, he_llo)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 7, 0, 0, zero)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 8, 0, 0, two)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 9, LANA_HOST_STRING_CODEPOINT_SLICE, 6, 3)) == LANA_OK);
+    /* to_upper("hello") -> R11 = "HELLO". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 10, 0, 0, hello)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 11, LANA_HOST_TO_UPPER, 10, 1)) == LANA_OK);
+    /* to_lower("HELLO") -> R13 = "hello". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 12, 0, 0, hello_upper)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 13, LANA_HOST_TO_LOWER, 12, 1)) == LANA_OK);
+    /* to_upper("Straße") -> R15 = "STRAßE" (ß has no simple uppercase). */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 14, 0, 0, sharp_s)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 15, LANA_HOST_TO_UPPER, 14, 1)) == LANA_OK);
+    /* to_lower("İ") -> R17 = "i". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 16, 0, 0, dotted_i)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 17, LANA_HOST_TO_LOWER, 16, 1)) == LANA_OK);
+    /* to_upper("ı") -> R19 = "I". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 18, 0, 0, dotless_i)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 19, LANA_HOST_TO_UPPER, 18, 1)) == LANA_OK);
+    /* to_upper("ς") -> R21 = "Σ". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 20, 0, 0, final_sigma)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 21, LANA_HOST_TO_UPPER, 20, 1)) == LANA_OK);
+    /* to_lower("ẞ") -> R23 = "ß". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 22, 0, 0, cap_sharp_s)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 23, LANA_HOST_TO_LOWER, 22, 1)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_OK);
+    CHECK(vm.frames[0].registers[1].type == VAL_NUMBER);
+    CHECK(vm.frames[0].registers[1].as.number == 5.0);
+    CHECK(vm.frames[0].registers[3].as.number == 5.0);
+    CHECK(vm.frames[0].registers[5].as.number == 1.0);
+    CHECK(vm.frames[0].registers[9].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[9].as.string, "h\303\251") == 0);
+    CHECK(strcmp(vm.frames[0].registers[11].as.string, "HELLO") == 0);
+    CHECK(strcmp(vm.frames[0].registers[13].as.string, "hello") == 0);
+    CHECK(strcmp(vm.frames[0].registers[15].as.string, "STRA\303\237E") == 0);
+    CHECK(strcmp(vm.frames[0].registers[17].as.string, "i") == 0);
+    CHECK(strcmp(vm.frames[0].registers[19].as.string, "I") == 0);
+    CHECK(strcmp(vm.frames[0].registers[21].as.string, "\316\243") == 0);
+    CHECK(strcmp(vm.frames[0].registers[23].as.string, "\303\237") == 0);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    /* Invalid UTF-8 is a Schema error, not a crash. */
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\303"), &truncated) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\377"), &bad_byte) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 0, 0, 0, truncated)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 1, LANA_HOST_CHAR_LENGTH, 0, 1)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_ERR_SCHEMA);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("\377"), &bad_byte) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 0, 0, 0, bad_byte)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 1, LANA_HOST_TO_UPPER, 0, 1)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_ERR_SCHEMA);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+
+    return 0;
+}
+
+static int test_regex_host_calls(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    uint32_t a_plus, aaa, xxaaayy, dash, lparen, one;
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("a+"), &a_plus) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("aaa"), &aaa) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("xxaaayy"), &xxaaayy) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("-"), &dash) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_string("("), &lparen) == LANA_OK);
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(1.0), &one) == LANA_OK);
+
+    /* regex_compile("a+") -> R1 = [true, regex]. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 0, 0, 0, a_plus)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 1, LANA_HOST_REGEX_COMPILE, 0, 1)) == LANA_OK);
+    /* R3 = R1[1] (the compiled regex). */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 2, 0, 0, one)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_ARRAY_GET, 1, 2, 3, 0)) == LANA_OK);
+    /* regex_match(re, "aaa") -> R5 = [true, {start:0, end:3, text:"aaa"}]. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 4, 0, 0, aaa)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 5, LANA_HOST_REGEX_MATCH, 3, 2)) == LANA_OK);
+    /* regex_search(re, "xxaaayy") -> R8 = [true, {start:2, end:5, text:"aaa"}]. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_MOVE, 6, 3, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 7, 0, 0, xxaaayy)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 8, LANA_HOST_REGEX_SEARCH, 6, 2)) == LANA_OK);
+    /* regex_replace(re, "xxaaayy", "-") -> R12 = "xx-yy". */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_MOVE, 9, 3, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 10, 0, 0, xxaaayy)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 11, 0, 0, dash)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 12, LANA_HOST_REGEX_REPLACE, 9, 3)) == LANA_OK);
+    /* regex_compile("(") -> R14 = [false, "unterminated group"]. */
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 13, 0, 0, lparen)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 14, LANA_HOST_REGEX_COMPILE, 13, 1)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_OK);
+
+    /* R1 = [true, regex]. */
+    CHECK(vm.frames[0].registers[1].type == VAL_ARRAY);
+    CHECK(vm.frames[0].registers[1].as.array->count == 2u);
+    CHECK(vm.frames[0].registers[1].as.array->items[0].as.boolean);
+    CHECK(vm.frames[0].registers[1].as.array->items[1].type == VAL_REGEX);
+
+    /* R5 = [true, {start:0, end:3, text:"aaa"}]. */
+    CHECK(vm.frames[0].registers[5].type == VAL_ARRAY);
+    CHECK(vm.frames[0].registers[5].as.array->items[0].as.boolean);
+    CHECK(vm.frames[0].registers[5].as.array->items[1].type == VAL_MAP);
+    {
+        LanaMap *m = vm.frames[0].registers[5].as.array->items[1].as.map;
+        CHECK(m->count == 3u);
+        CHECK(strcmp(m->entries[0].key, "start") == 0);
+        CHECK(m->entries[0].value->as.number == 0.0);
+        CHECK(strcmp(m->entries[1].key, "end") == 0);
+        CHECK(m->entries[1].value->as.number == 3.0);
+        CHECK(strcmp(m->entries[2].key, "text") == 0);
+        CHECK(strcmp(m->entries[2].value->as.string, "aaa") == 0);
+    }
+
+    /* R8 = [true, {start:2, end:5, text:"aaa"}]. */
+    CHECK(vm.frames[0].registers[8].as.array->items[0].as.boolean);
+    {
+        LanaMap *m = vm.frames[0].registers[8].as.array->items[1].as.map;
+        CHECK(m->entries[0].value->as.number == 2.0);
+        CHECK(m->entries[1].value->as.number == 5.0);
+        CHECK(strcmp(m->entries[2].value->as.string, "aaa") == 0);
+    }
+
+    /* R12 = "xx-yy". */
+    CHECK(vm.frames[0].registers[12].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[12].as.string, "xx-yy") == 0);
+
+    /* R14 = [false, "unterminated group"]. */
+    CHECK(vm.frames[0].registers[14].type == VAL_ARRAY);
+    CHECK(!vm.frames[0].registers[14].as.array->items[0].as.boolean);
+    CHECK(vm.frames[0].registers[14].as.array->items[1].type == VAL_STRING);
+    CHECK(strcmp(vm.frames[0].registers[14].as.array->items[1].as.string, "unterminated group") == 0);
+
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+    return 0;
+}
+
 int main(void) {
     CHECK(test_state_construction() == 0);
     CHECK(test_json_parse_clears_output_metadata() == 0);
+    CHECK(test_json_large_integer_duplicate_keys_and_sorted_stringify() == 0);
     CHECK(test_state_canonicalization_and_transforms() == 0);
     CHECK(test_distribution_runtime() == 0);
     CHECK(test_basis_measurement_and_estimation() == 0);
@@ -1063,7 +1729,15 @@ int main(void) {
     CHECK(test_verifier_rejects_bad_opcode_and_jump() == 0);
     CHECK(test_labc_host_calls_are_contiguous() == 0);
     CHECK(test_lazy_datasets() == 0);
+    CHECK(test_generator_suspension() == 0);
     CHECK(test_correlated_host_call() == 0);
+    CHECK(test_set_operations() == 0);
+    CHECK(test_getenv_host_call() == 0);
+    CHECK(test_random_seed_and_floor() == 0);
+    CHECK(test_string_to_number_and_type_of() == 0);
+    CHECK(test_format_host_calls() == 0);
+    CHECK(test_unicode_host_calls() == 0);
+    CHECK(test_regex_host_calls() == 0);
     CHECK(test_assembler_serialization_and_loader() == 0);
     CHECK(test_assembler_indexed_fixups() == 0);
     CHECK(test_named_joint_information() == 0);

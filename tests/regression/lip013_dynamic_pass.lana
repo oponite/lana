@@ -1,0 +1,21 @@
+// LIP-013: Tensor<Dynamic> defers the shape check to runtime.
+
+type Layer = Dense(in: Shape, out: Shape, weights: Tensor<[in, out]>) | Conv(in: Shape, out: Shape, kernel: Shape) | Relu(shape: Shape);
+type Model = Sequential(Layer, Layer) | Residual(Layer, Layer) | Branch(Layer, Layer, Layer);
+
+// A Dynamic-typed tensor carries no compile-time shape, so the Dense
+// weights constraint is deferred rather than rejected.
+let w: Tensor<Dynamic> = tensor([[1.0, 2.0], [3.0, 4.0]]);
+let d1 = Dense([2], [2], w);
+let d2 = Dense([2], [2], tensor([[1.0, 2.0], [3.0, 4.0]]));
+let m = Sequential(d1, d2);
+
+let kind = match m {
+    Sequential(a, b) => "sequential"
+    Residual(a, b) => "residual"
+    Branch(a, b, c) => "branch"
+    unknown => "unknown"
+};
+assert(kind == "sequential", "Dynamic model must still be a Sequential value");
+
+print("LIP013_DYNAMIC_PASS");

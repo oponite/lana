@@ -86,6 +86,26 @@ pub enum OpCode {
     Force,
     /* Lana 2.0 deterministic resampling. */
     Bootstrap,
+    /* Lana 2.1 reverse-mode autodiff (LIP-011): load a function value so it
+     * can be passed to the `grad`/`vjp` host calls. */
+    LoadFunction,
+    /* Lana 2.1 generator suspension (LIP-022 §2). */
+    Generator,
+    Yield,
+    Next,
+    /* Lana 2.2 async/await (LIP-024). Operand semantics:
+     *   OP_ASYNC <target> <arg0> <argcount> <dest> — create a cold future by
+     *     calling async function <target> with <argcount> arguments starting at
+     *     register <arg0>, storing the future in <dest>. The body is NOT
+     *     executed (mirrors OP_GENERATOR).
+     *   OP_AWAIT <future> <dest> — suspend the current async frame until the
+     *     future in <future> completes, then store its result in <dest> and
+     *     yield control to the event loop.
+     *   OP_RUN_ASYNC <future> <dest> — run the event loop to completion on the
+     *     future in <future>, then store its result in <dest>. */
+    Async,
+    Await,
+    RunAsync,
     Count,
 }
 
@@ -168,6 +188,13 @@ impl OpCode {
             Lazy => "LAZY",
             Force => "FORCE",
             Bootstrap => "BOOTSTRAP",
+            Generator => "GENERATOR",
+            Yield => "YIELD",
+            Next => "NEXT",
+            Async => "ASYNC",
+            Await => "AWAIT",
+            RunAsync => "RUN_ASYNC",
+            LoadFunction => "LOAD_FUNCTION",
             Count => "COUNT",
         }
     }
@@ -189,5 +216,7 @@ impl TryFrom<u8> for OpCode {
 /// LABC version constants, mirroring `vm/include/bytecode.h`.
 pub const LABC_VERSION: u32 = 2;
 pub const LABC_VERSION_1: u32 = 1;
+pub const LABC_VERSION_3: u32 = 3;
+pub const LABC_VERSION_4: u32 = 4;
 pub const LANA_MAX_REGISTERS: u32 = 256;
 pub const LANA_MAX_CALL_FRAMES: u32 = 64;

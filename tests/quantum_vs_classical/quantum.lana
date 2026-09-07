@@ -1,0 +1,87 @@
+// Quantum vs classical: Lana emits both the classical projection and the
+// quantum result for each experiment, so the harness can diff against
+// Python/Java (classical only).
+
+// --- experiment 1: distinguish (same p, opposite phase) ---
+state plus  = state(p: 0.5, d: 0.8);
+state minus = state(p: 0.5, d: -0.8);
+let d_classical = map_new();
+map_set(d_classical, "plus", measure plus as probability);
+map_set(d_classical, "minus", measure minus as probability);
+let d_quantum = map_new();
+map_set(d_quantum, "x_plus", measure plus in x as probability);
+map_set(d_quantum, "x_minus", measure minus in x as probability);
+
+// --- experiment 2: invert flips phase, not just p ---
+state s = state(p: 0.3, d_re: 0.0, d_im: 0.8);
+let i_classical = map_new();
+map_set(i_classical, "before", measure s as probability);
+let y_before = measure s in y as probability;
+transform s with invert();
+map_set(i_classical, "after", measure s as probability);
+let y_after = measure s in y as probability;
+let i_quantum = map_new();
+map_set(i_quantum, "y_before", y_before);
+map_set(i_quantum, "y_after", y_after);
+
+// --- experiment 3: trace distance degeneracy ---
+state a = state(p: 0.5, d: 0.8);
+state b = state(p: 0.5, d: -0.8);
+let dist_classical = a.p - b.p;
+let dist_quantum = trace_distance a b;
+
+// --- experiment 4: neutralize IS classical probability ---
+state n = state(p: 0.5, d: 0.8);
+let n_classical = map_new();
+map_set(n_classical, "before", measure n as probability);
+let x_before = measure n in x as probability;
+transform n with neutralize();
+map_set(n_classical, "after", measure n as probability);
+let x_after = measure n in x as probability;
+let n_quantum = map_new();
+map_set(n_quantum, "x_before", x_before);
+map_set(n_quantum, "x_after", x_after);
+
+// --- experiment 5: agreement vs disagreement ---
+state agree1 = state(p: 0.7, d: 0.6);
+state agree2 = state(p: 0.7, d: 0.6);
+state oppose = state(p: 0.7, d: -0.6);
+let fa = append(agree1, agree2);
+let fo = append(agree1, oppose);
+let a_classical = map_new();
+map_set(a_classical, "agree", measure fa as probability);
+map_set(a_classical, "oppose", measure fo as probability);
+let a_quantum = map_new();
+map_set(a_quantum, "input_distance_agree", trace_distance agree1 agree2);
+map_set(a_quantum, "input_distance_oppose", trace_distance agree1 oppose);
+map_set(a_quantum, "aligned_sample_d_re", sample_value(sample(fa)).d_re);
+map_set(a_quantum, "opposed_sample_d_re", sample_value(sample(fo)).d_re);
+
+// --- assemble ---
+let out = map_new();
+let e1 = map_new();
+map_set(e1, "classical", d_classical);
+map_set(e1, "quantum", d_quantum);
+map_set(out, "distinguish", e1);
+
+let e2 = map_new();
+map_set(e2, "classical", i_classical);
+map_set(e2, "quantum", i_quantum);
+map_set(out, "invert", e2);
+
+let e3 = map_new();
+map_set(e3, "classical", dist_classical);
+map_set(e3, "quantum", dist_quantum);
+map_set(out, "distance", e3);
+
+let e4 = map_new();
+map_set(e4, "classical", n_classical);
+map_set(e4, "quantum", n_quantum);
+map_set(out, "neutralize", e4);
+
+let e5 = map_new();
+map_set(e5, "classical", a_classical);
+map_set(e5, "quantum", a_quantum);
+map_set(out, "agreement", e5);
+
+print(json_stringify(out));

@@ -1,0 +1,14 @@
+let i = 0;
+let total = 0;
+
+while (i < 1000000) {
+    state a = state(p: 0.5, d: 0.3);
+    state b = state(p: 0.9, d: 0.65);
+    let combined = append(a, b);
+    transform combined with invert();
+    let probability = measure combined as probability;
+    total = total + probability;
+    i = i + 1;
+}
+
+print(total);

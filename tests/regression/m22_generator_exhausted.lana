@@ -1,0 +1,12 @@
+fn once() {
+    yield 1;
+}
+
+let it = once();
+let r1 = next(it);
+let r2 = next(it);
+assert(result_is_ok(r1), "first next was not ok");
+assert(result_value(r1) == 1, "first yield was not 1");
+assert(!result_is_ok(r2), "exhausted generator did not return error");
+assert(result_error_value(r2) == "exhausted", "exhausted error was not 'exhausted'");
+print("M22_GENERATOR_EXHAUSTED");

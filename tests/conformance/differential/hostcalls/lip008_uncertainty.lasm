@@ -1,0 +1,76 @@
+.function main 0 32
+# LIP-008: uncertainty-carrying tensors. Build two uncertain tensors
+# { prediction, uncertainty } and propagate variance through add, mul,
+# matmul, sum, and mean.
+
+# a_pred = [1, 2]
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 1
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 2
+HOST_CALL array_push R1 2 R1
+HOST_CALL tensor R1 1 R3
+
+# a_var = [0.5, 0.25]
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R4
+LOAD_CONST R5 0.5
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 0.25
+HOST_CALL array_push R4 2 R4
+HOST_CALL tensor R4 1 R6
+
+# uncertain_a = { prediction: a_pred, uncertainty: a_var }
+LOAD_CONST R7 prediction
+MOVE R8 R3
+LOAD_CONST R9 uncertainty
+MOVE R10 R6
+HOST_CALL map_new R7 4 R11
+
+# b_pred = [3, 4]
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R12
+LOAD_CONST R13 3
+HOST_CALL array_push R12 2 R12
+LOAD_CONST R13 4
+HOST_CALL array_push R12 2 R12
+HOST_CALL tensor R12 1 R14
+
+# b_var = [0.125, 0.0625]
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R15
+LOAD_CONST R16 0.125
+HOST_CALL array_push R15 2 R15
+LOAD_CONST R16 0.0625
+HOST_CALL array_push R15 2 R15
+HOST_CALL tensor R15 1 R17
+
+# uncertain_b = { prediction: b_pred, uncertainty: b_var }
+LOAD_CONST R18 prediction
+MOVE R19 R14
+LOAD_CONST R20 uncertainty
+MOVE R21 R17
+HOST_CALL map_new R18 4 R22
+
+# add: pred [4,6], var [0.625,0.3125]
+HOST_CALL tensor_add R11 2 R23
+PRINT R23
+
+# mul: pred [3,8], var [4.625,4.25]
+HOST_CALL tensor_mul R11 2 R24
+PRINT R24
+
+# matmul (dot): pred [11], var [8.875]
+HOST_CALL tensor_matmul R11 2 R25
+PRINT R25
+
+# sum: pred [10], var [0.9375]
+HOST_CALL tensor_sum R11 1 R26
+PRINT R26
+
+# mean: pred [2.5], var [0.05859375]
+HOST_CALL tensor_mean R11 1 R27
+PRINT R27
+
+RETURN R0

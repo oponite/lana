@@ -4,6 +4,15 @@ A LIP is a written proposal for a change to Lana's language, bytecode, or VM
 semantics. It is the mechanism by which a design target becomes an
 implementation-ready contract.
 
+The current implementation scope and verification state are tracked in
+[`MILESTONE-2.1.md`](MILESTONE-2.1.md). It includes LIPs 004–016 and 018–025;
+the package-manager/registry proposal (017) is deferred.
+
+[`LIP-026.md`](LIP-026.md) is the design charter: fifteen normative design
+requirements plus the ten-question design test that every surface change must
+answer. All LIPs carry the resulting "Design test" section (see
+[`TEMPLATE.md`](TEMPLATE.md)).
+
 ## When a LIP is required
 
 A LIP is required for any change to:
@@ -34,4 +43,16 @@ do not alter the contracts above.
 ## Format
 
 Copy [`TEMPLATE.md`](TEMPLATE.md). Every LIP carries: title, status, author,
-date, motivation, specification, rationale, compatibility, and test coverage.
+date, motivation, specification, rationale, design test, compatibility, and
+test coverage.
+
+## Mini LIPs (mLIPs)
+
+An **mLIP** is a written proposal for implementation work that makes **no
+contract change** — no source syntax, bytecode, VM semantics, or math objects.
+It is the vehicle for runtime/backend engineering (fused kernels, arena
+allocation, native loops) that is bounded by an existing LIP but does not alter
+it. Copy [`mLIP-TEMPLATE.md`](mLIP-TEMPLATE.md). Every mLIP carries: title,
+status, author, date, purpose, scope, implementation plan, verification, and
+out of scope. An mLIP that turns out to need a contract change is promoted to a
+full LIP.

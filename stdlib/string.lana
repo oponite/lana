@@ -1,0 +1,106 @@
+// std/string — text helpers layered over the string host calls.
+// Pure Lana; no new VM semantics. Indices are byte offsets (see std/unicode
+// for code-point-aware operations).
+
+fn join(parts, separator) {
+    return string_join(parts, separator);
+}
+
+fn starts_with(text, prefix) {
+    if (string_length(text) < string_length(prefix)) { return false; }
+    return string_slice(text, 0, string_length(prefix)) == prefix;
+}
+
+fn ends_with(text, suffix) {
+    let text_len = string_length(text);
+    let suffix_len = string_length(suffix);
+    if (text_len < suffix_len) { return false; }
+    return string_slice(text, text_len - suffix_len, text_len) == suffix;
+}
+
+fn contains(text, needle) {
+    let text_len = string_length(text);
+    let needle_len = string_length(needle);
+    if (needle_len == 0) { return true; }
+    if (text_len < needle_len) { return false; }
+    let i = 0;
+    while (i <= text_len - needle_len) {
+        if (string_slice(text, i, i + needle_len) == needle) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn substring(text, start, end) {
+    return string_slice(text, start, end);
+}
+
+fn split(text, separator) {
+    assert(string_length(separator) > 0, "split separator must be non-empty");
+    let result = array_new(0);
+    let text_len = string_length(text);
+    let sep_len = string_length(separator);
+    let start = 0;
+    let i = 0;
+    while (i <= text_len - sep_len) {
+        if (string_slice(text, i, i + sep_len) == separator) {
+            array_push(result, string_slice(text, start, i));
+            start = i + sep_len;
+            i = start;
+        } else {
+            i = i + 1;
+        }
+    }
+    array_push(result, string_slice(text, start, text_len));
+    return result;
+}
+
+fn is_whitespace(byte) {
+    if (byte == 32) { return true; }
+    if (byte == 9) { return true; }
+    if (byte == 10) { return true; }
+    if (byte == 13) { return true; }
+    return false;
+}
+
+fn trim(text) {
+    let text_len = string_length(text);
+    let start = 0;
+    let end = text_len;
+    let scanning = true;
+    while (scanning) {
+        if (start < end) {
+            if (is_whitespace(string_byte_at(text, start))) { start = start + 1; }
+            else { scanning = false; }
+        } else { scanning = false; }
+    }
+    scanning = true;
+    while (scanning) {
+        if (end > start) {
+            if (is_whitespace(string_byte_at(text, end - 1))) { end = end - 1; }
+            else { scanning = false; }
+        } else { scanning = false; }
+    }
+    return string_slice(text, start, end);
+}
+
+fn replace(text, old, new) {
+    assert(string_length(old) > 0, "replace target must be non-empty");
+    let result = "";
+    let text_len = string_length(text);
+    let old_len = string_length(old);
+    let start = 0;
+    let i = 0;
+    while (i <= text_len - old_len) {
+        if (string_slice(text, i, i + old_len) == old) {
+            result = string_concat(result, string_slice(text, start, i));
+            result = string_concat(result, new);
+            start = i + old_len;
+            i = start;
+        } else {
+            i = i + 1;
+        }
+    }
+    result = string_concat(result, string_slice(text, start, text_len));
+    return result;
+}

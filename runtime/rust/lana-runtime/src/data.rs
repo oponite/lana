@@ -13,7 +13,7 @@
 use std::sync::{Arc, Mutex};
 
 use lana_bytecode::LanaError;
-use lana_vm::value::{Array, Map, Value, ValueKind};
+use lana_vm::value::{Array, Map, MapEntry, Value, ValueKind};
 
 use crate::codec::format_17g;
 
@@ -179,7 +179,7 @@ fn json_value(parser: &mut JsonParser, depth: usize) -> Result<Value, LanaError>
             }
             parser.offset += 1;
             let item = json_value(parser, depth + 1)?;
-            if map.set(key, item, true).is_err() {
+            if map.set(key, item, false).is_err() {
                 return Err(LanaError::Parse);
             }
             parser.space();
@@ -213,9 +213,49 @@ fn json_value(parser: &mut JsonParser, depth: usize) -> Result<Value, LanaError>
         return Ok(Value::boolean(false));
     }
     // Number: `strtod` plus the strict leading `+`/`0` rejection.
+    let start = parser.offset;
     let (number, end) = parse_number_strict(parser.data, parser.offset)?;
     parser.offset = end;
-    Ok(Value::number(number))
+    if json_large_integer(&parser.data[start..end]) {
+        let text = std::str::from_utf8(&parser.data[start..end]).map_err(|_| LanaError::Parse)?;
+        Ok(Value::string(Arc::from(text)))
+    } else {
+        Ok(Value::number(number))
+    }
+}
+
+/// An integer literal whose magnitude exceeds 2^53 is not exactly representable
+/// in binary64; LIP-023 §3 preserves it as a string. Returns false for any
+/// token with a fraction or exponent.
+fn json_large_integer(token: &[u8]) -> bool {
+    if token.iter().any(|&b| b == b'.' || b == b'e' || b == b'E') {
+        return false;
+    }
+    let mut p = 0;
+    if p < token.len() && token[p] == b'-' {
+        p += 1;
+    }
+    while p < token.len() && token[p] == b'0' {
+        p += 1;
+    }
+    let first = p;
+    let digits = token.len() - p;
+    if digits < 16 {
+        return false;
+    }
+    if digits > 16 {
+        return true;
+    }
+    const LIMIT: &[u8] = b"9007199254740992";
+    for i in 0..16 {
+        if token[first + i] > LIMIT[i] {
+            return true;
+        }
+        if token[first + i] < LIMIT[i] {
+            return false;
+        }
+    }
+    false
 }
 
 fn parse_number_strict(data: &[u8], offset: usize) -> Result<(f64, usize), LanaError> {
@@ -349,7 +389,9 @@ fn json_emit(value: &Value, out: &mut String, stack: &mut Vec<usize>, depth: usi
         ValueKind::Map(map) => {
             out.push('{');
             let map = map.lock().unwrap();
-            for (index, entry) in map.entries.iter().enumerate() {
+            let mut entries: Vec<&MapEntry> = map.entries.iter().collect();
+            entries.sort_by(|a, b| a.key.cmp(&b.key));
+            for (index, entry) in entries.iter().enumerate() {
                 if index > 0 {
                     out.push(',');
                 }
@@ -588,6 +630,33 @@ mod tests {
     fn json_stringify_zero() {
         assert_eq!(json_stringify(&Value::number(0.0)).unwrap(), "0");
         assert_eq!(json_stringify(&Value::number(-0.0)).unwrap(), "0");
+    }
+
+    #[test]
+    fn json_preserves_large_integer_as_string() {
+        let value = json_parse("9007199254740993").unwrap();
+        assert_eq!(value.as_string(), Arc::from("9007199254740993"));
+        // At or below 2^53 stays a number.
+        let value = json_parse("9007199254740992").unwrap();
+        assert_eq!(value.as_number(), 9007199254740992.0);
+    }
+
+    #[test]
+    fn json_duplicate_keys_last_wins() {
+        let value = json_parse(r#"{"a":1,"a":2}"#).unwrap();
+        let ValueKind::Map(map) = &value.kind else { panic!("expected map") };
+        let map = map.lock().unwrap();
+        assert_eq!(map.entries.len(), 1);
+        assert_eq!(map.entries[0].value.as_number(), 2.0);
+    }
+
+    #[test]
+    fn json_stringify_sorts_keys() {
+        let mut map = Map::new(2);
+        map.set(Arc::from("b"), Value::number(2.0), false).unwrap();
+        map.set(Arc::from("a"), Value::number(1.0), false).unwrap();
+        let value = Value::map(Arc::new(Mutex::new(map)));
+        assert_eq!(json_stringify(&value).unwrap(), r#"{"a":1,"b":2}"#);
     }
 
     #[test]

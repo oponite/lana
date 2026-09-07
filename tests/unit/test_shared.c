@@ -187,8 +187,58 @@ static int test_shared_information_transactions(void) {
     return 0;
 }
 
+static int test_shared_capability_grant_revoke(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    LanaSharedInformation *shared;
+    LanaCapabilityToken *admin;
+    LanaCapabilityToken *use;
+    LanaCapabilityToken *admin_grant;
+    LanaCapabilityToken *revoked;
+    Value source = lana_value_number(7.0);
+
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_shared_information_create(&vm, &source, &shared,
+                                         &admin) == LANA_OK);
+
+    /* grant "use" (READ) and "admin" (ADMIN) from the admin token */
+    CHECK(lana_shared_capability_grant(admin, LANA_CAPABILITY_READ,
+                                       &use) == LANA_OK);
+    CHECK(lana_shared_capability_grant(admin, LANA_CAPABILITY_ADMIN,
+                                       &admin_grant) == LANA_OK);
+    CHECK(lana_shared_capability_allows(use, LANA_CAPABILITY_READ));
+    CHECK(!lana_shared_capability_allows(use, LANA_CAPABILITY_ADMIN));
+    CHECK(lana_shared_capability_allows(admin_grant, LANA_CAPABILITY_ADMIN));
+
+    /* invalidate a token: single-arg revoke, no admin check */
+    CHECK(lana_shared_capability_grant(admin, LANA_CAPABILITY_READ,
+                                       &revoked) == LANA_OK);
+    CHECK(lana_shared_capability_allows(revoked, LANA_CAPABILITY_READ));
+    CHECK(lana_shared_capability_invalidate(revoked) == LANA_OK);
+    CHECK(!lana_shared_capability_allows(revoked, LANA_CAPABILITY_READ));
+    CHECK(!lana_shared_capability_allows(revoked, LANA_CAPABILITY_ADMIN));
+
+    /* invalidate is idempotent */
+    CHECK(lana_shared_capability_invalidate(revoked) == LANA_OK);
+    CHECK(!lana_shared_capability_allows(revoked, LANA_CAPABILITY_READ));
+
+    /* admin revoke still works and is distinct from invalidate */
+    CHECK(lana_shared_capability_grant(admin, LANA_CAPABILITY_READ,
+                                       &revoked) == LANA_OK);
+    CHECK(lana_shared_capability_revoke(admin, revoked) == LANA_OK);
+    CHECK(!lana_shared_capability_allows(revoked, LANA_CAPABILITY_READ));
+
+    lana_shared_information_release(shared);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+    return 0;
+}
+
 int main(void) {
     CHECK(test_shared_information_transactions() == 0);
+    CHECK(test_shared_capability_grant_revoke() == 0);
     (void)printf("Shared Information tests passed\n");
     return 0;
 }

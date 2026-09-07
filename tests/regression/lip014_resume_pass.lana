@@ -1,0 +1,58 @@
+// LIP-014: whole-run reproducibility and resumability.
+
+fn model(params, x) { return params * x; }
+fn loss(y, target) { return sum((y - target) * (y - target)); }
+
+let train_cap = capability("train");
+let use = grant(train_cap, "use");
+
+// SGD (no momentum) on two points, two epochs, batch size 1 (four steps).
+// model(params, x) = params * x, loss = (y - target)^2.
+//   step 0: x=1, t=2 -> grad -4.0,  w = 0.4
+//   step 1: x=3, t=6 -> grad -28.8, w = 3.28
+//   step 2: x=1, t=2 -> grad 2.56,  w = 3.024
+//   step 3: x=3, t=6 -> grad 18.432, w = 1.1808
+let opt = sgd(0.1, 0.0);
+let data = [[tensor([1.0]), tensor([2.0])], [tensor([3.0]), tensor([6.0])]];
+let init = tensor([0.0]);
+let r = train(model, data, loss, opt, init, 2, 1);
+
+assert(array_length(r.steps) == 4, "four steps");
+
+// Snapshot the original run's tail before resuming, so immutability can be
+// checked against the pre-resume values (not float literals).
+let r_params0 = r.params[0];
+let r_step2_params = r.steps[2].parameters[0];
+let r_step3_params = r.steps[3].parameters[0];
+let r_step2_grad = r.steps[2].gradient[0];
+let r_step3_grad = r.steps[3].gradient[0];
+
+// Resume from step 1: the continuation must be byte-identical to the
+// original run's steps 2..3.
+let resumed = resume(r, 1);
+
+assert(array_length(resumed.steps) == 4, "resumed four steps");
+assert(resumed.params[0] == r_params0, "resumed final params match");
+
+// Byte-identical continuation: recomputed steps equal the original's.
+assert(resumed.steps[2].parameters[0] == r_step2_params,
+       "resumed step 2 params byte-identical");
+assert(resumed.steps[3].parameters[0] == r_step3_params,
+       "resumed step 3 params byte-identical");
+assert(resumed.steps[2].gradient[0] == r_step2_grad,
+       "resumed step 2 gradient byte-identical");
+assert(resumed.steps[3].gradient[0] == r_step3_grad,
+       "resumed step 3 gradient byte-identical");
+
+// The copied prefix is shared with the original (steps 0..1 unchanged).
+assert(resumed.steps[0].parameters[0] == r.steps[0].parameters[0],
+       "resumed step 0 params match");
+assert(resumed.steps[1].parameters[0] == r.steps[1].parameters[0],
+       "resumed step 1 params match");
+
+// The original run is immutable: its params and steps are untouched.
+assert(r.params[0] == r_params0, "original final params unchanged");
+assert(r.steps[2].parameters[0] == r_step2_params, "original step 2 unchanged");
+assert(r.steps[3].parameters[0] == r_step3_params, "original step 3 unchanged");
+
+print("LIP014_RESUME_PASS");

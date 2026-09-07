@@ -1,0 +1,1 @@
+{"business_date":"2026-09-07","eod_cutoff":"2026-09-07T17:00:00-04:00","in_scope_accounts":["ACC-1001","ACC-2200","ACC-1004"],"kind":"review_coverage_request","last_reviewed_at":{"ACC-1004":{"date":"2026-09-06","days_since":1}},"review_events":[{"account_id":"ACC-1001","actor":"pm.chen","geography_or_desk":"NY-desk","timestamp":"2026-09-07T09:15:00-04:00"}],"schema":1}

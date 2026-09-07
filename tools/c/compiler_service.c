@@ -17,6 +17,27 @@ static bool compiler_candidate(const char *directory, char *out, size_t out_size
     return written > 0 && (size_t)written < out_size && access(out, R_OK) == 0;
 }
 
+/* Point the compiler at the installed stdlib. The compiler bytecode sits at
+ * <prefix>/bin/lana-compiler.labc and the stdlib at <prefix>/share/lana/stdlib,
+ * so strip the last two path components and append the share path. Only set the
+ * variable when that directory exists (source-tree builds fall back to a
+ * cwd-relative `stdlib/`), and never override a user-supplied value. */
+static void set_stdlib_dir(const char *compiler_path) {
+    char prefix[4096];
+    char stdlib_dir[4096];
+    char *slash;
+    if (getenv("LANA_STDLIB_DIR") != NULL) return;
+    if (snprintf(prefix, sizeof(prefix), "%s", compiler_path) <= 0) return;
+    slash = strrchr(prefix, '/');
+    if (slash == NULL) return;
+    *slash = '\0'; /* <prefix>/bin */
+    slash = strrchr(prefix, '/');
+    if (slash == NULL) return;
+    *slash = '\0'; /* <prefix> */
+    if (snprintf(stdlib_dir, sizeof(stdlib_dir), "%s/share/lana/stdlib", prefix) <= 0) return;
+    if (access(stdlib_dir, R_OK) == 0) setenv("LANA_STDLIB_DIR", stdlib_dir, 1);
+}
+
 bool lana_compiler_find(const char *argv0, char *out, size_t out_size) {
     const char *configured = getenv("LANA_COMPILER_LABC");
     const char *path;
@@ -50,9 +71,10 @@ int lana_compiler_run(const char *compiler_path, size_t argument_count,
     *error = (LanaErrorInfo){0};
     result = lana_chunk_read_file(&compiler_chunk, compiler_path, error);
     if (result != LANA_OK) return 1;
+    set_stdlib_dir(compiler_path);
     lana_vm_init(&vm, &compiler_chunk);
     lana_vm_set_memory_limit(&vm, 256u * 1024u * 1024u);
-    vm.instruction_limit = UINT64_C(50000000);
+    vm.instruction_limit = UINT64_C(100000000);
     lana_vm_set_program_args(&vm, argument_count, arguments);
     result = lana_vm_run(&vm);
     if (result != LANA_OK) *error = vm.error;

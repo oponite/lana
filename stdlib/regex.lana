@@ -1,0 +1,22 @@
+// std/regex — regular expressions (LIP-021 §2) over the regex host calls.
+// A Thompson NFA engine: linear-time, no backtracking. `compile` returns
+// Result<Regex, E> as a tagged pair `[true, re]` / `[false, error]`;
+// `matches`/`search` return Result<map, E> where the map is
+// `{start, end, text}` (byte offsets + matched substring). `replace` returns
+// the text with every non-overlapping match substituted.
+
+fn compile(pattern) {
+    return regex_compile(pattern);
+}
+
+fn matches(re, text) {
+    return regex_match(re, text);
+}
+
+fn search(re, text) {
+    return regex_search(re, text);
+}
+
+fn replace(re, text, replacement) {
+    return regex_replace(re, text, replacement);
+}

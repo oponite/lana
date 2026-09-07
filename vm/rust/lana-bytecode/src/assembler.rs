@@ -6,7 +6,7 @@
 
 use crate::chunk::{Chunk, Function, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
-use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1, LANA_MAX_REGISTERS};
+use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1, LABC_VERSION_3, LABC_VERSION_4, LANA_MAX_REGISTERS};
 use crate::value::{Value, ValueType};
 
 const LANA_NO_OPERAND: u32 = u32::MAX;
@@ -50,9 +50,33 @@ const HOST_CALL_NAMES: &[&str] = &[
     "information_inspect", "directory_list", "directory_create",
     "path_exists", "write_text_atomic", "hash_update", "lazy_bound",
     "correlated", "surprisal",
+    "tensor_alloc", "tensor_zeros", "tensor_ones", "tensor_eye", "tensor_dtype",
+    "tensor_shape", "tensor_ndim", "tensor_add", "tensor_sub", "tensor_mul",
+    "tensor_div", "tensor_matmul", "tensor_sum", "tensor_mean", "tensor_max",
+    "tensor_min", "tensor", "tensor_complex", "grant", "revoke",
+    "set_new", "set_add", "set_contains", "set_union", "set_intersect",
+    "set_difference", "getenv", "random_seed", "floor", "string_to_number",
+    "type_of", "format", "format_number", "char_length",
+    "string_codepoint_slice", "to_upper", "to_lower",
+    "regex_compile", "regex_match", "regex_search", "regex_replace",
+    "gpu_matmul",
+    "density_operator", "povm", "channel", "observable", "tensor_product",
+    "partial_trace", "measure_with", "apply_to", "expect", "mix",
+    "trace_distance", "is_separable", "to_state",
+    "grad", "vjp",
+    "sgd", "adam", "train",
+    "mcmc", "vi", "smc", "infer", "update", "resume",
+    "state_tensor", "append", "measure", "transform",
+    "run_async", "future_all", "future_race", "sleep",
+    "dataset", "dataset_filter", "dataset_map", "dataset_select",
+    "dataset_limit", "dataset_sort", "dataset_group_by", "dataset_aggregate",
+    "dataset_join", "dataset_materialize", "dataset_explain",
     "store_open", "store_put", "store_get", "store_delete", "store_commit",
     "store_scan", "store_current_revision", "policy_evaluate",
     "policy_store_decision", "ledger_append", "ledger_query",
+    "store_get_at", "store_snapshot", "store_commit_if",
+    "adapter_load", "adapter_fetch",
+    "ffi_declare", "ffi_load", "ffi_call",
 ];
 
 struct Label {
@@ -135,6 +159,12 @@ fn field_id(name: &str) -> Option<u32> {
         "p" => Some(0),
         "d" | "d_re" => Some(1),
         "d_im" => Some(2),
+        "params" => Some(0),
+        "steps" => Some(1),
+        "mean" => Some(0),
+        "variance" => Some(1),
+        "samples" => Some(2),
+        "history" => Some(3),
         _ => None,
     }
 }
@@ -755,6 +785,152 @@ fn emit_line(
             ins.b = function_index;
             ins.c = c;
             ins.imm = b;
+        }
+        "GENERATOR" => {
+            expect(5)?;
+            let a = reg(tokens[2])?;
+            let number = tokens[3].parse::<f64>().unwrap_or(0.0);
+            let b = reg(tokens[4])?;
+            let function_index = match chunk.functions.iter().position(|f| f.name == tokens[1]) {
+                Some(index) => index as u32,
+                None => {
+                    if function_fixups.len() >= LANA_ASSEMBLER_MAX_FIXUPS || tokens[1].len() >= 64 {
+                        return Err(LanaErrorInfo::new(
+                            LanaError::Limit,
+                            ip,
+                            OpCode::Nop as u8,
+                            line,
+                            "too many function fixups",
+                        ));
+                    }
+                    function_fixups.push(FunctionFixup {
+                        name: tokens[1].to_string(),
+                        instruction: chunk.code.len() as u32,
+                    });
+                    0
+                }
+            };
+            if number < 0.0 || number > LANA_MAX_REGISTERS as f64 {
+                return Err(LanaErrorInfo::new(
+                    LanaError::Format,
+                    ip,
+                    OpCode::Nop as u8,
+                    line,
+                    "invalid argument count",
+                ));
+            }
+            ins.opcode = OpCode::Generator;
+            ins.a = b;
+            ins.b = function_index;
+            ins.c = a;
+            ins.imm = number as u32;
+        }
+        "YIELD" => {
+            expect(3)?;
+            let a = reg(tokens[1])?;
+            let b = reg(tokens[2])?;
+            ins.opcode = OpCode::Yield;
+            ins.a = a;
+            ins.b = b;
+        }
+        "NEXT" => {
+            expect(3)?;
+            let a = reg(tokens[1])?;
+            let b = reg(tokens[2])?;
+            ins.opcode = OpCode::Next;
+            ins.a = a;
+            ins.b = b;
+        }
+        "ASYNC" => {
+            expect(5)?;
+            let a = reg(tokens[2])?;
+            let number: f64 = tokens[3].parse().map_err(|_| {
+                LanaErrorInfo::new(
+                    LanaError::Format,
+                    ip,
+                    OpCode::Nop as u8,
+                    line,
+                    "invalid argument count",
+                )
+            })?;
+            let b = reg(tokens[4])?;
+            if number < 0.0 || number > LANA_MAX_REGISTERS as f64 {
+                return Err(LanaErrorInfo::new(
+                    LanaError::Format,
+                    ip,
+                    OpCode::Nop as u8,
+                    line,
+                    "invalid argument count",
+                ));
+            }
+            let function_index = match chunk.functions.iter().position(|f| f.name == tokens[1]) {
+                Some(index) => index as u32,
+                None => {
+                    if function_fixups.len() >= LANA_ASSEMBLER_MAX_FIXUPS || tokens[1].len() >= 64 {
+                        return Err(LanaErrorInfo::new(
+                            LanaError::Limit,
+                            ip,
+                            OpCode::Nop as u8,
+                            line,
+                            "too many function fixups",
+                        ));
+                    }
+                    function_fixups.push(FunctionFixup {
+                        name: tokens[1].to_string(),
+                        instruction: chunk.code.len() as u32,
+                    });
+                    0
+                }
+            };
+            ins.opcode = OpCode::Async;
+            ins.a = b;
+            ins.b = function_index;
+            ins.c = a;
+            ins.imm = number as u32;
+        }
+        "AWAIT" => {
+            expect(3)?;
+            let a = reg(tokens[1])?;
+            let b = reg(tokens[2])?;
+            ins.opcode = OpCode::Await;
+            ins.a = a;
+            ins.b = b;
+        }
+        "RUN_ASYNC" => {
+            expect(3)?;
+            let a = reg(tokens[1])?;
+            let b = reg(tokens[2])?;
+            ins.opcode = OpCode::RunAsync;
+            ins.a = a;
+            ins.b = b;
+        }
+        "LOAD_FUNCTION" => {
+            expect(3)?;
+            let a = reg(tokens[1])?;
+            let function_index = match chunk.functions.iter().position(|f| f.name == tokens[2]) {
+                Some(index) => index as u32,
+                None => {
+                    if function_fixups.len() >= LANA_ASSEMBLER_MAX_FIXUPS || tokens[2].len() >= 64 {
+                        return Err(LanaErrorInfo::new(
+                            LanaError::Limit,
+                            ip,
+                            OpCode::Nop as u8,
+                            line,
+                            "too many function fixups",
+                        ));
+                    }
+                    function_fixups.push(FunctionFixup {
+                        name: tokens[2].to_string(),
+                        instruction: chunk.code.len() as u32,
+                    });
+                    0
+                }
+            };
+            ins.opcode = OpCode::LoadFunction;
+            ins.a = a;
+            ins.b = function_index;
+            ins.c = 0;
+            ins.imm = 0;
         }
         "JOINT_BUILD" => {
             expect(5)?;
@@ -1401,7 +1577,9 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
                         "invalid version",
                     )
                 })?;
-                if version != LABC_VERSION && version != LABC_VERSION_1 {
+                if version != LABC_VERSION && version != LABC_VERSION_1 && version != LABC_VERSION_3
+                    && version != LABC_VERSION_4
+                {
                     return Err(LanaErrorInfo::new(
                         LanaError::IncompatibleFormat,
                         line as usize,

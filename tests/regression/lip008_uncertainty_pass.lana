@@ -1,0 +1,52 @@
+// LIP-008: uncertainty-carrying tensors. An op over uncertain operands returns
+// { prediction, uncertainty }; certain inputs stay ordinary tensors.
+
+// Element-wise add/sub/mul/div propagate first-order variance.
+let a = tensor([1.0, 2.0]);
+let va = tensor([0.5, 0.25]);
+let b = tensor([3.0, 4.0]);
+let vb = tensor([0.125, 0.0625]);
+let ua = { prediction: a, uncertainty: va };
+let ub = { prediction: b, uncertainty: vb };
+
+let s = ua + ub;
+assert(sum(s.prediction) == 10.0, "add prediction"); // 4+6
+assert(sum(s.uncertainty) == 0.9375, "add variance"); // 0.625+0.3125
+
+let d = ua - ub;
+assert(sum(d.prediction) == -4.0, "sub prediction"); // -2+-2
+assert(sum(d.uncertainty) == 0.9375, "sub variance");
+
+let m = ua * ub;
+assert(sum(m.prediction) == 11.0, "mul prediction"); // 3+8
+assert(sum(m.uncertainty) == 8.875, "mul variance"); // 4.625+4.25
+
+let q = { prediction: tensor([1.0, 1.0]), uncertainty: tensor([1.0, 1.0]) };
+let r = { prediction: tensor([2.0, 2.0]), uncertainty: tensor([1.0, 1.0]) };
+let dv = q / r;
+assert(sum(dv.prediction) == 1.0, "div prediction"); // 0.5+0.5
+assert(sum(dv.uncertainty) == 0.625, "div variance"); // 0.3125+0.3125
+
+// A certain operand contributes zero variance.
+let mixed = a + ub;
+assert(sum(mixed.prediction) == 10.0, "mixed prediction");
+assert(sum(mixed.uncertainty) == 0.1875, "mixed variance"); // 0.125+0.0625
+
+// Matmul propagates variance through the squared operands.
+let dot = matmul(ua, ub);
+assert(sum(dot.prediction) == 11.0, "matmul prediction");
+assert(sum(dot.uncertainty) == 8.875, "matmul variance");
+
+// Reductions: sum(var) and sum(var)/n^2.
+let total = sum(ua);
+assert(sum(total.prediction) == 3.0, "sum prediction");
+assert(sum(total.uncertainty) == 0.75, "sum variance");
+let avg = mean(ua);
+assert(sum(avg.prediction) == 1.5, "mean prediction");
+assert(sum(avg.uncertainty) == 0.1875, "mean variance");
+
+// Field access extracts the prediction and uncertainty.
+assert(sum(ua.prediction) == 3.0, "field prediction");
+assert(sum(ua.uncertainty) == 0.75, "field uncertainty");
+
+print("LIP008_UNCERTAINTY_PASS");

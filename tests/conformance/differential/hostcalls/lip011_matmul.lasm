@@ -1,0 +1,29 @@
+.version 3
+.function main 0 16
+# x = [[1,2],[3,4]]
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 1
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 2
+HOST_CALL array_push R1 2 R1
+HOST_CALL array_new R0 1 R4
+LOAD_CONST R5 3
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 4
+HOST_CALL array_push R4 2 R4
+HOST_CALL array_new R0 1 R7
+MOVE R8 R1
+HOST_CALL array_push R7 2 R7
+MOVE R8 R4
+HOST_CALL array_push R7 2 R7
+HOST_CALL tensor R7 1 R9
+LOAD_FUNCTION R8 f
+HOST_CALL grad R8 2 R10
+PRINT R10
+RETURN R0
+.function f 1 8
+MOVE R1 R0
+HOST_CALL tensor_matmul R0 2 R2
+HOST_CALL tensor_sum R2 1 R3
+RETURN R3

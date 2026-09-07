@@ -1,0 +1,42 @@
+// LIP-021 §2: regular expressions (Thompson NFA, linear-time).
+import "std/regex" as regex;
+
+let re = regex.compile("a+");
+assert(re[0] == true, "compile a+ ok");
+
+let m = regex.matches(re[1], "aaa");
+assert(m[0] == true, "match aaa ok");
+assert(map_get(m[1], "start") == 0, "match start");
+assert(map_get(m[1], "end") == 3, "match end");
+assert(map_get(m[1], "text") == "aaa", "match text");
+
+let s = regex.search(re[1], "xxaaayy");
+assert(s[0] == true, "search ok");
+assert(map_get(s[1], "start") == 2, "search start");
+assert(map_get(s[1], "end") == 5, "search end");
+assert(map_get(s[1], "text") == "aaa", "search text");
+
+assert(regex.replace(re[1], "xxaaayy", "-") == "xx-yy", "replace");
+
+let bad = regex.compile("(");
+assert(bad[0] == false, "compile ( fails");
+assert(bad[1] == "unterminated group", "compile ( error");
+
+let opt = regex.compile("colou?r");
+assert(regex.matches(opt[1], "colour")[0] == true, "optional colour");
+assert(regex.matches(opt[1], "color")[0] == true, "optional color");
+
+let cls = regex.compile("[a-z]+");
+let cs = regex.search(cls[1], "123abc456");
+assert(map_get(cs[1], "start") == 3, "class start");
+assert(map_get(cs[1], "end") == 6, "class end");
+assert(map_get(cs[1], "text") == "abc", "class text");
+
+let anchored = regex.compile("^abc$");
+assert(regex.matches(anchored[1], "abc")[0] == true, "anchor match");
+assert(regex.matches(anchored[1], "xabc")[0] == false, "anchor no match");
+
+let alt = regex.compile("cat|dog");
+assert(regex.matches(alt[1], "dog")[0] == true, "alternation");
+
+print("M21_REGEX_PASS");

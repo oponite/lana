@@ -1,0 +1,5 @@
+// LIP-008: an Uncertain<Tensor> cannot be used where a certain Tensor is
+// required (shape/dtype/ndim/max/min).
+let t = tensor([1.0, 2.0]);
+let u = { prediction: t, uncertainty: t };
+shape(u);

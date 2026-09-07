@@ -1,0 +1,46 @@
+.function main 0 16
+# complex zgemm: (iI) . (iI) = -I, interleaved [re, im] per element.
+# Build iI = [[0+1i, 0+0i], [0+0i, 0+1i]] from real and imag component arrays.
+LOAD_CONST R0 0
+# real part = [[0,0],[0,0]]
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 0
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 0
+HOST_CALL array_push R1 2 R1
+HOST_CALL array_new R0 1 R3
+LOAD_CONST R4 0
+HOST_CALL array_push R3 2 R3
+LOAD_CONST R4 0
+HOST_CALL array_push R3 2 R3
+HOST_CALL array_new R0 1 R5
+MOVE R6 R1
+HOST_CALL array_push R5 2 R5
+MOVE R6 R3
+HOST_CALL array_push R5 2 R5
+# imag part = [[1,0],[0,1]]
+HOST_CALL array_new R0 1 R7
+LOAD_CONST R8 1
+HOST_CALL array_push R7 2 R7
+LOAD_CONST R8 0
+HOST_CALL array_push R7 2 R7
+HOST_CALL array_new R0 1 R9
+LOAD_CONST R10 0
+HOST_CALL array_push R9 2 R9
+LOAD_CONST R10 1
+HOST_CALL array_push R9 2 R9
+HOST_CALL array_new R0 1 R11
+MOVE R12 R7
+HOST_CALL array_push R11 2 R11
+MOVE R12 R9
+HOST_CALL array_push R11 2 R11
+# tensor_complex(real, imag) -> iI
+MOVE R13 R5
+MOVE R14 R11
+HOST_CALL tensor_complex R13 2 R15
+# matmul(iI, iI) = -I
+MOVE R13 R15
+MOVE R14 R15
+HOST_CALL tensor_matmul R13 2 R15
+PRINT R15
+RETURN R0

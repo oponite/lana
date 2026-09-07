@@ -1,0 +1,32 @@
+.function main 0 16
+# density_operator from an N=1 STATE: rho = [[p, c], [c*, 1-p]].
+STATE_NEW R0 0.4 0.2 0.0
+HOST_CALL density_operator R0 1 R1
+PRINT R1
+# to_state round-trips the 1-qubit density operator back to (p, d_re, d_im).
+HOST_CALL to_state R1 1 R2
+PRINT R2
+# density_operator from a tensor: the maximally mixed state I/2.
+# Build [[0.5, 0], [0, 0.5]] as a real tensor.
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R4
+LOAD_CONST R5 0.5
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 0
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R6
+LOAD_CONST R7 0
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R7 0.5
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R8
+MOVE R9 R4
+HOST_CALL array_push R8 2 R8
+MOVE R9 R6
+HOST_CALL array_push R8 2 R8
+HOST_CALL tensor R8 1 R10
+HOST_CALL density_operator R10 1 R11
+PRINT R11
+RETURN R0

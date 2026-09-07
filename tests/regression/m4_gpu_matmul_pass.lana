@@ -1,0 +1,18 @@
+// LIP-004 section 5: explicit GPU matmul. The GPU path is optional, so this
+// test passes when a Metal device is present and is skipped (not failed) when
+// one is absent. The result is approximate (float32), so it is checked within
+// a tolerance of the exact CPU result rather than bitwise.
+
+import "std/math" as math;
+
+let a = tensor([[1.0, 2.0], [3.0, 4.0]]);
+let b = tensor([[5.0, 6.0], [7.0, 8.0]]);
+let prod = gpu_matmul(a, b, "float32");
+
+// float32 result within tolerance of the exact CPU result [[19,22],[43,50]].
+assert(math.abs(prod[0, 0] - 19.0) < 0.0001, "gpu_matmul [0,0]");
+assert(math.abs(prod[0, 1] - 22.0) < 0.0001, "gpu_matmul [0,1]");
+assert(math.abs(prod[1, 0] - 43.0) < 0.0001, "gpu_matmul [1,0]");
+assert(math.abs(prod[1, 1] - 50.0) < 0.0001, "gpu_matmul [1,1]");
+
+print("GPU_MATMUL_PASS");

@@ -1,0 +1,27 @@
+.function main 0 16
+# partial_trace rejects a subsystem count that is not strictly less than N.
+# rho = I/2 (1-qubit), then partial_trace(rho, 1) with subsystem == N.
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R4
+LOAD_CONST R5 0.5
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 0
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R6
+LOAD_CONST R7 0
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R7 0.5
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R8
+MOVE R9 R4
+HOST_CALL array_push R8 2 R8
+MOVE R9 R6
+HOST_CALL array_push R8 2 R8
+HOST_CALL tensor R8 1 R10
+HOST_CALL density_operator R10 1 R10
+LOAD_CONST R11 1
+HOST_CALL partial_trace R10 2 R12
+PRINT R12
+RETURN R0

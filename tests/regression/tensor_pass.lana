@@ -1,0 +1,54 @@
+// LIP-004: first-class tensor and vectorized operations.
+
+// Construction + introspection.
+let a = tensor([1.0, 2.0, 3.0]);
+assert(ndim(a) == 1, "tensor ndim");
+assert(dtype(a) == "f64", "tensor dtype");
+let sh = shape(a);
+assert(array_length(sh) == 1, "shape length");
+assert(sh[0] == 3, "shape[0]");
+
+// Element-wise arithmetic (lifted numeric operators).
+let b = tensor([4.0, 5.0, 6.0]);
+assert(sum(a + b) == 21.0, "sum(a+b)");
+assert(sum(a - b) == -9.0, "sum(a-b)");
+assert(sum(a * b) == 32.0, "sum(a*b)");
+assert(sum(a / b) > 0.0, "sum(a/b) positive");
+
+// matmul: 1-d x 1-d is a dot product.
+let dot = matmul(a, b);
+assert(sum(dot) == 32.0, "dot product");
+
+// eye + ones + matmul.
+let eye2 = eye(2);
+let ones2 = ones([2, 2]);
+let prod = matmul(ones2, eye2);
+assert(sum(prod) == 4.0, "ones @ eye");
+
+// zeros.
+let z = zeros([2, 3]);
+assert(sum(z) == 0.0, "zeros sum");
+assert(ndim(z) == 2, "zeros ndim");
+
+// Reductions over a 2-d tensor.
+let t = tensor([[1.0, 2.0], [3.0, 4.0]]);
+assert(sum(t) == 10.0, "sum 2d");
+assert(mean(t) == 2.5, "mean 2d");
+assert(max(t) == 4.0, "max 2d");
+assert(min(t) == 1.0, "min 2d");
+
+// Broadcasting: (2x1) + (1x3) -> (2x3).
+let col = tensor([[1.0], [2.0]]);
+let row = tensor([[10.0, 20.0, 30.0]]);
+let bc = col + row;
+assert(ndim(bc) == 2, "broadcast ndim");
+assert(sum(bc) == 129.0, "broadcast sum");
+
+// Complex construction + introspection.
+let c = tensor_complex([1.0, 0.0], [0.0, 1.0]);
+assert(dtype(c) == "complex", "complex dtype");
+assert(ndim(c) == 1, "complex ndim");
+let csh = shape(c);
+assert(csh[0] == 2, "complex shape[0]");
+
+print("TENSOR_PASS");

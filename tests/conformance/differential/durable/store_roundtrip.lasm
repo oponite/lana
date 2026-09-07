@@ -1,0 +1,13 @@
+.function main 0 16
+LOAD_CONST R0 store.db
+HOST_CALL store_open R0 1 R1
+LOAD_CONST R2 k
+LOAD_CONST R3 42
+HOST_CALL store_put R2 2 R4
+HOST_CALL store_commit R4 0 R5
+PRINT R5
+HOST_CALL store_get R2 1 R6
+PRINT R6
+HOST_CALL store_current_revision R6 0 R7
+PRINT R7
+RETURN R0

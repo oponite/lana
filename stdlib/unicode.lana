@@ -1,0 +1,8 @@
+// std/unicode — code-point-aware text operations (LIP-021 §4).
+// char_length, to_upper, to_lower, and string_codepoint_slice are host calls
+// and are callable directly. This module adds a code-point-indexed substring
+// (the byte-indexed `substring` in std/string remains for internal use).
+
+fn substring(text, start, end) {
+    return string_codepoint_slice(text, start, end);
+}

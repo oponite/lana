@@ -35,10 +35,13 @@ LanaError lana_shared_capability_grant(LanaCapabilityToken *admin,
                                        LanaCapabilityToken **out);
 LanaError lana_shared_capability_revoke(LanaCapabilityToken *admin,
                                         LanaCapabilityToken *target);
+LanaError lana_shared_capability_invalidate(LanaCapabilityToken *target);
 bool lana_shared_capability_allows(const LanaCapabilityToken *capability,
                                    uint32_t permissions);
 LanaSharedInformation *lana_shared_capability_information(
     const LanaCapabilityToken *capability);
+bool lana_shared_information_allows_named_read(
+    const LanaSharedInformation *shared, const char *name);
 
 LanaError lana_shared_information_snapshot(LanaVM *destination,
                                            LanaSharedInformation *shared,
