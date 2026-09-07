@@ -320,6 +320,12 @@ if(LANA_PYTHON3)
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_lsp_roundtrip PROPERTIES
         PASS_REGULAR_EXPRESSION "LSP_ROUNDTRIP_PASS")
+    add_test(NAME lana_repl_session
+        COMMAND ${LANA_PYTHON3}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_repl.py"
+            $<TARGET_FILE:lana>)
+    set_tests_properties(lana_repl_session PROPERTIES
+        PASS_REGULAR_EXPRESSION "REPL_SESSION_PASS" TIMEOUT 30)
 endif()
 add_test(NAME lana_project_workflow
     COMMAND "${CMAKE_COMMAND}" -DLANA=$<TARGET_FILE:lana>
