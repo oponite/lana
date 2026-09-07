@@ -57,7 +57,7 @@ The domain of concrete Lana 2.0 states on N qubits is
 \;\middle|\;
 \rho = \rho^\dagger,\;
 \rho \succeq 0,\;
-\operatorname{Tr}(\rho) = 1
+\mathrm{Tr}(\rho) = 1
 \right\}.
 ```
 
@@ -142,7 +142,7 @@ the substrate's primary combine operation.
 For a state on registers A and B, the reduced state of A is
 
 ```math
-\rho_A = \operatorname{Tr}_B(\rho_{AB}).
+\rho_A = \mathrm{Tr}_B(\rho_{AB}).
 ```
 
 Partial trace is the marginalization operation: "look at one subsystem of many."
@@ -180,7 +180,7 @@ E_i \succeq 0,
 For a state $`\rho \in \mathcal S_N`$, the outcome probability is
 
 ```math
-p(i) = \operatorname{Tr}(\rho E_i).
+p(i) = \mathrm{Tr}(\rho E_i).
 ```
 
 A POVM is a first-class value: users construct and pass their own. The outcome
@@ -289,7 +289,7 @@ An observable is a Hermitian operator $`A = A^\dagger`$ on $`\mathcal H_N`$. Its
 expectation in a state $`\rho`$ is
 
 ```math
-\langle A \rangle_\rho = \operatorname{Tr}(\rho A).
+\langle A \rangle_\rho = \mathrm{Tr}(\rho A).
 ```
 
 This generalizes the 1.0 binary `p` to arbitrary observables.
@@ -298,10 +298,10 @@ This generalizes the 1.0 binary `p` to arbitrary observables.
 
 For N=1, the 1.0 surface maps as:
 
-- `p` (observable probability) = $`\rho_{11} = \operatorname{Tr}(\rho |1\rangle\langle1|)`$.
+- `p` (observable probability) = $`\rho_{11} = \mathrm{Tr}(\rho |1\rangle\langle1|)`$.
 - `d = d_{re} + i d_{im}` = the normalized coherence $`c / \sqrt{p(1-p)}`$.
-- `measure as probability` = $`\operatorname{Tr}(\rho E)`$ for the relevant POVM element.
-- `sample` = a draw from the outcome distribution $`p(i) = \operatorname{Tr}(\rho E_i)`$.
+- `measure as probability` = $`\mathrm{Tr}(\rho E)`$ for the relevant POVM element.
+- `sample` = a draw from the outcome distribution $`p(i) = \mathrm{Tr}(\rho E_i)`$.
 
 ## 7. Boundary and error semantics
 
@@ -334,11 +334,11 @@ For $`\rho \in \mathcal S_N`$, the completely dephasing map in the computational
 basis is
 
 ```math
-\operatorname{neutralize}(\rho)
+\mathrm{neutralize}(\rho)
 =
 \sum_{b \in \{0,1\}^N} |b\rangle\langle b|\, \rho\, |b\rangle\langle b|
 =
-\operatorname{diag}(\rho).
+\mathrm{diag}(\rho).
 ```
 
 It zeroes every off-diagonal element and keeps the diagonal. It is a channel
@@ -351,22 +351,22 @@ and it maps every state to a classical state. At N=1 it recovers the 1.0
 For $`\rho \in \mathcal S_N`$ and $`f \in [0,1]`$,
 
 ```math
-\operatorname{attenuate}(\rho, f)
+\mathrm{attenuate}(\rho, f)
 =
-f\,\rho + (1-f)\,\operatorname{diag}(\rho).
+f\,\rho + (1-f)\,\mathrm{diag}(\rho).
 ```
 
 It multiplies every off-diagonal element by `f` and keeps the diagonal. It is a
 channel (the dephasing channel). The laws are
 
 ```math
-\operatorname{attenuate}(\rho, 1) = \rho,
+\mathrm{attenuate}(\rho, 1) = \rho,
 ```
 
 ```math
-\operatorname{attenuate}(\operatorname{attenuate}(\rho, f_1), f_2)
+\mathrm{attenuate}(\mathrm{attenuate}(\rho, f_1), f_2)
 =
-\operatorname{attenuate}(\rho, f_1 f_2).
+\mathrm{attenuate}(\rho, f_1 f_2).
 ```
 
 At `f = 0` the result is $`neutralize(\rho)`$. Factors outside `[0,1]` and
@@ -378,7 +378,7 @@ $`(p, d) \mapsto (p, f d)`$.
 For $`a, b \in \mathcal S_N`$ and $`w \in [0,1]`$,
 
 ```math
-\operatorname{mix}(a, b, w)
+\mathrm{mix}(a, b, w)
 =
 w\,a + (1-w)\,b.
 ```
@@ -387,11 +387,11 @@ This is a convex density-operator mixture, not evidence combination. The result
 is in $`\mathcal S_N`$. It is weight-symmetric and idempotent:
 
 ```math
-\operatorname{mix}(a, b, w) = \operatorname{mix}(b, a, 1-w),
+\mathrm{mix}(a, b, w) = \mathrm{mix}(b, a, 1-w),
 ```
 
 ```math
-\operatorname{mix}(a, a, w) = a.
+\mathrm{mix}(a, a, w) = a.
 ```
 
 ### 9.4 Trace distance
@@ -399,28 +399,28 @@ is in $`\mathcal S_N`$. It is weight-symmetric and idempotent:
 For $`a, b \in \mathcal S_N`$,
 
 ```math
-\operatorname{trace\_distance}(a, b)
+\mathrm{trace\_distance}(a, b)
 =
 \frac12 \lVert a - b \rVert_1,
 \qquad
-\lVert X \rVert_1 = \operatorname{Tr}\!\left(\sqrt{X^\dagger X}\right).
+\lVert X \rVert_1 = \mathrm{Tr}\!\left(\sqrt{X^\dagger X}\right).
 ```
 
 The result is real and lies in `[0,1]`. The laws are symmetry, zero iff equal,
 and the triangle inequality:
 
 ```math
-\operatorname{trace\_distance}(a, b) = \operatorname{trace\_distance}(b, a),
+\mathrm{trace\_distance}(a, b) = \mathrm{trace\_distance}(b, a),
 ```
 
 ```math
-\operatorname{trace\_distance}(a, b) = 0 \iff a = b,
+\mathrm{trace\_distance}(a, b) = 0 \iff a = b,
 ```
 
 ```math
-\operatorname{trace\_distance}(a, c)
+\mathrm{trace\_distance}(a, c)
 \le
-\operatorname{trace\_distance}(a, b) + \operatorname{trace\_distance}(b, c).
+\mathrm{trace\_distance}(a, b) + \mathrm{trace\_distance}(b, c).
 ```
 
 ### 9.5 Relationship-aware APPEND (N=1)
@@ -611,11 +611,11 @@ associativity or inverse law.
 
 #### Distributed inputs
 
-Let $`\mu_A,\mu_B\in\operatorname{Dist}(\mathcal S)`$ be the input state
+Let $`\mu_A,\mu_B\in\mathrm{Dist}(\mathcal S)`$ be the input state
 distributions. A relationship-aware operation requires an outer state coupling
 
 ```math
-\pi\in\operatorname{Coupling}(\mu_A,\mu_B),
+\pi\in\mathrm{Coupling}(\mu_A,\mu_B),
 ```
 
 whose marginals are $`\mu_A`$ and $`\mu_B`$. This coupling selects which concrete
@@ -693,7 +693,7 @@ replaces an exact operation without an explicit rule.
 For a model event with probability $`P`$, surprisal is
 
 ```math
-\operatorname{surprisal}(P)=-\log(P).
+\mathrm{surprisal}(P)=-\log(P).
 ```
 
 The semantic definition MUST specify the logarithm base and units. It MUST
@@ -736,8 +736,8 @@ their values per that operation's law, but the resulting status is the
 least-certain input:
 
 ```math
-\operatorname{status}(e_1 \oplus e_2)
-= \min(\operatorname{status}(e_1), \operatorname{status}(e_2))
+\mathrm{status}(e_1 \oplus e_2)
+= \min(\mathrm{status}(e_1), \mathrm{status}(e_2))
 ```
 
 under the certainty order above. Combining evidence can add information
@@ -796,7 +796,7 @@ change bytes; a seed or input change may change bytes; nothing else may.
 A lazy dataset is a computable function
 
 ```math
-f : \mathbb{N} \to \operatorname{Value}
+f : \mathbb{N} \to \mathrm{Value}
 ```
 
 (or an equivalent generator) that produces values on demand. It occupies
@@ -846,7 +846,7 @@ replacement for each of `B` resamples:
 
 ```math
 x^*_b = (x_{i_1}, \dots, x_{i_n}),
-\qquad i_j \sim \operatorname{Uniform}\{1,\dots,n\},
+\qquad i_j \sim \mathrm{Uniform}\{1,\dots,n\},
 ```
 
 and computes `θ*_b = T(x*_b)`. The bootstrap distribution is the empirical
@@ -880,7 +880,7 @@ may be overridden by the user. The chosen `B` is recorded in the result.
 Surprisal uses the natural logarithm, in nats:
 
 ```math
-\operatorname{surprisal}(P) = -\ln(P).
+\mathrm{surprisal}(P) = -\ln(P).
 ```
 
 The event, outcome, model identity, model version, precision,
