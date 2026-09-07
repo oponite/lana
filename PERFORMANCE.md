@@ -72,23 +72,37 @@ this ceiling without the naive throttle.
 
 ## 6. fp16/bf16 matmul
 
-LIP-027 B16 native fp32-accumulation loops for f16/bf16 inputs, measured on a
-representative training workload: 1000 iterations of a 128x128 matmul (a small
-linear-layer forward pass, iterated), `ones` inputs, C11 VM (`build/lana run`).
-Wall-clock, best-of-5 median, no cache flush, single machine (macOS, Apple
-Silicon). Cross-checked on the Rust VM.
+LIP-027 item 9 routes the fp32-accumulation matmul (f32/f16/bf16 inputs)
+through `cblas_sgemm` on macOS (Accelerate), packing each operand's elements
+into float scratch with fp32 accumulation; the naive loop remains the fallback
+off Apple platforms. Measured on the representative training workload: 1000
+iterations of a 128x128 matmul (a small linear-layer forward pass, iterated),
+`ones` inputs, C11 VM (`build/lanavm_release run`). Wall-clock, best-of-3
+median, no cache flush, single machine (macOS, Apple Silicon). Cross-checked
+on the Rust VM; C and Rust are byte-identical on every fp32/16/bf16 matmul
+(the fp32-accumulation discriminator `2^24 + 1 -> 2^24` matches).
 
-| dtype | median time (s) | vs f64 |
-|---|---:|---:|
-| f64 | 0.09 | 1.0x |
-| f16 | 5.10 | 0.018x (56.7x slower) |
-| bf16 | 5.09 | 0.018x (56.6x slower) |
+| dtype | time (s) | vs f64 | vs prior native loop |
+|---|---:|---:|---:|
+| f64 | 0.04 | 1.0x | — |
+| f32 | 0.08 | 2.0x slower | ~30-50x faster |
+| f16 | 0.11 | 2.8x slower | ~46x faster |
+| bf16 | 0.09 | 2.3x slower | ~57x faster |
 
-The fp16/bf16 native loops are ~57x slower than the f64 path, not faster. The
-expected memory-bound speedup (half the bytes of f64) did not materialize; the
-f16/bf16 path is dominated by per-element software conversion between the
-low-precision storage type and the fp32 accumulator, which is far more
-expensive than the native f64 multiply-add loop. The regression is consistent
-across both VMs (Rust VM at n=200: f64 0.09s vs f16 3.81s, ~42x slower). The
-fp16/bf16 native path should not be relied on for speed until this is
-addressed.
+The prior native fp32-accumulation loops were ~57x slower than the f64 path (f16
+5.10s, bf16 5.09s), dominated by per-element software conversion between the
+low-precision storage type and the fp32 accumulator inside a scalar triple
+loop. Routing them through `cblas_sgemm` removes the regression: f16/bf16 go
+from ~57x slower to ~2-3x slower than f64, and f32 from a ~50x-slower naive
+loop to ~2x f64. Both VMs make the same backend selection per platform
+(sgemm on macOS, else the identical naive loop), so C/Rust differential
+byte identity holds everywhere; the macOS fp32 sgemm is verified byte-identical
+between the two VMs on the f32/f16/bf16 matmul paths.
+
+The residual ~2-3x gap vs f64 on this small 128x128 matmul is the redundant
+double -> float repack: the caller stages low-precision elements as doubles
+(the VM widens half/bf16/f32 storage to binary64 before the backend call), and
+the backend widens them back to float for sgemm. On a compute-bound matrix this
+overhead amortizes toward parity; eliminating it entirely means passing float
+operands from the VM, which is a follow-up (the backend interface is held fixed
+here).
