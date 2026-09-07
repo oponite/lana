@@ -762,7 +762,10 @@ pub struct Vm<'a> {
     /// run on targets without a filesystem (e.g. `wasm32-unknown-unknown`).
     virtual_fs: Option<HashMap<String, String>>,
     /// LIP-018 two-way FFI: declared signatures and the single loaded library.
+    /// `libloading` is unavailable on `wasm32`, so the loaded library is
+    /// compiled out there and `ffi_load`/`ffi_call` return `UnsupportedOperation`.
     ffi_sigs: Vec<String>,
+    #[cfg(not(target_arch = "wasm32"))]
     ffi_lib: Option<libloading::Library>,
     /// LIP-019 networking: open sockets, indexed by handle.
     sockets: Vec<NetSocket>,
@@ -973,6 +976,7 @@ fn ffi_validate_args(sig: &FfiSignature, args: &[Value]) -> bool {
 /// scalar arguments (0-4) returning `double`, `int`, or `void`. `string` and
 /// `array` arguments are rejected with `FfiError::Type` in this initial
 /// release; the C11 VM's libffi path is more general.
+#[cfg(not(target_arch = "wasm32"))]
 fn ffi_call_impl(
     lib: &libloading::Library,
     sig: &FfiSignature,
@@ -1206,6 +1210,7 @@ impl<'a> Vm<'a> {
             host_call_extension: None,
             virtual_fs: None,
             ffi_sigs: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             ffi_lib: None,
             sockets: Vec::new(),
         };
@@ -10968,6 +10973,12 @@ impl<'a> Vm<'a> {
         if !self.has_named_capability("ffi") {
             return LanaError::External;
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (path, out);
+            return LanaError::UnsupportedOperation;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         match unsafe { libloading::Library::new(path.as_ref()) } {
             Ok(lib) => {
                 self.ffi_lib = Some(lib);
@@ -10981,6 +10992,7 @@ impl<'a> Vm<'a> {
     /// `ffi_call(lib, fn, args) -> Result<T, E>` (LIP-018): invoke a declared
     /// symbol. Requires the `ffi` capability. Returns a `{"ok": ...}` /
     /// `{"error": ...}` map; capability denial is `LANA_ERR_EXTERNAL`.
+    #[cfg(not(target_arch = "wasm32"))]
     fn host_ffi_call(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
         if arguments.len() != 3 {
             return LanaError::Type;
@@ -11028,6 +11040,12 @@ impl<'a> Vm<'a> {
                 self.ffi_result_map("error", &e, out)
             }
         }
+    }
+
+    /// `wasm32` has no dynamic library loading, so `ffi_call` is unsupported.
+    #[cfg(target_arch = "wasm32")]
+    fn host_ffi_call(&mut self, _arguments: &[Value], _out: &mut Value) -> LanaError {
+        LanaError::UnsupportedOperation
     }
 
     fn ffi_result_map(&self, key: &str, value: &Value, out: &mut Value) -> LanaError {
