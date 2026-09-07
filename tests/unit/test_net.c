@@ -36,7 +36,7 @@
 typedef struct {
     int port;
     int hold;
-    volatile int *ready;
+    _Atomic int *ready;
 } ServerConfig;
 
 static void *http_server(void *arg) {
@@ -294,7 +294,7 @@ static int test_capability_denial(void) {
 
 int main(void) {
     pthread_t http_thread, echo_thread, hold_thread;
-    volatile int http_ready = 0, echo_ready = 0, hold_ready = 0;
+    _Atomic int http_ready = 0, echo_ready = 0, hold_ready = 0;
     ServerConfig http_cfg = {18090, 0, &http_ready};
     ServerConfig echo_cfg = {18091, 0, &echo_ready};
     ServerConfig hold_cfg = {18092, 1, &hold_ready};
