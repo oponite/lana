@@ -62,7 +62,7 @@ check_c_compiler_flag("-Wno-format-truncation" LANA_HAS_FORMAT_TRUNCATION_FLAG)
 
 add_library(lanaruntime STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime PUBLIC ${LANA_INCLUDE_DIRS})
-target_link_libraries(lanaruntime PUBLIC Threads::Threads PkgConfig::FFI ${LANA_BLAS_LIBS} ${LANA_METAL_LIBS})
+target_link_libraries(lanaruntime PUBLIC Threads::Threads PkgConfig::FFI OpenSSL::SSL ${LANA_BLAS_LIBS} ${LANA_METAL_LIBS})
 target_compile_options(lanaruntime PRIVATE -Wall -Wextra -Wpedantic -Werror)
 # Adapter facade locates dlopen plugins in the build directory.
 target_compile_definitions(lanaruntime PRIVATE
@@ -85,7 +85,7 @@ target_compile_options(lanavm PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_library(lanaruntime_release STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime_release PUBLIC ${LANA_INCLUDE_DIRS})
-target_link_libraries(lanaruntime_release PUBLIC PkgConfig::FFI)
+target_link_libraries(lanaruntime_release PUBLIC PkgConfig::FFI OpenSSL::SSL)
 if(LANA_HAS_FORMAT_TRUNCATION_FLAG)
     target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-format-truncation -O3 -DNDEBUG)
 else()

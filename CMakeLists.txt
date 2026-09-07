@@ -18,6 +18,8 @@ find_package(Threads REQUIRED)
 # libffi powers the LIP-018 two-way FFI's arbitrary-signature calls.
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFI REQUIRED IMPORTED_TARGET libffi)
+# OpenSSL powers the LIP-019 networking TLS backend (https on by default).
+find_package(OpenSSL REQUIRED)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

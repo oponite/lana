@@ -516,6 +516,13 @@ pub const LANA_HOST_ADAPTER_FETCH: u32 = 156;
 pub const LANA_HOST_FFI_DECLARE: u32 = 157;
 pub const LANA_HOST_FFI_LOAD: u32 = 158;
 pub const LANA_HOST_FFI_CALL: u32 = 159;
+// LIP-019 networking and HTTP.
+pub const LANA_HOST_HTTP_GET: u32 = 160;
+pub const LANA_HOST_HTTP_POST: u32 = 161;
+pub const LANA_HOST_SOCKET_CONNECT: u32 = 162;
+pub const LANA_HOST_SOCKET_SEND: u32 = 163;
+pub const LANA_HOST_SOCKET_RECV: u32 = 164;
+pub const LANA_HOST_SOCKET_CLOSE: u32 = 165;
 
 // LIP-024 async/await. Present in both the C11 VM and the Rust VM at ids
 // 126-129 (matching the C11 assembler's host-call table and the
@@ -757,6 +764,8 @@ pub struct Vm<'a> {
     /// LIP-018 two-way FFI: declared signatures and the single loaded library.
     ffi_sigs: Vec<String>,
     ffi_lib: Option<libloading::Library>,
+    /// LIP-019 networking: open sockets, indexed by handle.
+    sockets: Vec<NetSocket>,
 }
 
 /// LIP-018 two-way FFI: a parsed C-style signature and the bounded set of
@@ -768,6 +777,87 @@ enum FfiType {
     Double,
     String,
     Array,
+}
+
+/// LIP-019 networking: an open socket. Plain TCP, or TLS-wrapped.
+enum NetSocket {
+    Plain(std::net::TcpStream),
+}
+
+/// LIP-019 networking: a network failure, mapped to a `Result` error reason.
+enum NetError {
+    Timeout,
+    Io,
+}
+
+/// Parse a URL into `(scheme, host, port, path)`. Returns `None` on malformed.
+fn net_parse_url(url: &str) -> Option<(String, String, u16, String)> {
+    let (scheme, rest) = url.split_once("://")?;
+    if scheme.is_empty() {
+        return None;
+    }
+    let (host_port, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+            (h.to_string(), p.parse::<u16>().ok()?)
+        }
+        _ => (host_port.to_string(), if scheme == "https" { 443 } else { 80 }),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((scheme.to_string(), host, port, path.to_string()))
+}
+
+/// Connect a TCP socket to `host:port` with a timeout.
+fn net_connect(host: &str, port: u16, timeout_ms: u64) -> Result<std::net::TcpStream, NetError> {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let addrs = std::net::ToSocketAddrs::to_socket_addrs(&(host, port)).map_err(|_| NetError::Io)?;
+    let mut last_err = NetError::Io;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)) {
+            Ok(s) => {
+                let _ = s.set_read_timeout(Some(Duration::from_millis(timeout_ms)));
+                let _ = s.set_write_timeout(Some(Duration::from_millis(timeout_ms)));
+                return Ok(s);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => return Err(NetError::Timeout),
+            Err(_) => last_err = NetError::Io,
+        }
+    }
+    Err(last_err)
+}
+
+impl NetSocket {
+    fn read(&mut self, buf: &mut [u8], timeout_ms: u64) -> Result<usize, NetError> {
+        use std::io::Read;
+        match self {
+            NetSocket::Plain(s) => {
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(timeout_ms)));
+                match s.read(buf) {
+                    Ok(n) => Ok(n),
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        Err(NetError::Timeout)
+                    }
+                    Err(_) => Err(NetError::Io),
+                }
+            }
+        }
+    }
+
+    fn write_all(&mut self, data: &[u8]) -> Result<(), NetError> {
+        use std::io::Write;
+        match self {
+            NetSocket::Plain(s) => s.write_all(data).map_err(|_| NetError::Io),
+        }
+    }
 }
 
 struct FfiSignature {
@@ -1117,6 +1207,7 @@ impl<'a> Vm<'a> {
             virtual_fs: None,
             ffi_sigs: Vec::new(),
             ffi_lib: None,
+            sockets: Vec::new(),
         };
         vm.seed(0x4c414e41);
         vm
@@ -10833,6 +10924,12 @@ impl<'a> Vm<'a> {
             LANA_HOST_FFI_DECLARE => self.host_ffi_declare(arguments, out),
             LANA_HOST_FFI_LOAD => self.host_ffi_load(arguments, out),
             LANA_HOST_FFI_CALL => self.host_ffi_call(arguments, out),
+            LANA_HOST_HTTP_GET => self.host_http_get(arguments, out),
+            LANA_HOST_HTTP_POST => self.host_http_post(arguments, out),
+            LANA_HOST_SOCKET_CONNECT => self.host_socket_connect(arguments, out),
+            LANA_HOST_SOCKET_SEND => self.host_socket_send(arguments, out),
+            LANA_HOST_SOCKET_RECV => self.host_socket_recv(arguments, out),
+            LANA_HOST_SOCKET_CLOSE => self.host_socket_close(arguments, out),
             _ => match self.host_call_extension.as_mut() {
                 Some(handler) => handler(host_id, arguments, out),
                 None => LanaError::Format,
@@ -10939,6 +11036,230 @@ impl<'a> Vm<'a> {
             return LanaError::Oom;
         }
         *out = Value::map(Arc::new(Mutex::new(map)));
+        LanaError::Ok
+    }
+
+    /// LIP-019 networking: build a `{"ok": value}` / `{"error": reason}` map.
+    fn net_result_map(&self, key: &str, value: &Value, out: &mut Value) -> LanaError {
+        self.ffi_result_map(key, value, out)
+    }
+
+    fn net_error_result(&self, reason: &str, out: &mut Value) -> LanaError {
+        let e = Value::string(Arc::from(reason));
+        self.net_result_map("error", &e, out)
+    }
+
+    /// Perform an HTTP request and build the `Result<HttpResponse, E>` map.
+    fn net_http_request(
+        &mut self,
+        method: &str,
+        url: &str,
+        body: Option<&str>,
+        timeout_ms: f64,
+        out: &mut Value,
+    ) -> LanaError {
+        let timeout = if timeout_ms > 0.0 { timeout_ms as u64 } else { 5000 };
+        let (_scheme, host, port, path) = match net_parse_url(url) {
+            Some(x) => x,
+            None => return self.net_error_result("url", out),
+        };
+        let stream = match net_connect(&host, port, timeout) {
+            Ok(s) => s,
+            Err(NetError::Timeout) => return self.net_error_result("timeout", out),
+            Err(_) => return self.net_error_result("connect", out),
+        };
+        let mut request = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
+            method, path, host
+        );
+        match body {
+            Some(b) => request.push_str(&format!("Content-Length: {}\r\n\r\n{}", b.len(), b)),
+            None => request.push_str("Content-Length: 0\r\n\r\n"),
+        }
+        let mut sock = NetSocket::Plain(stream);
+        if sock.write_all(request.as_bytes()).is_err() {
+            return self.net_error_result("send", out);
+        }
+        let mut response = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match sock.read(&mut buf, timeout) {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(NetError::Timeout) => return self.net_error_result("timeout", out),
+                Err(_) => break,
+            }
+        }
+        let text = String::from_utf8_lossy(&response).to_string();
+        let header_end = match text.find("\r\n\r\n") {
+            Some(i) => i,
+            None => return self.net_error_result("response", out),
+        };
+        let status_line = &text[..text.find("\r\n").unwrap_or(0)];
+        let status = if let Some(sp) = status_line.find(' ') {
+            status_line[sp + 1..].split(' ').next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        let body_text = &text[header_end + 4..];
+        let mut resp = Map::new(3);
+        let status_value = Value::number(status);
+        let body_value = Value::string(Arc::from(body_text));
+        if resp.set(Arc::from("status"), status_value, false).is_err()
+            || resp.set(Arc::from("headers"), Value::map(Arc::new(Mutex::new(Map::new(0)))), false).is_err()
+            || resp.set(Arc::from("body"), body_value, false).is_err()
+        {
+            return LanaError::Oom;
+        }
+        let resp_value = Value::map(Arc::new(Mutex::new(resp)));
+        self.net_result_map("ok", &resp_value, out)
+    }
+
+    /// `http_get(url, headers, timeout_ms) -> Result<HttpResponse, E>` (LIP-019).
+    fn host_http_get(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        if arguments.len() != 3 {
+            return LanaError::Type;
+        }
+        let ValueKind::String(url) = &arguments[0].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::Map(_headers) = &arguments[1].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::Number(timeout_ms) = &arguments[2].kind else {
+            return LanaError::Type;
+        };
+        if !self.has_named_capability("net") {
+            return LanaError::Capability;
+        }
+        self.net_http_request("GET", url, None, *timeout_ms, out)
+    }
+
+    /// `http_post(url, body, headers, timeout_ms) -> Result<HttpResponse, E>`.
+    fn host_http_post(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        if arguments.len() != 4 {
+            return LanaError::Type;
+        }
+        let ValueKind::String(url) = &arguments[0].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::String(body) = &arguments[1].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::Map(_headers) = &arguments[2].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::Number(timeout_ms) = &arguments[3].kind else {
+            return LanaError::Type;
+        };
+        if !self.has_named_capability("net") {
+            return LanaError::Capability;
+        }
+        self.net_http_request("POST", url, Some(body), *timeout_ms, out)
+    }
+
+    /// `socket_connect(host, port) -> Result<Socket, E>` (LIP-019).
+    fn host_socket_connect(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        if arguments.len() != 2 {
+            return LanaError::Type;
+        }
+        let ValueKind::String(host) = &arguments[0].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::Number(port) = &arguments[1].kind else {
+            return LanaError::Type;
+        };
+        if !self.has_named_capability("net") {
+            return LanaError::Capability;
+        }
+        let stream = match net_connect(host, *port as u16, 5000) {
+            Ok(s) => s,
+            Err(NetError::Timeout) => return self.net_error_result("timeout", out),
+            Err(_) => return self.net_error_result("connect", out),
+        };
+        let handle = self.sockets.len();
+        self.sockets.push(NetSocket::Plain(stream));
+        *out = Value::number(handle as f64);
+        LanaError::Ok
+    }
+
+    /// `socket_send(sock, bytes) -> Result<number, E>` (LIP-019).
+    fn host_socket_send(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        if arguments.len() != 2 {
+            return LanaError::Type;
+        }
+        let ValueKind::Number(handle) = &arguments[0].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::String(bytes) = &arguments[1].kind else {
+            return LanaError::Type;
+        };
+        if !self.has_named_capability("net") {
+            return LanaError::Capability;
+        }
+        let index = *handle as usize;
+        let Some(sock) = self.sockets.get_mut(index) else {
+            return LanaError::InvalidState;
+        };
+        match sock.write_all(bytes.as_bytes()) {
+            Ok(()) => {
+                *out = Value::number(bytes.len() as f64);
+                LanaError::Ok
+            }
+            Err(_) => self.net_error_result("send", out),
+        }
+    }
+
+    /// `socket_recv(sock, max_bytes) -> Result<string, E>` (LIP-019).
+    fn host_socket_recv(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        if arguments.len() != 2 {
+            return LanaError::Type;
+        }
+        let ValueKind::Number(handle) = &arguments[0].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::Number(max_bytes) = &arguments[1].kind else {
+            return LanaError::Type;
+        };
+        if !self.has_named_capability("net") {
+            return LanaError::Capability;
+        }
+        let index = *handle as usize;
+        let Some(sock) = self.sockets.get_mut(index) else {
+            return LanaError::InvalidState;
+        };
+        let mut buf = vec![0u8; (*max_bytes as usize).min(65536)];
+        match sock.read(&mut buf, 5000) {
+            Ok(0) => {
+                *out = Value::string(Arc::from(""));
+                LanaError::Ok
+            }
+            Ok(n) => {
+                *out = Value::string(Arc::from(String::from_utf8_lossy(&buf[..n]).to_string()));
+                LanaError::Ok
+            }
+            Err(NetError::Timeout) => self.net_error_result("timeout", out),
+            Err(_) => self.net_error_result("recv", out),
+        }
+    }
+
+    /// `socket_close(sock)` (LIP-019).
+    fn host_socket_close(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        if arguments.len() != 1 {
+            return LanaError::Type;
+        }
+        let ValueKind::Number(handle) = &arguments[0].kind else {
+            return LanaError::Type;
+        };
+        if !self.has_named_capability("net") {
+            return LanaError::Capability;
+        }
+        let index = *handle as usize;
+        if index >= self.sockets.len() {
+            return LanaError::InvalidState;
+        }
+        self.sockets.remove(index);
+        *out = Value::null();
         LanaError::Ok
     }
 

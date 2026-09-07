@@ -46,6 +46,13 @@ typedef struct LanaPathExecution LanaPathExecution;
 typedef struct LanaSharedReference LanaSharedReference;
 typedef struct LanaStore LanaStore;
 typedef struct LanaLedger LanaLedger;
+/* LIP-019 networking: an open socket. `ssl` is an `SSL*` for TLS
+ * connections and NULL for plain TCP. */
+typedef struct {
+    int fd;
+    void *ssl;
+    bool is_tls;
+} LanaSocket;
 typedef bool (*LanaDebugHook)(LanaVM *vm, size_t instruction,
                              uint32_t source_line, void *context);
 typedef LanaError (*LanaEffectExecutor)(LanaVM *vm, const char *kind,
@@ -143,6 +150,11 @@ struct LanaVM {
     /* Crash containment: a sigsetjmp guard around the FFI call. */
     sigjmp_buf ffi_jmp;
     volatile bool ffi_faulted;
+    /* LIP-019 networking: open sockets, indexed by handle. `ssl` is an
+     * `SSL*` for TLS connections and NULL for plain TCP. */
+    LanaSocket *sockets;
+    size_t socket_count;
+    size_t socket_capacity;
 };
 
 void lana_vm_init(LanaVM *vm, const LanaChunk *chunk);

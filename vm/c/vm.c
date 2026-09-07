@@ -15,6 +15,7 @@
 
 static LanaError dataset_array_new(LanaVM *vm, LanaArray **out);
 static LanaError dataset_array_push(LanaVM *vm, LanaArray *array, const Value *value);
+static void net_socket_close(LanaSocket *sock);
 
 #include <math.h>
 #include <ctype.h>
@@ -32,6 +33,14 @@ static LanaError dataset_array_push(LanaVM *vm, LanaArray *array, const Value *v
 #include <dlfcn.h>
 #include <signal.h>
 #include <ffi.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <poll.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 extern char *realpath(const char *path, char *resolved_path);
 
@@ -1205,6 +1214,14 @@ void lana_vm_free(LanaVM *vm) {
         free(vm->ffi_sigs);
         vm->ffi_sigs = NULL;
         vm->ffi_sig_count = 0u;
+    }
+    if (vm->sockets != NULL) {
+        size_t index;
+        for (index = 0; index < vm->socket_count; ++index) net_socket_close(&vm->sockets[index]);
+        free(vm->sockets);
+        vm->sockets = NULL;
+        vm->socket_count = 0u;
+        vm->socket_capacity = 0u;
     }
 }
 
@@ -6562,6 +6579,268 @@ static LanaError ffi_call_impl(LanaVM *vm, const FfiSignature *sig, void *lib,
     return LANA_OK;
 }
 
+/* ---- LIP-019 networking ---- */
+
+/* Close a socket (fd + TLS). */
+static void net_socket_close(LanaSocket *sock) {
+    if (sock->ssl != NULL) {
+        SSL_shutdown((SSL *)sock->ssl);
+        SSL_free((SSL *)sock->ssl);
+        sock->ssl = NULL;
+    }
+    if (sock->fd >= 0) { close(sock->fd); sock->fd = -1; }
+    sock->is_tls = false;
+}
+
+/* Result map: {"ok": value} or {"error": reason}. */
+static LanaError net_result_map(LanaVM *vm, const char *key, const Value *value,
+                                Value *out) {
+    LanaMap *map;
+    LanaError error = lana_map_new(vm, 1u, &map);
+    if (error != LANA_OK) return error;
+    error = lana_map_set(vm, map, key, value, true);
+    if (error != LANA_OK) return error;
+    *out = lana_value_map(map);
+    return LANA_OK;
+}
+
+static LanaError net_error_result(LanaVM *vm, const char *reason, Value *out) {
+    Value e = lana_value_string(reason);
+    return net_result_map(vm, "error", &e, out);
+}
+
+/* Parse a URL into scheme, host, port, path. Returns false on malformed. */
+static bool net_parse_url(const char *url, char *scheme, size_t scheme_cap,
+                          char *host, size_t host_cap, int *port,
+                          char *path, size_t path_cap) {
+    const char *scheme_end = strstr(url, "://");
+    const char *host_start, *host_end, *path_start;
+    size_t slen, hlen, plen;
+    if (scheme_end == NULL) return false;
+    slen = (size_t)(scheme_end - url);
+    if (slen == 0 || slen >= scheme_cap) return false;
+    memcpy(scheme, url, slen); scheme[slen] = '\0';
+    host_start = scheme_end + 3;
+    host_end = host_start;
+    while (*host_end != '\0' && *host_end != ':' && *host_end != '/') ++host_end;
+    hlen = (size_t)(host_end - host_start);
+    if (hlen == 0 || hlen >= host_cap) return false;
+    memcpy(host, host_start, hlen); host[hlen] = '\0';
+    *port = 0;
+    if (*host_end == ':') {
+        const char *port_start = host_end + 1;
+        const char *port_end = port_start;
+        while (*port_end >= '0' && *port_end <= '9') ++port_end;
+        if (port_end == port_start) return false;
+        *port = atoi(port_start);
+        host_end = port_end;
+    }
+    path_start = host_end;
+    if (*path_start == '\0') path_start = "/";
+    plen = strlen(path_start);
+    if (plen >= path_cap) return false;
+    memcpy(path, path_start, plen + 1);
+    if (*port == 0) *port = strcmp(scheme, "https") == 0 ? 443 : 80;
+    return true;
+}
+
+/* Connect a TCP socket to host:port with a timeout. Returns fd or -1. */
+static int net_connect(const char *host, int port, int timeout_ms, bool *timed_out) {
+    struct addrinfo hints, *res = NULL, *rp;
+    char port_str[16];
+    int fd = -1;
+    int rc;
+    *timed_out = false;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    rc = getaddrinfo(host, port_str, &hints, &res);
+    if (rc != 0) return -1;
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+        int flags;
+        struct pollfd pfd;
+        int so_error = 0;
+        socklen_t len = sizeof(so_error);
+        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd < 0) continue;
+        flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            fcntl(fd, F_SETFL, flags);
+            break;
+        }
+        if (errno != EINPROGRESS) { close(fd); fd = -1; continue; }
+        pfd.fd = fd; pfd.events = POLLOUT;
+        rc = poll(&pfd, 1, timeout_ms);
+        if (rc <= 0) {
+            if (rc == 0) *timed_out = true;
+            close(fd); fd = -1; continue;
+        }
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &len) != 0 || so_error != 0) {
+            close(fd); fd = -1; continue;
+        }
+        fcntl(fd, F_SETFL, flags);
+        break;
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+/* Wrap an fd in TLS. Returns SSL* or NULL on failure. */
+static SSL *net_tls_wrap(int fd, const char *host, bool verify) {
+    SSL_CTX *ctx;
+    SSL *ssl;
+    ctx = SSL_CTX_new(TLS_client_method());
+    if (ctx == NULL) return NULL;
+    if (verify) {
+        SSL_CTX_set_default_verify_paths(ctx);
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+    } else {
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    }
+    ssl = SSL_new(ctx);
+    SSL_CTX_free(ctx);
+    if (ssl == NULL) return NULL;
+    SSL_set_fd(ssl, fd);
+    SSL_set_tlsext_host_name(ssl, host);
+    if (SSL_connect(ssl) != 1) {
+        SSL_free(ssl);
+        return NULL;
+    }
+    return ssl;
+}
+
+/* Read up to `cap` bytes from a socket (TLS-aware) with a timeout. */
+static ssize_t net_read(LanaSocket *sock, char *buf, size_t cap, int timeout_ms,
+                        bool *timed_out) {
+    struct pollfd pfd;
+    int rc;
+    *timed_out = false;
+    pfd.fd = sock->fd; pfd.events = POLLIN;
+    rc = poll(&pfd, 1, timeout_ms);
+    if (rc == 0) { *timed_out = true; return -1; }
+    if (rc < 0) return -1;
+    if (sock->ssl != NULL) return (ssize_t)SSL_read((SSL *)sock->ssl, buf, (int)cap);
+    return recv(sock->fd, buf, cap, 0);
+}
+
+/* Write all bytes to a socket (TLS-aware). Returns bytes written or -1. */
+static ssize_t net_write_all(LanaSocket *sock, const char *buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n;
+        if (sock->ssl != NULL) n = (ssize_t)SSL_write((SSL *)sock->ssl, buf + off, (int)(len - off));
+        else n = send(sock->fd, buf + off, len - off, 0);
+        if (n <= 0) return -1;
+        off += (size_t)n;
+    }
+    return (ssize_t)off;
+}
+
+/* Perform an HTTP request and build the Result map. */
+static LanaError net_http_request(LanaVM *vm, const char *method, const char *url,
+                                  const char *body, double timeout_ms, Value *out) {
+    char scheme[16], host[256], path[1024];
+    char request[16384];
+    char response[65536];
+    int port, timeout = (int)timeout_ms;
+    int fd;
+    bool timed_out = false, is_tls;
+    SSL *ssl = NULL;
+    LanaSocket sock;
+    size_t req_len = 0, resp_len = 0;
+    ssize_t n;
+    LanaError error;
+    Value status_value, body_value, headers_map, resp_map;
+    LanaMap *header_map, *headers_map_ptr;
+    const char *status_line, *header_end, *body_start;
+    long http_status = 0;
+    if (timeout <= 0) timeout = 5000;
+    if (!net_parse_url(url, scheme, sizeof(scheme), host, sizeof(host), &port,
+                       path, sizeof(path))) {
+        return net_error_result(vm, "url", out);
+    }
+    is_tls = strcmp(scheme, "https") == 0;
+    fd = net_connect(host, port, timeout, &timed_out);
+    if (fd < 0) {
+        if (timed_out) return net_error_result(vm, "timeout", out);
+        return net_error_result(vm, "connect", out);
+    }
+    if (is_tls) {
+        ssl = net_tls_wrap(fd, host, true);
+        if (ssl == NULL) { close(fd); return net_error_result(vm, "tls", out); }
+    }
+    sock.fd = fd; sock.ssl = ssl; sock.is_tls = is_tls;
+    req_len = (size_t)snprintf(request, sizeof(request),
+        "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
+        "Content-Length: %zu\r\n\r\n%s",
+        method, path, host, body == NULL ? 0u : strlen(body),
+        body == NULL ? "" : body);
+    if (req_len >= sizeof(request)) { net_socket_close(&sock); return net_error_result(vm, "request", out); }
+    if (net_write_all(&sock, request, req_len) < 0) {
+        net_socket_close(&sock); return net_error_result(vm, "send", out);
+    }
+    while (resp_len < sizeof(response) - 1u) {
+        n = net_read(&sock, response + resp_len, sizeof(response) - 1u - resp_len, timeout, &timed_out);
+        if (n < 0) break;
+        if (n == 0) break;
+        resp_len += (size_t)n;
+    }
+    net_socket_close(&sock);
+    if (timed_out) return net_error_result(vm, "timeout", out);
+    if (resp_len == 0) return net_error_result(vm, "response", out);
+    response[resp_len] = '\0';
+    status_line = response;
+    header_end = strstr(response, "\r\n\r\n");
+    if (header_end == NULL) return net_error_result(vm, "response", out);
+    if (strncmp(status_line, "HTTP/1.", 7) == 0) {
+        const char *sp = strchr(status_line, ' ');
+        if (sp != NULL) http_status = strtol(sp + 1, NULL, 10);
+    }
+    body_start = header_end + 4;
+    error = lana_map_new(vm, 3u, &header_map);
+    if (error != LANA_OK) return error;
+    /* The "headers" value is a distinct empty map, not a self-reference. */
+    error = lana_map_new(vm, 0u, &headers_map_ptr);
+    if (error != LANA_OK) return error;
+    headers_map = lana_value_map(headers_map_ptr);
+    status_value = lana_value_number((double)http_status);
+    body_value = lana_value_string(body_start);
+    error = lana_map_set(vm, header_map, "status", &status_value, true);
+    if (error != LANA_OK) return error;
+    error = lana_map_set(vm, header_map, "headers", &headers_map, true);
+    if (error != LANA_OK) return error;
+    error = lana_map_set(vm, header_map, "body", &body_value, true);
+    if (error != LANA_OK) return error;
+    resp_map = lana_value_map(header_map);
+    return net_result_map(vm, "ok", &resp_map, out);
+}
+
+/* Store a socket in the VM table, returning its handle. */
+static LanaError net_socket_store(LanaVM *vm, LanaSocket *sock, Value *out) {
+    LanaSocket *new_sockets;
+    if (vm->socket_count == vm->socket_capacity) {
+        size_t capacity = vm->socket_capacity == 0 ? 8u : vm->socket_capacity * 2u;
+        if (capacity < vm->socket_capacity || capacity > SIZE_MAX / sizeof(*new_sockets))
+            return LANA_ERR_OOM;
+        new_sockets = realloc(vm->sockets, capacity * sizeof(*new_sockets));
+        if (new_sockets == NULL) return LANA_ERR_OOM;
+        vm->sockets = new_sockets;
+        vm->socket_capacity = capacity;
+    }
+    vm->sockets[vm->socket_count] = *sock;
+    *out = lana_value_number((double)vm->socket_count);
+    vm->socket_count += 1u;
+    return LANA_OK;
+}
+
+static LanaSocket *net_socket_get(LanaVM *vm, double handle) {
+    size_t index = (size_t)handle;
+    if (handle < 0 || index >= vm->socket_count) return NULL;
+    return &vm->sockets[index];
+}
+
 static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *arguments,
                                  size_t argc, uint32_t scratch_register, Value *out) {
     size_t index;
@@ -8381,6 +8660,97 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             }
             if (error != LANA_OK) return error;
             return ffi_result_map(vm, "ok", &result, out);
+        }
+        case LANA_HOST_HTTP_GET: {
+            const char *url;
+            double timeout_ms;
+            if (argc != 3u || arguments[0].type != VAL_STRING ||
+                arguments[1].type != VAL_MAP || arguments[2].type != VAL_NUMBER)
+                return LANA_ERR_TYPE;
+            if (!vm_has_named_capability(vm, "net")) return LANA_ERR_CAPABILITY;
+            url = arguments[0].as.string;
+            timeout_ms = arguments[2].as.number;
+            return net_http_request(vm, "GET", url, NULL, timeout_ms, out);
+        }
+        case LANA_HOST_HTTP_POST: {
+            const char *url, *body;
+            double timeout_ms;
+            if (argc != 4u || arguments[0].type != VAL_STRING ||
+                arguments[1].type != VAL_STRING || arguments[2].type != VAL_MAP ||
+                arguments[3].type != VAL_NUMBER)
+                return LANA_ERR_TYPE;
+            if (!vm_has_named_capability(vm, "net")) return LANA_ERR_CAPABILITY;
+            url = arguments[0].as.string;
+            body = arguments[1].as.string;
+            timeout_ms = arguments[3].as.number;
+            return net_http_request(vm, "POST", url, body, timeout_ms, out);
+        }
+        case LANA_HOST_SOCKET_CONNECT: {
+            const char *host;
+            int port;
+            int fd;
+            bool timed_out = false;
+            LanaSocket sock;
+            if (argc != 2u || arguments[0].type != VAL_STRING ||
+                arguments[1].type != VAL_NUMBER)
+                return LANA_ERR_TYPE;
+            if (!vm_has_named_capability(vm, "net")) return LANA_ERR_CAPABILITY;
+            host = arguments[0].as.string;
+            port = (int)arguments[1].as.number;
+            fd = net_connect(host, port, 5000, &timed_out);
+            if (fd < 0) {
+                if (timed_out) return net_error_result(vm, "timeout", out);
+                return net_error_result(vm, "connect", out);
+            }
+            sock.fd = fd; sock.ssl = NULL; sock.is_tls = false;
+            return net_socket_store(vm, &sock, out);
+        }
+        case LANA_HOST_SOCKET_SEND: {
+            LanaSocket *sock;
+            ssize_t n;
+            if (argc != 2u || arguments[0].type != VAL_NUMBER ||
+                arguments[1].type != VAL_STRING)
+                return LANA_ERR_TYPE;
+            if (!vm_has_named_capability(vm, "net")) return LANA_ERR_CAPABILITY;
+            sock = net_socket_get(vm, arguments[0].as.number);
+            if (sock == NULL) return LANA_ERR_INVALID_STATE;
+            n = net_write_all(sock, arguments[1].as.string, strlen(arguments[1].as.string));
+            if (n < 0) return net_error_result(vm, "send", out);
+            *out = lana_value_number((double)n);
+            return LANA_OK;
+        }
+        case LANA_HOST_SOCKET_RECV: {
+            LanaSocket *sock;
+            char buf[65536];
+            ssize_t n;
+            bool timed_out = false;
+            size_t max_bytes;
+            if (argc != 2u || arguments[0].type != VAL_NUMBER ||
+                arguments[1].type != VAL_NUMBER)
+                return LANA_ERR_TYPE;
+            if (!vm_has_named_capability(vm, "net")) return LANA_ERR_CAPABILITY;
+            sock = net_socket_get(vm, arguments[0].as.number);
+            if (sock == NULL) return LANA_ERR_INVALID_STATE;
+            max_bytes = (size_t)arguments[1].as.number;
+            if (max_bytes > sizeof(buf)) max_bytes = sizeof(buf);
+            n = net_read(sock, buf, max_bytes, 5000, &timed_out);
+            if (n < 0) {
+                if (timed_out) return net_error_result(vm, "timeout", out);
+                return net_error_result(vm, "recv", out);
+            }
+            buf[n] = '\0';
+            *out = lana_value_string(buf);
+            return LANA_OK;
+        }
+        case LANA_HOST_SOCKET_CLOSE: {
+            LanaSocket *sock;
+            if (argc != 1u || arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+            if (!vm_has_named_capability(vm, "net")) return LANA_ERR_CAPABILITY;
+            sock = net_socket_get(vm, arguments[0].as.number);
+            if (sock == NULL) return LANA_ERR_INVALID_STATE;
+            net_socket_close(sock);
+            *out = lana_value_null();
+            return LANA_OK;
         }
         default: return LANA_ERR_FORMAT;
     }
