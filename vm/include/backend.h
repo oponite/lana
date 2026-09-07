@@ -11,6 +11,7 @@
 typedef struct {
     size_t m, k, n;   /* C = A(m x k) . B(k x n), row-major throughout */
     bool is_complex;  /* components interleaved: [re, im] per element */
+    bool fp32;        /* LIP-027: accumulate in binary32 (f32/f16/bf16 inputs) */
     const double *a;  /* m * k elements (complex: 2 * m * k doubles) */
     size_t lda;       /* row stride of a in elements, >= k, or 1 when k == 0 */
     const double *b;  /* k * n elements */

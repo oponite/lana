@@ -16,8 +16,8 @@ use crate::opcode::{OpCode, LANA_MAX_REGISTERS};
 /// deliberate, documented divergence from the C11 verifier. LIP-024 async host
 /// calls (run_async/future_all/future_race/sleep) occupy ids 126-129 and the
 /// LIP-015 dataset calls ids 130-140, LIP-018 FFI calls 157-159, LIP-019 net
-/// calls 160-165, matching the C11 VM.
-pub const LANA_HOST_COUNT: u32 = 166;
+/// calls 160-165, LIP-027 cast at 166, matching the C11 VM.
+pub const LANA_HOST_COUNT: u32 = 167;
 
 const LANA_TRANSFORM_NEUTRALIZE: u32 = 1;
 const LANA_MEASURE_SAMPLE: u32 = 2;

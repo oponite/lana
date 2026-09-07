@@ -1,0 +1,37 @@
+// LIP-027 B16: matmul accumulates in binary32 for f32/f16/bf16 inputs. The
+// discriminator is a dot product that sums to 2^24 + 1: in fp32 the +1 is
+// below half the ulp of 2^24 and rounds away (result 2^24), while fp64 keeps
+// it (result 2^24 + 1). Both VMs must take the fp32 path and agree.
+
+// a = [[2^24, 1.0]] (1x2), b = [[1.0],[1.0]] (2x1). Dot product = 2^24 + 1.
+// fp32 accumulation rounds the +1 away -> 2^24 = 16777216.0.
+let a = tensor([[16777216.0, 1.0]], dtype: "f32");
+let b = tensor([[1.0], [1.0]], dtype: "f32");
+let r = matmul(a, b);
+assert(dtype(r) == "f32", "f32 x f32 -> f32");
+assert(r[0][0] == 16777216.0, "fp32 accumulation rounds 2^24+1 to 2^24");
+assert(r[0][0] != 16777217.0, "not fp64 accumulation");
+
+// f16 x f16 also accumulates in fp32 (inputs are low precision, but the
+// accumulation path must be fp32, not fp64). Basic correctness check.
+let a16 = tensor([[1.0, 2.0], [3.0, 4.0]], dtype: "f16");
+let b16 = tensor([[1.0, 0.0], [0.0, 1.0]], dtype: "f16");
+let r16 = matmul(a16, b16);
+assert(dtype(r16) == "f16", "f16 x f16 -> f16");
+assert(r16[0][0] == 1.0, "r16[0][0]");
+assert(r16[1][1] == 4.0, "r16[1][1]");
+
+// bf16 x bf16 accumulates in fp32.
+let abf = tensor([[1.0, 2.0], [3.0, 4.0]], dtype: "bf16");
+let bbf = tensor([[1.0, 0.0], [0.0, 1.0]], dtype: "bf16");
+let rbf = matmul(abf, bbf);
+assert(dtype(rbf) == "bf16", "bf16 x bf16 -> bf16");
+assert(rbf[0][0] == 1.0, "rbf[0][0]");
+assert(rbf[1][1] == 4.0, "rbf[1][1]");
+
+// f16 inputs with out_dtype f64 still accumulate in fp32 internally.
+let r64 = matmul(a16, b16, out_dtype: "f64");
+assert(dtype(r64) == "f64", "out_dtype f64 on f16 inputs");
+assert(r64[0][0] == 1.0, "r64[0][0]");
+
+print("TENSOR_MATMUL_FP32_ACCUM_PASS");

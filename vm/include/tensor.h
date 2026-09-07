@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #define LANA_TENSOR_MAX_RANK 32u
 
@@ -22,14 +23,19 @@ typedef enum LanaTensorDtype {
  *   shape  – array of dimension lengths.
  *   strides – row‑major strides (computed from shape).
  *   is_complex – true for complex tensors (each element stores real & imag).
- *   data   – contiguous buffer of double values (real interleaved with imag if complex).
+ *   dtype  – LIP-027 numeric dtype (F64 default); determines element width.
+ *   data   – contiguous byte buffer of `prod(shape) * element_width` bytes.
+ *            For a complex tensor each element is 16 bytes (real, imag).
+ *            Element access goes through the tensor_get/set helpers in vm.c,
+ *            which convert between the storage dtype and double.
  *   offset – index of the first element (in elements; 0 for a base tensor).
  *   base   – the source tensor when this tensor is a view, NULL for a base
  *            tensor. The GC marks the whole base chain so a shared buffer
  *            outlives every view of it.
  *
- * The base buffer size is prod(shape) * (is_complex ? 2 : 1). A view shares
- * that buffer; its shape/strides/offset select a subset, and strides may be
+ * The base buffer size is prod(shape) * element_width, where element_width is
+ * 8 for f64, 4 for f32, 2 for f16/bf16, and 16 for complex. A view shares that
+ * buffer; its shape/strides/offset select a subset, and strides may be
  * non‑contiguous. Element access always goes through offset and strides.
  */
 
@@ -39,7 +45,7 @@ typedef struct LanaTensor {
     size_t *strides;    // length ndim, row‑major stride for each dimension
     bool is_complex;
     LanaTensorDtype dtype; // LIP-027: numeric dtype (F64 default)
-    double *data;       // length prod(shape) * (is_complex ? 2 : 1)
+    uint8_t *data;      // length prod(shape) * element_width bytes
     size_t offset;      // first element, in elements (0 for a base tensor)
     struct LanaTensor *base; // source tensor for a view, NULL for a base tensor
     bool is_state;      // LIP-007: a STATE tensor (each element is a density matrix)
@@ -48,5 +54,12 @@ typedef struct LanaTensor {
 /* Helper to compute row‑major strides from shape. Caller must allocate
  * space for `strides` (size ndim). Returns 0 on success, non‑zero on overflow. */
 int lana_tensor_compute_strides(const size_t *shape, size_t ndim, size_t *strides);
+
+/* LIP-027: element accessors. `i` is the absolute element index (already
+ * including `offset`). `tensor_get_real` returns the real part of element `i`
+ * converted to double; `tensor_get_imag` returns the imaginary part (0.0 for a
+ * real dtype). Defined in vm.c. */
+double tensor_get_real(const LanaTensor *t, size_t i);
+double tensor_get_imag(const LanaTensor *t, size_t i);
 
 #endif // LANA_TENSOR_H

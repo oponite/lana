@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <float.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -25,9 +26,11 @@ static int tensor_elements_match(const LanaTensor *actual, const LanaTensor *exp
             index += (rem % actual->shape[d]) * actual->strides[d];
             rem /= actual->shape[d];
         }
-        for (size_t c = 0u; c < mult; ++c)
-            if (actual->data[index * mult + c] != expected->data[lin * mult + c])
-                return 0;
+        for (size_t c = 0u; c < mult; ++c) {
+            double a = c ? tensor_get_imag(actual, index) : tensor_get_real(actual, index);
+            double e = c ? tensor_get_imag(expected, lin) : tensor_get_real(expected, lin);
+            if (a != e) return 0;
+        }
     }
     return 1;
 }
@@ -50,8 +53,8 @@ static int tensor_elements_match_tol(const LanaTensor *actual, const LanaTensor 
             rem /= actual->shape[d];
         }
         for (size_t c = 0u; c < mult; ++c) {
-            double a = actual->data[index * mult + c];
-            double e = expected->data[lin * mult + c];
+            double a = c ? tensor_get_imag(actual, index) : tensor_get_real(actual, index);
+            double e = c ? tensor_get_imag(expected, lin) : tensor_get_real(expected, lin);
             if (fabs(a - e) > tol * (1.0 + fabs(e))) return 0;
         }
     }
@@ -70,8 +73,6 @@ static void call_checked(uint32_t host, Value *args, uint32_t argc, LanaError ex
     lana_vm_init(&vm, &chunk);
     for (uint32_t i = 0u; i < argc; ++i) vm.frames[0].registers[i] = args[i];
     LanaError actual = lana_vm_run(&vm);
-    if (actual != expected)
-        (void)fprintf(stderr, "host %u: expected %d, got %d\n", host, expected, actual);
     assert(actual == expected);
     if (expected != LANA_OK) assert(vm.frames[0].registers[8].type == VAL_NULL);
     if (result != NULL) {
@@ -132,18 +133,18 @@ static void call_dtype(uint32_t constructor, Value *args, uint32_t argc,
 static void axis_reductions(void) {
     size_t shape[] = {2, 3}, strides[] = {3, 1}, out_size = 3;
     double data[] = {1, 2, 3, 4, 5, 6};
-    LanaTensor t = {2, shape, strides, false, LANA_TENSOR_F64, data, 0, NULL, false};
+    LanaTensor t = {2, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false};
     Value args[] = {lana_value_tensor(&t), lana_value_number(0)};
     double sums[] = {5, 7, 9}, means[] = {2.5, 3.5, 4.5};
-    LanaTensor expected = {1, &out_size, NULL, false, LANA_TENSOR_F64, sums, 0, NULL, false};
+    LanaTensor expected = {1, &out_size, NULL, false, LANA_TENSOR_F64, (uint8_t *)sums, 0, NULL, false};
     call_checked(LANA_HOST_TENSOR_SUM, args, 2, LANA_OK, &expected);
-    expected.data = means;
+    expected.data = (uint8_t *)means;
     call_checked(LANA_HOST_TENSOR_MEAN, args, 2, LANA_OK, &expected);
     args[1] = lana_value_number(-1);
     double maxima[] = {3, 6}, minima[] = {1, 4};
-    out_size = 2; expected.data = maxima;
+    out_size = 2; expected.data = (uint8_t *)maxima;
     call_checked(LANA_HOST_TENSOR_MAX, args, 2, LANA_OK, &expected);
-    expected.data = minima;
+    expected.data = (uint8_t *)minima;
     call_checked(LANA_HOST_TENSOR_MIN, args, 2, LANA_OK, &expected);
     const double bad_axes[] = {NAN, INFINITY, -INFINITY, 0.5, -3, 2, 0x1p64};
     for (size_t i = 0; i < sizeof(bad_axes) / sizeof(bad_axes[0]); ++i) {
@@ -154,7 +155,7 @@ static void axis_reductions(void) {
     call(LANA_HOST_TENSOR_SUM, args, 2, LANA_ERR_TYPE);
     args[1] = lana_value_number(0);
     shape[0] = 0; out_size = 3;
-    double zeros[] = {0, 0, 0}; expected.data = zeros;
+    double zeros[] = {0, 0, 0}; expected.data = (uint8_t *)zeros;
     call_checked(LANA_HOST_TENSOR_SUM, args, 2, LANA_OK, &expected);
     for (uint32_t op = LANA_HOST_TENSOR_MEAN; op <= LANA_HOST_TENSOR_MIN; ++op)
         call(op, args, 2, LANA_ERR_INVALID_PARAMETERS);
@@ -162,9 +163,10 @@ static void axis_reductions(void) {
     call_checked(LANA_HOST_TENSOR_MEAN, args, 2, LANA_OK, &expected);
     t.ndim = 0; args[1] = lana_value_number(0);
     call(LANA_HOST_TENSOR_SUM, args, 2, LANA_ERR_INVALID_PARAMETERS);
-    t.ndim = 1; shape[0] = 2; strides[0] = 1; t.is_complex = true;
+    t.ndim = 1; shape[0] = 2; strides[0] = 1; t.is_complex = true; t.dtype = LANA_TENSOR_COMPLEX;
     double complex_sum[] = {4, 6};
-    expected.ndim = 0; expected.is_complex = true; expected.data = complex_sum;
+    expected.ndim = 0; expected.is_complex = true; expected.dtype = LANA_TENSOR_COMPLEX;
+    expected.data = (uint8_t *)complex_sum;
     call_checked(LANA_HOST_TENSOR_SUM, args, 2, LANA_OK, &expected);
     call(LANA_HOST_TENSOR_MAX, args, 2, LANA_ERR_TYPE);
     data[1] = INFINITY;
@@ -180,13 +182,13 @@ static void indexing(void) {
     /* t = [[1, 2, 3], [4, 5, 6]] */
     size_t shape[] = {2, 3}, strides[] = {3, 1};
     double data[] = {1, 2, 3, 4, 5, 6};
-    LanaTensor t = {2, shape, strides, false, LANA_TENSOR_F64, data, 0, NULL, false};
+    LanaTensor t = {2, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false};
     Value args[3] = {lana_value_tensor(&t), {0}, {0}};
 
     /* One integer position selects a row: a rank-1 view sharing the buffer. */
     size_t row = 3, one = 1;
     double row_456[] = {4, 5, 6};
-    LanaTensor expected_row = {1, &row, &one, false, LANA_TENSOR_F64, row_456, 0, NULL, false};
+    LanaTensor expected_row = {1, &row, &one, false, LANA_TENSOR_F64, (uint8_t *)row_456, 0, NULL, false};
     args[1] = lana_value_number(1);
     call_checked(LANA_HOST_INDEX_GET, args, 2, LANA_OK, &expected_row);
     args[1] = lana_value_number(-1); /* negative counts from the end */
@@ -220,7 +222,7 @@ static void indexing(void) {
     args[1] = lana_value_array(&spec);
     size_t two = 2, col_stride = 3;
     double col_25[] = {2, 5};
-    LanaTensor expected_col = {1, &two, &col_stride, false, LANA_TENSOR_F64, col_25, 0, NULL, false};
+    LanaTensor expected_col = {1, &two, &col_stride, false, LANA_TENSOR_F64, (uint8_t *)col_25, 0, NULL, false};
     call_checked(LANA_HOST_INDEX_GET, args, 2, LANA_OK, &expected_col); /* t[0:2, 1] */
 
     /* A full set of integer positions selects one element as a number. */
@@ -242,11 +244,11 @@ static void indexing(void) {
     pair_items[1] = lana_value_number(10);  /* clamps to 2 */
     positions[0] = lana_value_array(&pair);
     spec.count = 1u; /* axis 0 sliced, axis 1 kept whole */
-    LanaTensor expected_whole = {2, shape, strides, false, LANA_TENSOR_F64, data, 0, NULL, false};
+    LanaTensor expected_whole = {2, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false};
     call_checked(LANA_HOST_INDEX_GET, args, 2, LANA_OK, &expected_whole);
     pair_items[0] = lana_value_number(5); /* clamps past the end: empty axis */
     size_t empty_shape[] = {0, 3};
-    LanaTensor expected_empty = {2, empty_shape, strides, false, LANA_TENSOR_F64, data, 0, NULL, false};
+    LanaTensor expected_empty = {2, empty_shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false};
     call_checked(LANA_HOST_INDEX_GET, args, 2, LANA_OK, &expected_empty);
     pair_items[0] = lana_value_number(1);
     pair_items[1] = lana_value_number(0); /* start > end: empty axis */
@@ -271,7 +273,7 @@ static void indexing(void) {
     call(LANA_HOST_INDEX_SET, args, 3, LANA_ERR_TYPE);
 
     /* A position on a rank-zero tensor has no axis to select. */
-    LanaTensor scalar = {0, NULL, NULL, false, LANA_TENSOR_F64, data, 0, NULL, false};
+    LanaTensor scalar = {0, NULL, NULL, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false};
     args[0] = lana_value_tensor(&scalar);
     args[1] = lana_value_number(0);
     call(LANA_HOST_INDEX_GET, args, 2, LANA_ERR_INVALID_PARAMETERS);
@@ -279,7 +281,7 @@ static void indexing(void) {
     /* Views chain: selecting a column view again still reads through offset
      * and strides, and the base chain keeps the shared buffer reachable. */
     size_t col_shape = 2, col_strides = 3;
-    LanaTensor column = {1, &col_shape, &col_strides, false, LANA_TENSOR_F64, data, 1, &t, false};
+    LanaTensor column = {1, &col_shape, &col_strides, false, LANA_TENSOR_F64, (uint8_t *)data, 1, &t, false};
     args[0] = lana_value_tensor(&column);
     args[1] = lana_value_number(1);
     call_number(LANA_HOST_INDEX_GET, args, 2, 5.0);
@@ -292,17 +294,17 @@ static void indexing(void) {
      * follow its strides rather than assuming a contiguous fiber. */
     args[1] = lana_value_tensor(&column);
     double doubled[] = {4, 10};
-    LanaTensor expected_doubled = {1, &two, &one, false, LANA_TENSOR_F64, doubled, 0, NULL, false};
+    LanaTensor expected_doubled = {1, &two, &one, false, LANA_TENSOR_F64, (uint8_t *)doubled, 0, NULL, false};
     call_checked(LANA_HOST_TENSOR_ADD, args, 2, LANA_OK, &expected_doubled);
     call_number(LANA_HOST_TENSOR_SUM, args, 1, 7.0);
 
     /* A complex element selection yields the rank-zero complex form. */
     size_t c_size = 1, c_stride = 1;
     double cdata[] = {3, 4};
-    LanaTensor ctensor = {1, &c_size, &c_stride, true, LANA_TENSOR_COMPLEX, cdata, 0, NULL, false};
+    LanaTensor ctensor = {1, &c_size, &c_stride, true, LANA_TENSOR_COMPLEX, (uint8_t *)cdata, 0, NULL, false};
     args[0] = lana_value_tensor(&ctensor);
     args[1] = lana_value_number(0);
-    LanaTensor expected_c = {0, NULL, NULL, true, LANA_TENSOR_COMPLEX, cdata, 0, NULL, false};
+    LanaTensor expected_c = {0, NULL, NULL, true, LANA_TENSOR_COMPLEX, (uint8_t *)cdata, 0, NULL, false};
     call_checked(LANA_HOST_INDEX_GET, args, 2, LANA_OK, &expected_c);
 }
 
@@ -316,61 +318,61 @@ static void matmul(void) {
     /* 1d x 1d is a dot product: a rank-zero tensor. */
     size_t v3 = 3, one = 1;
     double a1[] = {1, 2, 3}, b1[] = {4, 5, 6};
-    LanaTensor ta = {1, &v3, &one, false, LANA_TENSOR_F64, a1, 0, NULL, false};
-    LanaTensor tb = {1, &v3, &one, false, LANA_TENSOR_F64, b1, 0, NULL, false};
+    LanaTensor ta = {1, &v3, &one, false, LANA_TENSOR_F64, (uint8_t *)a1, 0, NULL, false};
+    LanaTensor tb = {1, &v3, &one, false, LANA_TENSOR_F64, (uint8_t *)b1, 0, NULL, false};
     double dot[] = {32};
-    LanaTensor expected_dot = {0, NULL, NULL, false, LANA_TENSOR_F64, dot, 0, NULL, false};
+    LanaTensor expected_dot = {0, NULL, NULL, false, LANA_TENSOR_F64, (uint8_t *)dot, 0, NULL, false};
     args[0] = lana_value_tensor(&ta); args[1] = lana_value_tensor(&tb);
     call_checked(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_OK, &expected_dot);
 
     /* 1d x 2d promotes the vector to a row: [1,2,3] . [[1,2],[3,4],[5,6]]. */
     size_t s23[] = {3, 2}, st32[] = {2, 1};
     double bm[] = {1, 2, 3, 4, 5, 6};
-    LanaTensor tbm = {2, s23, st32, false, LANA_TENSOR_F64, bm, 0, NULL, false};
+    LanaTensor tbm = {2, s23, st32, false, LANA_TENSOR_F64, (uint8_t *)bm, 0, NULL, false};
     size_t two = 2;
     double vm[] = {22, 28};
-    LanaTensor expected_vm = {1, &two, &one, false, LANA_TENSOR_F64, vm, 0, NULL, false};
+    LanaTensor expected_vm = {1, &two, &one, false, LANA_TENSOR_F64, (uint8_t *)vm, 0, NULL, false};
     args[1] = lana_value_tensor(&tbm);
     call_checked(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_OK, &expected_vm);
 
     /* 2d x 1d promotes the vector to a column: [[1,2,3],[4,5,6]] . [1,2,3]. */
     size_t s23b[] = {2, 3}, st23b[] = {3, 1};
     double am[] = {1, 2, 3, 4, 5, 6};
-    LanaTensor tam = {2, s23b, st23b, false, LANA_TENSOR_F64, am, 0, NULL, false};
+    LanaTensor tam = {2, s23b, st23b, false, LANA_TENSOR_F64, (uint8_t *)am, 0, NULL, false};
     double mv[] = {14, 32};
-    LanaTensor expected_mv = {1, &two, &one, false, LANA_TENSOR_F64, mv, 0, NULL, false};
+    LanaTensor expected_mv = {1, &two, &one, false, LANA_TENSOR_F64, (uint8_t *)mv, 0, NULL, false};
     args[0] = lana_value_tensor(&tam); args[1] = lana_value_tensor(&ta);
     call_checked(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_OK, &expected_mv);
 
     /* 2d x 2d: [[1,2],[3,4]] . [[5,6],[7,8]]. */
     size_t s22[] = {2, 2}, st22[] = {2, 1};
     double a2[] = {1, 2, 3, 4}, b2[] = {5, 6, 7, 8};
-    LanaTensor ta2 = {2, s22, st22, false, LANA_TENSOR_F64, a2, 0, NULL, false};
-    LanaTensor tb2 = {2, s22, st22, false, LANA_TENSOR_F64, b2, 0, NULL, false};
+    LanaTensor ta2 = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)a2, 0, NULL, false};
+    LanaTensor tb2 = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)b2, 0, NULL, false};
     double mm[] = {19, 22, 43, 50};
-    LanaTensor expected_mm = {2, s22, st22, false, LANA_TENSOR_F64, mm, 0, NULL, false};
+    LanaTensor expected_mm = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)mm, 0, NULL, false};
     args[0] = lana_value_tensor(&ta2); args[1] = lana_value_tensor(&tb2);
     call_checked(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_OK, &expected_mm);
 
     /* Batched with broadcast: a[2,2,2] . b[1,2,2] -> [2,2,2]. */
     size_t s222[] = {2, 2, 2}, st222[] = {4, 2, 1};
     double ab[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    LanaTensor tab = {3, s222, st222, false, LANA_TENSOR_F64, ab, 0, NULL, false};
+    LanaTensor tab = {3, s222, st222, false, LANA_TENSOR_F64, (uint8_t *)ab, 0, NULL, false};
     size_t s122[] = {1, 2, 2}, st122[] = {4, 2, 1};
     double bb[] = {1, 0, 0, 1}; /* identity, broadcast across the batch */
-    LanaTensor tbb = {3, s122, st122, false, LANA_TENSOR_F64, bb, 0, NULL, false};
+    LanaTensor tbb = {3, s122, st122, false, LANA_TENSOR_F64, (uint8_t *)bb, 0, NULL, false};
     double batched[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    LanaTensor expected_batched = {3, s222, st222, false, LANA_TENSOR_F64, batched, 0, NULL, false};
+    LanaTensor expected_batched = {3, s222, st222, false, LANA_TENSOR_F64, (uint8_t *)batched, 0, NULL, false};
     args[0] = lana_value_tensor(&tab); args[1] = lana_value_tensor(&tbb);
     call_checked(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_OK, &expected_batched);
 
     /* Complex zgemm: (iI) . (iI) = -I. */
     double ca[] = {0, 1, 0, 0, 0, 0, 0, 1};
     double cb[] = {0, 1, 0, 0, 0, 0, 0, 1};
-    LanaTensor tca = {2, s22, st22, true, LANA_TENSOR_COMPLEX, ca, 0, NULL, false};
-    LanaTensor tcb = {2, s22, st22, true, LANA_TENSOR_COMPLEX, cb, 0, NULL, false};
+    LanaTensor tca = {2, s22, st22, true, LANA_TENSOR_COMPLEX, (uint8_t *)ca, 0, NULL, false};
+    LanaTensor tcb = {2, s22, st22, true, LANA_TENSOR_COMPLEX, (uint8_t *)cb, 0, NULL, false};
     double cm[] = {-1, 0, 0, 0, 0, 0, -1, 0};
-    LanaTensor expected_cm = {2, s22, st22, true, LANA_TENSOR_COMPLEX, cm, 0, NULL, false};
+    LanaTensor expected_cm = {2, s22, st22, true, LANA_TENSOR_COMPLEX, (uint8_t *)cm, 0, NULL, false};
     args[0] = lana_value_tensor(&tca); args[1] = lana_value_tensor(&tcb);
     call_checked(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_OK, &expected_cm);
 
@@ -378,37 +380,37 @@ static void matmul(void) {
      * row stride 4, so lda = 4 > K = 3 and BLAS reads the true row stride. */
     size_t s24[] = {2, 4}, st24[] = {4, 1};
     double base24[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    LanaTensor tbase24 = {2, s24, st24, false, LANA_TENSOR_F64, base24, 0, NULL, false};
+    LanaTensor tbase24 = {2, s24, st24, false, LANA_TENSOR_F64, (uint8_t *)base24, 0, NULL, false};
     size_t s23v[] = {2, 3}, st23v[] = {4, 1};
-    LanaTensor view23 = {2, s23v, st23v, false, LANA_TENSOR_F64, base24, 0, &tbase24, false};
+    LanaTensor view23 = {2, s23v, st23v, false, LANA_TENSOR_F64, (uint8_t *)base24, 0, &tbase24, false};
     double b32[] = {1, 0, 0, 1, 1, 1};
-    LanaTensor tb32 = {2, s23, st32, false, LANA_TENSOR_F64, b32, 0, NULL, false};
+    LanaTensor tb32 = {2, s23, st32, false, LANA_TENSOR_F64, (uint8_t *)b32, 0, NULL, false};
     double strided[] = {4, 5, 12, 13};
-    LanaTensor expected_strided = {2, s22, st22, false, LANA_TENSOR_F64, strided, 0, NULL, false};
+    LanaTensor expected_strided = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)strided, 0, NULL, false};
     args[0] = lana_value_tensor(&view23); args[1] = lana_value_tensor(&tb32);
     call_checked(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_OK, &expected_strided);
 
     /* Packed non-contiguous core: columns 0:4:2 of a 2x4 base have column
      * stride 2, so the operand is gathered into scratch before the call. */
     size_t s22v[] = {2, 2}, st22v[] = {4, 2};
-    LanaTensor view22 = {2, s22v, st22v, false, LANA_TENSOR_F64, base24, 0, &tbase24, false};
+    LanaTensor view22 = {2, s22v, st22v, false, LANA_TENSOR_F64, (uint8_t *)base24, 0, &tbase24, false};
     double b22p[] = {1, 1, 0, 1};
-    LanaTensor tb22p = {2, s22, st22, false, LANA_TENSOR_F64, b22p, 0, NULL, false};
+    LanaTensor tb22p = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)b22p, 0, NULL, false};
     double packed[] = {1, 4, 5, 12};
-    LanaTensor expected_packed = {2, s22, st22, false, LANA_TENSOR_F64, packed, 0, NULL, false};
+    LanaTensor expected_packed = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)packed, 0, NULL, false};
     args[0] = lana_value_tensor(&view22); args[1] = lana_value_tensor(&tb22p);
     call_checked(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_OK, &expected_packed);
 
     /* Empty contraction (K = 0): [2,0] . [0,3] -> [2,3] of zeros. */
     size_t s20[] = {2, 0}, st20[] = {0, 1};
     double empty_a[] = {0};
-    LanaTensor tea = {2, s20, st20, false, LANA_TENSOR_F64, empty_a, 0, NULL, false};
+    LanaTensor tea = {2, s20, st20, false, LANA_TENSOR_F64, (uint8_t *)empty_a, 0, NULL, false};
     size_t s03[] = {0, 3}, st03[] = {3, 1};
     double empty_b[] = {0};
-    LanaTensor teb = {2, s03, st03, false, LANA_TENSOR_F64, empty_b, 0, NULL, false};
+    LanaTensor teb = {2, s03, st03, false, LANA_TENSOR_F64, (uint8_t *)empty_b, 0, NULL, false};
     size_t s23o[] = {2, 3}, st23o[] = {3, 1};
     double empty_out[] = {0, 0, 0, 0, 0, 0};
-    LanaTensor expected_empty = {2, s23o, st23o, false, LANA_TENSOR_F64, empty_out, 0, NULL, false};
+    LanaTensor expected_empty = {2, s23o, st23o, false, LANA_TENSOR_F64, (uint8_t *)empty_out, 0, NULL, false};
     args[0] = lana_value_tensor(&tea); args[1] = lana_value_tensor(&teb);
     call_checked(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_OK, &expected_empty);
 
@@ -416,20 +418,20 @@ static void matmul(void) {
      * dims, and incompatible batch dims. */
     args[0] = lana_value_tensor(&tca); args[1] = lana_value_tensor(&ta2);
     call(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_ERR_TYPE);
-    LanaTensor scalar = {0, NULL, NULL, false, LANA_TENSOR_F64, a1, 0, NULL, false};
+    LanaTensor scalar = {0, NULL, NULL, false, LANA_TENSOR_F64, (uint8_t *)a1, 0, NULL, false};
     args[0] = lana_value_tensor(&scalar); args[1] = lana_value_tensor(&ta2);
     call(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_ERR_INVALID_PARAMETERS);
     size_t s33[] = {3, 3}, st33[] = {3, 1};
     double a3[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
-    LanaTensor ta3 = {2, s33, st33, false, LANA_TENSOR_F64, a3, 0, NULL, false};
+    LanaTensor ta3 = {2, s33, st33, false, LANA_TENSOR_F64, (uint8_t *)a3, 0, NULL, false};
     args[0] = lana_value_tensor(&ta3); args[1] = lana_value_tensor(&ta2);
     call(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_ERR_INVALID_PARAMETERS);
     size_t s322[] = {3, 2, 2}, st322[] = {4, 2, 1};
     double abad[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
-    LanaTensor tabad = {3, s322, st322, false, LANA_TENSOR_F64, abad, 0, NULL, false};
+    LanaTensor tabad = {3, s322, st322, false, LANA_TENSOR_F64, (uint8_t *)abad, 0, NULL, false};
     size_t s222b[] = {2, 2, 2}, st222b[] = {4, 2, 1};
     double bbad[] = {1, 0, 0, 1, 1, 0, 0, 1};
-    LanaTensor tbbad = {3, s222b, st222b, false, LANA_TENSOR_F64, bbad, 0, NULL, false};
+    LanaTensor tbbad = {3, s222b, st222b, false, LANA_TENSOR_F64, (uint8_t *)bbad, 0, NULL, false};
     args[0] = lana_value_tensor(&tabad); args[1] = lana_value_tensor(&tbbad);
     call(LANA_HOST_TENSOR_MATMUL, args, 2, LANA_ERR_INVALID_PARAMETERS);
 }
@@ -441,8 +443,8 @@ static void matmul(void) {
 static void gpu_matmul(void) {
     size_t s22[] = {2, 2}, st22[] = {2, 1};
     double a2[] = {1, 2, 3, 4}, b2[] = {5, 6, 7, 8};
-    LanaTensor ta2 = {2, s22, st22, false, LANA_TENSOR_F64, a2, 0, NULL, false};
-    LanaTensor tb2 = {2, s22, st22, false, LANA_TENSOR_F64, b2, 0, NULL, false};
+    LanaTensor ta2 = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)a2, 0, NULL, false};
+    LanaTensor tb2 = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)b2, 0, NULL, false};
     Value args[3];
     args[0] = lana_value_tensor(&ta2);
     args[1] = lana_value_tensor(&tb2);
@@ -468,7 +470,7 @@ static void gpu_matmul(void) {
     Value value = vm.frames[0].registers[8];
     assert(value.type == VAL_TENSOR);
     double expected[] = {19, 22, 43, 50};
-    LanaTensor texpected = {2, s22, st22, false, LANA_TENSOR_F64, expected, 0, NULL, false};
+    LanaTensor texpected = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)expected, 0, NULL, false};
     assert(tensor_elements_match_tol(value.as.tensor, &texpected, 1e-5));
     assert(value.derivation != NULL);
     assert(value.derivation->kind == LANA_DERIVATION_APPROXIMATION);
@@ -483,7 +485,7 @@ static void gpu_matmul(void) {
     call(LANA_HOST_GPU_MATMUL, args, 3, LANA_ERR_TYPE);
     args[2] = lana_value_string("float32");
     double ca[] = {0, 1, 0, 0, 0, 0, 0, 1};
-    LanaTensor tca = {2, s22, st22, true, LANA_TENSOR_COMPLEX, ca, 0, NULL, false};
+    LanaTensor tca = {2, s22, st22, true, LANA_TENSOR_COMPLEX, (uint8_t *)ca, 0, NULL, false};
     args[0] = lana_value_tensor(&tca);
     call(LANA_HOST_GPU_MATMUL, args, 3, LANA_ERR_TYPE);
 }
@@ -528,8 +530,8 @@ static void dtype_construction(void) {
     /* f16 rounding of 0.1 -> 0.0999755859375 (round-to-nearest-even). */
     args[0] = arrv;
     args[1] = lana_value_string("f16");
-    double r16[] = {0.0999755859375};
-    LanaTensor expected16 = {1, &one, &stride, false, LANA_TENSOR_F16, r16, 0, NULL, false};
+    uint8_t r16[] = {0x66, 0x2E}; /* f16 bit pattern of 0.0999755859375 */
+    LanaTensor expected16 = {1, &one, &stride, false, LANA_TENSOR_F16, (uint8_t *)r16, 0, NULL, false};
     call_checked(LANA_HOST_TENSOR, args, 2, LANA_OK, &expected16);
 
     /* bf16 rounding of 3.14159 -> 3.140625 (mantissa rounded to 7 bits). */
@@ -538,8 +540,8 @@ static void dtype_construction(void) {
     LanaArray pi_arr = {1, 1, pi_items};
     args[0] = lana_value_array(&pi_arr);
     args[1] = lana_value_string("bf16");
-    double rbf[] = {3.140625};
-    LanaTensor expected_bf = {1, &one, &stride, false, LANA_TENSOR_BF16, rbf, 0, NULL, false};
+    uint8_t rbf[] = {0x49, 0x40}; /* bf16 bit pattern of 3.140625 */
+    LanaTensor expected_bf = {1, &one, &stride, false, LANA_TENSOR_BF16, (uint8_t *)rbf, 0, NULL, false};
     call_checked(LANA_HOST_TENSOR, args, 2, LANA_OK, &expected_bf);
 
     /* Unknown dtype -> LANA_ERR_INVALID_PARAMETERS on every constructor. */
@@ -700,74 +702,74 @@ static void uncertainty_propagation(void) {
     /* Element-wise add/sub: var = var_a + var_b. */
     double a_pred[] = {1, 2}, a_var[] = {0.5, 0.25};
     double b_pred[] = {3, 4}, b_var[] = {0.125, 0.0625};
-    LanaTensor ta = {1, &n2, &one, false, LANA_TENSOR_F64, a_pred, 0, NULL, false};
-    LanaTensor va = {1, &n2, &one, false, LANA_TENSOR_F64, a_var, 0, NULL, false};
-    LanaTensor tb = {1, &n2, &one, false, LANA_TENSOR_F64, b_pred, 0, NULL, false};
-    LanaTensor vb = {1, &n2, &one, false, LANA_TENSOR_F64, b_var, 0, NULL, false};
+    LanaTensor ta = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)a_pred, 0, NULL, false};
+    LanaTensor va = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)a_var, 0, NULL, false};
+    LanaTensor tb = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)b_pred, 0, NULL, false};
+    LanaTensor vb = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)b_var, 0, NULL, false};
     double add_pred[] = {4, 6}, add_var[] = {0.625, 0.3125};
-    LanaTensor e_add_pred = {1, &n2, &one, false, LANA_TENSOR_F64, add_pred, 0, NULL, false};
-    LanaTensor e_add_var = {1, &n2, &one, false, LANA_TENSOR_F64, add_var, 0, NULL, false};
+    LanaTensor e_add_pred = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)add_pred, 0, NULL, false};
+    LanaTensor e_add_var = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)add_var, 0, NULL, false};
     call_uncertain_binary(LANA_HOST_TENSOR_ADD, &ta, &va, &tb, &vb, &e_add_pred, &e_add_var);
     double sub_pred[] = {-2, -2};
-    LanaTensor e_sub_pred = {1, &n2, &one, false, LANA_TENSOR_F64, sub_pred, 0, NULL, false};
+    LanaTensor e_sub_pred = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)sub_pred, 0, NULL, false};
     call_uncertain_binary(LANA_HOST_TENSOR_SUB, &ta, &va, &tb, &vb, &e_sub_pred, &e_add_var);
 
     /* Mixed certain/uncertain: the certain operand contributes zero variance. */
     double mixed_var[] = {0.125, 0.0625};
-    LanaTensor e_mixed_var = {1, &n2, &one, false, LANA_TENSOR_F64, mixed_var, 0, NULL, false};
+    LanaTensor e_mixed_var = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)mixed_var, 0, NULL, false};
     call_uncertain_binary(LANA_HOST_TENSOR_ADD, &ta, NULL, &tb, &vb, &e_add_pred, &e_mixed_var);
 
     /* Mul: var = var_a*b^2 + var_b*a^2. */
     double mul_pred[] = {3, 8}, mul_var[] = {4.625, 4.25};
-    LanaTensor e_mul_pred = {1, &n2, &one, false, LANA_TENSOR_F64, mul_pred, 0, NULL, false};
-    LanaTensor e_mul_var = {1, &n2, &one, false, LANA_TENSOR_F64, mul_var, 0, NULL, false};
+    LanaTensor e_mul_pred = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)mul_pred, 0, NULL, false};
+    LanaTensor e_mul_var = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)mul_var, 0, NULL, false};
     call_uncertain_binary(LANA_HOST_TENSOR_MUL, &ta, &va, &tb, &vb, &e_mul_pred, &e_mul_var);
 
     /* Div: var = var_a/b^2 + var_b*a^2/b^4. */
     double d_pred[] = {1, 1}, d_var[] = {1, 1};
     double e_pred[] = {2, 2}, e_var[] = {1, 1};
-    LanaTensor td = {1, &n2, &one, false, LANA_TENSOR_F64, d_pred, 0, NULL, false};
-    LanaTensor vd = {1, &n2, &one, false, LANA_TENSOR_F64, d_var, 0, NULL, false};
-    LanaTensor te = {1, &n2, &one, false, LANA_TENSOR_F64, e_pred, 0, NULL, false};
-    LanaTensor ve = {1, &n2, &one, false, LANA_TENSOR_F64, e_var, 0, NULL, false};
+    LanaTensor td = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)d_pred, 0, NULL, false};
+    LanaTensor vd = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)d_var, 0, NULL, false};
+    LanaTensor te = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)e_pred, 0, NULL, false};
+    LanaTensor ve = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)e_var, 0, NULL, false};
     double div_pred[] = {0.5, 0.5}, div_var[] = {0.3125, 0.3125};
-    LanaTensor e_div_pred = {1, &n2, &one, false, LANA_TENSOR_F64, div_pred, 0, NULL, false};
-    LanaTensor e_div_var = {1, &n2, &one, false, LANA_TENSOR_F64, div_var, 0, NULL, false};
+    LanaTensor e_div_pred = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)div_pred, 0, NULL, false};
+    LanaTensor e_div_var = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)div_var, 0, NULL, false};
     call_uncertain_binary(LANA_HOST_TENSOR_DIV, &td, &vd, &te, &ve, &e_div_pred, &e_div_var);
 
     /* Matmul (dot): var = matmul(var_a, b^2) + matmul(a^2, var_b). */
     double dot_pred[] = {11}, dot_var[] = {8.875};
-    LanaTensor e_dot_pred = {0, NULL, NULL, false, LANA_TENSOR_F64, dot_pred, 0, NULL, false};
-    LanaTensor e_dot_var = {0, NULL, NULL, false, LANA_TENSOR_F64, dot_var, 0, NULL, false};
+    LanaTensor e_dot_pred = {0, NULL, NULL, false, LANA_TENSOR_F64, (uint8_t *)dot_pred, 0, NULL, false};
+    LanaTensor e_dot_var = {0, NULL, NULL, false, LANA_TENSOR_F64, (uint8_t *)dot_var, 0, NULL, false};
     call_uncertain_binary(LANA_HOST_TENSOR_MATMUL, &ta, &va, &tb, &vb, &e_dot_pred, &e_dot_var);
 
     /* Full sum/mean: var = sum(var) and sum(var)/n^2. */
     size_t n4 = 4;
     double s_pred[] = {1, 2, 3, 4}, s_var[] = {0.5, 0.25, 0.125, 0.0625};
-    LanaTensor ts = {1, &n4, &one, false, LANA_TENSOR_F64, s_pred, 0, NULL, false};
-    LanaTensor vs = {1, &n4, &one, false, LANA_TENSOR_F64, s_var, 0, NULL, false};
+    LanaTensor ts = {1, &n4, &one, false, LANA_TENSOR_F64, (uint8_t *)s_pred, 0, NULL, false};
+    LanaTensor vs = {1, &n4, &one, false, LANA_TENSOR_F64, (uint8_t *)s_var, 0, NULL, false};
     double sum_pred[] = {10}, sum_var[] = {0.9375};
-    LanaTensor e_sum_pred = {0, NULL, NULL, false, LANA_TENSOR_F64, sum_pred, 0, NULL, false};
-    LanaTensor e_sum_var = {0, NULL, NULL, false, LANA_TENSOR_F64, sum_var, 0, NULL, false};
+    LanaTensor e_sum_pred = {0, NULL, NULL, false, LANA_TENSOR_F64, (uint8_t *)sum_pred, 0, NULL, false};
+    LanaTensor e_sum_var = {0, NULL, NULL, false, LANA_TENSOR_F64, (uint8_t *)sum_var, 0, NULL, false};
     call_uncertain_reduce(LANA_HOST_TENSOR_SUM, &ts, &vs, NULL, &e_sum_pred, &e_sum_var);
     double mean_pred[] = {2.5}, mean_var[] = {0.05859375};
-    LanaTensor e_mean_pred = {0, NULL, NULL, false, LANA_TENSOR_F64, mean_pred, 0, NULL, false};
-    LanaTensor e_mean_var = {0, NULL, NULL, false, LANA_TENSOR_F64, mean_var, 0, NULL, false};
+    LanaTensor e_mean_pred = {0, NULL, NULL, false, LANA_TENSOR_F64, (uint8_t *)mean_pred, 0, NULL, false};
+    LanaTensor e_mean_var = {0, NULL, NULL, false, LANA_TENSOR_F64, (uint8_t *)mean_var, 0, NULL, false};
     call_uncertain_reduce(LANA_HOST_TENSOR_MEAN, &ts, &vs, NULL, &e_mean_pred, &e_mean_var);
 
     /* Axis sum/mean over a 2x2 tensor. */
     size_t s22[] = {2, 2}, st22[] = {2, 1};
     double m_pred[] = {1, 2, 3, 4}, m_var[] = {0.5, 0.25, 0.125, 0.0625};
-    LanaTensor tm = {2, s22, st22, false, LANA_TENSOR_F64, m_pred, 0, NULL, false};
-    LanaTensor vm2 = {2, s22, st22, false, LANA_TENSOR_F64, m_var, 0, NULL, false};
+    LanaTensor tm = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)m_pred, 0, NULL, false};
+    LanaTensor vm2 = {2, s22, st22, false, LANA_TENSOR_F64, (uint8_t *)m_var, 0, NULL, false};
     Value axis0 = lana_value_number(0);
     double asum_pred[] = {4, 6}, asum_var[] = {0.625, 0.3125};
-    LanaTensor e_asum_pred = {1, &n2, &one, false, LANA_TENSOR_F64, asum_pred, 0, NULL, false};
-    LanaTensor e_asum_var = {1, &n2, &one, false, LANA_TENSOR_F64, asum_var, 0, NULL, false};
+    LanaTensor e_asum_pred = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)asum_pred, 0, NULL, false};
+    LanaTensor e_asum_var = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)asum_var, 0, NULL, false};
     call_uncertain_reduce(LANA_HOST_TENSOR_SUM, &tm, &vm2, &axis0, &e_asum_pred, &e_asum_var);
     double amean_pred[] = {2, 3}, amean_var[] = {0.15625, 0.078125};
-    LanaTensor e_amean_pred = {1, &n2, &one, false, LANA_TENSOR_F64, amean_pred, 0, NULL, false};
-    LanaTensor e_amean_var = {1, &n2, &one, false, LANA_TENSOR_F64, amean_var, 0, NULL, false};
+    LanaTensor e_amean_pred = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)amean_pred, 0, NULL, false};
+    LanaTensor e_amean_var = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)amean_var, 0, NULL, false};
     call_uncertain_reduce(LANA_HOST_TENSOR_MEAN, &tm, &vm2, &axis0, &e_amean_pred, &e_amean_var);
 
     /* max/min reject uncertain operands. */
@@ -776,14 +778,14 @@ static void uncertainty_propagation(void) {
 
     /* Non-finite uncertainty is InvalidParameters. */
     double inf_var[] = {0.5, INFINITY};
-    LanaTensor vinf = {1, &n2, &one, false, LANA_TENSOR_F64, inf_var, 0, NULL, false};
+    LanaTensor vinf = {1, &n2, &one, false, LANA_TENSOR_F64, (uint8_t *)inf_var, 0, NULL, false};
     call_uncertain_binary_error(LANA_HOST_TENSOR_ADD, &ta, &vinf, &tb, &vb,
                                 LANA_ERR_INVALID_PARAMETERS);
 
     /* Complex uncertain operands are Type errors. */
     double c_pred[] = {1, 0, 2, 0}, c_var[] = {0.5, 0, 0.25, 0};
-    LanaTensor tc = {1, &n2, &one, true, LANA_TENSOR_COMPLEX, c_pred, 0, NULL, false};
-    LanaTensor vc = {1, &n2, &one, true, LANA_TENSOR_COMPLEX, c_var, 0, NULL, false};
+    LanaTensor tc = {1, &n2, &one, true, LANA_TENSOR_COMPLEX, (uint8_t *)c_pred, 0, NULL, false};
+    LanaTensor vc = {1, &n2, &one, true, LANA_TENSOR_COMPLEX, (uint8_t *)c_var, 0, NULL, false};
     call_uncertain_binary_error(LANA_HOST_TENSOR_ADD, &tc, &vc, &tb, &vb, LANA_ERR_TYPE);
 
     /* Malformed maps are Type errors: wrong entry count, wrong keys, and
@@ -811,12 +813,50 @@ static void uncertainty_propagation(void) {
                     "uncertainty", lana_value_number(1.0), LANA_ERR_TYPE);
 }
 
+/* LIP-027 B18: a tensor's buffer accounts the actual element width, so an
+ * f16 buffer is a quarter of an f64 buffer. Under a 1 MiB limit, 300000 f16
+ * elements (600000 bytes) fit but 300000 f64 elements (2400000 bytes) OOM. */
+static void memory_accounting(void) {
+    Value dims[1] = {lana_value_number(300000.0)};
+    LanaArray shape = {0};
+    shape.items = dims;
+    shape.count = shape.capacity = 1u;
+    Value args[2] = {{.type = VAL_ARRAY, .as.array = &shape}, {0}};
+    LanaChunk chunk;
+    LanaVM vm;
+    lana_chunk_init(&chunk);
+    LanaInstruction invoke = {OP_HOST_CALL, 8u, LANA_HOST_TENSOR_ZEROS, 0u, 2u, 1u};
+    LanaInstruction halt = {OP_HALT, 0u, 0u, 0u, 0u, 2u};
+    assert(lana_chunk_emit(&chunk, invoke) == LANA_OK);
+    assert(lana_chunk_emit(&chunk, halt) == LANA_OK);
+
+    /* f16 fits: 300000 * 2 = 600000 bytes < 1 MiB. */
+    lana_vm_init(&vm, &chunk);
+    lana_vm_set_memory_limit(&vm, 1u * 1024u * 1024u);
+    args[1] = lana_value_string("f16");
+    vm.frames[0].registers[0] = args[0];
+    vm.frames[0].registers[1] = args[1];
+    assert(lana_vm_run(&vm) == LANA_OK);
+    lana_vm_free(&vm);
+
+    /* f64 OOMs: 300000 * 8 = 2400000 bytes > 1 MiB. */
+    lana_vm_init(&vm, &chunk);
+    lana_vm_set_memory_limit(&vm, 1u * 1024u * 1024u);
+    args[1] = lana_value_string("f64");
+    vm.frames[0].registers[0] = args[0];
+    vm.frames[0].registers[1] = args[1];
+    assert(lana_vm_run(&vm) == LANA_ERR_OOM);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+}
+
 int main(void) {
     axis_reductions();
     indexing();
     matmul();
     gpu_matmul();
     dtype_construction();
+    memory_accounting();
     uncertainty_propagation();
     Value dims[33];
     LanaArray shape = {0};
@@ -845,7 +885,7 @@ int main(void) {
 
     double data[4] = {1.0, INFINITY, 2.0, 0.0};
     size_t size = 2u, stride = 1u;
-    LanaTensor tensor = {1u, &size, &stride, true, LANA_TENSOR_COMPLEX, data, 0, NULL, false};
+    LanaTensor tensor = {1u, &size, &stride, true, LANA_TENSOR_COMPLEX, (uint8_t *)data, 0, NULL, false};
     args[0] = lana_value_tensor(&tensor);
     call(LANA_HOST_TENSOR_SUM, args, 1u, LANA_ERR_INVALID_PARAMETERS);
     data[0] = data[2] = DBL_MAX;

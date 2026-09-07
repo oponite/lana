@@ -78,11 +78,33 @@ fn blas_gemm(
 /// never read, so a zero inner dimension writes zeros. Operands must already
 /// be row-major with the given leading dimensions; callers pack anything that
 /// cannot be expressed that way into contiguous scratch first.
+///
+/// LIP-027: when `fp32` is set, each input element is downcast to float and
+/// the dot product accumulates in binary32 (for f32/f16/bf16 inputs); the
+/// result is upcast to double. Complex never takes this path.
 pub fn backend_gemm(
-    m: usize, k: usize, n: usize, complex: bool,
+    m: usize, k: usize, n: usize, complex: bool, fp32: bool,
     a: *const f64, lda: usize, b: *const f64, ldb: usize, c: *mut f64,
 ) {
     if m == 0 || n == 0 {
+        return;
+    }
+    if fp32 {
+        // Operation-for-operation the same loop as the C backend's fp32 path so
+        // both VMs stay byte-identical.
+        let lda = if lda == 0 { 1 } else { lda };
+        let ldb = if ldb == 0 { 1 } else { ldb };
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = 0.0f32;
+                for p in 0..k {
+                    let av = unsafe { *a.add(i * lda + p) } as f32;
+                    let bv = unsafe { *b.add(p * ldb + j) } as f32;
+                    acc += av * bv;
+                }
+                unsafe { *c.add(i * n + j) = acc as f64 };
+            }
+        }
         return;
     }
     if blas_gemm(m, k, n, complex, a, lda, b, ldb, c) {

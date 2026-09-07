@@ -319,6 +319,8 @@ typedef enum {
     LANA_HOST_SOCKET_SEND,
     LANA_HOST_SOCKET_RECV,
     LANA_HOST_SOCKET_CLOSE,
+    /* LIP-027: cast a tensor to another real dtype. */
+    LANA_HOST_TENSOR_CAST,
     LANA_HOST_COUNT
 } LanaHostCallId;
 

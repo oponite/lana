@@ -79,6 +79,7 @@ const HOST_CALL_NAMES: &[&str] = &[
     "ffi_declare", "ffi_load", "ffi_call",
     "http_get", "http_post", "socket_connect", "socket_send",
     "socket_recv", "socket_close",
+    "tensor_cast",
 ];
 
 struct Label {

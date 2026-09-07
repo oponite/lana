@@ -3575,10 +3575,46 @@ static int dtype_from_string(const char *s) {
 
 static double f16_to_double(uint16_t h);
 
-/* LIP-027: round a double to binary16 (f16) precision, round-to-nearest-even,
- * stored back as a double. Handles normal, subnormal, and overflow-to-inf. */
-static double round_f16(double x) {
-    if (!isfinite(x) || x == 0.0) return x;
+/* LIP-027: relative precision rank used to pick the default matmul output
+ * dtype for a mixed-dtype pair. Higher rank wins on a tie; f16 and bf16 are
+ * equal (both 16-bit). Complex is handled separately by the caller. */
+static int dtype_rank(LanaTensorDtype d) {
+    switch (d) {
+        case LANA_TENSOR_F64: return 3;
+        case LANA_TENSOR_F32: return 2;
+        case LANA_TENSOR_F16: return 1;
+        case LANA_TENSOR_BF16: return 1;
+        default: return 0;
+    }
+}
+
+/* LIP-027: default matmul output dtype. Same dtype -> that dtype; otherwise
+ * the higher-precision operand (f64/f32 mix -> f64, f32/f16 -> f32). */
+static LanaTensorDtype matmul_default_dtype(const LanaTensor *a, const LanaTensor *b) {
+    if (a->dtype == b->dtype) return a->dtype;
+    return (dtype_rank(a->dtype) >= dtype_rank(b->dtype)) ? a->dtype : b->dtype;
+}
+
+/* LIP-027: whether matmul accumulates in binary32. f16/bf16 inputs always
+ * accumulate in fp32 regardless of the output dtype; f32 x f32 also uses fp32.
+ * A binary64 (or complex) input forces fp64 accumulation so it is never
+ * silently downcast. */
+static bool matmul_accumulation_fp32(const LanaTensor *a, const LanaTensor *b) {
+    if (a->dtype == LANA_TENSOR_F16 || a->dtype == LANA_TENSOR_BF16 ||
+        b->dtype == LANA_TENSOR_F16 || b->dtype == LANA_TENSOR_BF16) return true;
+    return a->dtype == LANA_TENSOR_F32 && b->dtype == LANA_TENSOR_F32;
+}
+
+/* LIP-027: convert a double to a binary16 (f16) bit pattern,
+ * round-to-nearest-even. Handles normal, subnormal, and overflow-to-inf. */
+static uint16_t f64_to_f16_bits(double x) {
+    if (isnan(x)) return 0x7E00u; /* canonical f16 NaN */
+    if (isinf(x)) return x < 0 ? 0xFC00u : 0x7C00u;
+    if (x == 0.0) {
+        union { double d; uint64_t u; } z;
+        z.d = x;
+        return (z.u >> 63) ? 0x8000u : 0x0000u; /* preserve signed zero */
+    }
     union { double d; uint64_t u; } v;
     v.d = x;
     uint32_t sign = (uint32_t)(v.u >> 63);
@@ -3596,28 +3632,25 @@ static double round_f16(double x) {
     if (sig11 == (1ull << 11)) { sig11 = 0; exp += 1; }
     uint64_t mant10 = sig11 & 0x3FF;
 
-    if (exp > 15) return sign ? -INFINITY : INFINITY; /* overflow */
+    if (exp > 15) return (uint16_t)((sign << 15) | 0x7C00u); /* overflow to inf */
     if (exp >= -14) { /* normal f16 */
-        uint16_t h = (uint16_t)((sign << 15) | ((uint16_t)(exp + 15) << 10) | (uint16_t)mant10);
-        return f16_to_double(h);
+        return (uint16_t)((sign << 15) | ((uint16_t)(exp + 15) << 10) | (uint16_t)mant10);
     }
     /* subnormal: value = sig11 * 2^exp, exp < -14 */
     int shift = -14 - exp;
     if (shift >= 11) {
         /* rounds to zero; exactly 2^-25 (halfway to min subnormal) rounds to
          * zero (even) */
-        return sign ? -0.0 : 0.0;
+        return (uint16_t)(sign << 15);
     }
     uint64_t sub_mant = sig11 >> shift;
     uint64_t dropped = sig11 & ((1ull << shift) - 1);
     uint64_t half = 1ull << (shift - 1);
     if (dropped > half || (dropped == half && (sub_mant & 1))) sub_mant += 1;
     if (sub_mant == (1ull << 10)) { /* rounded up to min normal 2^-14 */
-        uint16_t h = (uint16_t)((sign << 15) | (1u << 10));
-        return f16_to_double(h);
+        return (uint16_t)((sign << 15) | (1u << 10));
     }
-    uint16_t h = (uint16_t)((sign << 15) | (uint16_t)sub_mant);
-    return f16_to_double(h);
+    return (uint16_t)((sign << 15) | (uint16_t)sub_mant);
 }
 
 static double f16_to_double(uint16_t h) {
@@ -3635,21 +3668,41 @@ static double f16_to_double(uint16_t h) {
     return sign ? -value : value;
 }
 
-/* LIP-027: round a double to bfloat16 (bf16) precision, round-to-nearest-even,
- * stored back as a double. bf16 shares fp32's exponent range; overflow to inf. */
-static double round_bf16(double x) {
-    if (!isfinite(x) || x == 0.0) return x;
+/* LIP-027: convert a double to a bfloat16 (bf16) bit pattern,
+ * round-to-nearest-even. bf16 shares fp32's exponent range; overflow to inf. */
+static uint16_t f64_to_bf16_bits(double x) {
+    if (isnan(x)) return 0x7FC0u; /* canonical bf16 NaN */
+    if (isinf(x)) return x < 0 ? 0xFF80u : 0x7F80u;
+    if (x == 0.0) {
+        union { double d; uint64_t u; } z;
+        z.d = x;
+        return (z.u >> 63) ? 0x8000u : 0x0000u; /* preserve signed zero */
+    }
     union { double d; uint64_t u; } v;
     v.d = x;
     int exp = (int)((v.u >> 52) & 0x7FF) - 1023;
-    if (exp > 127) return x < 0 ? -INFINITY : INFINITY; /* overflow beyond fp32 range */
+    if (exp > 127) return x < 0 ? 0xFF80u : 0x7F80u; /* overflow beyond fp32 range */
     /* Round the 52-bit mantissa to 7 bits (drop 45), round-to-nearest-even. */
     uint64_t low = v.u & 0x1FFFFFFFFFFF;
     uint64_t half = 1ull << 44;
     uint64_t lsb = 1ull << 45;
     if (low > half || (low == half && (v.u & lsb))) v.u += 1ull << 45;
     v.u &= ~0x1FFFFFFFFFFFull;
-    return v.d;
+    /* The rounded f64 has 8 significant mantissa bits, so it converts to f32
+     * exactly; bf16 is the top 16 bits of that f32 representation. */
+    float f = (float)v.d;
+    uint32_t f32_bits;
+    memcpy(&f32_bits, &f, sizeof(f32_bits));
+    return (uint16_t)(f32_bits >> 16);
+}
+
+/* LIP-027: convert a bfloat16 (bf16) bit pattern to a double. bf16 is the top
+ * 16 bits of an f32, so widen the f32 to f64. */
+static double bf16_to_double(uint16_t h) {
+    uint32_t f32_bits = (uint32_t)h << 16;
+    float f;
+    memcpy(&f, &f32_bits, sizeof(f));
+    return (double)f;
 }
 
 /* LIP-027: parse an optional trailing dtype string argument (the last of
@@ -3661,17 +3714,102 @@ static int tensor_optional_dtype(const Value *arguments, unsigned argc) {
     return dtype_from_string(arguments[1].as.string);
 }
 
-/* Allocate a zero-initialized tensor with the given shape. `shape` is copied;
- * the caller owns the input array. Returns NULL on allocation failure or shape
- * overflow. All memory is GC-managed so the tensor's buffer counts against the
- * VM memory limit. */
-static LanaTensor *tensor_new(LanaVM *vm, size_t ndim, const size_t *shape, bool is_complex) {
+/* LIP-027: element width in bytes for a tensor's dtype. */
+static size_t tensor_elem_bytes(const LanaTensor *t) {
+    switch (t->dtype) {
+    case LANA_TENSOR_F32: return 4u;
+    case LANA_TENSOR_F16: return 2u;
+    case LANA_TENSOR_BF16: return 2u;
+    case LANA_TENSOR_COMPLEX: return 16u;
+    default: return 8u; /* F64 */
+    }
+}
+
+/* LIP-027: read the real part of element `i` (absolute element index, already
+ * including `offset`), converting from the storage dtype to double. */
+double tensor_get_real(const LanaTensor *t, size_t i) {
+    switch (t->dtype) {
+    case LANA_TENSOR_F32: { float f; memcpy(&f, t->data + i * 4u, 4u); return (double)f; }
+    case LANA_TENSOR_F16: { uint16_t h; memcpy(&h, t->data + i * 2u, 2u); return f16_to_double(h); }
+    case LANA_TENSOR_BF16: { uint16_t h; memcpy(&h, t->data + i * 2u, 2u); return bf16_to_double(h); }
+    case LANA_TENSOR_COMPLEX: { double d; memcpy(&d, t->data + i * 16u, 8u); return d; }
+    default: { double d; memcpy(&d, t->data + i * 8u, 8u); return d; } /* F64 */
+    }
+}
+
+/* LIP-027: read the imaginary part of element `i` (0.0 for a real dtype). */
+double tensor_get_imag(const LanaTensor *t, size_t i) {
+    if (t->dtype != LANA_TENSOR_COMPLEX) return 0.0;
+    double d;
+    memcpy(&d, t->data + i * 16u + 8u, 8u);
+    return d;
+}
+
+/* LIP-027: write the real part of element `i`, converting from double to the
+ * storage dtype (round-to-nearest-even for f16/bf16). */
+static void tensor_set_real(LanaTensor *t, size_t i, double v) {
+    switch (t->dtype) {
+    case LANA_TENSOR_F32: { float f = (float)v; memcpy(t->data + i * 4u, &f, 4u); break; }
+    case LANA_TENSOR_F16: { uint16_t h = f64_to_f16_bits(v); memcpy(t->data + i * 2u, &h, 2u); break; }
+    case LANA_TENSOR_BF16: { uint16_t h = f64_to_bf16_bits(v); memcpy(t->data + i * 2u, &h, 2u); break; }
+    case LANA_TENSOR_COMPLEX: { memcpy(t->data + i * 16u, &v, 8u); break; }
+    default: { memcpy(t->data + i * 8u, &v, 8u); break; } /* F64 */
+    }
+}
+
+/* LIP-027: write the imaginary part of element `i` (no-op for a real dtype). */
+static void tensor_set_imag(LanaTensor *t, size_t i, double v) {
+    if (t->dtype != LANA_TENSOR_COMPLEX) return;
+    memcpy(t->data + i * 16u + 8u, &v, 8u);
+}
+
+static LanaTensor *tensor_new_dtype(LanaVM *vm, size_t ndim, const size_t *shape,
+                                    LanaTensorDtype dtype);
+
+/* LIP-027: cast a tensor to another real dtype. Same-dtype is a no-op (returns
+ * the same tensor). Cast to/from complex is out of scope (LANA_ERR_TYPE). The
+ * result is a fresh base tensor; a view is never mutated. */
+static LanaError tensor_cast(LanaVM *vm, const LanaTensor *t, LanaTensorDtype dtype,
+                             Value *out) {
+    if (t->dtype == LANA_TENSOR_COMPLEX || dtype == LANA_TENSOR_COMPLEX)
+        return LANA_ERR_TYPE;
+    if (t->dtype == dtype) {
+        *out = lana_value_tensor((LanaTensor *)t);
+        return LANA_OK;
+    }
+    LanaTensor *r = tensor_new_dtype(vm, t->ndim, t->shape, dtype);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t total = 1;
+    for (size_t i = 0; i < t->ndim; ++i) total *= t->shape[i];
+    size_t *idx = lana_vm_alloc(vm, t->ndim * sizeof(*idx));
+    if (idx == NULL && t->ndim > 0) return LANA_ERR_OOM;
+    for (size_t lin = 0; lin < total; ++lin) {
+        size_t rem = lin;
+        for (ssize_t i = (ssize_t)t->ndim - 1; i >= 0; --i) {
+            idx[i] = (t->shape[i] == 0) ? 0 : rem % t->shape[i];
+            rem /= t->shape[i];
+        }
+        size_t src = 0;
+        for (size_t i = 0; i < t->ndim; ++i) src += idx[i] * t->strides[i];
+        tensor_set_real(r, lin, tensor_get_real(t, t->offset + src));
+    }
+    *out = lana_value_tensor(r);
+    return LANA_OK;
+}
+
+/* Allocate a zero-initialized tensor with the given shape and dtype. `shape`
+ * is copied; the caller owns the input array. Returns NULL on allocation
+ * failure or shape overflow. All memory is GC-managed so the tensor's buffer
+ * counts against the VM memory limit. */
+static LanaTensor *tensor_new_dtype(LanaVM *vm, size_t ndim, const size_t *shape,
+                                    LanaTensorDtype dtype) {
     if (ndim > LANA_TENSOR_MAX_RANK) return NULL;
+    bool is_complex = (dtype == LANA_TENSOR_COMPLEX);
     LanaTensor *tensor = lana_vm_alloc(vm, sizeof(*tensor));
     if (tensor == NULL) return NULL;
     tensor->ndim = ndim;
     tensor->is_complex = is_complex;
-    tensor->dtype = is_complex ? LANA_TENSOR_COMPLEX : LANA_TENSOR_F64;
+    tensor->dtype = dtype;
     tensor->is_state = false;
     tensor->shape = NULL;
     tensor->strides = NULL;
@@ -3697,14 +3835,22 @@ static LanaTensor *tensor_new(LanaVM *vm, size_t ndim, const size_t *shape, bool
         total *= shape[i];
     }
     size_t components = is_complex ? 2u : 1u;
-    if (total > SIZE_MAX / components / sizeof(*tensor->data)) return NULL;
+    size_t width = tensor_elem_bytes(tensor);
+    if (total > SIZE_MAX / components / width) return NULL;
     size_t elem_count = total * components;
     if (elem_count > 0) {
-        tensor->data = lana_vm_alloc(vm, elem_count * sizeof(*tensor->data));
+        tensor->data = lana_vm_alloc(vm, elem_count * width);
         if (tensor->data == NULL) return NULL;
-        memset(tensor->data, 0, elem_count * sizeof(*tensor->data));
+        memset(tensor->data, 0, elem_count * width);
     }
     return tensor;
+}
+
+/* Allocate a zero-initialized tensor with the given shape, defaulting to F64
+ * (or COMPLEX when `is_complex`). Kept for the common case; dtype-specific
+ * callers use `tensor_new_dtype`. */
+static LanaTensor *tensor_new(LanaVM *vm, size_t ndim, const size_t *shape, bool is_complex) {
+    return tensor_new_dtype(vm, ndim, shape, is_complex ? LANA_TENSOR_COMPLEX : LANA_TENSOR_F64);
 }
 
 static LanaError tensor_dimension(double n, size_t *dimension) {
@@ -3757,7 +3903,8 @@ static void tensor_broadcast_strides(const LanaTensor *t, size_t out_ndim,
 /* Element-wise binary op with NumPy broadcasting. op: 0=add 1=sub 2=mul 3=div. */
 static LanaError tensor_elementwise(LanaVM *vm, const LanaTensor *a, const LanaTensor *b,
                                     int op, Value *out) {
-    if (a->is_complex != b->is_complex) return LANA_ERR_TYPE;
+    /* LIP-027: element-wise requires the same dtype; no silent promotion. */
+    if (a->dtype != b->dtype) return LANA_ERR_TYPE;
     size_t out_ndim = a->ndim > b->ndim ? a->ndim : b->ndim;
     size_t *out_shape = lana_vm_alloc(vm, out_ndim * sizeof(*out_shape));
     if (out_shape == NULL && out_ndim > 0) return LANA_ERR_OOM;
@@ -3769,7 +3916,7 @@ static LanaError tensor_elementwise(LanaVM *vm, const LanaTensor *a, const LanaT
         else if (bi == 1) out_shape[i] = ai;
         else return LANA_ERR_INVALID_PARAMETERS;
     }
-    LanaTensor *r = tensor_new(vm, out_ndim, out_shape, a->is_complex);
+    LanaTensor *r = tensor_new_dtype(vm, out_ndim, out_shape, a->dtype);
     if (r == NULL) return LANA_ERR_OOM;
     size_t *a_strides = lana_vm_alloc(vm, out_ndim * sizeof(*a_strides));
     size_t *b_strides = lana_vm_alloc(vm, out_ndim * sizeof(*b_strides));
@@ -3790,8 +3937,8 @@ static LanaError tensor_elementwise(LanaVM *vm, const LanaTensor *a, const LanaT
         size_t ai = 0, bi = 0;
         for (size_t i = 0; i < out_ndim; ++i) { ai += idx[i] * a_strides[i]; bi += idx[i] * b_strides[i]; }
         if (complex) {
-            double ar = a->data[a->offset + 2 * ai], aim = a->data[a->offset + 2 * ai + 1];
-            double br = b->data[b->offset + 2 * bi], bim = b->data[b->offset + 2 * bi + 1];
+            double ar = tensor_get_real(a, a->offset + ai), aim = tensor_get_imag(a, a->offset + ai);
+            double br = tensor_get_real(b, b->offset + bi), bim = tensor_get_imag(b, b->offset + bi);
             double rr, ri;
             switch (op) {
                 case 0: rr = ar + br; ri = aim + bim; break;
@@ -3805,17 +3952,66 @@ static LanaError tensor_elementwise(LanaVM *vm, const LanaTensor *a, const LanaT
                     break;
                 }
             }
-            r->data[2 * lin] = rr; r->data[2 * lin + 1] = ri;
+            tensor_set_real(r, lin, rr); tensor_set_imag(r, lin, ri);
         } else {
-            double av = a->data[a->offset + ai], bv = b->data[b->offset + bi];
+            double av = tensor_get_real(a, a->offset + ai), bv = tensor_get_real(b, b->offset + bi);
             switch (op) {
-                case 0: r->data[lin] = av + bv; break;
-                case 1: r->data[lin] = av - bv; break;
-                case 2: r->data[lin] = av * bv; break;
+                case 0: tensor_set_real(r, lin, av + bv); break;
+                case 1: tensor_set_real(r, lin, av - bv); break;
+                case 2: tensor_set_real(r, lin, av * bv); break;
                 default:
                     if (bv == 0.0) return LANA_ERR_INVALID_PARAMETERS;
-                    r->data[lin] = av / bv; break;
+                    tensor_set_real(r, lin, av / bv); break;
             }
+        }
+    }
+    *out = lana_value_tensor(r);
+    return LANA_OK;
+}
+
+/* LIP-027: element-wise between a tensor and a scalar number. The scalar
+ * adopts the tensor's dtype (cast to it), so `f16_tensor + 1.0` is "f16". */
+static LanaError tensor_elementwise_scalar(LanaVM *vm, const LanaTensor *t, double s,
+                                           int op, Value *out) {
+    LanaTensor *r = tensor_new_dtype(vm, t->ndim, t->shape, t->dtype);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t total = 1;
+    for (size_t i = 0; i < t->ndim; ++i) total *= t->shape[i];
+    size_t *idx = lana_vm_alloc(vm, t->ndim * sizeof(*idx));
+    if (idx == NULL && t->ndim > 0) return LANA_ERR_OOM;
+    bool complex = t->is_complex;
+    for (size_t lin = 0; lin < total; ++lin) {
+        size_t rem = lin;
+        for (ssize_t i = (ssize_t)t->ndim - 1; i >= 0; --i) {
+            idx[i] = (t->shape[i] == 0) ? 0 : rem % t->shape[i];
+            rem /= t->shape[i];
+        }
+        size_t src = 0;
+        for (size_t i = 0; i < t->ndim; ++i) src += idx[i] * t->strides[i];
+        if (complex) {
+            double ar = tensor_get_real(t, t->offset + src), aim = tensor_get_imag(t, t->offset + src);
+            double rr, ri;
+            switch (op) {
+                case 0: rr = ar + s; ri = aim; break;
+                case 1: rr = ar - s; ri = aim; break;
+                case 2: rr = ar * s; ri = aim * s; break;
+                default:
+                    if (s == 0.0) return LANA_ERR_INVALID_PARAMETERS;
+                    rr = ar / s; ri = aim / s; break;
+            }
+            tensor_set_real(r, lin, rr); tensor_set_imag(r, lin, ri);
+        } else {
+            double v = tensor_get_real(t, t->offset + src);
+            double result;
+            switch (op) {
+                case 0: result = v + s; break;
+                case 1: result = v - s; break;
+                case 2: result = v * s; break;
+                default:
+                    if (s == 0.0) return LANA_ERR_INVALID_PARAMETERS;
+                    result = v / s; break;
+            }
+            tensor_set_real(r, lin, result);
         }
     }
     *out = lana_value_tensor(r);
@@ -3825,10 +4021,14 @@ static LanaError tensor_elementwise(LanaVM *vm, const LanaTensor *a, const LanaT
 /* General matmul following NumPy semantics: 1d x 1d is a dot product, 1d x Nd
  * and Nd x 1d are vector-matrix, and Nd x Md contracts the last axis of the
  * left with the second-to-last of the right, broadcasting batch dims. */
-static LanaError tensor_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor *b, Value *out) {
+static LanaError tensor_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor *b,
+                               LanaTensorDtype out_dtype, Value *out) {
     if (a->is_complex != b->is_complex) return LANA_ERR_TYPE;
     if (a->ndim == 0 || b->ndim == 0) return LANA_ERR_INVALID_PARAMETERS;
     bool complex = a->is_complex;
+    /* LIP-027: the output dtype must agree with the complexness of the inputs:
+     * complex inputs require a complex output, real inputs a real output. */
+    if (complex != (out_dtype == LANA_TENSOR_COMPLEX)) return LANA_ERR_TYPE;
     size_t a_ndim = a->ndim, b_ndim = b->ndim;
     size_t a_rows = (a_ndim == 1) ? 1 : a->shape[a_ndim - 2];
     size_t a_cols = a->shape[a_ndim - 1];
@@ -3857,7 +4057,7 @@ static LanaError tensor_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor
     size_t pos = batch_ndim;
     if (!a_vec) out_shape[pos++] = a_rows;
     if (!b_vec) out_shape[pos++] = b_cols;
-    LanaTensor *r = tensor_new(vm, out_ndim, out_shape, complex);
+    LanaTensor *r = tensor_new_dtype(vm, out_ndim, out_shape, out_dtype);
     if (r == NULL) return LANA_ERR_OOM;
     size_t *a_batch_strides = lana_vm_alloc(vm, batch_ndim * sizeof(*a_batch_strides));
     size_t *b_batch_strides = lana_vm_alloc(vm, batch_ndim * sizeof(*b_batch_strides));
@@ -3882,8 +4082,12 @@ static LanaError tensor_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor
      * when its one live stride is 1; a matrix operand when its column stride
      * is 1. Anything else is gathered into accounted scratch per batch
      * element (LIP-004 section 5). */
-    bool pack_a = a_col_stride != 1u;
-    bool pack_b = b_col_stride != 1u;
+    /* LIP-027: a non-f64 real dtype stores compact bytes (2/4 per element), so
+     * the direct `double*` fast path is invalid; gather it into a double
+     * scratch buffer via tensor_get_real. Complex (interleaved doubles) and
+     * f64 read directly. */
+    bool pack_a = a_col_stride != 1u || (a->dtype != LANA_TENSOR_F64 && a->dtype != LANA_TENSOR_COMPLEX);
+    bool pack_b = b_col_stride != 1u || (b->dtype != LANA_TENSOR_F64 && b->dtype != LANA_TENSOR_COMPLEX);
     /* Leading dimensions for direct (non-packed) operands: the true row
      * stride of the view, which BLAS accepts instead of a copy. A promoted
      * vector has one row (lda = K) or one column (ldb = its row stride). */
@@ -3900,6 +4104,15 @@ static LanaError tensor_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor
         b_packed = lana_vm_alloc(vm, b_core * sizeof(double));
         if (b_packed == NULL) return LANA_ERR_OOM;
     }
+    /* LIP-027: the backend gemm accumulates in binary64. When the output dtype
+     * is narrower than f64 (f32/f16/bf16), the result is staged in a scratch
+     * buffer and converted element-wise into the compact output buffer. */
+    size_t c_core = m * n * mult;
+    double *c_scratch = NULL;
+    if (c_core > 0) {
+        c_scratch = lana_vm_alloc(vm, c_core * sizeof(double));
+        if (c_scratch == NULL) return LANA_ERR_OOM;
+    }
     for (size_t batch = 0; batch < batch_total; ++batch) {
         size_t rem = batch, a_off = 0, b_off = 0;
         for (ssize_t i = (ssize_t)batch_ndim - 1; i >= 0; --i) {
@@ -3908,14 +4121,15 @@ static LanaError tensor_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor
             a_off += bi * a_batch_strides[i];
             b_off += bi * b_batch_strides[i];
         }
-        const double *a_ptr = a->data + (a->offset + a_off) * mult;
-        const double *b_ptr = b->data + (b->offset + b_off) * mult;
+        const double *a_ptr = (const double*)a->data + (a->offset + a_off) * mult;
+        const double *b_ptr = (const double*)b->data + (b->offset + b_off) * mult;
         if (a_packed != NULL) {
             for (size_t i = 0; i < m; ++i) {
                 for (size_t k = 0; k < K; ++k) {
-                    size_t src = (a->offset + a_off + i * a_row_stride + k * a_col_stride) * mult;
+                    size_t elem = a->offset + a_off + i * a_row_stride + k * a_col_stride;
                     size_t dst = (i * K + k) * mult;
-                    for (size_t w = 0; w < mult; ++w) a_packed[dst + w] = a->data[src + w];
+                    a_packed[dst] = tensor_get_real(a, elem);
+                    if (mult == 2u) a_packed[dst + 1] = tensor_get_imag(a, elem);
                 }
             }
             a_ptr = a_packed;
@@ -3923,16 +4137,27 @@ static LanaError tensor_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor
         if (b_packed != NULL) {
             for (size_t k = 0; k < K; ++k) {
                 for (size_t j = 0; j < n; ++j) {
-                    size_t src = (b->offset + b_off + k * b_row_stride + j * b_col_stride) * mult;
+                    size_t elem = b->offset + b_off + k * b_row_stride + j * b_col_stride;
                     size_t dst = (k * n + j) * mult;
-                    for (size_t w = 0; w < mult; ++w) b_packed[dst + w] = b->data[src + w];
+                    b_packed[dst] = tensor_get_real(b, elem);
+                    if (mult == 2u) b_packed[dst + 1] = tensor_get_imag(b, elem);
                 }
             }
             b_ptr = b_packed;
         }
-        LanaGemmCall gemm = { m, K, n, complex, a_ptr, a_ld, b_ptr, b_ld,
-                              r->data + batch * m * n * mult };
+        LanaGemmCall gemm = { m, K, n, complex, matmul_accumulation_fp32(a, b),
+                              a_ptr, a_ld, b_ptr, b_ld, c_scratch };
         lana_backend_gemm(&gemm);
+        /* Stage the binary64 result into the compact output buffer. */
+        for (size_t i = 0; i < c_core; ++i) {
+            size_t elem = batch * m * n + i / mult;
+            if (mult == 2u) {
+                if (i % 2u == 0u) tensor_set_real(r, elem, c_scratch[i]);
+                else tensor_set_imag(r, elem, c_scratch[i]);
+            } else {
+                tensor_set_real(r, elem, c_scratch[i]);
+            }
+        }
     }
     *out = lana_value_tensor(r);
     return LANA_OK;
@@ -4013,14 +4238,14 @@ static LanaError tensor_gpu_matmul(LanaVM *vm, const LanaTensor *a, const LanaTe
         }
         for (size_t i = 0; i < m; ++i)
             for (size_t k = 0; k < K; ++k)
-                a_float[i * K + k] = (float)a->data[a->offset + a_off + i * a_row_stride + k * a_col_stride];
+                a_float[i * K + k] = (float)tensor_get_real(a, a->offset + a_off + i * a_row_stride + k * a_col_stride);
         for (size_t k = 0; k < K; ++k)
             for (size_t j = 0; j < n; ++j)
-                b_float[k * n + j] = (float)b->data[b->offset + b_off + k * b_row_stride + j * b_col_stride];
+                b_float[k * n + j] = (float)tensor_get_real(b, b->offset + b_off + k * b_row_stride + j * b_col_stride);
         if (!lana_metal_sgemm(m, K, n, a_float, b_float, c_float))
             return LANA_ERR_UNSUPPORTED_OPERATION;
         for (size_t i = 0; i < m * n; ++i)
-            r->data[batch * m * n + i] = (double)c_float[i];
+            tensor_set_real(r, batch * m * n + i, (double)c_float[i]);
     }
     *out = lana_value_tensor(r);
     return LANA_OK;
@@ -4029,25 +4254,35 @@ static LanaError tensor_gpu_matmul(LanaVM *vm, const LanaTensor *a, const LanaTe
 /* Reduce one strided fiber. op: 0=sum 1=mean 2=max 3=min. `offset` is
  * relative to the tensor's first element; the tensor's own view offset is
  * folded in here so every caller is automatically view-correct. */
+/* LIP-027: sum/mean accumulate in binary32 for f16/bf16 inputs. */
+static bool reduction_accumulation_fp32(const LanaTensor *t) {
+    return t->dtype == LANA_TENSOR_F16 || t->dtype == LANA_TENSOR_BF16;
+}
+
 static LanaError tensor_reduce_fiber(const LanaTensor *t, size_t offset,
                                      size_t count, size_t stride, int op,
-                                     double *re, double *im) {
+                                     bool fp32, double *re, double *im) {
     if (t->is_complex && op >= 2) return LANA_ERR_TYPE;
     if (count == 0 && op != 0) return LANA_ERR_INVALID_PARAMETERS;
     double acc = op == 2 ? -INFINITY : op == 3 ? INFINITY : 0.0;
+    float acc32 = 0.0f;
     double imaginary = 0.0;
     for (size_t i = 0; i < count; ++i) {
         size_t index = t->offset + offset + i * stride;
-        double v = t->data[index * (t->is_complex ? 2u : 1u)];
+        double v = tensor_get_real(t, index);
         if (!isfinite(v)) return LANA_ERR_INVALID_PARAMETERS;
-        if (op < 2) acc += v;
+        if (op < 2) {
+            if (fp32) acc32 += (float)v;
+            else acc += v;
+        }
         else if (op == 2 ? v > acc : v < acc) acc = v;
         if (t->is_complex) {
-            double component = t->data[2 * index + 1];
+            double component = tensor_get_imag(t, index);
             if (!isfinite(component)) return LANA_ERR_INVALID_PARAMETERS;
             imaginary += component;
         }
     }
+    if (fp32 && op < 2) acc = (double)acc32;
     if (op == 1) { acc /= (double)count; imaginary /= (double)count; }
     if (!isfinite(acc) || !isfinite(imaginary)) return LANA_ERR_INVALID_PARAMETERS;
     *re = acc; *im = imaginary;
@@ -4064,7 +4299,9 @@ static LanaError tensor_reduce(LanaVM *vm, const LanaTensor *t, int op,
         size_t total = 1;
         for (size_t i = 0; i < t->ndim; ++i) total *= t->shape[i];
         if (total == 0 && op != 0) return LANA_ERR_INVALID_PARAMETERS;
+        bool fp32 = reduction_accumulation_fp32(t);
         double acc = op == 2 ? -INFINITY : op == 3 ? INFINITY : 0.0;
+        float acc32 = 0.0f;
         double imaginary = 0.0;
         for (size_t lin = 0; lin < total; ++lin) {
             size_t rem = lin, index = t->offset;
@@ -4072,22 +4309,26 @@ static LanaError tensor_reduce(LanaVM *vm, const LanaTensor *t, int op,
                 index += (t->shape[d] == 0 ? 0 : rem % t->shape[d]) * t->strides[d];
                 rem /= t->shape[d];
             }
-            double v = t->data[index * (t->is_complex ? 2u : 1u)];
+            double v = tensor_get_real(t, index);
             if (!isfinite(v)) return LANA_ERR_INVALID_PARAMETERS;
-            if (op < 2) acc += v;
+            if (op < 2) {
+                if (fp32) acc32 += (float)v;
+                else acc += v;
+            }
             else if (op == 2 ? v > acc : v < acc) acc = v;
             if (t->is_complex) {
-                double component = t->data[2 * index + 1];
+                double component = tensor_get_imag(t, index);
                 if (!isfinite(component)) return LANA_ERR_INVALID_PARAMETERS;
                 imaginary += component;
             }
         }
+        if (fp32 && op < 2) acc = (double)acc32;
         if (op == 1) { acc /= (double)total; imaginary /= (double)total; }
         if (!isfinite(acc) || !isfinite(imaginary)) return LANA_ERR_INVALID_PARAMETERS;
         if (!t->is_complex) { *out = lana_value_number(acc); return LANA_OK; }
         LanaTensor *r = tensor_new(vm, 0, NULL, true);
         if (r == NULL) return LANA_ERR_OOM;
-        r->data[0] = acc; r->data[1] = imaginary;
+        tensor_set_real(r, 0, acc); tensor_set_imag(r, 0, imaginary);
         *out = lana_value_tensor(r);
         return LANA_OK;
     }
@@ -4102,10 +4343,11 @@ static LanaError tensor_reduce(LanaVM *vm, const LanaTensor *t, int op,
     size_t shape[LANA_TENSOR_MAX_RANK];
     for (size_t i = 0, j = 0; i < t->ndim; ++i)
         if (i != axis) shape[j++] = t->shape[i];
-    LanaTensor *r = tensor_new(vm, t->ndim - 1, shape, t->is_complex);
+    LanaTensor *r = tensor_new_dtype(vm, t->ndim - 1, shape, t->dtype);
     if (r == NULL) return LANA_ERR_OOM;
     size_t total = 1;
     for (size_t i = 0; i < r->ndim; ++i) total *= r->shape[i];
+    bool fp32 = reduction_accumulation_fp32(t);
     for (size_t i = 0; i < total; ++i) {
         size_t offset = 0, remaining = i;
         for (size_t d = t->ndim; d-- > 0;) {
@@ -4114,10 +4356,10 @@ static LanaError tensor_reduce(LanaVM *vm, const LanaTensor *t, int op,
             remaining /= t->shape[d];
         }
         double re, im;
-        LanaError error = tensor_reduce_fiber(t, offset, count, t->strides[axis], op, &re, &im);
+        LanaError error = tensor_reduce_fiber(t, offset, count, t->strides[axis], op, fp32, &re, &im);
         if (error != LANA_OK) return error;
-        r->data[i * (t->is_complex ? 2u : 1u)] = re;
-        if (t->is_complex) r->data[2 * i + 1] = im;
+        tensor_set_real(r, i, re);
+        if (t->is_complex) tensor_set_imag(r, i, im);
     }
     *out = lana_value_tensor(r);
     return LANA_OK;
@@ -4174,7 +4416,7 @@ static bool tensor_all_finite(const LanaTensor *t) {
     for (size_t i = 0; i < t->ndim; ++i) total *= t->shape[i];
     size_t mult = t->is_complex ? 2u : 1u;
     for (size_t i = 0; i < total * mult; ++i) {
-        if (!isfinite(t->data[t->offset + i])) return false;
+        if (!isfinite(tensor_get_real(t, t->offset + i))) return false;
     }
     return true;
 }
@@ -4234,16 +4476,16 @@ static LanaError tensor_matmul_uncertain(LanaVM *vm, const LanaTensor *a_pred,
     if (a_pred->is_complex || b_pred->is_complex || a_var->is_complex || b_var->is_complex)
         return LANA_ERR_TYPE;
     Value pred_value;
-    LanaError error = tensor_matmul(vm, a_pred, b_pred, &pred_value);
+    LanaError error = tensor_matmul(vm, a_pred, b_pred, matmul_default_dtype(a_pred, b_pred), &pred_value);
     if (error != LANA_OK) return error;
     Value b_sq, a_sq, t1, t2, var_value;
     error = tensor_elementwise(vm, b_pred, b_pred, 2, &b_sq);
     if (error != LANA_OK) return error;
     error = tensor_elementwise(vm, a_pred, a_pred, 2, &a_sq);
     if (error != LANA_OK) return error;
-    error = tensor_matmul(vm, a_var, b_sq.as.tensor, &t1);
+    error = tensor_matmul(vm, a_var, b_sq.as.tensor, matmul_default_dtype(a_var, b_sq.as.tensor), &t1);
     if (error != LANA_OK) return error;
-    error = tensor_matmul(vm, a_sq.as.tensor, b_var, &t2);
+    error = tensor_matmul(vm, a_sq.as.tensor, b_var, matmul_default_dtype(a_sq.as.tensor, b_var), &t2);
     if (error != LANA_OK) return error;
     error = tensor_elementwise(vm, t1.as.tensor, t2.as.tensor, 0, &var_value);
     if (error != LANA_OK) return error;
@@ -4260,7 +4502,7 @@ static LanaError tensor_reduce_tensor(LanaVM *vm, const LanaTensor *t, int op,
     if (result.type == VAL_TENSOR) { *out = result.as.tensor; return LANA_OK; }
     LanaTensor *r = tensor_new(vm, 0, NULL, false);
     if (r == NULL) return LANA_ERR_OOM;
-    r->data[0] = result.as.number;
+    tensor_set_real(r, 0, result.as.number);
     *out = r;
     return LANA_OK;
 }
@@ -4271,8 +4513,10 @@ static LanaError tensor_scale(LanaVM *vm, const LanaTensor *t, double factor, La
     if (r == NULL) return LANA_ERR_OOM;
     size_t total = 1;
     for (size_t i = 0; i < t->ndim; ++i) total *= t->shape[i];
-    size_t mult = t->is_complex ? 2u : 1u;
-    for (size_t i = 0; i < total * mult; ++i) r->data[i] = t->data[t->offset + i] * factor;
+    for (size_t e = 0; e < total; ++e) {
+        tensor_set_real(r, e, tensor_get_real(t, t->offset + e) * factor);
+        tensor_set_imag(r, e, tensor_get_imag(t, t->offset + e) * factor);
+    }
     *out = r;
     return LANA_OK;
 }
@@ -4331,6 +4575,8 @@ static LanaTensor *tensor_transpose_last_two(LanaVM *vm, const LanaTensor *t) {
     if (view == NULL) return NULL;
     view->ndim = t->ndim;
     view->is_complex = t->is_complex;
+    view->dtype = t->dtype;    /* LIP-027: views inherit the source dtype */
+    view->is_state = t->is_state;
     view->shape = lana_vm_alloc(vm, t->ndim * sizeof(*view->shape));
     view->strides = lana_vm_alloc(vm, t->ndim * sizeof(*view->strides));
     if (view->shape == NULL || view->strides == NULL) return NULL;
@@ -4360,9 +4606,9 @@ static LanaError tensor_outer(LanaVM *vm, const LanaTensor *u, const LanaTensor 
     if (r == NULL) return LANA_ERR_OOM;
     for (size_t i = 0; i < k; ++i)
         for (size_t j = 0; j < n; ++j)
-            r->data[i * n + j] =
-                u->data[u->offset + i * u->strides[0]] *
-                v->data[v->offset + j * v->strides[0]];
+            tensor_set_real(r, i * n + j,
+                tensor_get_real(u, u->offset + i * u->strides[0]) *
+                tensor_get_real(v, v->offset + j * v->strides[0]));
     *out = r;
     return LANA_OK;
 }
@@ -4380,7 +4626,7 @@ static LanaError tensor_negate(LanaVM *vm, const LanaTensor *t, LanaTensor **out
             index += (t->shape[d] == 0 ? 0 : rem % t->shape[d]) * t->strides[d];
             rem /= t->shape[d];
         }
-        r->data[lin] = -t->data[index];
+        tensor_set_real(r, lin, -tensor_get_real(t, index));
     }
     *out = r;
     return LANA_OK;
@@ -4409,7 +4655,7 @@ static LanaError tensor_unbroadcast(LanaVM *vm, const LanaTensor *g,
             size_t coord = (target->shape[i] == 1) ? 0 : idx[gi];
             ti = ti * target->shape[i] + coord;
         }
-        r->data[ti] += g->data[g->offset + lin];
+        tensor_set_real(r, ti, tensor_get_real(r, ti) + tensor_get_real(g, g->offset + lin));
     }
     *out = r;
     return LANA_OK;
@@ -4447,7 +4693,7 @@ static LanaError tensor_broadcast_reduce(LanaVM *vm, const LanaTensor *g,
                 gi += idx[i] * g_strides[gd++];
             }
         }
-        r->data[lin] = g->data[g->offset + gi] * scale;
+        tensor_set_real(r, lin, tensor_get_real(g, g->offset + gi) * scale);
     }
     *out = r;
     return LANA_OK;
@@ -4467,7 +4713,7 @@ static LanaError ad_elementwise(LanaVM *vm, const LanaTensor *a, const LanaTenso
 static LanaError ad_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor *b,
                            LanaTensor **out) {
     Value result;
-    LanaError error = tensor_matmul(vm, a, b, &result);
+    LanaError error = tensor_matmul(vm, a, b, matmul_default_dtype(a, b), &result);
     if (error != LANA_OK) return error;
     *out = result.as.tensor;
     return LANA_OK;
@@ -4508,9 +4754,10 @@ static LanaError ad_backward(LanaVM *vm, LanaDerivation *node, const LanaTensor 
         if (node->ad_grad == NULL) return LANA_ERR_OOM;
     }
     size_t count = tensor_element_count(seed);
-    size_t components = seed->is_complex ? 2u : 1u;
-    for (size_t i = 0; i < count * components; ++i)
-        node->ad_grad->data[i] += seed->data[seed->offset * components + i];
+    for (size_t e = 0; e < count; ++e) {
+        tensor_set_real(node->ad_grad, e, tensor_get_real(node->ad_grad, e) + tensor_get_real(seed, seed->offset + e));
+        tensor_set_imag(node->ad_grad, e, tensor_get_imag(node->ad_grad, e) + tensor_get_imag(seed, seed->offset + e));
+    }
 
     if (node->ad_op < 0) return LANA_OK;
 
@@ -4628,9 +4875,9 @@ static LanaError ad_backward(LanaVM *vm, LanaDerivation *node, const LanaTensor 
             gb = tensor_new(vm, b->ndim, b->shape, true);
             if (ga == NULL || gb == NULL) return LANA_ERR_OOM;
             for (size_t bi = 0; bi < batch; ++bi) {
-                const double *da = a->data + bi * d * d * 2;
-                const double *db = b->data + bi * d * d * 2;
-                const double *dg = seed->data + (seed->offset + bi * d * d) * 2;
+                const double *da = (const double*)a->data + bi * d * d * 2;
+                const double *db = (const double*)b->data + bi * d * d * 2;
+                const double *dg = (const double*)seed->data + (seed->offset + bi * d * d) * 2;
                 double p_a = da[0], c_a_re = da[2], c_a_im = da[3];
                 double p_b = db[0], c_b_re = db[2], c_b_im = db[3];
                 double s_a = sqrt(p_a * (1.0 - p_a));
@@ -4669,12 +4916,12 @@ static LanaError ad_backward(LanaVM *vm, LanaDerivation *node, const LanaTensor 
                     double g_sb = -(g_db_re * c_b_re + g_db_im * c_b_im) / (s_b * s_b);
                     g_pb += g_sb * (1.0 - 2.0 * p_b) / (2.0 * s_b);
                 }
-                double *ga_data = ga->data + bi * d * d * 2;
+                double *ga_data = (double*)ga->data + bi * d * d * 2;
                 ga_data[0] = g_pa; ga_data[1] = 0.0;
                 ga_data[2] = g_ca_re; ga_data[3] = g_ca_im;
                 ga_data[4] = g_ca_re; ga_data[5] = g_ca_im == 0.0 ? 0.0 : -g_ca_im;
                 ga_data[6] = -g_pa; ga_data[7] = 0.0;
-                double *gb_data = gb->data + bi * d * d * 2;
+                double *gb_data = (double*)gb->data + bi * d * d * 2;
                 gb_data[0] = g_pb; gb_data[1] = 0.0;
                 gb_data[2] = g_cb_re; gb_data[3] = g_cb_im;
                 gb_data[4] = g_cb_re; gb_data[5] = g_cb_im == 0.0 ? 0.0 : -g_cb_im;
@@ -4705,14 +4952,14 @@ static LanaError ad_backward(LanaVM *vm, LanaDerivation *node, const LanaTensor 
                     for (size_t c = 0; c < d; ++c) {
                         double re = 0.0, im = 0.0;
                         for (size_t m = 0; m < k; ++m) {
-                            double seed_val = seed->data[seed->offset + bi * k + m];
+                            double seed_val = tensor_get_real(seed, seed->offset + bi * k + m);
                             double e_re, e_im;
                             linalg_get3(povm, m, c, r, &e_re, &e_im);
                             re += seed_val * e_re;
                             im += seed_val * (-e_im);
                         }
-                        gs->data[(bi * d * d + r * d + c) * 2] = re;
-                        gs->data[(bi * d * d + r * d + c) * 2 + 1] = im;
+                        tensor_set_real(gs, bi * d * d + r * d + c, re);
+                        tensor_set_imag(gs, bi * d * d + r * d + c, im);
                     }
             }
             if (node->ad_a_deriv != NULL) {
@@ -4732,7 +4979,7 @@ static LanaError ad_backward(LanaVM *vm, LanaDerivation *node, const LanaTensor 
             gs = tensor_new(vm, s->ndim, s->shape, true);
             if (gs == NULL) return LANA_ERR_OOM;
             for (size_t bi = 0; bi < batch; ++bi) {
-                const double *dg = seed->data + (seed->offset + bi * d * d) * 2;
+                const double *dg = (const double*)seed->data + (seed->offset + bi * d * d) * 2;
                 for (size_t m = 0; m < d; ++m)
                     for (size_t n = 0; n < d; ++n) {
                         double re = 0.0, im = 0.0;
@@ -4749,8 +4996,8 @@ static LanaError ad_backward(LanaVM *vm, LanaDerivation *node, const LanaTensor 
                                     re += t_re * kj_re - t_im * kj_im;
                                     im += t_re * kj_im + t_im * kj_re;
                                 }
-                        gs->data[(bi * d * d + m * d + n) * 2] = re;
-                        gs->data[(bi * d * d + m * d + n) * 2 + 1] = im;
+                        tensor_set_real(gs, bi * d * d + m * d + n, re);
+                        tensor_set_imag(gs, bi * d * d + m * d + n, im);
                     }
             }
             if (node->ad_a_deriv != NULL) {
@@ -4807,12 +5054,12 @@ static LanaError tensor_infer_shape(LanaVM *vm, const Value *v, size_t *ndim, si
 
 /* Recursively fill a tensor's data buffer in row-major order from a nested
  * array of numbers. `offset` is advanced past the written elements. */
-static LanaError tensor_fill_data(const Value *v, double *data, size_t *offset) {
-    if (v->type == VAL_NUMBER) { data[(*offset)++] = v->as.number; return LANA_OK; }
+static LanaError tensor_fill_data(const Value *v, LanaTensor *t, size_t *offset) {
+    if (v->type == VAL_NUMBER) { tensor_set_real(t, (*offset)++, v->as.number); return LANA_OK; }
     if (v->type != VAL_ARRAY) return LANA_ERR_TYPE;
     LanaArray *arr = v->as.array;
     for (size_t i = 0; i < arr->count; ++i) {
-        LanaError e = tensor_fill_data(&arr->items[i], data, offset);
+        LanaError e = tensor_fill_data(&arr->items[i], t, offset);
         if (e != LANA_OK) return e;
     }
     return LANA_OK;
@@ -4820,11 +5067,11 @@ static LanaError tensor_fill_data(const Value *v, double *data, size_t *offset) 
 
 /* Recursively fill a complex tensor's interleaved [re, im] buffer from two
  * parallel nested arrays. Shape mismatch raises LANA_ERR_INVALID_PARAMETERS. */
-static LanaError tensor_fill_complex(const Value *re, const Value *im, double *data, size_t *offset) {
+static LanaError tensor_fill_complex(const Value *re, const Value *im, LanaTensor *t, size_t *offset) {
     if (re->type == VAL_NUMBER) {
         if (im->type != VAL_NUMBER) return LANA_ERR_TYPE;
-        data[2 * (*offset)] = re->as.number;
-        data[2 * (*offset) + 1] = im->as.number;
+        tensor_set_real(t, *offset, re->as.number);
+        tensor_set_imag(t, *offset, im->as.number);
         (*offset)++;
         return LANA_OK;
     }
@@ -4832,7 +5079,7 @@ static LanaError tensor_fill_complex(const Value *re, const Value *im, double *d
     LanaArray *ra = re->as.array, *ia = im->as.array;
     if (ra->count != ia->count) return LANA_ERR_INVALID_PARAMETERS;
     for (size_t i = 0; i < ra->count; ++i) {
-        LanaError e = tensor_fill_complex(&ra->items[i], &ia->items[i], data, offset);
+        LanaError e = tensor_fill_complex(&ra->items[i], &ia->items[i], t, offset);
         if (e != LANA_OK) return e;
     }
     return LANA_OK;
@@ -4930,11 +5177,11 @@ static LanaError tensor_index(LanaVM *vm, LanaTensor *t, const Value *spec, Valu
     if (all_int) {
         /* A full set of integer positions selects one element: a number, or
          * the established rank-zero complex tensor for complex tensors. */
-        if (!t->is_complex) { *out = lana_value_number(t->data[view_offset]); return LANA_OK; }
+        if (!t->is_complex) { *out = lana_value_number(tensor_get_real(t, view_offset)); return LANA_OK; }
         LanaTensor *r = tensor_new(vm, 0, NULL, true);
         if (r == NULL) return LANA_ERR_OOM;
-        r->data[0] = t->data[2 * view_offset];
-        r->data[1] = t->data[2 * view_offset + 1];
+        tensor_set_real(r, 0, tensor_get_real(t, view_offset));
+        tensor_set_imag(r, 0, tensor_get_imag(t, view_offset));
         *out = lana_value_tensor(r);
         return LANA_OK;
     }
@@ -4943,6 +5190,8 @@ static LanaError tensor_index(LanaVM *vm, LanaTensor *t, const Value *spec, Valu
     if (view == NULL) return LANA_ERR_OOM;
     view->ndim = view_ndim;
     view->is_complex = t->is_complex;
+    view->dtype = t->dtype;    /* LIP-027: views inherit the source dtype */
+    view->is_state = t->is_state;
     view->shape = NULL;
     view->strides = NULL;
     view->data = t->data;      /* shared with the source; accounted once */
@@ -5619,10 +5868,10 @@ static LanaError regex_make_match(LanaVM *vm, const char *text, size_t start,
 static void linalg_get2(const LanaTensor *t, size_t i, size_t j, double *re, double *im) {
     size_t lin = t->offset + i * t->strides[0] + j * t->strides[1];
     if (t->is_complex) {
-        *re = t->data[lin * 2];
-        *im = t->data[lin * 2 + 1];
+        *re = tensor_get_real(t, lin);
+        *im = tensor_get_imag(t, lin);
     } else {
-        *re = t->data[lin];
+        *re = tensor_get_real(t, lin);
         *im = 0.0;
     }
 }
@@ -5630,18 +5879,18 @@ static void linalg_get2(const LanaTensor *t, size_t i, size_t j, double *re, dou
 /* Write the (i, j) entry of a 2-D complex tensor. */
 static void linalg_set2(LanaTensor *t, size_t i, size_t j, double re, double im) {
     size_t lin = t->offset + i * t->strides[0] + j * t->strides[1];
-    t->data[lin * 2] = re;
-    t->data[lin * 2 + 1] = im;
+    tensor_set_real(t, lin, re);
+    tensor_set_imag(t, lin, im);
 }
 
 /* Read the (k, i, j) entry of a 3-D tensor as a complex number. */
 static void linalg_get3(const LanaTensor *t, size_t k, size_t i, size_t j, double *re, double *im) {
     size_t lin = t->offset + k * t->strides[0] + i * t->strides[1] + j * t->strides[2];
     if (t->is_complex) {
-        *re = t->data[lin * 2];
-        *im = t->data[lin * 2 + 1];
+        *re = tensor_get_real(t, lin);
+        *im = tensor_get_imag(t, lin);
     } else {
-        *re = t->data[lin];
+        *re = tensor_get_real(t, lin);
         *im = 0.0;
     }
 }
@@ -5649,8 +5898,8 @@ static void linalg_get3(const LanaTensor *t, size_t k, size_t i, size_t j, doubl
 /* Write the (k, i, j) entry of a 3-D complex tensor. */
 static void linalg_set3(LanaTensor *t, size_t k, size_t i, size_t j, double re, double im) {
     size_t lin = t->offset + k * t->strides[0] + i * t->strides[1] + j * t->strides[2];
-    t->data[lin * 2] = re;
-    t->data[lin * 2 + 1] = im;
+    tensor_set_real(t, lin, re);
+    tensor_set_imag(t, lin, im);
 }
 
 /* Copy a 2-D tensor (real or complex) into a fresh complex tensor. */
@@ -6247,13 +6496,13 @@ static LanaError linalg_state_tensor(LanaVM *vm, const Value *arg, Value *out) {
     t->is_state = true;
     {
         size_t offset = 0;
-        error = tensor_fill_state(arg, t->data, &offset);
+        error = tensor_fill_state(arg, (double*)t->data, &offset);
         if (error != LANA_OK) return error;
     }
     batch = 1;
     for (i = 0; i + 2 < ndim; ++i) batch *= shape[i];
     for (i = 0; i < batch; ++i) {
-        error = linalg_validate_density_data(vm, t->data + i * d * d * 2, d);
+        error = linalg_validate_density_data(vm, (double*)t->data + i * d * d * 2, d);
         if (error != LANA_OK) return error;
     }
     *out = lana_value_tensor(t);
@@ -6277,9 +6526,9 @@ static LanaError linalg_state_append(LanaVM *vm, const LanaTensor *a, const Lana
     batch = 1;
     for (i = 0; i + 2 < a->ndim; ++i) batch *= a->shape[i];
     for (i = 0; i < batch; ++i) {
-        const double *da = a->data + i * d * d * 2;
-        const double *db = b->data + i * d * d * 2;
-        double *dr = r->data + i * d * d * 2;
+        const double *da = (const double*)a->data + i * d * d * 2;
+        const double *db = (const double*)b->data + i * d * d * 2;
+        double *dr = (double*)r->data + i * d * d * 2;
         double p_a = da[0], c_a_re = da[2], c_a_im = da[3];
         double p_b = db[0], c_b_re = db[2], c_b_im = db[3];
         double s_a = sqrt(p_a * (1.0 - p_a));
@@ -6322,7 +6571,7 @@ static LanaError linalg_state_measure(LanaVM *vm, const LanaTensor *s, const Lan
     res = tensor_new(vm, out_ndim, out_shape, false);
     if (res == NULL) return LANA_ERR_OOM;
     for (i = 0; i < batch; ++i) {
-        const double *ds = s->data + i * d * d * 2;
+        const double *ds = (const double*)s->data + i * d * d * 2;
         for (m = 0; m < k; ++m) {
             double re = 0.0;
             for (r = 0; r < d; ++r)
@@ -6332,7 +6581,7 @@ static LanaError linalg_state_measure(LanaVM *vm, const LanaTensor *s, const Lan
                     linalg_get3(povm, m, c, r, &e_re, &e_im);
                     re += rho_re * e_re - rho_im * e_im;
                 }
-            res->data[i * k + m] = re;
+            tensor_set_real(res, i * k + m, re);
         }
     }
     *out = lana_value_tensor(res);
@@ -6352,8 +6601,8 @@ static LanaError linalg_state_transform(LanaVM *vm, const LanaTensor *s, const L
     if (res == NULL) return LANA_ERR_OOM;
     res->is_state = true;
     for (i = 0; i < batch; ++i) {
-        const double *ds = s->data + i * d * d * 2;
-        double *dr = res->data + i * d * d * 2;
+        const double *ds = (const double*)s->data + i * d * d * 2;
+        double *dr = (double*)res->data + i * d * d * 2;
         for (r = 0; r < d; ++r)
             for (c = 0; c < d; ++c) {
                 double re = 0.0, im = 0.0;
@@ -6946,9 +7195,8 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             size_t ndim; size_t *shape;
             LanaError e = tensor_shape_from_array(vm, &arguments[0], &ndim, &shape);
             if (e != LANA_OK) return e;
-            LanaTensor *t = tensor_new(vm, ndim, shape, false);
+            LanaTensor *t = tensor_new_dtype(vm, ndim, shape, (LanaTensorDtype)dtype);
             if (t == NULL) return LANA_ERR_OOM;
-            t->dtype = (LanaTensorDtype)dtype;
             *out = lana_value_tensor(t);
             return LANA_OK;
         }
@@ -6959,12 +7207,11 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             size_t ndim; size_t *shape;
             LanaError e = tensor_shape_from_array(vm, &arguments[0], &ndim, &shape);
             if (e != LANA_OK) return e;
-            LanaTensor *t = tensor_new(vm, ndim, shape, false);
+            LanaTensor *t = tensor_new_dtype(vm, ndim, shape, (LanaTensorDtype)dtype);
             if (t == NULL) return LANA_ERR_OOM;
-            t->dtype = (LanaTensorDtype)dtype;
             size_t total = 1;
             for (size_t i = 0; i < ndim; ++i) total *= t->shape[i];
-            for (size_t i = 0; i < total; ++i) t->data[i] = 1.0;
+            for (size_t i = 0; i < total; ++i) tensor_set_real(t, i, 1.0);
             *out = lana_value_tensor(t);
             return LANA_OK;
         }
@@ -6977,10 +7224,9 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             LanaError error = tensor_dimension(arguments[0].as.number, &n);
             if (error != LANA_OK) return error;
             size_t shape[2] = {n, n};
-            LanaTensor *t = tensor_new(vm, 2, shape, false);
+            LanaTensor *t = tensor_new_dtype(vm, 2, shape, (LanaTensorDtype)dtype);
             if (t == NULL) return LANA_ERR_OOM;
-            t->dtype = (LanaTensorDtype)dtype;
-            for (size_t i = 0; i < n; ++i) t->data[i * n + i] = 1.0;
+            for (size_t i = 0; i < n; ++i) tensor_set_real(t, i * n + i, 1.0);
             *out = lana_value_tensor(t);
             return LANA_OK;
         }
@@ -6989,6 +7235,14 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             if (arguments[0].type != VAL_TENSOR) return LANA_ERR_TYPE;
             *out = lana_value_string(dtype_to_string(arguments[0].as.tensor->dtype));
             return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_CAST: {
+            if (argc != 2u) return LANA_ERR_TYPE;
+            if (arguments[0].type != VAL_TENSOR || arguments[1].type != VAL_STRING)
+                return LANA_ERR_TYPE;
+            int dtype = dtype_from_string(arguments[1].as.string);
+            if (dtype < 0) return LANA_ERR_INVALID_PARAMETERS;
+            return tensor_cast(vm, arguments[0].as.tensor, (LanaTensorDtype)dtype, out);
         }
         case LANA_HOST_TENSOR_SHAPE: {
             if (argc != 1u) return LANA_ERR_TYPE;
@@ -7036,7 +7290,8 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             return LANA_OK;
         }
         case LANA_HOST_TENSOR_MATMUL: {
-            if (argc != 2u) return LANA_ERR_TYPE;
+            if (argc != 2u && argc != 3u) return LANA_ERR_TYPE;
+            if (argc == 3u && arguments[2].type != VAL_STRING) return LANA_ERR_TYPE;
             const LanaTensor *a_pred = NULL, *a_var = NULL, *b_pred = NULL, *b_var = NULL;
             bool a_unc = false, b_unc = false;
             LanaError unpack_error = tensor_uncertainty_unpack(&arguments[0], &a_pred, &a_var, &a_unc);
@@ -7048,7 +7303,17 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
                 if (!b_unc) { b_var = tensor_zeros_like(vm, b_pred); if (b_var == NULL) return LANA_ERR_OOM; }
                 return tensor_matmul_uncertain(vm, a_pred, a_var, b_pred, b_var, out);
             }
-            LanaError error = tensor_matmul(vm, a_pred, b_pred, out);
+            /* LIP-027: optional out_dtype: named parameter. Defaults to the
+             * input dtype when both match, else the higher-precision operand. */
+            LanaTensorDtype out_dtype;
+            if (argc == 3u) {
+                int d = dtype_from_string(arguments[2].as.string);
+                if (d < 0) return LANA_ERR_INVALID_PARAMETERS;
+                out_dtype = (LanaTensorDtype)d;
+            } else {
+                out_dtype = matmul_default_dtype(a_pred, b_pred);
+            }
+            LanaError error = tensor_matmul(vm, a_pred, b_pred, out_dtype, out);
             if (error != LANA_OK) return error;
             if (vm->ad_recording)
                 return ad_record(vm, 4, &arguments[0], &arguments[1], -1, out);
@@ -7098,20 +7363,12 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             size_t ndim; size_t *shape;
             LanaError e = tensor_infer_shape(vm, &arguments[0], &ndim, &shape);
             if (e != LANA_OK) return e;
-            LanaTensor *t = tensor_new(vm, ndim, shape, false);
+            LanaTensor *t = tensor_new_dtype(vm, ndim, shape, (LanaTensorDtype)dtype);
             if (t == NULL) return LANA_ERR_OOM;
-            t->dtype = (LanaTensorDtype)dtype;
             size_t offset = 0;
-            e = tensor_fill_data(&arguments[0], t->data, &offset);
+            /* tensor_set_real rounds to the target precision at construction. */
+            e = tensor_fill_data(&arguments[0], t, &offset);
             if (e != LANA_OK) return e;
-            /* LIP-027: round to the target precision at construction. */
-            if (dtype == LANA_TENSOR_F16 || dtype == LANA_TENSOR_BF16) {
-                size_t total = 1;
-                for (size_t i = 0; i < ndim; ++i) total *= t->shape[i];
-                for (size_t i = 0; i < total; ++i) {
-                    t->data[i] = (dtype == LANA_TENSOR_F16) ? round_f16(t->data[i]) : round_bf16(t->data[i]);
-                }
-            }
             *out = lana_value_tensor(t);
             return LANA_OK;
         }
@@ -7123,7 +7380,7 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             LanaTensor *t = tensor_new(vm, ndim, shape, true);
             if (t == NULL) return LANA_ERR_OOM;
             size_t offset = 0;
-            e = tensor_fill_complex(&arguments[0], &arguments[1], t->data, &offset);
+            e = tensor_fill_complex(&arguments[0], &arguments[1], t, &offset);
             if (e != LANA_OK) return e;
             *out = lana_value_tensor(t);
             return LANA_OK;
@@ -9850,6 +10107,11 @@ static LanaError lift_binary_raw(LanaVM *vm, const Value *left, const Value *rig
     if (left->type == VAL_TENSOR || right->type == VAL_TENSOR ||
         left->type == VAL_MAP || right->type == VAL_MAP) {
         if (kind != LANA_PURE_BINARY) return LANA_ERR_TYPE;
+        /* LIP-027: a scalar operand adopts the tensor's dtype. */
+        if (left->type == VAL_TENSOR && right->type == VAL_NUMBER)
+            return tensor_elementwise_scalar(vm, left->as.tensor, right->as.number, (int)operation, out);
+        if (left->type == VAL_NUMBER && right->type == VAL_TENSOR)
+            return tensor_elementwise_scalar(vm, right->as.tensor, left->as.number, (int)operation, out);
         const LanaTensor *a_pred = NULL, *a_var = NULL, *b_pred = NULL, *b_var = NULL;
         bool a_unc = false, b_unc = false;
         LanaError unpack_error = tensor_uncertainty_unpack(left, &a_pred, &a_var, &a_unc);
@@ -12299,7 +12561,7 @@ static LanaError ad_finish(LanaVM *vm, LanaDerivation *leaf, const char *operati
     size_t count = tensor_element_count(grad);
     size_t components = grad->is_complex ? 2u : 1u;
     for (size_t i = 0; i < count * components; ++i)
-        if (!isfinite(grad->data[i])) return LANA_ERR_INVALID_PARAMETERS;
+        if (!isfinite(tensor_get_real(grad, i))) return LANA_ERR_INVALID_PARAMETERS;
     LanaTensor *result_tensor = tensor_new(vm, grad->ndim, grad->shape, grad->is_complex);
     if (result_tensor == NULL) return LANA_ERR_OOM;
     memcpy(result_tensor->data, grad->data, count * components * sizeof(double));
@@ -12325,7 +12587,7 @@ static LanaError ad_grad(LanaVM *vm, const Value *function_value, const Value *x
     if (result.type != VAL_NUMBER) return LANA_ERR_TYPE;
     LanaTensor *seed = tensor_new(vm, 0, NULL, false);
     if (seed == NULL) return LANA_ERR_OOM;
-    seed->data[0] = 1.0;
+    tensor_set_real(seed, 0, 1.0);
     if (result.derivation != NULL) {
         error = ad_backward(vm, result.derivation, seed);
         if (error != LANA_OK) return error;
@@ -12355,7 +12617,7 @@ static LanaError ad_vjp(LanaVM *vm, const Value *function_value, const Value *x,
                      v->as.tensor->strides[d];
             rem /= v->as.tensor->shape[d];
         }
-        seed->data[lin] = v->as.tensor->data[index];
+        tensor_set_real(seed, lin, tensor_get_real(v->as.tensor, index));
     }
     if (result.derivation != NULL) {
         error = ad_backward(vm, result.derivation, seed);
@@ -12381,10 +12643,10 @@ static LanaTensor *tensor_copy_contiguous(LanaVM *vm, const LanaTensor *t) {
             rem /= t->shape[d];
         }
         if (t->is_complex) {
-            copy->data[2 * lin] = t->data[2 * index];
-            copy->data[2 * lin + 1] = t->data[2 * index + 1];
+            tensor_set_real(copy, lin, tensor_get_real(t, index));
+            tensor_set_imag(copy, lin, tensor_get_imag(t, index));
         } else {
-            copy->data[lin] = t->data[index];
+            tensor_set_real(copy, lin, tensor_get_real(t, index));
         }
     }
     return copy;
@@ -12588,7 +12850,7 @@ static LanaError host_train(LanaVM *vm, const Value *arguments, size_t argc,
             if (batch_end > dataset_size) batch_end = dataset_size;
             size_t batch_actual = batch_end - batch_start;
 
-            memset(batch_grad->data, 0, param_count * param_components * sizeof(double));
+            memset(batch_grad->data, 0, param_count * param_components * tensor_elem_bytes(batch_grad));
 
             for (size_t i = batch_start; i < batch_end; ++i) {
                 Value pair;
@@ -12630,7 +12892,7 @@ static LanaError host_train(LanaVM *vm, const Value *arguments, size_t argc,
 
                 LanaTensor *seed = tensor_new(vm, 0, NULL, false);
                 if (seed == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
-                seed->data[0] = 1.0 / (double)batch_actual;
+                tensor_set_real(seed, 0, 1.0 / (double)batch_actual);
                 if (y.derivation != NULL) {
                     error = ad_backward(vm, y.derivation, seed);
                     if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
@@ -12642,8 +12904,8 @@ static LanaError host_train(LanaVM *vm, const Value *arguments, size_t argc,
                     if (grad == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
                 }
                 for (size_t k = 0; k < param_count * param_components; ++k) {
-                    if (!isfinite(grad->data[k])) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
-                    batch_grad->data[k] += grad->data[k];
+                    if (!isfinite(tensor_get_real(grad, k))) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
+                    tensor_set_real(batch_grad, k, tensor_get_real(batch_grad, k) + tensor_get_real(grad, k));
                 }
             }
 
@@ -12656,24 +12918,24 @@ static LanaError host_train(LanaVM *vm, const Value *arguments, size_t argc,
                 double bc1 = 1.0 - pow(optimizer->beta1, (double)adam_t);
                 double bc2 = 1.0 - pow(optimizer->beta2, (double)adam_t);
                 for (size_t k = 0; k < param_count * param_components; ++k) {
-                    double g = batch_grad->data[k];
-                    m->data[k] = optimizer->beta1 * m->data[k] + (1.0 - optimizer->beta1) * g;
-                    v->data[k] = optimizer->beta2 * v->data[k] + (1.0 - optimizer->beta2) * g * g;
-                    double m_hat = m->data[k] / bc1;
-                    double v_hat = v->data[k] / bc2;
-                    new_params->data[k] = params->data[k] -
-                        optimizer->learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon);
+                    double g = tensor_get_real(batch_grad, k);
+                    tensor_set_real(m, k, optimizer->beta1 * tensor_get_real(m, k) + (1.0 - optimizer->beta1) * g);
+                    tensor_set_real(v, k, optimizer->beta2 * tensor_get_real(v, k) + (1.0 - optimizer->beta2) * g * g);
+                    double m_hat = tensor_get_real(m, k) / bc1;
+                    double v_hat = tensor_get_real(v, k) / bc2;
+                    tensor_set_real(new_params, k, tensor_get_real(params, k) -
+                        optimizer->learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon));
                 }
             } else if (velocity != NULL) {
                 for (size_t k = 0; k < param_count * param_components; ++k) {
-                    velocity->data[k] = optimizer->momentum * velocity->data[k] -
-                        optimizer->learning_rate * batch_grad->data[k];
-                    new_params->data[k] = params->data[k] + velocity->data[k];
+                    tensor_set_real(velocity, k, optimizer->momentum * tensor_get_real(velocity, k) -
+                        optimizer->learning_rate * tensor_get_real(batch_grad, k));
+                    tensor_set_real(new_params, k, tensor_get_real(params, k) + tensor_get_real(velocity, k));
                 }
             } else {
                 for (size_t k = 0; k < param_count * param_components; ++k) {
-                    new_params->data[k] = params->data[k] -
-                        optimizer->learning_rate * batch_grad->data[k];
+                    tensor_set_real(new_params, k, tensor_get_real(params, k) -
+                        optimizer->learning_rate * tensor_get_real(batch_grad, k));
                 }
             }
 
@@ -12900,7 +13162,7 @@ static LanaError incremental_train(LanaVM *vm, const LanaTrainingResult *prior,
     (void)lana_vm_root_push(vm, &data_root);
 
     for (size_t step = 0u; step < step_count; ++step) {
-        memset(batch_grad->data, 0, param_count * sizeof(double));
+        memset(batch_grad->data, 0, param_count * tensor_elem_bytes(batch_grad));
 
         for (size_t i = 0u; i < dataset_size; ++i) {
             Value pair;
@@ -12942,7 +13204,7 @@ static LanaError incremental_train(LanaVM *vm, const LanaTrainingResult *prior,
 
             LanaTensor *seed = tensor_new(vm, 0, NULL, false);
             if (seed == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
-            seed->data[0] = 1.0 / (double)dataset_size;
+            tensor_set_real(seed, 0, 1.0 / (double)dataset_size);
             if (y.derivation != NULL) {
                 error = ad_backward(vm, y.derivation, seed);
                 if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
@@ -12954,8 +13216,8 @@ static LanaError incremental_train(LanaVM *vm, const LanaTrainingResult *prior,
                 if (grad == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
             }
             for (size_t k = 0; k < param_count; ++k) {
-                if (!isfinite(grad->data[k])) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
-                batch_grad->data[k] += grad->data[k];
+                if (!isfinite(tensor_get_real(grad, k))) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
+                tensor_set_real(batch_grad, k, tensor_get_real(batch_grad, k) + tensor_get_real(grad, k));
             }
         }
 
@@ -12967,24 +13229,24 @@ static LanaError incremental_train(LanaVM *vm, const LanaTrainingResult *prior,
             double bc1 = 1.0 - pow(optimizer->beta1, (double)adam_t);
             double bc2 = 1.0 - pow(optimizer->beta2, (double)adam_t);
             for (size_t k = 0; k < param_count; ++k) {
-                double g = batch_grad->data[k];
-                m->data[k] = optimizer->beta1 * m->data[k] + (1.0 - optimizer->beta1) * g;
-                v->data[k] = optimizer->beta2 * v->data[k] + (1.0 - optimizer->beta2) * g * g;
-                double m_hat = m->data[k] / bc1;
-                double v_hat = v->data[k] / bc2;
-                new_params->data[k] = params->data[k] -
-                    optimizer->learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon);
+                double g = tensor_get_real(batch_grad, k);
+                tensor_set_real(m, k, optimizer->beta1 * tensor_get_real(m, k) + (1.0 - optimizer->beta1) * g);
+                tensor_set_real(v, k, optimizer->beta2 * tensor_get_real(v, k) + (1.0 - optimizer->beta2) * g * g);
+                double m_hat = tensor_get_real(m, k) / bc1;
+                double v_hat = tensor_get_real(v, k) / bc2;
+                tensor_set_real(new_params, k, tensor_get_real(params, k) -
+                    optimizer->learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon));
             }
         } else if (velocity != NULL) {
             for (size_t k = 0; k < param_count; ++k) {
-                velocity->data[k] = optimizer->momentum * velocity->data[k] -
-                    optimizer->learning_rate * batch_grad->data[k];
-                new_params->data[k] = params->data[k] + velocity->data[k];
+                tensor_set_real(velocity, k, optimizer->momentum * tensor_get_real(velocity, k) -
+                    optimizer->learning_rate * tensor_get_real(batch_grad, k));
+                tensor_set_real(new_params, k, tensor_get_real(params, k) + tensor_get_real(velocity, k));
             }
         } else {
             for (size_t k = 0; k < param_count; ++k) {
-                new_params->data[k] = params->data[k] -
-                    optimizer->learning_rate * batch_grad->data[k];
+                tensor_set_real(new_params, k, tensor_get_real(params, k) -
+                    optimizer->learning_rate * tensor_get_real(batch_grad, k));
             }
         }
 
@@ -13287,7 +13549,7 @@ static LanaError host_resume(LanaVM *vm, const Value *arguments, size_t argc,
         if (batch_end > dataset_size) batch_end = dataset_size;
         size_t batch_actual = batch_end - batch_start;
 
-        memset(batch_grad->data, 0, param_count * sizeof(double));
+        memset(batch_grad->data, 0, param_count * tensor_elem_bytes(batch_grad));
 
         for (size_t i = batch_start; i < batch_end; ++i) {
             Value pair;
@@ -13329,7 +13591,7 @@ static LanaError host_resume(LanaVM *vm, const Value *arguments, size_t argc,
 
             LanaTensor *seed = tensor_new(vm, 0, NULL, false);
             if (seed == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
-            seed->data[0] = 1.0 / (double)batch_actual;
+            tensor_set_real(seed, 0, 1.0 / (double)batch_actual);
             if (y.derivation != NULL) {
                 error = ad_backward(vm, y.derivation, seed);
                 if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
@@ -13341,8 +13603,8 @@ static LanaError host_resume(LanaVM *vm, const Value *arguments, size_t argc,
                 if (grad == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
             }
             for (size_t k = 0; k < param_count; ++k) {
-                if (!isfinite(grad->data[k])) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
-                batch_grad->data[k] += grad->data[k];
+                if (!isfinite(tensor_get_real(grad, k))) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
+                tensor_set_real(batch_grad, k, tensor_get_real(batch_grad, k) + tensor_get_real(grad, k));
             }
         }
 
@@ -13354,37 +13616,37 @@ static LanaError host_resume(LanaVM *vm, const Value *arguments, size_t argc,
             double bc1 = 1.0 - pow(optimizer->beta1, (double)adam_t);
             double bc2 = 1.0 - pow(optimizer->beta2, (double)adam_t);
             for (size_t k = 0; k < param_count; ++k) {
-                double g = batch_grad->data[k];
-                m->data[k] = optimizer->beta1 * m->data[k] + (1.0 - optimizer->beta1) * g;
-                v->data[k] = optimizer->beta2 * v->data[k] + (1.0 - optimizer->beta2) * g * g;
-                double m_hat = m->data[k] / bc1;
-                double v_hat = v->data[k] / bc2;
-                new_params->data[k] = params->data[k] -
-                    optimizer->learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon);
+                double g = tensor_get_real(batch_grad, k);
+                tensor_set_real(m, k, optimizer->beta1 * tensor_get_real(m, k) + (1.0 - optimizer->beta1) * g);
+                tensor_set_real(v, k, optimizer->beta2 * tensor_get_real(v, k) + (1.0 - optimizer->beta2) * g * g);
+                double m_hat = tensor_get_real(m, k) / bc1;
+                double v_hat = tensor_get_real(v, k) / bc2;
+                tensor_set_real(new_params, k, tensor_get_real(params, k) -
+                    optimizer->learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon));
             }
         } else if (velocity != NULL) {
             for (size_t k = 0; k < param_count; ++k) {
-                velocity->data[k] = optimizer->momentum * velocity->data[k] -
-                    optimizer->learning_rate * batch_grad->data[k];
-                new_params->data[k] = params->data[k] + velocity->data[k];
+                tensor_set_real(velocity, k, optimizer->momentum * tensor_get_real(velocity, k) -
+                    optimizer->learning_rate * tensor_get_real(batch_grad, k));
+                tensor_set_real(new_params, k, tensor_get_real(params, k) + tensor_get_real(velocity, k));
             }
         } else {
             for (size_t k = 0; k < param_count; ++k) {
-                new_params->data[k] = params->data[k] -
-                    optimizer->learning_rate * batch_grad->data[k];
+                tensor_set_real(new_params, k, tensor_get_real(params, k) -
+                    optimizer->learning_rate * tensor_get_real(batch_grad, k));
             }
         }
 
         /* Non-finite optimizer state after a step → INVALID_PARAMETERS. */
         if (is_adam) {
             for (size_t k = 0; k < param_count; ++k) {
-                if (!isfinite(m->data[k]) || !isfinite(v->data[k])) {
+                if (!isfinite(tensor_get_real(m, k)) || !isfinite(tensor_get_real(v, k))) {
                     lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS;
                 }
             }
         } else if (velocity != NULL) {
             for (size_t k = 0; k < param_count; ++k) {
-                if (!isfinite(velocity->data[k])) {
+                if (!isfinite(tensor_get_real(velocity, k))) {
                     lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS;
                 }
             }
@@ -13515,7 +13777,7 @@ static LanaError infer_log_likelihood(LanaVM *vm, uint32_t model_fn,
             id += (data->shape[d] == 0 ? 0 : rem % data->shape[d]) * data->strides[d];
             rem /= p->shape[d];
         }
-        double diff = p->data[ip] - data->data[id];
+        double diff = tensor_get_real(p, ip) - tensor_get_real(data, id);
         sse += diff * diff;
     }
     *out = -0.5 * sse;
@@ -13674,7 +13936,7 @@ static LanaError infer_mcmc(LanaVM *vm, uint32_t model_fn, const LanaTensor *pri
         LanaTensor *proposal = tensor_new(vm, prior->ndim, prior->shape, false);
         if (proposal == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
         for (size_t k = 0u; k < param_count; ++k)
-            proposal->data[k] = params->data[k] + 0.1 * gaussian_sample(vm);
+            tensor_set_real(proposal, k, tensor_get_real(params, k) + 0.1 * gaussian_sample(vm));
         double proposal_ll;
         error = infer_log_likelihood(vm, model_fn, proposal, data, scratch, &proposal_ll);
         if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
@@ -13687,7 +13949,7 @@ static LanaError infer_mcmc(LanaVM *vm, uint32_t model_fn, const LanaTensor *pri
         }
         if (i >= burn_in) {
             for (size_t k = 0u; k < param_count; ++k)
-                sample_matrix->data[kept_index * param_count + k] = params->data[k];
+                tensor_set_real(sample_matrix, kept_index * param_count + k, tensor_get_real(params, k));
             ++kept_index;
         }
         error = infer_record_step(vm, steps, i, params, current_ll, prior, data);
@@ -13700,15 +13962,15 @@ static LanaError infer_mcmc(LanaVM *vm, uint32_t model_fn, const LanaTensor *pri
     for (size_t k = 0u; k < param_count; ++k) {
         double sum = 0.0;
         for (size_t s = 0u; s < kept; ++s)
-            sum += sample_matrix->data[s * param_count + k];
+            sum += tensor_get_real(sample_matrix, s * param_count + k);
         double m = sum / (double)kept;
         double var = 0.0;
         for (size_t s = 0u; s < kept; ++s) {
-            double d = sample_matrix->data[s * param_count + k] - m;
+            double d = tensor_get_real(sample_matrix, s * param_count + k) - m;
             var += d * d;
         }
-        mean->data[k] = m;
-        variance->data[k] = var / (double)kept;
+        tensor_set_real(mean, k, m);
+        tensor_set_real(variance, k, var / (double)kept);
     }
 
     lana_vm_root_pop(vm, root_base);
@@ -13735,7 +13997,7 @@ static LanaError infer_vi(LanaVM *vm, uint32_t model_fn, const LanaTensor *prior
     LanaTensor *params = tensor_new(vm, prior->ndim, prior->shape, false);
     if (mu == NULL || log_sigma == NULL || eps == NULL || sigma == NULL || params == NULL)
         return LANA_ERR_OOM;
-    for (size_t k = 0u; k < param_count; ++k) log_sigma->data[k] = log(0.1);
+    for (size_t k = 0u; k < param_count; ++k) tensor_set_real(log_sigma, k, log(0.1));
     LanaArray *steps = lana_vm_alloc(vm, sizeof(*steps));
     if (steps == NULL) return LANA_ERR_OOM;
     steps->count = 0u;
@@ -13760,10 +14022,10 @@ static LanaError infer_vi(LanaVM *vm, uint32_t model_fn, const LanaTensor *prior
         LanaError error = consume_sampling_budget(vm);
         if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
         for (size_t k = 0u; k < param_count; ++k) {
-            eps->data[k] = gaussian_sample(vm);
-            double s = exp(log_sigma->data[k]);
-            sigma->data[k] = s;
-            params->data[k] = mu->data[k] + s * eps->data[k];
+            tensor_set_real(eps, k, gaussian_sample(vm));
+            double s = exp(tensor_get_real(log_sigma, k));
+            tensor_set_real(sigma, k, s);
+            tensor_set_real(params, k, tensor_get_real(mu, k) + s * tensor_get_real(eps, k));
         }
         Value params_value = lana_value_tensor(params);
         Value pred;
@@ -13786,12 +14048,12 @@ static LanaError infer_vi(LanaVM *vm, uint32_t model_fn, const LanaTensor *prior
         if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
         const LanaTensor *grad = grad_value.as.tensor;
         for (size_t k = 0u; k < param_count; ++k) {
-            double g = grad->data[grad->offset + k];
-            double d_mu = g + (mu->data[k] - prior->data[prior->offset + k]);
-            double d_log_sigma = g * sigma->data[k] * eps->data[k] +
-                                 (sigma->data[k] * sigma->data[k] - 1.0);
-            mu->data[k] -= lr * d_mu;
-            log_sigma->data[k] -= lr * d_log_sigma;
+            double g = tensor_get_real(grad, grad->offset + k);
+            double d_mu = g + (tensor_get_real(mu, k) - tensor_get_real(prior, prior->offset + k));
+            double d_log_sigma = g * tensor_get_real(sigma, k) * tensor_get_real(eps, k) +
+                                 (tensor_get_real(sigma, k) * tensor_get_real(sigma, k) - 1.0);
+            tensor_set_real(mu, k, tensor_get_real(mu, k) - lr * d_mu);
+            tensor_set_real(log_sigma, k, tensor_get_real(log_sigma, k) - lr * d_log_sigma);
         }
         double ll;
         error = infer_log_likelihood(vm, model_fn, mu, data, scratch, &ll);
@@ -13804,8 +14066,8 @@ static LanaError infer_vi(LanaVM *vm, uint32_t model_fn, const LanaTensor *prior
     LanaTensor *variance = tensor_new(vm, prior->ndim, prior->shape, false);
     if (mean == NULL || variance == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
     for (size_t k = 0u; k < param_count; ++k) {
-        mean->data[k] = mu->data[k];
-        variance->data[k] = exp(2.0 * log_sigma->data[k]);
+        tensor_set_real(mean, k, tensor_get_real(mu, k));
+        tensor_set_real(variance, k, exp(2.0 * tensor_get_real(log_sigma, k)));
     }
 
     lana_vm_root_pop(vm, root_base);
@@ -13829,7 +14091,7 @@ static LanaError infer_smc(LanaVM *vm, uint32_t model_fn, const LanaTensor *prio
     if (matrix == NULL) return LANA_ERR_OOM;
     for (size_t p = 0u; p < particles; ++p)
         for (size_t k = 0u; k < param_count; ++k)
-            matrix->data[p * param_count + k] = prior->data[prior->offset + k];
+            tensor_set_real(matrix, p * param_count + k, tensor_get_real(prior, prior->offset + k));
     double *weights = lana_vm_alloc(vm, particles * sizeof(*weights));
     if (weights == NULL) return LANA_ERR_OOM;
     LanaArray *steps = lana_vm_alloc(vm, sizeof(*steps));
@@ -13850,7 +14112,7 @@ static LanaError infer_smc(LanaVM *vm, uint32_t model_fn, const LanaTensor *prio
     /* Propagate each particle with Gaussian noise. */
     for (size_t p = 0u; p < particles; ++p)
         for (size_t k = 0u; k < param_count; ++k)
-            matrix->data[p * param_count + k] += 0.1 * gaussian_sample(vm);
+            tensor_set_real(matrix, p * param_count + k, tensor_get_real(matrix, p * param_count + k) + 0.1 * gaussian_sample(vm));
 
     /* Weight by likelihood. */
     double weight_sum = 0.0;
@@ -13858,7 +14120,7 @@ static LanaError infer_smc(LanaVM *vm, uint32_t model_fn, const LanaTensor *prio
         LanaTensor *particle = tensor_new(vm, prior->ndim, prior->shape, false);
         if (particle == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
         for (size_t k = 0u; k < param_count; ++k)
-            particle->data[k] = matrix->data[p * param_count + k];
+            tensor_set_real(particle, k, tensor_get_real(matrix, p * param_count + k));
         double ll;
         error = infer_log_likelihood(vm, model_fn, particle, data, scratch, &ll);
         if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
@@ -13884,7 +14146,7 @@ static LanaError infer_smc(LanaVM *vm, uint32_t model_fn, const LanaTensor *prio
         }
         size_t pick = source == 0u ? 0u : source - 1u;
         for (size_t k = 0u; k < param_count; ++k)
-            resampled->data[p * param_count + k] = matrix->data[pick * param_count + k];
+            tensor_set_real(resampled, p * param_count + k, tensor_get_real(matrix, pick * param_count + k));
     }
 
     /* Weighted mean and variance over the resampled particles. */
@@ -13894,15 +14156,15 @@ static LanaError infer_smc(LanaVM *vm, uint32_t model_fn, const LanaTensor *prio
     for (size_t k = 0u; k < param_count; ++k) {
         double sum = 0.0;
         for (size_t p = 0u; p < particles; ++p)
-            sum += resampled->data[p * param_count + k];
+            sum += tensor_get_real(resampled, p * param_count + k);
         double m = sum / (double)particles;
         double var = 0.0;
         for (size_t p = 0u; p < particles; ++p) {
-            double d = resampled->data[p * param_count + k] - m;
+            double d = tensor_get_real(resampled, p * param_count + k) - m;
             var += d * d;
         }
-        mean->data[k] = m;
-        variance->data[k] = var / (double)particles;
+        tensor_set_real(mean, k, m);
+        tensor_set_real(variance, k, var / (double)particles);
     }
 
     /* Record a single provenance step carrying the weighted mean. */

@@ -13,7 +13,7 @@
 /* A 2x2 complex tensor laid out as interleaved [re, im] row-major data. */
 static LanaTensor complex2(double *data) {
     static size_t shape[2] = {2, 2}, strides[2] = {2, 1};
-    LanaTensor t = {2, shape, strides, true, LANA_TENSOR_COMPLEX, data, 0, NULL, false};
+    LanaTensor t = {2, shape, strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)data, 0, NULL, false};
     return t;
 }
 
@@ -21,7 +21,7 @@ static LanaTensor complex2(double *data) {
  * data. */
 static LanaTensor state1(double *data) {
     static size_t shape[3] = {1, 2, 2}, strides[3] = {4, 2, 1};
-    LanaTensor t = {3, shape, strides, true, LANA_TENSOR_COMPLEX, data, 0, NULL, true};
+    LanaTensor t = {3, shape, strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)data, 0, NULL, true};
     return t;
 }
 
@@ -164,7 +164,7 @@ static void append_measure_transform(void) {
     /* Computational POVM {|0><0|, |1><1|}: stack shape [2, 2, 2]. */
     size_t p_shape[3] = {2, 2, 2}, p_strides[3] = {4, 2, 1};
     double p_stack[] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0};
-    LanaTensor povm = {3, p_shape, p_strides, true, LANA_TENSOR_COMPLEX, p_stack, 0, NULL, false};
+    LanaTensor povm = {3, p_shape, p_strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)p_stack, 0, NULL, false};
     Value povm_v = lana_value_povm(&povm);
 
     /* measure(s0, povm) = [0.5, 0.5]. */
@@ -172,13 +172,13 @@ static void append_measure_transform(void) {
     args[1] = povm_v;
     size_t q_shape[2] = {1, 2}, q_strides[2] = {2, 1};
     double q_data[] = {0.5, 0.5};
-    LanaTensor q_expected = {2, q_shape, q_strides, false, LANA_TENSOR_F64, q_data, 0, NULL, false};
+    LanaTensor q_expected = {2, q_shape, q_strides, false, LANA_TENSOR_F64, (uint8_t *)q_data, 0, NULL, false};
     call_tensor(LANA_HOST_MEASURE, args, 2, &q_expected);
 
     /* measure(s1, povm) = [1.0, 0.0]. */
     args[0] = s1_v;
     double q1_data[] = {1.0, 0.0};
-    LanaTensor q1_expected = {2, q_shape, q_strides, false, LANA_TENSOR_F64, q1_data, 0, NULL, false};
+    LanaTensor q1_expected = {2, q_shape, q_strides, false, LANA_TENSOR_F64, (uint8_t *)q1_data, 0, NULL, false};
     call_tensor(LANA_HOST_MEASURE, args, 2, &q1_expected);
 
     /* measure on a non-state tensor is a type error. */
@@ -188,7 +188,7 @@ static void append_measure_transform(void) {
     /* Identity channel (single Kraus operator I): stack shape [1, 2, 2]. */
     size_t k_shape[3] = {1, 2, 2}, k_strides[3] = {4, 2, 1};
     double k_stack[] = {1, 0, 0, 0, 0, 0, 1, 0};
-    LanaTensor chan = {3, k_shape, k_strides, true, LANA_TENSOR_COMPLEX, k_stack, 0, NULL, false};
+    LanaTensor chan = {3, k_shape, k_strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)k_stack, 0, NULL, false};
     Value chan_v = lana_value_channel(&chan);
 
     /* transform(s0, identity) = s0. */
