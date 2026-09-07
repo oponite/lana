@@ -1,0 +1,22 @@
+import "std/http" as http;
+
+let admin = capability("net");
+let use = grant(admin, "use");
+
+// LIP-019: an http_get returns Result<Information<HttpResponse>, E> as a
+// tagged pair `[true, response]`. The response is rooted as Information whose
+// derivation records the operation and the request URL.
+let r = http.get("http://127.0.0.1:18100/", {}, 5000);
+assert(r[0] == true, "http get should succeed");
+let resp = r[1];
+assert(map_get(resp, "status") == 200, "http status");
+assert(map_get(resp, "body") == "hello from lana", "http body");
+
+let prov = inspect_information(resp);
+assert(prov.reactive, "http response is Information");
+let derivation = map_get(prov, "derivation");
+assert(map_get(derivation, "operation") == "http_get", "http provenance operation");
+let src = map_get(derivation, "source");
+assert(map_get(src, "label") == "http://127.0.0.1:18100/", "http provenance label is the URL");
+
+print("NET_HTTP_OK");

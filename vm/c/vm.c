@@ -6842,20 +6842,23 @@ static void net_socket_close(LanaSocket *sock) {
 }
 
 /* Result map: {"ok": value} or {"error": reason}. */
-static LanaError net_result_map(LanaVM *vm, const char *key, const Value *value,
-                                Value *out) {
-    LanaMap *map;
-    LanaError error = lana_map_new(vm, 1u, &map);
-    if (error != LANA_OK) return error;
-    error = lana_map_set(vm, map, key, value, true);
-    if (error != LANA_OK) return error;
-    *out = lana_value_map(map);
-    return LANA_OK;
-}
-
+/* LIP-019 Results use the language's canonical tagged-pair encoding
+ * ([ok:bool, value]) — the same shape the compiler emits for `result_ok` /
+ * `result_error` and json_parse produces via make_result. A network call
+ * returns [true, HttpResponse] on success or [false, reason] on failure, so a
+ * program can consume it with result_is_ok / result_value. */
 static LanaError net_error_result(LanaVM *vm, const char *reason, Value *out) {
     Value e = lana_value_string(reason);
-    return net_result_map(vm, "error", &e, out);
+    return make_result(vm, false, e, out);
+}
+
+/* Read an optional bool option (e.g. "verify") from a request headers map,
+ * leaving *out unchanged when the key is absent or not a bool (defaults are
+ * applied by the caller). */
+static void net_option_bool(const LanaMap *map, const char *key, bool *out) {
+    Value value;
+    if (lana_map_get(map, key, &value) == LANA_OK && value.type == VAL_BOOL)
+        *out = value.as.boolean;
 }
 
 /* Parse a URL into scheme, host, port, path. Returns false on malformed. */
@@ -6989,7 +6992,7 @@ static ssize_t net_write_all(LanaSocket *sock, const char *buf, size_t len) {
 
 /* Perform an HTTP request and build the Result map. */
 static LanaError net_http_request(LanaVM *vm, const char *method, const char *url,
-                                  const char *body, double timeout_ms, Value *out) {
+                                  const char *body, double timeout_ms, bool verify, Value *out) {
     char scheme[16], host[256], path[1024];
     char request[16384];
     char response[65536];
@@ -7017,7 +7020,7 @@ static LanaError net_http_request(LanaVM *vm, const char *method, const char *ur
         return net_error_result(vm, "connect", out);
     }
     if (is_tls) {
-        ssl = net_tls_wrap(fd, host, true);
+        ssl = net_tls_wrap(fd, host, verify);
         if (ssl == NULL) { close(fd); return net_error_result(vm, "tls", out); }
     }
     sock.fd = fd; sock.ssl = ssl; sock.is_tls = is_tls;
@@ -7063,7 +7066,20 @@ static LanaError net_http_request(LanaVM *vm, const char *method, const char *ur
     error = lana_map_set(vm, header_map, "body", &body_value, true);
     if (error != LANA_OK) return error;
     resp_map = lana_value_map(header_map);
-    return net_result_map(vm, "ok", &resp_map, out);
+    /* LIP-019 §4: root the response as Information with a derivation recording
+     * the URL and operation, so a decision that consumed a network reading can
+     * be audited and replayed against the response. */
+    {
+        const char *op = strcmp(method, "POST") == 0 ? "http_post" : "http_get";
+        Value rooted;
+        error = lana_vm_reactive_root(vm, &resp_map, LANA_EXACTNESS_EXACT, &rooted);
+        if (error != LANA_OK) return error;
+        error = attach_derivation(vm, &rooted, LANA_DERIVATION_EVIDENCE,
+                                  op, NULL, 0u, url, 0u,
+                                  LANA_EXACTNESS_EXACT, "root");
+        if (error != LANA_OK) return error;
+        return make_result(vm, true, rooted, out);
+    }
 }
 
 /* Store a socket in the VM table, returning its handle. */
@@ -8921,17 +8937,20 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
         case LANA_HOST_HTTP_GET: {
             const char *url;
             double timeout_ms;
+            bool verify = true;
             if (argc != 3u || arguments[0].type != VAL_STRING ||
                 arguments[1].type != VAL_MAP || arguments[2].type != VAL_NUMBER)
                 return LANA_ERR_TYPE;
             if (!vm_has_named_capability(vm, "net")) return LANA_ERR_CAPABILITY;
             url = arguments[0].as.string;
             timeout_ms = arguments[2].as.number;
-            return net_http_request(vm, "GET", url, NULL, timeout_ms, out);
+            net_option_bool(arguments[1].as.map, "verify", &verify);
+            return net_http_request(vm, "GET", url, NULL, timeout_ms, verify, out);
         }
         case LANA_HOST_HTTP_POST: {
             const char *url, *body;
             double timeout_ms;
+            bool verify = true;
             if (argc != 4u || arguments[0].type != VAL_STRING ||
                 arguments[1].type != VAL_STRING || arguments[2].type != VAL_MAP ||
                 arguments[3].type != VAL_NUMBER)
@@ -8940,7 +8959,8 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             url = arguments[0].as.string;
             body = arguments[1].as.string;
             timeout_ms = arguments[3].as.number;
-            return net_http_request(vm, "POST", url, body, timeout_ms, out);
+            net_option_bool(arguments[2].as.map, "verify", &verify);
+            return net_http_request(vm, "POST", url, body, timeout_ms, verify, out);
         }
         case LANA_HOST_SOCKET_CONNECT: {
             const char *host;
@@ -8960,7 +8980,12 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
                 return net_error_result(vm, "connect", out);
             }
             sock.fd = fd; sock.ssl = NULL; sock.is_tls = false;
-            return net_socket_store(vm, &sock, out);
+            {
+                LanaError error = net_socket_store(vm, &sock, out);
+                /* Result<Socket, E>: success is `[true, handle]`. */
+                if (error != LANA_OK) return error;
+                return make_result(vm, true, *out, out);
+            }
         }
         case LANA_HOST_SOCKET_SEND: {
             LanaSocket *sock;
@@ -8973,8 +8998,7 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             if (sock == NULL) return LANA_ERR_INVALID_STATE;
             n = net_write_all(sock, arguments[1].as.string, strlen(arguments[1].as.string));
             if (n < 0) return net_error_result(vm, "send", out);
-            *out = lana_value_number((double)n);
-            return LANA_OK;
+            return make_result(vm, true, lana_value_number((double)n), out);
         }
         case LANA_HOST_SOCKET_RECV: {
             LanaSocket *sock;
@@ -8989,15 +9013,15 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             sock = net_socket_get(vm, arguments[0].as.number);
             if (sock == NULL) return LANA_ERR_INVALID_STATE;
             max_bytes = (size_t)arguments[1].as.number;
-            if (max_bytes > sizeof(buf)) max_bytes = sizeof(buf);
+            /* Reserve one byte for the NUL terminator (Result<string, E>). */
+            if (max_bytes >= sizeof(buf)) max_bytes = sizeof(buf) - 1u;
             n = net_read(sock, buf, max_bytes, 5000, &timed_out);
             if (n < 0) {
                 if (timed_out) return net_error_result(vm, "timeout", out);
                 return net_error_result(vm, "recv", out);
             }
             buf[n] = '\0';
-            *out = lana_value_string(buf);
-            return LANA_OK;
+            return make_result(vm, true, lana_value_string(buf), out);
         }
         case LANA_HOST_SOCKET_CLOSE: {
             LanaSocket *sock;
