@@ -8,7 +8,7 @@ import "../../integrations/lana/bridge.lana" as bridge;
 
 let request = bridge.read_request();
 let fixture_path = request["fixture"];
-let evidence = json_parse(read_text(fixture_path));
+let evidence = result_value(json_parse(read_text(fixture_path)));
 
 let baseline = evidence["baseline"];
 let current = evidence["current"];
