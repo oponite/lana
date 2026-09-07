@@ -34,11 +34,12 @@ target_compile_options(lana_http_service PRIVATE -Wall -Wextra -Wpedantic -Werro
 # Shared runtime for the ctypes Python bindings.
 add_library(lanaruntime_shared SHARED ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime_shared PUBLIC ${LANA_INCLUDE_DIRS})
-target_link_libraries(lanaruntime_shared PUBLIC Threads::Threads m)
+target_link_libraries(lanaruntime_shared PUBLIC Threads::Threads PkgConfig::FFI OpenSSL::SSL ${LANA_BLAS_LIBS} ${LANA_METAL_LIBS} m)
 target_compile_options(lanaruntime_shared PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_compile_definitions(lanaruntime_shared PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
-    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    ${LANA_BLAS_DEFINES})
 
 add_executable(lana_adapter_tests tests/unit/test_adapters.c)
 target_link_libraries(lana_adapter_tests PRIVATE lanaruntime m)

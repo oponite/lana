@@ -11,8 +11,8 @@ let fixture_path = request["fixture"];
 let trends = csv_read(fixture_path);
 
 let latest = trends[array_length(trends) - 1];
-let prob_value = json_parse(latest["probability"]);
-let conf_value = json_parse(latest["confidence"]);
+let prob_value = result_value(json_parse(latest["probability"]));
+let conf_value = result_value(json_parse(latest["confidence"]));
 
 state forecast_state = state(p: prob_value, d_re: conf_value, d_im: 0.0);
 

@@ -29,5 +29,5 @@ fn decide(features) {
 
 let argv = args();
 assert(array_length(argv) == 1, "usage: decision.lana JSON_PATH");
-let result = decide(json_parse(read_text(argv[0])));
+let result = decide(result_value(json_parse(read_text(argv[0]))));
 print(json_stringify(result));
