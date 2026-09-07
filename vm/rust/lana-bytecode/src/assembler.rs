@@ -77,6 +77,8 @@ const HOST_CALL_NAMES: &[&str] = &[
     "store_get_at", "store_snapshot", "store_commit_if",
     "adapter_load", "adapter_fetch",
     "ffi_declare", "ffi_load", "ffi_call",
+    "http_get", "http_post", "socket_connect", "socket_send",
+    "socket_recv", "socket_close",
 ];
 
 struct Label {

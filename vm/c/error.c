@@ -38,7 +38,7 @@ const char *lana_error_name(LanaError error) {
         "LANA_ERR_INVALID_PARAMETERS", "LANA_ERR_CLAIM_MISMATCH",
         "LANA_ERR_CLAIM_REVOKED", "LANA_ERR_CLAIM_EXPIRED",
         "LANA_ERR_UNAUTHORIZED_ISSUER", "LANA_ERR_INTEGRITY",
-        "LANA_ERR_NO_MATCHING_EVENT", "LANA_ERR_EXTERNAL"
+        "LANA_ERR_NO_MATCHING_EVENT", "LANA_ERR_EXTERNAL", "LANA_ERR_NETWORK"
     };
     if ((size_t)error >= sizeof(names) / sizeof(names[0])) return "LANA_ERR_UNKNOWN";
     return names[error];
@@ -98,6 +98,7 @@ LanaErrorKind lana_error_kind_from_code(LanaError error) {
         case LANA_ERR_INTEGRITY:
         case LANA_ERR_NO_MATCHING_EVENT:
         case LANA_ERR_EXTERNAL:
+        case LANA_ERR_NETWORK:
             return LANA_ERROR_KIND_VALIDATION;
     }
     return LANA_ERROR_KIND_ASSERTION;

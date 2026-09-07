@@ -279,7 +279,9 @@ static int host_call_id(const char *name) {
         "policy_store_decision", "ledger_append", "ledger_query",
         "store_get_at", "store_snapshot", "store_commit_if",
         "adapter_load", "adapter_fetch",
-        "ffi_declare", "ffi_load", "ffi_call"
+        "ffi_declare", "ffi_load", "ffi_call",
+        "http_get", "http_post", "socket_connect", "socket_send",
+        "socket_recv", "socket_close"
     };
     size_t index;
     for (index = 0; index < sizeof(names) / sizeof(names[0]); ++index)

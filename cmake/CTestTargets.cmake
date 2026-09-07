@@ -43,6 +43,8 @@ set_target_properties(lana_ffi_test_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_lana_c_test(lana_ffi_tests tests/unit/test_ffi.c)
 target_compile_definitions(lana_ffi_tests PRIVATE
     LANA_FFI_TEST_LIB="$<TARGET_FILE:lana_ffi_test_lib>")
+# LIP-019 networking: real-network paths (C-only, non-deterministic).
+add_lana_c_test(lana_net_tests tests/unit/test_net.c)
 
 function(add_native_compile_failure name source expected)
     add_test(
