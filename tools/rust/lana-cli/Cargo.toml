@@ -7,5 +7,5 @@ description = "Command-line driver for the Rust Lana runtime (phase 2 of the Rus
 
 [dependencies]
 lana-bytecode = { workspace = true }
-lana-vm = { workspace = true }
+lana-vm = { workspace = true, features = ["net-tls"] }
 lana-runtime = { workspace = true }

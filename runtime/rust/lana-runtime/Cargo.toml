@@ -7,5 +7,5 @@ description = "Lana host calls, adapters, and durable pipeline (phase 2 of the R
 
 [dependencies]
 lana-bytecode = { workspace = true }
-lana-vm = { workspace = true }
+lana-vm = { workspace = true, features = ["net-tls"] }
 ed25519-compact = { version = "2.4.2", default-features = false, features = ["std"] }

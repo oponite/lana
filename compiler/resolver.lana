@@ -381,6 +381,12 @@ fn host_effect(name) {
     if (name == "future_all") { return effects("io"); }
     if (name == "future_race") { return effects("io"); }
     if (name == "sleep") { return effects("io"); }
+    if (name == "http_get") { return effects("io"); }
+    if (name == "http_post") { return effects("io"); }
+    if (name == "socket_connect") { return effects("io"); }
+    if (name == "socket_send") { return effects("io"); }
+    if (name == "socket_recv") { return effects("io"); }
+    if (name == "socket_close") { return effects("io"); }
     if (host_is_pure(name)) { return effects("pure"); }
     return effects("external_call");
 }
@@ -417,6 +423,12 @@ fn host_type(name) {
     if (name == "assert") { return type_ordinary("null"); }
     if (name == "json_parse") { return type_result(type_information(type_unknown()), type_ordinary("string")); }
     if (name == "json_stringify") { return type_ordinary("string"); }
+    if (name == "http_get") { return type_result(type_information(type_unknown()), type_ordinary("string")); }
+    if (name == "http_post") { return type_result(type_information(type_unknown()), type_ordinary("string")); }
+    if (name == "socket_connect") { return type_result(type_ordinary("number"), type_ordinary("string")); }
+    if (name == "socket_send") { return type_result(type_ordinary("number"), type_ordinary("string")); }
+    if (name == "socket_recv") { return type_result(type_ordinary("string"), type_ordinary("string")); }
+    if (name == "socket_close") { return type_ordinary("null"); }
     if (name == "csv_read") { return type_ordinary("array"); }
     if (name == "csv_write") { return type_ordinary("null"); }
     if (name == "array_length") { return type_ordinary("number"); }

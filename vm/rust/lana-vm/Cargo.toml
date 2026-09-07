@@ -5,10 +5,21 @@ edition.workspace = true
 license.workspace = true
 description = "Canonical Rust register VM for Lana (phase 2 of the Rust runtime boundary)"
 
+[features]
+# LIP-019 TLS client verification (verify:false opt-out). Disable at build
+# time (e.g. the wasm target, which cannot do host TLS) with
+# `--no-default-features`. rustls provides the client; webpki-roots supplies
+# the default Mozilla trust store used when `verify` is on.
+default = ["net-tls"]
+net-tls = ["dep:rustls", "dep:webpki-roots"]
+
 [dependencies]
 lana-bytecode = { workspace = true }
 # LIP-018 two-way FFI: dlopen a shared library and resolve typed symbols.
 libloading = "0.8"
+# LIP-019 TLS client for https hosts. Optional (see the `net-tls` feature).
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
 
 # Explicit GPU matmul (LIP-004 section 5). macOS-only: the Metal framework is
 # the GPU backend; every other platform returns "unsupported" from gpu_matmul.

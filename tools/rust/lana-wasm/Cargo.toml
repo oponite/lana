@@ -10,6 +10,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 lana-bytecode = { workspace = true }
-lana-vm = { workspace = true }
+# The wasm target has no host TLS stack; disable the `net-tls` default feature
+# so rustls does not enter the wasm32-unknown-unknown build.
+lana-vm = { workspace = true, default-features = false }
 lana-runtime = { workspace = true }
 wasm-bindgen = "=0.2.100"

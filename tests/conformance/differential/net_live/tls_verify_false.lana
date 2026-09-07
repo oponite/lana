@@ -1,0 +1,12 @@
+import "std/http" as http;
+
+let admin = capability("net");
+let use = grant(admin, "use");
+
+// `verify:false` in the headers map is an explicit per-call opt-out of TLS
+// certificate validation (LIP-019 §4). The request still goes over real TLS.
+let r = http.get("https://127.0.0.1:18101/", { "verify": false }, 5000);
+assert(r[0] == true, "verify:false should accept self-signed cert");
+let resp = r[1];
+assert(map_get(resp, "status") == 200, "https status 200 with verify:false");
+print("NET_TLS_VERIFY_FALSE_OK");
