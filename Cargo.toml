@@ -8,6 +8,7 @@ members = [
     "tools/rust/lana-cli",
     "tools/rust/lana-fuzz",
     "tools/rust/lana-wasm",
+    "tools/rust/lana-wasm-wasi",
 ]
 
 [workspace.package]
