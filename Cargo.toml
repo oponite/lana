@@ -18,8 +18,14 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 lana-bytecode = { path = "vm/rust/lana-bytecode" }
-lana-vm = { path = "vm/rust/lana-vm" }
-lana-runtime = { path = "runtime/rust/lana-runtime" }
+# The `net-tls` feature is opt-in at the workspace level so the wasm target can
+# stay TLS-free; native consumers below re-enable it explicitly.
+lana-vm = { path = "vm/rust/lana-vm", default-features = false }
+# lana-runtime forwards net-tls to lana-vm; keep it opt-in so lana-wasm (a
+# consumer of lana-runtime) does not pull rustls/ring/getrandom into the wasm
+# build via feature unification. Native crates enable net-tls on lana-vm
+# directly.
+lana-runtime = { path = "runtime/rust/lana-runtime", default-features = false }
 lana-ffi = { path = "runtime/rust/lana-ffi" }
 
 # The parity gate (Section 4.5.4) measures the Rust VM against the C11

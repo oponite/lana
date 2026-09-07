@@ -799,9 +799,13 @@ enum FfiType {
     Array,
 }
 
-/// LIP-019 networking: an open socket. Plain TCP, or TLS-wrapped.
+/// LIP-019 networking: an open socket. Plain TCP, or TLS-wrapped when the
+/// `net-tls` feature is enabled (https). The wasm target disables `net-tls`
+/// and only ever holds plain sockets.
 enum NetSocket {
     Plain(std::net::TcpStream),
+    #[cfg(feature = "net-tls")]
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>>),
 }
 
 /// LIP-019 networking: a network failure, mapped to a `Result` error reason.
@@ -869,6 +873,12 @@ impl NetSocket {
                     Err(_) => Err(NetError::Io),
                 }
             }
+            #[cfg(feature = "net-tls")]
+            NetSocket::Tls(s) => match s.read(buf) {
+                Ok(n) => Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(NetError::Timeout),
+                Err(_) => Err(NetError::Io),
+            },
         }
     }
 
@@ -876,8 +886,103 @@ impl NetSocket {
         use std::io::Write;
         match self {
             NetSocket::Plain(s) => s.write_all(data).map_err(|_| NetError::Io),
+            #[cfg(feature = "net-tls")]
+            NetSocket::Tls(s) => s.write_all(data).map_err(|_| NetError::Io),
         }
     }
+
+}
+
+/// Build a rustls client config: verify against the Mozilla roots when
+/// `verify` is on, or accept any certificate when it is off (`verify:false`).
+#[cfg(feature = "net-tls")]
+fn net_tls_config(verify: bool) -> std::result::Result<rustls::ClientConfig, NetError> {
+    use rustls::client::danger::{
+        HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+    };
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::SignatureScheme;
+    use std::sync::Arc;
+
+    if verify {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        return Ok(rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth());
+    }
+
+    // LIP-019 `verify:false` explicit opt-out: accept any server certificate.
+    #[derive(Debug)]
+    struct AcceptAny;
+    impl ServerCertVerifier for AcceptAny {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            use SignatureScheme::*;
+            vec![
+                RSA_PKCS1_SHA256,
+                RSA_PKCS1_SHA384,
+                RSA_PKCS1_SHA512,
+                ECDSA_NISTP256_SHA256,
+                ECDSA_NISTP384_SHA384,
+                ECDSA_NISTP521_SHA512,
+                RSA_PSS_SHA256,
+                RSA_PSS_SHA384,
+                RSA_PSS_SHA512,
+                ED25519,
+            ]
+        }
+    }
+    Ok(rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAny))
+        .with_no_client_auth())
+}
+
+/// Wrap a connected TCP stream in TLS for an https host, driving the
+/// handshake to completion so certificate verification fails loudly.
+#[cfg(feature = "net-tls")]
+fn net_tls_connect(
+    stream: std::net::TcpStream,
+    host: &str,
+    verify: bool,
+) -> Result<NetSocket, NetError> {
+    use std::sync::Arc;
+    let config = Arc::new(net_tls_config(verify)?);
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|_| NetError::Io)?;
+    let mut conn =
+        rustls::ClientConnection::new(config, server_name).map_err(|_| NetError::Io)?;
+    let mut tcp = stream;
+    while conn.is_handshaking() {
+        conn.complete_io(&mut tcp).map_err(|_| NetError::Io)?;
+    }
+    Ok(NetSocket::Tls(Box::new(rustls::StreamOwned::new(conn, tcp))))
 }
 
 struct FfiSignature {
@@ -11096,27 +11201,27 @@ impl<'a> Vm<'a> {
         LanaError::Ok
     }
 
-    /// LIP-019 networking: build a `{"ok": value}` / `{"error": reason}` map.
-    fn net_result_map(&self, key: &str, value: &Value, out: &mut Value) -> LanaError {
-        self.ffi_result_map(key, value, out)
-    }
-
+    /// LIP-019 networking: error result `[false, reason]`, mirroring the
+    /// language `Result` tagged-pair that `result_error` and json_parse emit.
     fn net_error_result(&self, reason: &str, out: &mut Value) -> LanaError {
-        let e = Value::string(Arc::from(reason));
-        self.net_result_map("error", &e, out)
+        *out = self.make_result(false, Value::string(Arc::from(reason)));
+        LanaError::Ok
     }
 
-    /// Perform an HTTP request and build the `Result<HttpResponse, E>` map.
+    /// Perform an HTTP request and build the `Result<HttpResponse, E>` tagged
+    /// pair. On success the response map is rooted as Information with a
+    /// derivation recording the operation and URL (LIP-019 §4).
     fn net_http_request(
         &mut self,
         method: &str,
         url: &str,
         body: Option<&str>,
         timeout_ms: f64,
+        verify: bool,
         out: &mut Value,
     ) -> LanaError {
         let timeout = if timeout_ms > 0.0 { timeout_ms as u64 } else { 5000 };
-        let (_scheme, host, port, path) = match net_parse_url(url) {
+        let (scheme, host, port, path) = match net_parse_url(url) {
             Some(x) => x,
             None => return self.net_error_result("url", out),
         };
@@ -11124,6 +11229,22 @@ impl<'a> Vm<'a> {
             Ok(s) => s,
             Err(NetError::Timeout) => return self.net_error_result("timeout", out),
             Err(_) => return self.net_error_result("connect", out),
+        };
+        let mut sock = if scheme == "https" {
+            #[cfg(feature = "net-tls")]
+            {
+                match net_tls_connect(stream, &host, verify) {
+                    Ok(s) => s,
+                    Err(NetError::Timeout) => return self.net_error_result("timeout", out),
+                    Err(_) => return self.net_error_result("tls", out),
+                }
+            }
+            #[cfg(not(feature = "net-tls"))]
+            {
+                NetSocket::Plain(stream)
+            }
+        } else {
+            NetSocket::Plain(stream)
         };
         let mut request = format!(
             "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
@@ -11133,7 +11254,6 @@ impl<'a> Vm<'a> {
             Some(b) => request.push_str(&format!("Content-Length: {}\r\n\r\n{}", b.len(), b)),
             None => request.push_str("Content-Length: 0\r\n\r\n"),
         }
-        let mut sock = NetSocket::Plain(stream);
         if sock.write_all(request.as_bytes()).is_err() {
             return self.net_error_result("send", out);
         }
@@ -11168,8 +11288,27 @@ impl<'a> Vm<'a> {
         {
             return LanaError::Oom;
         }
+        // LIP-019 §4: root the response as Information with an evidence
+        // derivation recording the operation and URL, then wrap `[true, val]`.
         let resp_value = Value::map(Arc::new(Mutex::new(resp)));
-        self.net_result_map("ok", &resp_value, out)
+        let mut rooted = match self.reactive_root(&resp_value, DerivationExactness::Exact) {
+            Ok(rooted) => rooted,
+            Err(error) => return error,
+        };
+        let op = if method == "POST" { "http_post" } else { "http_get" };
+        rooted.derivation = self.record_derivation(
+            DerivationKind::Evidence,
+            op,
+            &[],
+            url,
+            0,
+            DerivationExactness::Exact,
+            "root",
+            DerivationOutcome::Success,
+            "none",
+        );
+        *out = self.make_result(true, rooted);
+        LanaError::Ok
     }
 
     /// `http_get(url, headers, timeout_ms) -> Result<HttpResponse, E>` (LIP-019).
@@ -11180,7 +11319,7 @@ impl<'a> Vm<'a> {
         let ValueKind::String(url) = &arguments[0].kind else {
             return LanaError::Type;
         };
-        let ValueKind::Map(_headers) = &arguments[1].kind else {
+        let ValueKind::Map(headers) = &arguments[1].kind else {
             return LanaError::Type;
         };
         let ValueKind::Number(timeout_ms) = &arguments[2].kind else {
@@ -11189,7 +11328,15 @@ impl<'a> Vm<'a> {
         if !self.has_named_capability("net") {
             return LanaError::Capability;
         }
-        self.net_http_request("GET", url, None, *timeout_ms, out)
+        // LIP-019 `verify:false` is an explicit per-call opt-out read from the
+        // headers map; TLS validation is otherwise ON by default.
+        let mut verify = true;
+        if let Some(v) = headers.lock().unwrap().get("verify") {
+            if let ValueKind::Bool(b) = &v.kind {
+                verify = *b;
+            }
+        }
+        self.net_http_request("GET", url, None, *timeout_ms, verify, out)
     }
 
     /// `http_post(url, body, headers, timeout_ms) -> Result<HttpResponse, E>`.
@@ -11203,7 +11350,7 @@ impl<'a> Vm<'a> {
         let ValueKind::String(body) = &arguments[1].kind else {
             return LanaError::Type;
         };
-        let ValueKind::Map(_headers) = &arguments[2].kind else {
+        let ValueKind::Map(headers) = &arguments[2].kind else {
             return LanaError::Type;
         };
         let ValueKind::Number(timeout_ms) = &arguments[3].kind else {
@@ -11212,7 +11359,13 @@ impl<'a> Vm<'a> {
         if !self.has_named_capability("net") {
             return LanaError::Capability;
         }
-        self.net_http_request("POST", url, Some(body), *timeout_ms, out)
+        let mut verify = true;
+        if let Some(v) = headers.lock().unwrap().get("verify") {
+            if let ValueKind::Bool(b) = &v.kind {
+                verify = *b;
+            }
+        }
+        self.net_http_request("POST", url, Some(body), *timeout_ms, verify, out)
     }
 
     /// `socket_connect(host, port) -> Result<Socket, E>` (LIP-019).
@@ -11236,7 +11389,7 @@ impl<'a> Vm<'a> {
         };
         let handle = self.sockets.len();
         self.sockets.push(NetSocket::Plain(stream));
-        *out = Value::number(handle as f64);
+        *out = self.make_result(true, Value::number(handle as f64));
         LanaError::Ok
     }
 
@@ -11260,7 +11413,7 @@ impl<'a> Vm<'a> {
         };
         match sock.write_all(bytes.as_bytes()) {
             Ok(()) => {
-                *out = Value::number(bytes.len() as f64);
+                *out = self.make_result(true, Value::number(bytes.len() as f64));
                 LanaError::Ok
             }
             Err(_) => self.net_error_result("send", out),
@@ -11285,14 +11438,17 @@ impl<'a> Vm<'a> {
         let Some(sock) = self.sockets.get_mut(index) else {
             return LanaError::InvalidState;
         };
-        let mut buf = vec![0u8; (*max_bytes as usize).min(65536)];
+        let mut buf = vec![0u8; (*max_bytes as usize).min(65535)];
         match sock.read(&mut buf, 5000) {
             Ok(0) => {
-                *out = Value::string(Arc::from(""));
+                *out = self.make_result(true, Value::string(Arc::from("")));
                 LanaError::Ok
             }
             Ok(n) => {
-                *out = Value::string(Arc::from(String::from_utf8_lossy(&buf[..n]).to_string()));
+                *out = self.make_result(
+                    true,
+                    Value::string(Arc::from(String::from_utf8_lossy(&buf[..n]).to_string())),
+                );
                 LanaError::Ok
             }
             Err(NetError::Timeout) => self.net_error_result("timeout", out),

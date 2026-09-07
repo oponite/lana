@@ -5,7 +5,16 @@ edition.workspace = true
 license.workspace = true
 description = "Lana host calls, adapters, and durable pipeline (phase 2 of the Rust runtime boundary)"
 
+[features]
+# LIP-019 TLS client verification. On by default for native; the wasm
+# targets (lana-wasm / lana-wasm-wasi) build this crate with
+# default-features = false so rustls/ring never enter the wasm graph
+# (https fails cleanly with an unsupported/verify error at the LIP-025
+# boundary rather than failing to compile).
+default = ["net-tls"]
+net-tls = ["lana-vm/net-tls"]
+
 [dependencies]
 lana-bytecode = { workspace = true }
-lana-vm = { workspace = true }
+lana-vm = { workspace = true, default-features = false }
 ed25519-compact = { version = "2.4.2", default-features = false, features = ["std"] }

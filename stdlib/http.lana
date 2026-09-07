@@ -1,0 +1,27 @@
+// std/http — HTTP client (LIP-019 §1–3) over the `net` host calls.
+//
+// `get`/`post` return `Result<Information<HttpResponse>, E>`: a tagged pair
+// `[true, response]` / `[false, reason]`. On success the response is an
+// Information value rooted at the request whose derivation records the
+// operation (`http_get`/`http_post`) and the URL, so a decision that consumed
+// a network reading can be audited and replayed (LIP-019 §4).
+//
+// TLS certificate verification is ON by default for https and can only be
+// turned off per-call by passing a headers map containing `"verify": false`.
+//
+// Both functions carry the `io` effect (via the underlying host calls), so a
+// function calling them must be annotated `io` and the caller must hold the
+// `net` capability.
+
+/// Send an HTTP GET. `headers` is a map (may be empty); a `Verify` key of
+/// false disables TLS certificate validation for this call. `timeout_ms` is
+/// the read deadline in milliseconds.
+fn get(url, headers, timeout_ms) {
+    return http_get(url, headers, timeout_ms);
+}
+
+/// Send an HTTP POST carrying `body`, with `headers` and `timeout_ms` as in
+/// `get`. The response carries a `Content-Length` computed from `body`.
+fn post(url, body, headers, timeout_ms) {
+    return http_post(url, body, headers, timeout_ms);
+}
