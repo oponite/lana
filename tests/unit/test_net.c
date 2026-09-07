@@ -213,6 +213,9 @@ static int test_socket_echo(void) {
     char *out = NULL;
     LanaError result;
     printf("Testing socket_connect/send/recv/close...\n");
+    /* socket_connect/send/recv return Result<T,E> tagged pairs (LIP-019 §1),
+     * so the handle is unwrapped with index_get R6,1 before each use and the
+     * wrapped results are printed as-is. */
     CHECK(assemble(
         ".function main 0 16\n"
         "LOAD_CONST R0 net\n"
@@ -223,19 +226,21 @@ static int test_socket_echo(void) {
         "LOAD_CONST R5 18091\n"
         "HOST_CALL socket_connect R4 2 R6\n"
         "PRINT R6\n"
-        "LOAD_STRING R7 68656c6c6f\n"
-        "HOST_CALL socket_send R6 2 R8\n"
-        "PRINT R8\n"
-        "LOAD_CONST R7 100\n"
-        "HOST_CALL socket_recv R6 2 R10\n"
+        "LOAD_CONST R7 1\n"
+        "HOST_CALL index_get R6 2 R8\n"
+        "LOAD_STRING R9 68656c6c6f\n"
+        "HOST_CALL socket_send R8 2 R10\n"
         "PRINT R10\n"
-        "HOST_CALL socket_close R6 1 R11\n"
+        "LOAD_CONST R9 100\n"
+        "HOST_CALL socket_recv R8 2 R12\n"
+        "PRINT R12\n"
+        "HOST_CALL socket_close R8 1 R13\n"
         "RETURN R0\n",
         &chunk) == 0);
     result = run_capture(&chunk, &out);
     CHECK(result == LANA_OK);
-    CHECK(out != NULL && strstr(out, "0\n") != NULL);
-    CHECK(out != NULL && strstr(out, "5\n") != NULL);
+    CHECK(out != NULL && strstr(out, "[true, 0]") != NULL);
+    CHECK(out != NULL && strstr(out, "[true, 5]") != NULL);
     CHECK(out != NULL && strstr(out, "hello") != NULL);
     free(out);
     return 0;
@@ -264,7 +269,8 @@ static int test_timeout(void) {
         &chunk) == 0);
     result = run_capture(&chunk, &out);
     CHECK(result == LANA_OK);
-    CHECK(out != NULL && strstr(out, "\"error\": timeout") != NULL);
+    /* Strings print bare inside tagged pairs: `[false, timeout]`. */
+    CHECK(out != NULL && strstr(out, "[false, timeout]") != NULL);
     free(out);
     return 0;
 }

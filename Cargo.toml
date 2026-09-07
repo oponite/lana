@@ -17,7 +17,9 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 lana-bytecode = { path = "vm/rust/lana-bytecode" }
-lana-vm = { path = "vm/rust/lana-vm" }
+# The `net-tls` feature is opt-in at the workspace level so the wasm target can
+# stay TLS-free; native consumers below re-enable it explicitly.
+lana-vm = { path = "vm/rust/lana-vm", default-features = false }
 lana-runtime = { path = "runtime/rust/lana-runtime" }
 lana-ffi = { path = "runtime/rust/lana-ffi" }
 

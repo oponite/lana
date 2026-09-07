@@ -1,0 +1,10 @@
+import "std/http" as http;
+
+let admin = capability("net");
+let use = grant(admin, "use");
+
+// TLS certificate verification is ON by default: a self-signed certificate
+// must be rejected as a Result error, not silently accepted (LIP-019 §4).
+let r = http.get("https://127.0.0.1:18101/", {}, 5000);
+assert(r[0] == false, "self-signed cert should be rejected by default");
+print("NET_TLS_DEFAULT_REJECT");

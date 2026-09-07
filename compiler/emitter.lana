@@ -154,6 +154,9 @@ fn is_host_call(name) {
     if (name == "materialize") { return true; } if (name == "explain") { return true; }
     if (name == "dataset_map") { return true; } if (name == "dataset_filter") { return true; }
     if (name == "dataset_explain") { return true; }
+    if (name == "http_get") { return true; } if (name == "http_post") { return true; }
+    if (name == "socket_connect") { return true; } if (name == "socket_send") { return true; }
+    if (name == "socket_recv") { return true; } if (name == "socket_close") { return true; }
     return false;
 }
 

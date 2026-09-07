@@ -45,6 +45,14 @@ target_compile_definitions(lana_ffi_tests PRIVATE
     LANA_FFI_TEST_LIB="$<TARGET_FILE:lana_ffi_test_lib>")
 # LIP-019 networking: real-network paths (C-only, non-deterministic).
 add_lana_c_test(lana_net_tests tests/unit/test_net.c)
+# LIP-019 live networking over the .lana std/http surface: http_get with
+# provenance rooting plus TLS verify-on/off against a loopback server. Skips
+# itself if openssl/python3 are unavailable.
+add_test(
+    NAME net_live_conformance
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance/differential/run_net_live.sh")
+set_tests_properties(net_live_conformance PROPERTIES
+    ENVIRONMENT "LANA=$<TARGET_FILE:lana>;LANAVM=$<TARGET_FILE:lanavm>")
 
 function(add_native_compile_failure name source expected)
     add_test(

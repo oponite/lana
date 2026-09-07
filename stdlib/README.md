@@ -24,6 +24,7 @@ path.
 | `std/datetime` | `now`, `add_duration` |
 | `std/testing` | `assert_eq`, `assert_true`, `assert_false` |
 | `std/json` | `parse`, `stringify` |
+| `std/http` | `get`, `post` (io effect; return `Result<Information<HttpResponse>, E>`) |
 | `std/csv` | `read`, `write` |
 | `std/unicode` | `substring` (code-point-indexed); `char_length`, `to_upper`, `to_lower` are host calls |
 | `std/regex` | `compile`, `matches`, `search`, `replace` (Thompson NFA, linear-time) |
