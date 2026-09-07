@@ -1,0 +1,14 @@
+{
+  "name": "lana-wasm",
+  "version": "0.2.0",
+  "description": "WebAssembly bindings for the Lana runtime (LIP-025)",
+  "type": "module",
+  "main": "lana-wasm.js",
+  "exports": {
+    ".": "./lana-wasm.js"
+  },
+  "files": [
+    "lana-wasm.js"
+  ],
+  "license": "MIT OR Apache-2.0"
+}
