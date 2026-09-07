@@ -16,13 +16,15 @@ use std::process::ExitCode;
 use lana_bytecode::{Chunk, LanaError, LanaErrorInfo, OpCode, Value};
 use lana_vm::Vm;
 
+mod repl;
+
 const LANA_VERSION: &str = "2.0.0";
 
 /// Full usage text, mirroring `usage()` in `tools/c/cli.c` (with `lanavm` folded
 /// into the single `lana` binary).
 fn usage(program: &str) {
     eprintln!(
-        "usage:\n  {program} compile program.lana -o program.labc\n  {program} new directory\n  {program} lsp\n  {program} debug program.lana\n  {program} build|run|test|check|fmt|doc\n  {program} check program.lana\n  {program} asm program.lasm -o program.labc\n  {program} run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n  {program} run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n  {program} dis program.labc\n  {program} verify program.labc\n  {program} inspect program.lana [--format json|dot]"
+        "usage:\n  {program} compile program.lana -o program.labc\n  {program} new directory\n  {program} lsp\n  {program} debug program.lana\n  {program} repl\n  {program} build|run|test|check|fmt|doc\n  {program} check program.lana\n  {program} asm program.lasm -o program.labc\n  {program} run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n  {program} run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n  {program} dis program.labc\n  {program} verify program.labc\n  {program} inspect program.lana [--format json|dot]"
     );
 }
 
@@ -263,6 +265,39 @@ fn compile_source_file(compiler: &Path, source_path: &str, output_path: &str) ->
         .map_err(|info| CliError::Assemble { path: source_path.to_string(), info })?;
     write_chunk(&chunk, output_path)
         .map_err(|info| CliError::Write { path: output_path.to_string(), info })
+}
+
+/// Compile an in-memory `.lana` source string to a chunk, mirroring
+/// `compile_source_file` but returning the chunk instead of writing it to
+/// disk. Used by the REPL (LIP-020) to compile each input.
+fn compile_source_to_chunk(compiler: &Path, source_text: &str) -> Result<Chunk, CliError> {
+    let source_path = temp_path("lana-repl-source");
+    let source_str = source_path.to_string_lossy().into_owned();
+    if std::fs::write(&source_path, source_text).is_err() {
+        return Err(CliError::Load {
+            path: source_str,
+            info: LanaErrorInfo::new(LanaError::Io, 0, 0, 0, "cannot write source"),
+        });
+    }
+    let asm_path = temp_path("lana-repl-assembly");
+    let asm_str = asm_path.to_string_lossy().into_owned();
+    let program_args = vec![source_str.clone(), asm_str.clone()];
+    let result = run_compiler_program(compiler, &program_args);
+    let _ = std::fs::remove_file(&source_path);
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&asm_path);
+        return Err(error);
+    }
+    let asm_text = match std::fs::read_to_string(&asm_path) {
+        Ok(text) => text,
+        Err(_) => {
+            let _ = std::fs::remove_file(&asm_path);
+            return Err(CliError::Project);
+        }
+    };
+    let _ = std::fs::remove_file(&asm_path);
+    lana_bytecode::assemble(&asm_text)
+        .map_err(|info| CliError::Assemble { path: source_str, info })
 }
 
 fn run_command(args: &[String]) -> ExitCode {
@@ -929,10 +964,25 @@ fn inspect_command(args: &[String]) -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        usage("lana");
-        return ExitCode::from(2);
+        // Bare `lana` (no subcommand) launches the REPL (LIP-020).
+        let Some(compiler) = find_compiler() else {
+            eprintln!("native Lana compiler bytecode not found");
+            return ExitCode::from(1);
+        };
+        return repl::run_repl(&compiler);
     }
     match args[1].as_str() {
+        "repl" => {
+            if args.len() != 2 {
+                usage("lana");
+                return ExitCode::from(2);
+            }
+            let Some(compiler) = find_compiler() else {
+                eprintln!("native Lana compiler bytecode not found");
+                return ExitCode::from(1);
+            };
+            repl::run_repl(&compiler)
+        }
         "version" => {
             println!("Lana {LANA_VERSION} (LABC v2, Rust VM, native compiler)");
             ExitCode::SUCCESS

@@ -45,6 +45,7 @@ static void usage(FILE *out) {
         "  lana lsp\n"
         "  lana debug program.lana\n"
         "  lana inspect program.lana [--format json|dot]\n"
+        "  lana repl\n"
         "  lana build|run|test|check|fmt|doc\n"
         "  lana check program.lana\n"
         "  lanavm asm program.lasm -o program.labc\n"
@@ -289,9 +290,329 @@ static int inspect_command(int argc, char **argv) {
     lana_chunk_free(&chunk); return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Interactive REPL (LIP-020). A thin loop over the compiler and VM:   */
+/* each completed input is compiled and executed against the           */
+/* accumulated session source, so top-level bindings persist.          */
+/* ------------------------------------------------------------------ */
+
+#define REPL_SEED UINT64_C(0x4c414e41)
+
+/* Append `src` to the dynamic string `dst` (realloc'd), updating `len`. */
+static char *repl_str_append(char *dst, size_t *len, const char *src) {
+    size_t src_len = strlen(src);
+    char *new_dst = realloc(dst, *len + src_len + 1u);
+    if (new_dst == NULL) return dst;
+    memcpy(new_dst + *len, src, src_len);
+    *len += src_len;
+    new_dst[*len] = '\0';
+    return new_dst;
+}
+
+/* True when the accumulated input is a complete statement (balanced
+ * brackets, no unterminated string literal). */
+static bool repl_is_complete(const char *buffer) {
+    int depth = 0; bool in_string = false; bool escaped = false;
+    const char *p;
+    for (p = buffer; *p != '\0'; ++p) {
+        if (in_string) {
+            if (escaped) escaped = false;
+            else if (*p == '\\') escaped = true;
+            else if (*p == '"') in_string = false;
+            continue;
+        }
+        if (*p == '"') in_string = true;
+        else if (*p == '(' || *p == '[' || *p == '{') ++depth;
+        else if (*p == ')' || *p == ']' || *p == '}') --depth;
+    }
+    return depth <= 0 && !in_string;
+}
+
+/* True when the first `len` bytes of `line` begin a statement keyword. */
+static bool repl_starts_with_keyword(const char *line, size_t len) {
+    static const char *const keywords[] = {
+        "let", "fn", "if", "while", "for", "return", "print", "import",
+        "from", "match", "type", "struct", "async", "generator", "yield",
+        "break", "continue", "assert", "use", "const", "var", "shared",
+        "capability", "effect", "claim", "task", "spawn", "await", "export",
+        NULL
+    };
+    size_t index;
+    for (index = 0u; keywords[index] != NULL; ++index) {
+        size_t klen = strlen(keywords[index]);
+        if (len >= klen && strncmp(line, keywords[index], klen) == 0 &&
+            (len == klen || line[klen] == ' ' || line[klen] == '\t'))
+            return true;
+    }
+    return false;
+}
+
+/* Compile an in-memory source string to a chunk. On failure prints the
+ * compiler's recovery message (SYNTAX-10) unless `quiet` is set, and returns
+ * nonzero. `quiet` is used for the display probe, whose compile failure is
+ * expected for non-expression inputs. */
+static int repl_compile_source(const char *compiler_path, const char *source_text,
+                               LanaChunk *chunk, bool quiet) {
+    LanaErrorInfo error = {0}; LanaError result;
+    char source_path[] = "/tmp/lana-repl-source-XXXXXX";
+    char assembly_path[] = "/tmp/lana-repl-assembly-XXXXXX";
+    int descriptor;
+    const char *arguments[2] = {source_path, assembly_path};
+    descriptor = mkstemp(source_path);
+    if (descriptor < 0) return 1;
+    (void)write(descriptor, source_text, strlen(source_text));
+    (void)close(descriptor);
+    descriptor = mkstemp(assembly_path);
+    if (descriptor < 0) { (void)unlink(source_path); return 1; }
+    (void)close(descriptor);
+    if (lana_compiler_run(compiler_path, 2u, arguments, &error) != 0) {
+        lana_compiler_error_context(&error, source_path);
+        (void)unlink(source_path); (void)unlink(assembly_path);
+        if (!quiet) (void)fprintf(stderr, "%s\n", error.message);
+        return 1;
+    }
+    (void)unlink(source_path);
+    result = lana_assemble_file(assembly_path, chunk, &error);
+    (void)unlink(assembly_path);
+    if (result != LANA_OK) {
+        if (!quiet) (void)fprintf(stderr, "%s\n", error.message);
+        return 1;
+    }
+    return 0;
+}
+
+/* Run a chunk on a fresh VM. On success prints the result value when
+ * `print_result` is set. Returns 0 on success, nonzero on runtime error. */
+static int repl_run_chunk(const LanaChunk *chunk, uint64_t seed, bool print_result) {
+    LanaVM vm; LanaErrorInfo error = {0}; LanaError run_result;
+    lana_vm_init(&vm, chunk);
+    lana_vm_seed(&vm, seed);
+    run_result = lana_vm_run(&vm);
+    if (run_result != LANA_OK) {
+        error = vm.error;
+        lana_vm_free(&vm);
+        return report_error(&error);
+    }
+    if (print_result) { lana_value_print(&vm.result); (void)printf("\n"); }
+    lana_vm_free(&vm);
+    return 0;
+}
+
+/* Handle a `:`-prefixed command. Sets `*quit` when the session should end. */
+static void repl_handle_command(const char *compiler_path, const char *command,
+                                char **session_source, size_t *session_len,
+                                bool *quit) {
+    char name[64]; const char *argument = "";
+    const char *space; size_t name_len, cmd_len;
+    char *cmd_copy = strdup(command);
+    if (cmd_copy == NULL) return;
+    cmd_len = strlen(cmd_copy);
+    while (cmd_len > 0u && (cmd_copy[cmd_len - 1u] == '\n' ||
+                            cmd_copy[cmd_len - 1u] == '\r' ||
+                            cmd_copy[cmd_len - 1u] == ' ' ||
+                            cmd_copy[cmd_len - 1u] == '\t'))
+        cmd_copy[--cmd_len] = '\0';
+    space = strchr(cmd_copy, ' ');
+    if (space != NULL) {
+        name_len = (size_t)(space - cmd_copy);
+        argument = space + 1;
+        while (*argument == ' ') ++argument;
+    } else {
+        name_len = cmd_len;
+    }
+    if (name_len >= sizeof(name)) name_len = sizeof(name) - 1u;
+    memcpy(name, cmd_copy, name_len); name[name_len] = '\0';
+
+    if (strcmp(name, ":help") == 0) {
+        (void)printf("commands:\n");
+        (void)printf("  :help              list commands\n");
+        (void)printf("  :quit, :exit       end the session\n");
+        (void)printf("  :load <file>       compile and run a file in the session\n");
+        (void)printf("  :save <file>       export the session's bindings as a .lana file\n");
+        (void)printf("  :clear             drop all bindings\n");
+    } else if (strcmp(name, ":quit") == 0 || strcmp(name, ":exit") == 0) {
+        *quit = true;
+    } else if (strcmp(name, ":clear") == 0) {
+        *session_len = 0u;
+        if (*session_source != NULL) (*session_source)[0] = '\0';
+    } else if (strcmp(name, ":save") == 0) {
+        if (*argument == '\0') {
+            (void)fprintf(stderr, "usage: :save <file>\n");
+        } else {
+            FILE *file = fopen(argument, "w");
+            if (file == NULL) {
+                (void)fprintf(stderr, ":save: cannot open %s\n", argument);
+            } else {
+                if (*session_source != NULL)
+                    (void)fwrite(*session_source, 1, *session_len, file);
+                (void)fclose(file);
+                (void)printf("saved %s\n", argument);
+            }
+        }
+    } else if (strcmp(name, ":load") == 0) {
+        if (*argument == '\0') {
+            (void)fprintf(stderr, "usage: :load <file>\n");
+        } else {
+            FILE *file = fopen(argument, "r");
+            if (file == NULL) {
+                (void)fprintf(stderr, ":load: cannot open %s\n", argument);
+            } else {
+                char contents[65536]; size_t n;
+                n = fread(contents, 1, sizeof(contents) - 1u, file);
+                (void)fclose(file);
+                contents[n] = '\0';
+                {
+                    char *candidate = malloc(*session_len + n + 1u);
+                    if (candidate != NULL) {
+                        if (*session_source != NULL)
+                            memcpy(candidate, *session_source, *session_len);
+                        memcpy(candidate + *session_len, contents, n);
+                        candidate[*session_len + n] = '\0';
+                        {
+                            LanaChunk chunk;
+                            if (repl_compile_source(compiler_path, candidate, &chunk, false) == 0) {
+                                if (repl_run_chunk(&chunk, REPL_SEED, false) == 0) {
+                                    free(*session_source);
+                                    *session_source = candidate;
+                                    *session_len += n;
+                                    (void)printf("loaded %s\n", argument);
+                                } else {
+                                    free(candidate);
+                                }
+                                lana_chunk_free(&chunk);
+                            } else {
+                                free(candidate);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        (void)fprintf(stderr, "unknown command: %s (try :help)\n", name);
+    }
+    free(cmd_copy);
+}
+
+/* Compile and execute one complete input, committing it to the session on
+ * success. A bare expression's value is printed; a statement prints nothing. */
+static void repl_process_input(const char *compiler_path, char **session_source,
+                               size_t *session_len, const char *buffer) {
+    const char *trimmed = buffer;
+    size_t tlen, blen = strlen(buffer);
+    char *candidate;
+    while (*trimmed == ' ' || *trimmed == '\t' || *trimmed == '\n') ++trimmed;
+    if (*trimmed == '\0') return;
+    tlen = strlen(trimmed);
+    while (tlen > 0u && (trimmed[tlen - 1u] == ' ' || trimmed[tlen - 1u] == '\t' ||
+                         trimmed[tlen - 1u] == '\n')) --tlen;
+    if (tlen > 0u && trimmed[tlen - 1u] == ';') --tlen;
+    while (tlen > 0u && (trimmed[tlen - 1u] == ' ' || trimmed[tlen - 1u] == '\t')) --tlen;
+
+    candidate = malloc(*session_len + blen + 1u);
+    if (candidate == NULL) return;
+    if (*session_source != NULL) memcpy(candidate, *session_source, *session_len);
+    memcpy(candidate + *session_len, buffer, blen);
+    candidate[*session_len + blen] = '\0';
+
+    if (tlen > 0u && !repl_starts_with_keyword(trimmed, tlen)) {
+        /* Probe form: `return (<line>);` captures the expression's value. If
+         * the line is not a bare expression this fails to compile and we fall
+         * back to the plain statement form below. */
+        size_t probe_len = *session_len + blen + tlen + 16u;
+        char *probe = malloc(probe_len);
+        if (probe != NULL) {
+            size_t off = 0u;
+            if (*session_source != NULL) {
+                memcpy(probe, *session_source, *session_len);
+                off = *session_len;
+            }
+            memcpy(probe + off, buffer, blen); off += blen;
+            memcpy(probe + off, "return (", 8u); off += 8u;
+            memcpy(probe + off, trimmed, tlen); off += tlen;
+            memcpy(probe + off, ");\n", 3u); off += 3u;
+            probe[off] = '\0';
+            {
+                LanaChunk chunk;
+                if (repl_compile_source(compiler_path, probe, &chunk, true) == 0) {
+                    if (repl_run_chunk(&chunk, REPL_SEED, true) == 0) {
+                        free(*session_source);
+                        *session_source = candidate;
+                        *session_len += blen;
+                    } else {
+                        free(candidate);
+                    }
+                    lana_chunk_free(&chunk);
+                    free(probe);
+                    return;
+                }
+            }
+            free(probe);
+        }
+    }
+
+    {
+        LanaChunk chunk;
+        if (repl_compile_source(compiler_path, candidate, &chunk, false) == 0) {
+            if (repl_run_chunk(&chunk, REPL_SEED, false) == 0) {
+                free(*session_source);
+                *session_source = candidate;
+                *session_len += blen;
+            } else {
+                free(candidate);
+            }
+            lana_chunk_free(&chunk);
+        } else {
+            free(candidate);
+        }
+    }
+}
+
+/* Run the interactive REPL. */
+static int repl_command(const char *compiler_path) {
+    char *session_source = NULL; size_t session_len = 0u;
+    char *buffer = NULL; size_t buffer_len = 0u;
+    char line[4096];
+    bool quit = false;
+    while (!quit) {
+        const char *prompt = buffer_len == 0u ? "lana> " : "...> ";
+        (void)printf("%s", prompt); (void)fflush(stdout);
+        if (fgets(line, sizeof(line), stdin) == NULL) break; /* EOF */
+        if (buffer_len == 0u) {
+            const char *trimmed = line;
+            while (*trimmed == ' ' || *trimmed == '\t') ++trimmed;
+            if (*trimmed == ':') {
+                repl_handle_command(compiler_path, trimmed, &session_source,
+                                    &session_len, &quit);
+                continue;
+            }
+        }
+        buffer = repl_str_append(buffer, &buffer_len, line);
+        if (!repl_is_complete(buffer)) continue; /* multiline */
+        repl_process_input(compiler_path, &session_source, &session_len, buffer);
+        buffer_len = 0u;
+    }
+    free(session_source);
+    free(buffer);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     char compiler_path[4096];
-    if (argc < 2) { usage(stderr); return 2; }
+    if (argc < 2) {
+        /* Bare `lana` (no subcommand) launches the REPL (LIP-020). */
+        if (!lana_compiler_find(argv[0], compiler_path, sizeof(compiler_path))) {
+            (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1;
+        }
+        return repl_command(compiler_path);
+    }
+    if (strcmp(argv[1], "repl") == 0) {
+        if (argc != 2) { usage(stderr); return 2; }
+        if (!lana_compiler_find(argv[0], compiler_path, sizeof(compiler_path))) {
+            (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1;
+        }
+        return repl_command(compiler_path);
+    }
     if (strcmp(argv[1], "version") == 0) { (void)printf("Lana %s (LABC v2, C VM, native compiler)\n", LANA_VERSION); return 0; }
     if (strcmp(argv[1], "new") == 0) {
         if (argc != 3) { usage(stderr); return 2; }
