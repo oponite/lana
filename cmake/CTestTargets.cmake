@@ -335,6 +335,16 @@ if(LANA_PYTHON3)
     set_tests_properties(lana_repl_session PROPERTIES
         PASS_REGULAR_EXPRESSION "REPL_SESSION_PASS" TIMEOUT 30)
 endif()
+# WASM conformance (LIP-025): the node and WASI runners assert native-vs-WASM
+# byte-identical results and host-call gating. Both are soft gates where a
+# missing wasm toolchain (wasm-bindgen CLI / wasmtime) makes the script exit 0
+# with a SKIP notice, so they are safe in a non-Rust CI environment.
+add_test(NAME lana_wasm_node_conformance
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-wasm/tests/run-wasm-conformance.sh")
+set_tests_properties(lana_wasm_node_conformance PROPERTIES TIMEOUT 300)
+add_test(NAME lana_wasm_wasi_conformance
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-wasm/tests/run-wasi-conformance.sh")
+set_tests_properties(lana_wasm_wasi_conformance PROPERTIES TIMEOUT 300)
 add_test(NAME lana_project_workflow
     COMMAND "${CMAKE_COMMAND}" -DLANA=$<TARGET_FILE:lana>
         -DROOT=${CMAKE_CURRENT_BINARY_DIR}/project-workflow

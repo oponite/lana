@@ -70,6 +70,48 @@ assert.equal(run(escapedSource, '', ''), escapedExpected);
 assert.equal(run_bytecode(labcReturn42(), '', ''), '{"ok":true,"result":"42"}');
 assert.ok(run_bytecode(new Uint8Array([0xff, 0xff, 0xff]), '', '').startsWith('{"ok":false,"error":'));
 
+// A LABC blob holding a single HOST_CALL with the given host id. The gating
+// scan in run_chunk covers compiled chunks, so a call to a gated network host
+// is rejected before execution.
+function labcHostCall(hostId) {
+    const bytes = [];
+    const pushU32 = (n) => {
+        const b = new Uint8Array(4);
+        new DataView(b.buffer).setUint32(0, n, true);
+        bytes.push(...b);
+    };
+    bytes.push(0x4c, 0x41, 0x42, 0x43); // "LABC"
+    pushU32(2); // version
+    pushU32(1); // constants
+    pushU32(0); // functions
+    pushU32(1); // instructions
+    pushU32(0); // entry
+    bytes.push(1); // ValueType::Number
+    const zero = new Uint8Array(8);
+    bytes.push(...zero);
+    // HOST_CALL (opcode 39): a=8 (dest), b=hostId, c=0, imm=0, line=1
+    bytes.push(39);
+    pushU32(8);
+    pushU32(hostId);
+    pushU32(0);
+    pushU32(0);
+    pushU32(1);
+    return new Uint8Array(bytes);
+}
+
+// LIP-025 §3: networking host calls are gated by default; wiring lifts the gate.
+const netGated = run_bytecode(labcHostCall(160), '', '');
+assert.ok(netGated.startsWith('{"ok":false,"error":{"line":'));
+assert.ok(netGated.includes('LANA_ERR_UNSUPPORTED_OPERATION'));
+assert.ok(netGated.includes("host call 'http_get' is not available"));
+
+const socketGated = run_bytecode(labcHostCall(162), '', '');
+assert.ok(socketGated.includes('LANA_ERR_UNSUPPORTED_OPERATION'));
+assert.ok(socketGated.includes("host call 'socket_connect' is not available"));
+
+const netWired = run_bytecode(labcHostCall(160), '', '{"http_get":true}');
+assert.ok(!netWired.includes('LANA_ERR_UNSUPPORTED_OPERATION'));
+
 // Host-call gating: a gated FS call fails with LANA_ERR_UNSUPPORTED_OPERATION
 // when not wired, byte-identical to the native VM.
 const gated = run('let e = directory_list("/tmp");\nreturn e;\n', '', '');

@@ -1,0 +1,18 @@
+[package]
+name = "lana-wasm-wasi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WASI (wasm32-wasip1) command entry for Lana (LIP-025): compile, gate, and run a Lana program on the Rust VM without a JS host."
+
+[lib]
+name = "lana_wasm_wasi"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lana-wasm-wasi"
+path = "src/main.rs"
+
+[dependencies]
+lana-bytecode = { workspace = true }
+lana-vm = { workspace = true }

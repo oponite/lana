@@ -150,6 +150,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lana-wasm-wasi"
+version = "0.2.0"
+dependencies = [
+ "lana-bytecode",
+ "lana-vm",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"

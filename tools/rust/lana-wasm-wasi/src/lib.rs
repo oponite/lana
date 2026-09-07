@@ -1,43 +1,23 @@
-//! WebAssembly bindings for the Lana runtime (LIP-002 / LIP-025).
+//! WASI command entry for the Lana runtime (LIP-025).
 //!
-//! Exposes `check`, `run`, and `run_bytecode` over `wasm-bindgen`, compiling
-//! Lana source with the embedded self-hosted compiler (`lana-compiler.labc`)
-//! and running it on the Rust VM. The compiler's file-backed host calls
-//! (`read_text`, `write_text`, `path_exists`) resolve against the VM's
-//! in-memory filesystem, so no host filesystem is required.
+//! This crate is a thin command-line wrapper over the same compile / gate /
+//! run path the browser `lana-wasm` crate exposes, so a program compiles to the
+//! same LABC v2 and runs byte-identically on a `wasm32-wasip1` target running
+//! under a WASI runtime (e.g. `wasmtime`). Unlike `lana-wasm`, it does not
+//! depend on `wasm-bindgen`, so it builds for WASI as well as any host.
 //!
-//! Both entry points return a JSON string so the boundary stays a single
-//! `String` (no `serde`/`JsValue` marshalling):
+//! `run(source, input, capabilities) -> String` mirrors `lana-wasm::run`
+//! exactly: it compiles `source` with the embedded self-hosted compiler,
+//! rejects any gated filesystem or network host call the host has not wired
+//! (`LANA_ERR_UNSUPPORTED_OPERATION`), and returns the same JSON contract:
 //!
-//!   check(source) -> {"ok":true} | {"ok":false,"error":{"line":N,"message":"..."}}
-//!   run(source, input, capabilities) -> {"ok":true,"result":"..."} | {"ok":false,"error":{...}}
-//!   run_bytecode(labc, input, capabilities) -> same as run
+//!   {"ok":true,"result":"..."} | {"ok":false,"error":{"line":N,"message":"..."}}
 //!
-//! `input` is passed to the program as its single argument (available via
-//! `args()`); an empty string passes no argument.
-//!
-//! # Host-call policy (LIP-025 §3)
-//!
-//! Filesystem and networking host calls are unavailable by default in WASM
-//! (there is no ambient filesystem or network). A program that uses a gated
-//! host call — the filesystem calls (`read_text`, `write_text`,
-//! `directory_list`, `directory_create`, `path_exists`, `write_text_atomic`)
-//! or the networking calls (`http_get`, `http_post`, `socket_connect`,
-//! `socket_send`, `socket_recv`, `socket_close`) — fails with
-//! `LANA_ERR_UNSUPPORTED_OPERATION` unless the host explicitly wires that
-//! capability. The `capabilities` argument is a JSON object naming which gated
-//! host calls are wired (value `true`) plus optional `seed`,
-//! `instruction_limit`, and `memory_limit` (MiB) keys:
-//!
-//!   {"read_text":true,"write_text":true,"seed":42,"instruction_limit":1000}
-//!
-//! Gating is enforced by scanning the compiled chunk for `HOST_CALL`
-//! instructions before execution, so the VM itself is unchanged and native
-//! behavior is byte-identical.
+//! Resource limits (256 MiB, 50,000,000 instructions) are the Rust VM's
+//! defaults and are enforced in the run loop, byte-identical to native and to
+//! the browser target.
 
 use std::collections::HashSet;
-
-use wasm_bindgen::prelude::*;
 
 use lana_bytecode::{Chunk, LanaError, OpCode};
 use lana_vm::vm::{
@@ -55,10 +35,8 @@ const COMPILER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lana-compiler.
 const SOURCE_PATH: &str = "/src/main.lana";
 const ASM_PATH: &str = "/src/main.lasm";
 
-/// Host calls gated behind explicit capabilities in WASM (LIP-025 §3). These
-/// are the filesystem and networking host calls; there is no ambient FS or
-/// network in a WASM embedding, so a program that names one without wiring it
-/// fails with `LANA_ERR_UNSUPPORTED_OPERATION`.
+/// Host calls gated behind explicit capabilities (LIP-025 §3): the filesystem
+/// and networking host calls. Mirrors `lana-wasm` so both targets agree.
 const GATED_HOST_CALLS: &[(u32, &str)] = &[
     (LANA_HOST_READ_TEXT, "read_text"),
     (LANA_HOST_WRITE_TEXT, "write_text"),
@@ -88,7 +66,7 @@ fn gated_host_call_id(name: &str) -> Option<u32> {
     GATED_HOST_CALLS.iter().find(|(_, n)| *n == name).map(|(id, _)| *id)
 }
 
-/// Map a gated host-call ID to its name.
+/// Map a gated host-call ID to its name, or "unknown" when not gated.
 fn gated_host_call_name(id: u32) -> &'static str {
     GATED_HOST_CALLS
         .iter()
@@ -97,9 +75,8 @@ fn gated_host_call_name(id: u32) -> &'static str {
         .unwrap_or("unknown")
 }
 
-/// Parse the `capabilities` JSON object. Accepts `{"name":true,...}` for gated
-/// host calls plus `seed`, `instruction_limit`, and `memory_limit` numbers.
-/// An empty string parses to no capabilities (all gated calls rejected).
+/// Parse the `capabilities` JSON object (`{"name":true,...}` plus optional
+/// `seed`, `instruction_limit`, `memory_limit`). Empty string = none.
 fn parse_capabilities(json: &str) -> Capabilities {
     let mut caps = Capabilities {
         enabled: HashSet::new(),
@@ -117,7 +94,6 @@ fn parse_capabilities(json: &str) -> Capabilities {
                 end += 1;
             }
             let key = &json[start..end];
-            // Advance past the colon and whitespace to the value.
             let mut j = end + 1;
             while j < bytes.len() && (bytes[j] == b':' || bytes[j].is_ascii_whitespace()) {
                 j += 1;
@@ -139,7 +115,6 @@ fn parse_capabilities(json: &str) -> Capabilities {
                     }
                 }
                 _ => {
-                    // A gated host call is enabled only when its value is `true`.
                     if j < bytes.len() && bytes[j] == b't' {
                         if let Some(id) = gated_host_call_id(key) {
                             caps.enabled.insert(id);
@@ -202,7 +177,7 @@ fn error_json(vm: &Vm) -> String {
 }
 
 /// Compile Lana source to a chunk, running the embedded compiler against the
-/// VM's in-memory filesystem. Returns the assembled chunk or a JSON error.
+/// VM's in-memory filesystem. Mirrors `lana-wasm::compile_source`.
 fn compile_source(source: &str) -> Result<Chunk, String> {
     let compiler_chunk = lana_bytecode::loader::load(COMPILER)
         .map_err(|info| format!("{{\"line\":0,\"message\":\"cannot load compiler: {}\"}}", json_escape(&info.message)))?;
@@ -217,15 +192,6 @@ fn compile_source(source: &str) -> Result<Chunk, String> {
         .ok_or_else(|| "{\"line\":0,\"message\":\"compiler did not emit assembly\"}".to_string())?;
     lana_bytecode::assemble(&assembly)
         .map_err(|info| format!("{{\"line\":{},\"message\":\"{}\"}}", info.line, json_escape(&info.message)))
-}
-
-/// Compile-check a Lana source program, returning a JSON status string.
-#[wasm_bindgen]
-pub fn check(source: &str) -> String {
-    match compile_source(source) {
-        Ok(_) => "{\"ok\":true}".to_string(),
-        Err(error) => format!("{{\"ok\":false,\"error\":{error}}}"),
-    }
 }
 
 /// Run a compiled chunk with the given input and capabilities.
@@ -247,10 +213,6 @@ fn run_chunk(chunk: Chunk, input: &str, capabilities: &str) -> String {
     if !input.is_empty() {
         vm.set_program_args(&[input.to_string()]);
     }
-    let mut store_host = lana_runtime::host_calls::StoreHost::new();
-    vm.set_host_call_extension(Box::new(move |host_id, args, out| {
-        store_host.dispatch(host_id, args, out)
-    }));
     if vm.run() != LanaError::Ok {
         return format!("{{\"ok\":false,\"error\":{}}}", error_json(&vm));
     }
@@ -259,10 +221,7 @@ fn run_chunk(chunk: Chunk, input: &str, capabilities: &str) -> String {
 }
 
 /// Compile and run a Lana source program, returning a JSON result string.
-/// `input` is passed to the program as its single argument (empty = none).
-/// `capabilities` is a JSON object naming wired host calls and optional
-/// `seed`/`instruction_limit`/`memory_limit` (see module docs).
-#[wasm_bindgen]
+/// Mirrors `lana-wasm::run`.
 pub fn run(source: &str, input: &str, capabilities: &str) -> String {
     let chunk = match compile_source(source) {
         Ok(chunk) => chunk,
@@ -271,19 +230,37 @@ pub fn run(source: &str, input: &str, capabilities: &str) -> String {
     run_chunk(chunk, input, capabilities)
 }
 
-/// Run a precompiled LABC bytecode blob, returning a JSON result string.
-/// `input` and `capabilities` behave as in `run`.
-#[wasm_bindgen]
-pub fn run_bytecode(labc: &[u8], input: &str, capabilities: &str) -> String {
-    let chunk = match lana_bytecode::loader::load(labc) {
+/// Run a precompiled LABC blob given as a hex string, returning the same JSON
+/// contract as `run`. Lets the WASI conformance feed a hand-assembled
+/// `HOST_CALL http_get` chunk through the identical gating path, so LIP-025 §3
+/// network gating is provable on the WASI target even though the compiler at
+/// this fork point cannot yet emit network host calls from source.
+pub fn run_bytecode_hex(hex: &str, capabilities: &str) -> String {
+    let bytes = match decode_hex(hex) {
+        Some(bytes) => bytes,
+        None => return "{\"ok\":false,\"error\":{\"line\":0,\"message\":\"invalid hex bytecode\"}}".to_string(),
+    };
+    let chunk = match lana_bytecode::loader::load(&bytes) {
         Ok(chunk) => chunk,
         Err(info) => {
             return format!(
                 "{{\"ok\":false,\"error\":{{\"line\":{},\"message\":\"{}\"}}}}",
                 info.line,
                 json_escape(&info.message)
-            )
+            );
         }
     };
-    run_chunk(chunk, input, capabilities)
+    run_chunk(chunk, "", capabilities)
+}
+
+/// Decode a hex string (whitespace ignored) into bytes.
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    let clean: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+    if clean.len() % 2 != 0 {
+        return None;
+    }
+    (0..clean.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&clean[i..i + 2], 16).ok())
+        .collect()
 }
