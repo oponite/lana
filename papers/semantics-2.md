@@ -30,27 +30,27 @@ Decisions fixed by this substrate:
 
 For a register of N qubits, the Hilbert space is
 
-$$
+```math
 \mathcal H_N = (\mathbb C^2)^{\otimes N},
 \qquad
 \dim \mathcal H_N = d = 2^N.
-$$
+```
 
 The computational basis is the ordered set
 
-$$
+```math
 \{|b\rangle : b \in \{0,1\}^N\},
-$$
+```
 
 indexed by bit strings of length N. Matrix index `b` corresponds to the basis
-vector `|b\rangle`. N is a runtime value; the substrate is the family of spaces
-`\mathcal H_N` for `1 <= N <= 10`.
+vector $`|b\rangle`$. N is a runtime value; the substrate is the family of spaces
+$`\mathcal H_N`$ for `1 <= N <= 10`.
 
 ### 1.2 Density operator
 
 The domain of concrete Lana 2.0 states on N qubits is
 
-$$
+```math
 \mathcal S_N =
 \left\{
 \rho \in \mathcal L(\mathcal H_N)
@@ -59,7 +59,7 @@ $$
 \rho \succeq 0,\;
 \operatorname{Tr}(\rho) = 1
 \right\}.
-$$
+```
 
 A density operator is Hermitian, positive semidefinite, and unit-trace. This
 single object is the universal state: every other state form is a special case
@@ -69,13 +69,13 @@ or an operation on it.
 
 A pure state is a rank-1 density operator
 
-$$
+```math
 \rho = |\psi\rangle\langle\psi|,
 \qquad
 |\psi\rangle \in \mathcal H_N,
 \qquad
 \langle\psi|\psi\rangle = 1.
-$$
+```
 
 Pure-state languages (state-vector models) embed here.
 
@@ -83,13 +83,13 @@ Pure-state languages (state-vector models) embed here.
 
 A classical state is a density operator diagonal in the computational basis:
 
-$$
+```math
 \rho = \sum_{b \in \{0,1\}^N} p_b\, |b\rangle\langle b|,
 \qquad
 p_b \ge 0,
 \qquad
 \sum_b p_b = 1.
-$$
+```
 
 The vector `(p_b)` is a probability distribution over bit strings. Classical
 probabilistic languages embed here. A classical state has zero coherence: all
@@ -97,9 +97,9 @@ off-diagonal entries vanish.
 
 ### 1.5 The N=1 recovery
 
-For N=1, write `\rho` in the computational basis `(|0\rangle, |1\rangle)`:
+For N=1, write $`\rho`$ in the computational basis $`(|0\rangle, |1\rangle)`$:
 
-$$
+```math
 \rho =
 \begin{pmatrix}
 1-p & c \\
@@ -109,18 +109,18 @@ c^* & p
 0 \le p \le 1,
 \qquad
 |c|^2 \le p(1-p).
-$$
+```
 
 This is exactly the Lana 1.0 `STATE` of `semantics.md` Section 1.1, with
-`p = \rho_{11}` and `c = \rho_{01}`. The normalized disposition is
+$`p = \rho_{11}`$ and $`c = \rho_{01}`$. The normalized disposition is
 
-$$
+```math
 d = \frac{c}{\sqrt{p(1-p)}}
-$$
+```
 
-for `0 < p < 1`, and `d = 0` by convention at `p \in \{0,1\}`. The 1.0
+for `0 < p < 1`, and `d = 0` by convention at $`p \in \{0,1\}`$. The 1.0
 `STATE` is therefore the N=1 density operator; the 1.0 `STATE_DIST` is a
-probability distribution over `\mathcal S_1`.
+probability distribution over $`\mathcal S_1`$.
 
 ## 2. Composition
 
@@ -128,10 +128,10 @@ probability distribution over `\mathcal S_1`.
 
 For independent systems on registers A and B,
 
-$$
+```math
 \rho_{AB} = \rho_A \otimes \rho_B
 \qquad\in \mathcal S_{N_A + N_B}.
-$$
+```
 
 This is the "side-by-side" composition: it produces a larger state whose qubit
 count is the sum. It is the general composition of independent systems and is
@@ -141,9 +141,9 @@ the substrate's primary combine operation.
 
 For a state on registers A and B, the reduced state of A is
 
-$$
+```math
 \rho_A = \operatorname{Tr}_B(\rho_{AB}).
-$$
+```
 
 Partial trace is the marginalization operation: "look at one subsystem of many."
 It is the substrate's projection operation.
@@ -154,9 +154,9 @@ The 1.0 `APPEND` rule is retained as a **distinct, named operation** on the
 N=1 (or diagonal) case. It combines two beliefs about the *same* binary event
 using the independent probabilistic-OR rule
 
-$$
+```math
 p_C = 1 - (1-p_A)(1-p_B),
-$$
+```
 
 and does **not** change the qubit count. It is not the tensor product, and the
 two must not be conflated. Its full 1.0 definition (internal disposition
@@ -167,52 +167,52 @@ scoped to the N=1 case.
 
 ### 3.1 POVM
 
-A positive operator-valued measure (POVM) on `\mathcal H_N` is a finite set
+A positive operator-valued measure (POVM) on $`\mathcal H_N`$ is a finite set
 
-$$
+```math
 \{E_i\}_{i=1}^m,
 \qquad
 E_i \succeq 0,
 \qquad
 \sum_{i=1}^m E_i = I.
-$$
+```
 
-For a state `\rho \in \mathcal S_N`, the outcome probability is
+For a state $`\rho \in \mathcal S_N`$, the outcome probability is
 
-$$
+```math
 p(i) = \operatorname{Tr}(\rho E_i).
-$$
+```
 
 A POVM is a first-class value: users construct and pass their own. The outcome
-distribution is `(p(1), \ldots, p(m))`.
+distribution is $`(p(1), \ldots, p(m))`$.
 
 ### 3.2 Projective measurement (special case)
 
 A projective measurement (PVM) is the special case where the `E_i` are
 orthogonal projectors:
 
-$$
+```math
 E_i = |\phi_i\rangle\langle\phi_i|,
 \qquad
 \langle\phi_i|\phi_j\rangle = \delta_{ij},
 \qquad
 \sum_i |\phi_i\rangle\langle\phi_i| = I.
-$$
+```
 
 ### 3.3 Born rule
 
-For a pure state `\rho = |\psi\rangle\langle\psi|`, the POVM outcome probability
+For a pure state $`\rho = |\psi\rangle\langle\psi|`$, the POVM outcome probability
 reduces to the Born rule:
 
-$$
+```math
 p(i) = \langle\psi| E_i |\psi\rangle.
-$$
+```
 
 ### 3.4 The 1.0 measurement recovery
 
 The 1.0 computational-basis measurement is the N=1 projective measurement with
-`E_1 = |1\rangle\langle1|` and `E_0 = |0\rangle\langle0|`, giving
-`p(1) = \rho_{11} = p`. The 1.0 named bases (computational, x, y) are the N=1
+$`E_1 = |1\rangle\langle1|`$ and $`E_0 = |0\rangle\langle0|`$, giving
+$`p(1) = \rho_{11} = p`$. The 1.0 named bases (computational, x, y) are the N=1
 projective measurements in those bases.
 
 ## 4. Evolution
@@ -221,17 +221,17 @@ projective measurements in those bases.
 
 A quantum channel is a completely positive, trace-preserving (CPTP) map
 
-$$
+```math
 \Phi : \mathcal L(\mathcal H_N) \to \mathcal L(\mathcal H_N).
-$$
+```
 
 Every channel has a Kraus representation
 
-$$
+```math
 \Phi(\rho) = \sum_k K_k \rho K_k^\dagger,
 \qquad
 \sum_k K_k^\dagger K_k = I.
-$$
+```
 
 A channel is a first-class value: users construct and pass their own. This is
 the substrate's transform operation, and it generalizes the 1.0 `TRANSFORM`.
@@ -240,11 +240,11 @@ the substrate's transform operation, and it generalizes the 1.0 `TRANSFORM`.
 
 Unitary evolution is the single-Kraus-operator channel
 
-$$
+```math
 \Phi(\rho) = U \rho U^\dagger,
 \qquad
 U^\dagger U = I.
-$$
+```
 
 ### 4.3 Noise
 
@@ -264,16 +264,16 @@ transform, but not every abstract 1.0 transform is a channel.
 
 ### 5.1 Separability
 
-A bipartite state `\rho_{AB} \in \mathcal S_{N_A + N_B}` is **separable** if it
+A bipartite state $`\rho_{AB} \in \mathcal S_{N_A + N_B}`$ is **separable** if it
 can be written as a convex combination of product states:
 
-$$
+```math
 \rho_{AB} = \sum_i p_i\, \rho_A^{(i)} \otimes \rho_B^{(i)},
 \qquad
 p_i \ge 0,
 \qquad
 \sum_i p_i = 1.
-$$
+```
 
 ### 5.2 Entanglement
 
@@ -285,12 +285,12 @@ described as independent or classically correlated subsystems.
 
 ### 6.1 Observable
 
-An observable is a Hermitian operator `A = A^\dagger` on `\mathcal H_N`. Its
-expectation in a state `\rho` is
+An observable is a Hermitian operator $`A = A^\dagger`$ on $`\mathcal H_N`$. Its
+expectation in a state $`\rho`$ is
 
-$$
+```math
 \langle A \rangle_\rho = \operatorname{Tr}(\rho A).
-$$
+```
 
 This generalizes the 1.0 binary `p` to arbitrary observables.
 
@@ -298,10 +298,10 @@ This generalizes the 1.0 binary `p` to arbitrary observables.
 
 For N=1, the 1.0 surface maps as:
 
-- `p` (observable probability) = `\rho_{11} = \operatorname{Tr}(\rho |1\rangle\langle1|)`.
-- `d = d_{re} + i d_{im}` = the normalized coherence `c / \sqrt{p(1-p)}`.
-- `measure as probability` = `\operatorname{Tr}(\rho E)` for the relevant POVM element.
-- `sample` = a draw from the outcome distribution `p(i) = \operatorname{Tr}(\rho E_i)`.
+- `p` (observable probability) = $`\rho_{11} = \operatorname{Tr}(\rho |1\rangle\langle1|)`$.
+- `d = d_{re} + i d_{im}` = the normalized coherence $`c / \sqrt{p(1-p)}`$.
+- `measure as probability` = $`\operatorname{Tr}(\rho E)`$ for the relevant POVM element.
+- `sample` = a draw from the outcome distribution $`p(i) = \operatorname{Tr}(\rho E_i)`$.
 
 ## 7. Boundary and error semantics
 
@@ -309,12 +309,12 @@ A proposed state is invalid if it is not Hermitian, not positive semidefinite,
 or not unit-trace (within the floating-point tolerance of `semantics.md`
 Section 7.3). A POVM is invalid if any `E_i` is not positive semidefinite or
 the sum is not the identity. A channel is invalid if its Kraus operators do not
-satisfy `\sum_k K_k^\dagger K_k = I`. Invalid constructions are rejected, never
+satisfy $`\sum_k K_k^\dagger K_k = I`$. Invalid constructions are rejected, never
 silently repaired.
 
 ## 8. Implementation correspondence
 
-For Lana 2.x, `N <= 10`, so `d = 2^N <= 1024`. A dense `d \times d` complex
+For Lana 2.x, `N <= 10`, so `d = 2^N <= 1024`. A dense $`d \times d`$ complex
 matrix is the default representation; structured (sparse, stabilizer, MPS)
 representations are a later optimization, not a semantic requirement. The
 substrate is realized as a library over the general-purpose core (values,
@@ -330,98 +330,98 @@ verbatim. Cross-references to "Section 4" inside 9.5 refer to `semantics.md`.
 
 ### 9.1 Neutralize (full dephasing)
 
-For `\rho \in \mathcal S_N`, the completely dephasing map in the computational
+For $`\rho \in \mathcal S_N`$, the completely dephasing map in the computational
 basis is
 
-$$
+```math
 \operatorname{neutralize}(\rho)
 =
 \sum_{b \in \{0,1\}^N} |b\rangle\langle b|\, \rho\, |b\rangle\langle b|
 =
 \operatorname{diag}(\rho).
-$$
+```
 
 It zeroes every off-diagonal element and keeps the diagonal. It is a channel
-(Kraus operators are the projectors `|b\rangle\langle b|`), it is idempotent,
+(Kraus operators are the projectors $`|b\rangle\langle b|`$), it is idempotent,
 and it maps every state to a classical state. At N=1 it recovers the 1.0
-`NEUTRALIZE` transform: `(p, d) \mapsto (p, 0)`.
+`NEUTRALIZE` transform: $`(p, d) \mapsto (p, 0)`$.
 
 ### 9.2 Attenuate (partial dephasing)
 
-For `\rho \in \mathcal S_N` and `f \in [0,1]`,
+For $`\rho \in \mathcal S_N`$ and $`f \in [0,1]`$,
 
-$$
+```math
 \operatorname{attenuate}(\rho, f)
 =
 f\,\rho + (1-f)\,\operatorname{diag}(\rho).
-$$
+```
 
 It multiplies every off-diagonal element by `f` and keeps the diagonal. It is a
 channel (the dephasing channel). The laws are
 
-$$
+```math
 \operatorname{attenuate}(\rho, 1) = \rho,
-$$
+```
 
-$$
+```math
 \operatorname{attenuate}(\operatorname{attenuate}(\rho, f_1), f_2)
 =
 \operatorname{attenuate}(\rho, f_1 f_2).
-$$
+```
 
-At `f = 0` the result is `neutralize(\rho)`. Factors outside `[0,1]` and
+At `f = 0` the result is $`neutralize(\rho)`$. Factors outside `[0,1]` and
 non-finite factors are errors. At N=1 it recovers the 1.0 attenuation:
-`(p, d) \mapsto (p, f d)`.
+$`(p, d) \mapsto (p, f d)`$.
 
 ### 9.3 Convex state mixing
 
-For `a, b \in \mathcal S_N` and `w \in [0,1]`,
+For $`a, b \in \mathcal S_N`$ and $`w \in [0,1]`$,
 
-$$
+```math
 \operatorname{mix}(a, b, w)
 =
 w\,a + (1-w)\,b.
-$$
+```
 
 This is a convex density-operator mixture, not evidence combination. The result
-is in `\mathcal S_N`. It is weight-symmetric and idempotent:
+is in $`\mathcal S_N`$. It is weight-symmetric and idempotent:
 
-$$
+```math
 \operatorname{mix}(a, b, w) = \operatorname{mix}(b, a, 1-w),
-$$
+```
 
-$$
+```math
 \operatorname{mix}(a, a, w) = a.
-$$
+```
 
 ### 9.4 Trace distance
 
-For `a, b \in \mathcal S_N`,
+For $`a, b \in \mathcal S_N`$,
 
-$$
+```math
 \operatorname{trace\_distance}(a, b)
 =
 \frac12 \lVert a - b \rVert_1,
 \qquad
 \lVert X \rVert_1 = \operatorname{Tr}\!\left(\sqrt{X^\dagger X}\right).
-$$
+```
 
 The result is real and lies in `[0,1]`. The laws are symmetry, zero iff equal,
 and the triangle inequality:
 
-$$
+```math
 \operatorname{trace\_distance}(a, b) = \operatorname{trace\_distance}(b, a),
-$$
+```
 
-$$
+```math
 \operatorname{trace\_distance}(a, b) = 0 \iff a = b,
-$$
+```
 
-$$
+```math
 \operatorname{trace\_distance}(a, c)
 \le
 \operatorname{trace\_distance}(a, b) + \operatorname{trace\_distance}(b, c).
-$$
+```
 
 ### 9.5 Relationship-aware APPEND (N=1)
 
@@ -431,71 +431,71 @@ relationship-aware extension is post-freeze Lana 2.0 semantics.
 These modes define overlap between two binary events. They do not define a
 general evidence-fusion operator.
 
-For binary events $A,B$ with observable probabilities $p_A,p_B$, let
+For binary events $`A,B`$ with observable probabilities $`p_A,p_B`$, let
 
-$$
+```math
 p_C=P(A\lor B),\qquad q=P(A\land B).
-$$
+```
 
 Every non-synergistic relationship uses
 
-$$
+```math
 p_C=p_A+p_B-q.
-$$
+```
 
 The valid overlap bounds are
 
-$$
+```math
 L=\max(0,p_A+p_B-1),\qquad U=\min(p_A,p_B),
-$$
+```
 
 with
 
-$$
+```math
 L\le q\le U,
-$$
+```
 
-and independent overlap $I=p_Ap_B$.
+and independent overlap $`I=p_Ap_B`$.
 
 #### Independent
 
-$$
+```math
 q=I=p_Ap_B,
-$$
+```
 
 so
 
-$$
+```math
 p_C=1-(1-p_A)(1-p_B).
-$$
+```
 
 This is exactly the Lana 1.0 rule in Section 4.
 
 #### Redundant event overlap
 
 `REDUNDANT(r)` means overlap greater than independent overlap. For
-$r\in[0,1)$,
+$`r\in[0,1)`$,
 
-$$
+```math
 q=(1-r)I+rU,
 \qquad
 p_C=p_A+p_B-q.
-$$
+```
 
-At $r=0$, this is independent. For $0<r<1$, this is partial redundant event
+At $`r=0`$, this is independent. For $`0<r<1`$, this is partial redundant event
 overlap. Partial redundant overlap has no associativity rule.
 
 #### Full redundancy
 
 `FULL_REDUNDANCY` applies only when
 
-$$
+```math
 p_A=p_B,
 \qquad
 q=p_A.
-$$
+```
 
-Under these conditions, $A=B$ almost surely. `FULL_REDUNDANCY` is commutative
+Under these conditions, $`A=B`$ almost surely. `FULL_REDUNDANCY` is commutative
 and idempotent. Its observable probability is associative only when every
 binary node has an applicable full-redundancy relationship. It is not a
 parameter value of `REDUNDANT(r)`.
@@ -503,101 +503,101 @@ parameter value of `REDUNDANT(r)`.
 #### Complementary event overlap
 
 `COMPLEMENTARY(k)` means overlap less than independent overlap. For
-$k\in[0,1]$,
+$`k\in[0,1]`$,
 
-$$
+```math
 q=(1-k)I+kL,
 \qquad
 p_C=p_A+p_B-q.
-$$
+```
 
-At $k=0$ this is independent. At $k=1$,
+At $`k=0`$ this is independent. At $`k=1`$,
 
-$$
+```math
 q=L,\qquad p_C=\min(1,p_A+p_B).
-$$
+```
 
-At $k=1$, this is maximum feasible separation. Only maximum separation has
+At $`k=1`$, this is maximum feasible separation. Only maximum separation has
 observable-probability associativity. Partial complementary overlap has no
 associativity rule.
 
 #### Unified parameter
 
-A signed parameter $\lambda\in[-1,1)$ can represent independent, partial
+A signed parameter $`\lambda\in[-1,1)`$ can represent independent, partial
 redundant, and complementary event overlap:
 
-$$
+```math
 q=
 \begin{cases}
 I+\lambda(U-I), & \lambda\ge0,\\
 I+(-\lambda)(L-I), & \lambda<0.
 \end{cases}
-$$
+```
 
-$\lambda=-1$ is maximum feasible separation. $\lambda=0$ is independence.
-$0<\lambda<1$ is partial redundant overlap. `FULL_REDUNDANCY` is separate.
-$\lambda$ MUST NOT be described as Pearson correlation.
+$`\lambda=-1`$ is maximum feasible separation. $`\lambda=0`$ is independence.
+$`0<\lambda<1`$ is partial redundant overlap. `FULL_REDUNDANCY` is separate.
+$`\lambda`$ MUST NOT be described as Pearson correlation.
 
 #### Synergistic
 
-Synergy does not preserve the event meaning $C=A\lor B$. It requires an
-explicit base relationship, an interaction event $S_{AB}$, and
-$\eta\in[0,1]$. Let
+Synergy does not preserve the event meaning $`C=A\lor B`$. It requires an
+explicit base relationship, an interaction event $`S_{AB}`$, and
+$`\eta\in[0,1]`$. Let
 
-$$
+```math
 C_{\mathrm{base}}=A\lor B,
 \qquad
 p_{\mathrm{base}}=P(C_{\mathrm{base}}=1).
-$$
+```
 
 The interaction event has these conditional probabilities:
 
-$$
+```math
 P(S_{AB}=1\mid C_{\mathrm{base}}=1)=0,
 \qquad
 P(S_{AB}=1\mid C_{\mathrm{base}}=0)=\eta.
-$$
+```
 
 Define the synergistic output event as
 
-$$
+```math
 C=C_{\mathrm{base}}\lor S_{AB}.
-$$
+```
 
 Then
 
-$$
+```math
 p_C=p_{\mathrm{base}}+\eta(1-p_{\mathrm{base}})
 =1-(1-\eta)(1-p_{\mathrm{base}}).
-$$
+```
 
-The runtime MUST NOT infer $\eta$. Missing or unresolved base data is an
+The runtime MUST NOT infer $`\eta`$. Missing or unresolved base data is an
 error. Strength values below zero, above one, or non-finite are errors. At
-$\eta=0$, the result canonicalizes to the base relationship. It is not an
-active synergistic relationship. At $\eta=1$, $P(C=1)=1$. If
-$p_{\mathrm{base}}=1$, set $S_{AB}=0$ almost surely. The conditional
-probability on $C_{\mathrm{base}}=0$ is then not evaluated.
+$`\eta=0`$, the result canonicalizes to the base relationship. It is not an
+active synergistic relationship. At $`\eta=1`$, $`P(C=1)=1`$. If
+$`p_{\mathrm{base}}=1`$, set $`S_{AB}=0`$ almost surely. The conditional
+probability on $`C_{\mathrm{base}}=0`$ is then not evaluated.
 
 #### Dispositions and output
 
 Relationship mode changes observable overlap only. It does not change the
 existing internal disposition construction:
 
-$$
+```math
 m_C=\frac{d_A+d_B}{2},\qquad
 \sigma_C=\frac{|d_A-d_B|}{2}.
-$$
+```
 
-For each possible $d_C$, construct
+For each possible $`d_C`$, construct
 
-$$
+```math
 c_C=d_C\sqrt{p_C(1-p_C)},\qquad
 \rho_C=
 \begin{pmatrix}
 1-p_C & c_C\\
 c_C^* & p_C
 \end{pmatrix}.
-$$
+```
 
 The result is a `STATE_DIST`. Each concrete state satisfies the existing STATE
 invariants. Relationship modes MUST NOT add disposition reinforcement,
@@ -611,46 +611,46 @@ associativity or inverse law.
 
 #### Distributed inputs
 
-Let $\mu_A,\mu_B\in\operatorname{Dist}(\mathcal S)$ be the input state
+Let $`\mu_A,\mu_B\in\operatorname{Dist}(\mathcal S)`$ be the input state
 distributions. A relationship-aware operation requires an outer state coupling
 
-$$
+```math
 \pi\in\operatorname{Coupling}(\mu_A,\mu_B),
-$$
+```
 
-whose marginals are $\mu_A$ and $\mu_B$. This coupling selects which concrete
-states occur together. Marginal distributions alone MUST NOT determine $\pi$.
+whose marginals are $`\mu_A`$ and $`\mu_B`$. This coupling selects which concrete
+states occur together. Marginal distributions alone MUST NOT determine $`\pi`$.
 
-For each coupled pair $(\rho_A,\rho_B)$, the selected relationship $R$ defines
+For each coupled pair $`(\rho_A,\rho_B)`$, the selected relationship $`R`$ defines
 an inner event overlap
 
-$$
+```math
 q_R(\rho_A,\rho_B)
 =P(A=1,B=1\mid\rho_A,\rho_B,R).
-$$
+```
 
-For each pair, $q_R$ MUST satisfy the overlap bounds from this section. For a
-synergistic relationship, $q_R$ defines the base event $C_{\mathrm{base}}$.
-The interaction event then changes the output from $C_{\mathrm{base}}$ to $C$.
+For each pair, $`q_R`$ MUST satisfy the overlap bounds from this section. For a
+synergistic relationship, $`q_R`$ defines the base event $`C_{\mathrm{base}}`$.
+The interaction event then changes the output from $`C_{\mathrm{base}}`$ to $`C`$.
 
-The outer coupling $\pi$ and the inner overlap $q_R$ are different objects.
+The outer coupling $`\pi`$ and the inner overlap $`q_R`$ are different objects.
 Neither determines the other.
 
-Let $K_R(\rho_A,\rho_B;E)$ be the APPEND output kernel for a measurable set
-$E\subseteq\mathcal S$. The kernel uses $q_R$ to calculate the base output
+Let $`K_R(\rho_A,\rho_B;E)`$ be the APPEND output kernel for a measurable set
+$`E\subseteq\mathcal S`$. The kernel uses $`q_R`$ to calculate the base output
 probability. A synergistic kernel then applies the interaction-event rule. The
 kernel uses the disposition construction in this section. The relationship-aware
-result is the distribution $\nu$ defined by
+result is the distribution $`\nu`$ defined by
 
-$$
+```math
 \nu(E)=
 \int_{\mathcal S\times\mathcal S}
 K_R(\rho_A,\rho_B;E)\,d\pi(\rho_A,\rho_B).
-$$
+```
 
-$K_R$ MUST be a Markov kernel. For each input pair, it is a probability
-distribution over output states. For each measurable $E$, it is measurable in
-the input pair. The overlap function $q_R$ MUST also be measurable.
+$`K_R`$ MUST be a Markov kernel. For each input pair, it is a probability
+distribution over output states. For each measurable $`E`$, it is measurable in
+the input pair. The overlap function $`q_R`$ MUST also be measurable.
 
 Every relationship-aware APPEND over `STATE_DIST` inputs requires an explicit
 or trusted coupling. If no applicable coupling exists, the operation is
@@ -690,11 +690,11 @@ the sample count and seed when applicable. It MUST preserve its uncertainty
 interval when available, provenance, and exactness status. Sampling never
 replaces an exact operation without an explicit rule.
 
-For a model event with probability $P$, surprisal is
+For a model event with probability $`P`$, surprisal is
 
-$$
+```math
 \operatorname{surprisal}(P)=-\log(P).
-$$
+```
 
 The semantic definition MUST specify the logarithm base and units. It MUST
 specify the event, outcome, model identity, model version, precision,
