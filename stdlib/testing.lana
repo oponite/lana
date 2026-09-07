@@ -1,0 +1,16 @@
+// std/testing — assertion helpers over the `assert` host call.
+
+fn assert_eq(actual, expected) {
+    assert(actual == expected, "assert_eq failed");
+    return null;
+}
+
+fn assert_true(condition) {
+    assert(condition, "assert_true failed");
+    return null;
+}
+
+fn assert_false(condition) {
+    assert(condition == false, "assert_false failed");
+    return null;
+}

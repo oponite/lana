@@ -1,0 +1,4 @@
+// LIP-008: max/min require a certain Tensor (extract .prediction first).
+let t = tensor([1.0, 2.0]);
+let u = { prediction: t, uncertainty: t };
+max(u);

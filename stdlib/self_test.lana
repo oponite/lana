@@ -1,0 +1,116 @@
+import "./string.lana" as string;
+import "./math.lana" as math;
+import "./collections.lana" as collections;
+import "./testing.lana" as testing;
+import "./random.lana" as random;
+import "./iterators.lana" as iterators;
+import "./datetime.lana" as datetime;
+import "./csv.lana" as csv;
+import "./toml.lana" as toml;
+
+let parts = string.split("a,b,c", ",");
+assert(array_length(parts) == 3, "split length");
+assert(parts[0] == "a", "split[0]");
+assert(parts[1] == "b", "split[1]");
+assert(parts[2] == "c", "split[2]");
+
+assert(string.join(["a", "b"], "-") == "a-b", "join");
+assert(string.starts_with("abc", "a") == true, "starts_with");
+assert(string.starts_with("abc", "x") == false, "starts_with neg");
+assert(string.ends_with("abc", "c") == true, "ends_with");
+assert(string.contains("abc", "b") == true, "contains");
+assert(string.contains("abc", "z") == false, "contains neg");
+assert(string.substring("abcdef", 1, 3) == "bc", "substring");
+assert(string.trim("  x  ") == "x", "trim");
+assert(string.replace("abc", "b", "x") == "axc", "replace");
+
+assert(math.abs(-5) == 5, "abs");
+assert(math.min(3, 5) == 3, "min");
+assert(math.max(3, 5) == 5, "max");
+assert(math.clamp(10, 0, 5) == 5, "clamp hi");
+assert(math.clamp(-1, 0, 5) == 0, "clamp lo");
+assert(math.ceil(3.2) == 4, "ceil up");
+assert(math.ceil(-3.2) == -3, "ceil neg");
+assert(math.ceil(4) == 4, "ceil int");
+assert(math.idiv(7, 2) == 3, "idiv pos");
+assert(math.idiv(-7, 2) == -4, "idiv neg floor");
+assert(math.idiv(7, -2) == -4, "idiv neg divisor");
+assert(math.mod(7, 2) == 1, "mod pos");
+assert(math.mod(-7, 2) == 1, "mod floor sign");
+assert(math.mod(7, -2) == -1, "mod neg divisor");
+
+let set = collections.set_new();
+set = collections.set_add(set, "a");
+set = collections.set_add(set, "b");
+assert(collections.set_contains(set, "a") == true, "set contains");
+assert(collections.set_contains(set, "z") == false, "set not contains");
+assert(collections.set_contains(collections.set_union(set, collections.set_add(collections.set_new(), "c")), "c") == true, "set union");
+
+testing.assert_eq(1, 1);
+testing.assert_true(true);
+testing.assert_false(false);
+
+random.random_seed(7);
+let f = random.random_float();
+assert(f >= 0.0, "random_float >= 0");
+assert(f < 1.0, "random_float < 1");
+let i = random.random_int(1, 6);
+assert(i >= 1, "random_int >= 1");
+assert(i <= 6, "random_int <= 6");
+let c = random.random_choice(["a", "b", "c"]);
+if (c != "a") { if (c != "b") { assert(c == "c", "random_choice in set"); } }
+
+let total = 0;
+for x in iterators.iter([1, 2, 3]) { total = total + x; }
+assert(total == 6, "iter sum");
+
+let t = datetime.now();
+assert(t > 0, "now positive");
+assert(datetime.add_duration(t, 10) == t + 10, "add_duration");
+assert(datetime.format_timestamp(0) == "1970-01-01T00:00:00Z", "epoch");
+assert(datetime.format_timestamp(86400) == "1970-01-02T00:00:00Z", "one day");
+assert(datetime.format_timestamp(951782400) == "2000-02-29T00:00:00Z", "leap day");
+assert(datetime.format_timestamp(1780000000) == "2026-05-28T20:26:40Z", "recent");
+assert(datetime.format_timestamp(-1) == "1969-12-31T23:59:59Z", "negative");
+let p = datetime.parse_timestamp("2000-02-29T00:00:00Z");
+assert(p[0] == true, "parse ok");
+assert(p[1] == 951782400, "parse leap day");
+let p2 = datetime.parse_timestamp("2026-05-28T20:26:40Z");
+assert(p2[0] == true, "parse ok 2");
+assert(p2[1] == 1780000000, "parse recent");
+let p3 = datetime.parse_timestamp("1970-01-01T00:00:00Z");
+assert(p3[0] == true, "parse epoch");
+assert(p3[1] == 0, "parse epoch value");
+let pbad = datetime.parse_timestamp("not-a-date");
+assert(pbad[0] == false, "parse rejects garbage");
+let pbad2 = datetime.parse_timestamp("2000-13-01T00:00:00Z");
+assert(pbad2[0] == false, "parse rejects bad month");
+let round = datetime.parse_timestamp(datetime.format_timestamp(1780000000));
+assert(round[0] == true, "roundtrip ok");
+assert(round[1] == 1780000000, "roundtrip value");
+
+let csv_rows = csv.parse("a,b,c\n1,2,3");
+assert(csv_rows[0] == true, "csv parse ok");
+assert(array_length(csv_rows[1]) == 2, "csv two rows");
+assert(csv_rows[1][0][0] == "a", "csv row0 col0");
+assert(csv_rows[1][1][2] == "3", "csv row1 col2");
+assert(csv.stringify([["a", "b"], ["1", "2"]]) == "a,b\n1,2", "csv stringify");
+assert(csv.stringify([["a,b", "c"]]) == "\"a,b\",c", "csv quote comma");
+assert(csv.stringify([["a\"b"]]) == "\"a\"\"b\"", "csv quote escape");
+let csv_round = csv.parse(csv.stringify([["x", "y,z"], ["1", "2"]]));
+assert(csv_round[0] == true, "csv roundtrip ok");
+assert(csv_round[1][0][1] == "y,z", "csv roundtrip quoted");
+
+let toml_text = "schema = 1\nname = \"demo\"\nversion = \"1.0.0\"\n\n[dependencies]\nlana-http = \"1.2.0\"\n";
+let toml_map = toml.parse(toml_text);
+assert(toml_map[0] == true, "toml parse ok");
+let toml_root = toml_map[1];
+assert(map_get(toml_root, "schema") == 1, "toml schema number");
+assert(map_get(toml_root, "name") == "demo", "toml name string");
+assert(map_get(map_get(toml_root, "dependencies"), "lana-http") == "1.2.0", "toml section");
+let toml_round = toml.parse(toml.stringify(toml_root));
+assert(toml_round[0] == true, "toml roundtrip ok");
+assert(map_get(toml_round[1], "name") == "demo", "toml roundtrip name");
+assert(map_get(map_get(toml_round[1], "dependencies"), "lana-http") == "1.2.0", "toml roundtrip dep");
+
+print("stdlib self-test passed");

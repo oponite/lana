@@ -6,8 +6,18 @@ if(NOT LANA_VERSION)
 endif()
 project(lana_vm VERSION ${LANA_VERSION} LANGUAGES C)
 
+# The Metal backend (LIP-004 section 5) is an Objective-C translation unit on
+# Apple platforms; enable the Objective-C language there so `vm/c/metal.m`
+# compiles. Non-Apple builds never reference it.
+if(APPLE)
+    enable_language(OBJC)
+endif()
+
 include(GNUInstallDirs)
 find_package(Threads REQUIRED)
+# libffi powers the LIP-018 two-way FFI's arbitrary-signature calls.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFI REQUIRED IMPORTED_TARGET libffi)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

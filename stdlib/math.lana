@@ -1,0 +1,43 @@
+// std/math — numeric helpers. Pure Lana over the ordinary arithmetic
+// operators and the `floor` host call. Transcendental functions (sqrt, pow,
+// exp, log, trig) require math host calls and are added in a later phase.
+
+fn abs(x) {
+    if (x < 0) { return -x; }
+    return x;
+}
+
+fn min(a, b) {
+    if (a < b) { return a; }
+    return b;
+}
+
+fn max(a, b) {
+    if (a > b) { return a; }
+    return b;
+}
+
+fn clamp(x, lo, hi) {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+}
+
+// ceil(x) rounds toward positive infinity. Derived from the `floor` host call:
+// ceil(x) = -floor(-x).
+fn ceil(x) {
+    return -floor(-x);
+}
+
+// idiv(a, b) is floor division: the largest integer n with n <= a / b. Rounds
+// toward negative infinity, so idiv(-7, 2) == -4. Calendar math (formatting
+// timestamps) needs this rather than truncation.
+fn idiv(a, b) {
+    return floor(a / b);
+}
+
+// mod(a, b) is the floor-division remainder: a - b * idiv(a, b). The result
+// has the same sign as b, consistent with idiv. mod(a, 0) is NaN (IEEE).
+fn mod(a, b) {
+    return a - b * idiv(a, b);
+}

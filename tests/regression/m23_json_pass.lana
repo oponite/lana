@@ -1,0 +1,40 @@
+import "std/json" as json;
+
+// JSON text codec (LIP-023 §1–3).
+let parsed = json.parse("{\"a\": 1, \"b\": [true, null, \"x\"]}");
+assert(parsed[0] == true, "json parse ok");
+let root = parsed[1];
+assert(map_get(root, "a") == 1, "json number");
+assert(map_get(root, "b")[0] == true, "json bool");
+assert(map_get(root, "b")[1] == null, "json null");
+assert(map_get(root, "b")[2] == "x", "json string");
+
+// Stringify is deterministic (sorted keys).
+assert(json.stringify(root) == "{\"a\":1,\"b\":[true,null,\"x\"]}", "json sorted stringify");
+
+// Large integer beyond 2^53 is preserved as a string.
+let big = json.parse("9007199254740993");
+assert(big[0] == true, "json big parse ok");
+assert(big[1] == "9007199254740993", "json big preserved as string");
+
+// Duplicate keys: last occurrence wins.
+let dup = json.parse("{\"a\":1,\"a\":2}");
+assert(dup[0] == true, "json dup parse ok");
+assert(map_get(dup[1], "a") == 2, "json dup last wins");
+
+// Invalid JSON yields a tagged error, not a crash.
+let bad = json.parse("[1,2] x");
+assert(bad[0] == false, "json invalid error");
+
+// Provenance (LIP-023 §4): a parsed value is an Information value rooted at
+// the source text; the derivation records the text identity (SHA-256).
+let prov = json.parse("{\"a\": 1, \"b\": [true, null, \"x\"]}");
+assert(prov[0] == true, "json prov parse ok");
+let prov_snapshot = inspect_information(prov[1]);
+assert(prov_snapshot.reactive, "parsed value is not Information");
+let prov_derivation = map_get(prov_snapshot, "derivation");
+assert(map_get(prov_derivation, "operation") == "json_parse", "provenance operation");
+let prov_source = map_get(prov_derivation, "source");
+assert(map_get(prov_source, "label") == "96962523fe9b5045b716fa9eb3fcf6f02bd5d20853d577c9376b1fb916b08d7f", "provenance text identity");
+
+print("M23_JSON_PASS");

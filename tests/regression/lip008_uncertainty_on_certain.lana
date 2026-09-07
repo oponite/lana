@@ -1,0 +1,3 @@
+// LIP-008: `.uncertainty` on a certain Tensor is a type error.
+let t = tensor([1.0, 2.0]);
+t.uncertainty;

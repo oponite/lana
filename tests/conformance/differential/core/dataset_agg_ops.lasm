@@ -1,0 +1,28 @@
+.function main 0 16
+LOAD_CONST R0 5
+LAZY R1 gen R0
+HOST_CALL dataset R1 1 R2
+LOAD_CONST R3 g
+HOST_CALL dataset_group_by R2 2 R4
+LOAD_CONST R6 count
+ARRAY_NEW R5 R6 1
+HOST_CALL dataset_aggregate R4 2 R7
+HOST_CALL dataset_materialize R7 1 R8
+PRINT R8
+LOAD_CONST R3 x
+HOST_CALL dataset_sort R2 2 R9
+HOST_CALL dataset_materialize R9 1 R10
+PRINT R10
+MOVE R3 R2
+LOAD_CONST R4 x
+HOST_CALL dataset_join R2 3 R11
+HOST_CALL dataset_materialize R11 1 R12
+PRINT R12
+RETURN R0
+.function gen 1 8
+LOAD_CONST R1 x
+MOVE R2 R0
+LOAD_CONST R3 g
+LOAD_CONST R4 1
+HOST_CALL map_new R1 4 R5
+RETURN R5

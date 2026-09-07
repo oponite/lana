@@ -1,0 +1,204 @@
+// account_hold_gate.lana -- multi-account (UMA + SMA) reconciliation hold gate.
+// Formerly "lana-uma-hold"; renamed to account_hold_gate and generalized to
+// take an arbitrary array of accounts, each tagged with account_type
+// ("UMA", "SMA", or any other sleeve label ARIS uses). Each account is
+// evaluated independently against the same shared aggregate-portfolio side;
+// this script does not sum sleeves together, since the source spec never
+// said whether the aggregate should reconcile per-sleeve or against a sum,
+// and Lana does not infer that.
+//
+// Evidence shape: each side (aggregate_value, account_value) is a lightweight
+// evidence record -- {"status", "exactness", "value", "source", "observed_at"}
+// -- modeled on, but not identical to, integrations/lana/evidence.lana's
+// contract (status: resolved/unknown/not_measured/insufficient_evidence/
+// conflict; exactness: exact/sample/approximate). The three-tier tag from the
+// source spec maps onto that vocabulary exactly:
+//   observed = status "resolved" AND exactness "exact"
+//   modeled  = status "resolved" AND exactness "approximate" or "sample"
+//   unknown  = anything else (stale, pending, or not yet fed)
+// This file does not import evidence.lana/policy.lana directly: as of this
+// build, a map argument loses its keys when it crosses a two-level transitive
+// import, which is exactly the import depth those two modules would add.
+// Once that is fixed, the status_tier/worse_tier helpers below can be
+// replaced with policy.evidence_status() + evidence.lana's exactness field
+// directly.
+//
+// Every map this script BUILDS uses map_new()/map_set() instead of a {...}
+// literal. This build's self-hosted compiler has a confirmed bug where {...}
+// object-literal codegen (compiler/emitter.lana's emit_map) corrupts a key's
+// stored text for some map shapes (repro handed to the maintainer separately,
+// flagged as task_3e124d4a); map_new()/map_set() is unaffected on this build
+// and was verified directly. Reading keys with request["field"] is unaffected
+// either way and is used normally throughout.
+//
+// mismatch_pct formula is assumed as |aggregate - account| / |aggregate| * 100
+// (undefined by the source spec); ARIS should confirm or override it.
+//
+// corp_action_pending is carried into the audit record only. The source
+// spec's literal policy line ("IF status < exact OR mismatch% > threshold
+// THEN Hold ... ELSE auto-clear") never mentions the corp-action flag, so
+// this gate does not let it change the decision -- that rule is still
+// unresolved and belongs to ARIS/Mukesh, not to an inferred default here.
+//
+// Request:  {"schema":1, "kind":"account_hold_request",
+//            "mismatch_threshold_pct": <number, required, supplied by ARIS>,
+//            "accounts": [{"account_id", "account_type" ("UMA"|"SMA"|...),
+//                          "corp_action_pending" (optional bool),
+//                          "aggregate_value": <evidence>,
+//                          "account_value": <evidence>}, ...]}
+// Response: {"schema":1, "kind":"account_hold_decision",
+//            "mismatch_threshold_pct", "accounts": [<per-account decision>],
+//            "holds": [account_id, ...], "cleared": [account_id, ...]}
+// Per-account decision: {"account_id", "account_type", "aggregate_status",
+//            "account_status", "combined_status", "mismatch_pct",
+//            "corp_action_pending", "clearance" ("hold"|"auto_clear"),
+//            "pm_signoff_required", "pm_signoff" (null; filled in by the
+//            ledger once a PM actually signs off), "reasons", "audit"}
+
+import "bridge.lana" as bridge;
+
+fn abs_value(value) {
+    if (value < 0) {
+        return 0 - value;
+    }
+    return value;
+}
+
+fn status_tier(evidence) {
+    if (!map_has(evidence, "status")) { return "unknown"; }
+    if (evidence["status"] != "resolved") { return "unknown"; }
+    if (!map_has(evidence, "exactness")) { return "unknown"; }
+    if (evidence["exactness"] == "exact") { return "exact"; }
+    if (evidence["exactness"] == "approximate") { return "modeled"; }
+    if (evidence["exactness"] == "sample") { return "modeled"; }
+    return "unknown";
+}
+
+fn tier_rank(tier) {
+    if (tier == "exact") { return 2; }
+    if (tier == "modeled") { return 1; }
+    return 0;
+}
+
+fn worse_tier(left, right) {
+    if (tier_rank(left) <= tier_rank(right)) { return left; }
+    return right;
+}
+
+fn mismatch_pct(aggregate_evidence, account_evidence) {
+    if (!map_has(aggregate_evidence, "value")) { return null; }
+    if (!map_has(account_evidence, "value")) { return null; }
+    let aggregate_value = aggregate_evidence["value"];
+    let account_value = account_evidence["value"];
+    // A status of "unknown" legitimately carries no numeric value at all --
+    // but a feed can also send the key with an explicit null. Both must abort
+    // the calculation instead of hitting a null-arithmetic type error.
+    if (aggregate_value == null) { return null; }
+    if (account_value == null) { return null; }
+    if (aggregate_value == 0) { return null; }
+    return abs_value(aggregate_value - account_value) / abs_value(aggregate_value) * 100;
+}
+
+fn decide_account(mismatch_threshold_pct, account) {
+    assert(map_has(account, "account_id"), "account_id is required");
+    assert(map_has(account, "account_type"), "account_type is required");
+    assert(map_has(account, "aggregate_value"), "aggregate_value evidence is required");
+    assert(map_has(account, "account_value"), "account_value evidence is required");
+
+    let aggregate_evidence = account["aggregate_value"];
+    let account_evidence = account["account_value"];
+    let aggregate_tier = status_tier(aggregate_evidence);
+    let account_tier = status_tier(account_evidence);
+    let combined_tier = worse_tier(aggregate_tier, account_tier);
+    let mismatch = mismatch_pct(aggregate_evidence, account_evidence);
+
+    let hold = false;
+    let reasons = [];
+    if (combined_tier != "exact") {
+        hold = true;
+        array_push(reasons, string_concat("combined status is ", combined_tier));
+    }
+    if (mismatch == null) {
+        hold = true;
+        array_push(reasons, "mismatch percent could not be computed from the supplied evidence");
+    } else {
+        if (mismatch > mismatch_threshold_pct) {
+            hold = true;
+            array_push(reasons, "mismatch percent exceeds the policy threshold");
+        }
+    }
+    if (!hold) {
+        array_push(reasons, "combined status is exact and mismatch is within threshold");
+    }
+
+    let clearance = "auto_clear";
+    let pm_signoff_required = false;
+    if (hold) {
+        clearance = "hold";
+        pm_signoff_required = true;
+    }
+
+    let corp_action_pending = false;
+    if (map_has(account, "corp_action_pending")) {
+        corp_action_pending = account["corp_action_pending"];
+    }
+
+    let audit = map_new();
+    map_set(audit, "aggregate_evidence", aggregate_evidence);
+    map_set(audit, "account_evidence", account_evidence);
+
+    let decision = map_new();
+    map_set(decision, "account_id", account["account_id"]);
+    map_set(decision, "account_type", account["account_type"]);
+    map_set(decision, "aggregate_status", aggregate_tier);
+    map_set(decision, "account_status", account_tier);
+    map_set(decision, "combined_status", combined_tier);
+    map_set(decision, "mismatch_pct", mismatch);
+    map_set(decision, "corp_action_pending", corp_action_pending);
+    map_set(decision, "clearance", clearance);
+    map_set(decision, "pm_signoff_required", pm_signoff_required);
+    map_set(decision, "pm_signoff", null);
+    map_set(decision, "reasons", reasons);
+    map_set(decision, "audit", audit);
+    return decision;
+}
+
+fn gate_contract(request) {
+    assert(request["schema"] == 1, "unsupported account_hold schema");
+    assert(map_has(request, "kind"), "kind is required");
+    assert(request["kind"] == "account_hold_request", "invalid account_hold kind");
+    assert(map_has(request, "mismatch_threshold_pct"), "mismatch_threshold_pct must be supplied by ARIS; Lana does not infer it");
+    assert(map_has(request, "accounts"), "accounts is required");
+    return true;
+}
+
+fn decide(request) {
+    gate_contract(request);
+    let mismatch_threshold_pct = request["mismatch_threshold_pct"];
+    let accounts = request["accounts"];
+    let decisions = [];
+    let holds = [];
+    let cleared = [];
+    let index = 0;
+    while (index < array_length(accounts)) {
+        let decision = decide_account(mismatch_threshold_pct, accounts[index]);
+        array_push(decisions, decision);
+        if (decision["clearance"] == "hold") {
+            array_push(holds, decision["account_id"]);
+        } else {
+            array_push(cleared, decision["account_id"]);
+        }
+        index = index + 1;
+    }
+    let response = map_new();
+    map_set(response, "schema", 1);
+    map_set(response, "kind", "account_hold_decision");
+    map_set(response, "mismatch_threshold_pct", mismatch_threshold_pct);
+    map_set(response, "accounts", decisions);
+    map_set(response, "holds", holds);
+    map_set(response, "cleared", cleared);
+    return response;
+}
+
+let request = bridge.read_request();
+bridge.write_response(decide(request));

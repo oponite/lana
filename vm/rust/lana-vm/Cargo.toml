@@ -7,3 +7,10 @@ description = "Canonical Rust register VM for Lana (phase 2 of the Rust runtime 
 
 [dependencies]
 lana-bytecode = { workspace = true }
+# LIP-018 two-way FFI: dlopen a shared library and resolve typed symbols.
+libloading = "0.8"
+
+# Explicit GPU matmul (LIP-004 section 5). macOS-only: the Metal framework is
+# the GPU backend; every other platform returns "unsupported" from gpu_matmul.
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.29"

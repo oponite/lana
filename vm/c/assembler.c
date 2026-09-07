@@ -202,6 +202,12 @@ static int field_id(const char *name) {
     if (strcmp(name, "p") == 0) return 0;
     if (strcmp(name, "d") == 0 || strcmp(name, "d_re") == 0) return 1;
     if (strcmp(name, "d_im") == 0) return 2;
+    if (strcmp(name, "params") == 0) return 0;
+    if (strcmp(name, "steps") == 0) return 1;
+    if (strcmp(name, "mean") == 0) return 0;
+    if (strcmp(name, "variance") == 0) return 1;
+    if (strcmp(name, "samples") == 0) return 2;
+    if (strcmp(name, "history") == 0) return 3;
     return -1;
 }
 
@@ -246,7 +252,34 @@ static int host_call_id(const char *name) {
         "shared_revision", "shared_identity", "shared_wait",
         "information_inspect", "directory_list", "directory_create",
         "path_exists", "write_text_atomic", "hash_update", "lazy_bound",
-        "correlated", "surprisal"
+        "correlated", "surprisal",
+        "tensor_alloc", "tensor_zeros", "tensor_ones", "tensor_eye",
+        "tensor_dtype", "tensor_shape", "tensor_ndim", "tensor_add",
+        "tensor_sub", "tensor_mul", "tensor_div", "tensor_matmul",
+        "tensor_sum", "tensor_mean", "tensor_max", "tensor_min",
+        "tensor", "tensor_complex", "grant", "revoke",
+        "set_new", "set_add", "set_contains", "set_union", "set_intersect",
+        "set_difference", "getenv", "random_seed", "floor", "string_to_number",
+        "type_of", "format", "format_number", "char_length",
+        "string_codepoint_slice", "to_upper", "to_lower",
+        "regex_compile", "regex_match", "regex_search", "regex_replace",
+        "gpu_matmul",
+        "density_operator", "povm", "channel", "observable",
+        "tensor_product", "partial_trace", "measure_with", "apply_to",
+        "expect", "mix", "trace_distance", "is_separable", "to_state",
+        "grad", "vjp", "sgd", "adam", "train",
+        "mcmc", "vi", "smc", "infer", "update", "resume",
+        "state_tensor", "append", "measure", "transform",
+        "run_async", "future_all", "future_race", "sleep",
+        "dataset", "dataset_filter", "dataset_map", "dataset_select",
+        "dataset_limit", "dataset_sort", "dataset_group_by", "dataset_aggregate",
+        "dataset_join", "dataset_materialize", "dataset_explain",
+        "store_open", "store_put", "store_get", "store_delete", "store_commit",
+        "store_scan", "store_current_revision", "policy_evaluate",
+        "policy_store_decision", "ledger_append", "ledger_query",
+        "store_get_at", "store_snapshot", "store_commit_if",
+        "adapter_load", "adapter_fetch",
+        "ffi_declare", "ffi_load", "ffi_call"
     };
     size_t index;
     for (index = 0; index < sizeof(names) / sizeof(names[0]); ++index)
@@ -576,6 +609,62 @@ static LanaError emit_line(LanaChunk *chunk, char **tokens, size_t count, uint32
             function_index = 0u;
         }
         ins.opcode = OP_BOOTSTRAP; ins.a = a; ins.b = (uint32_t)function_index; ins.c = c; ins.imm = b;
+    } else if (strcmp(tokens[0], "GENERATOR") == 0) {
+        size_t function_index;
+        EXPECT(5); REG(tokens[2], a); number = strtod(tokens[3], NULL); REG(tokens[4], b);
+        for (function_index = 0; function_index < chunk->function_count; ++function_index)
+            if (strcmp(tokens[1], chunk->functions[function_index].name) == 0) break;
+        if (number < 0.0 || number > LANA_MAX_REGISTERS) return LANA_ERR_FORMAT;
+        if (function_index == chunk->function_count) {
+            if (*function_fixup_count >= LANA_ASSEMBLER_MAX_FIXUPS ||
+                strlen(tokens[1]) >= sizeof(function_fixups[0].name)) return LANA_ERR_LIMIT;
+            strcpy(function_fixups[*function_fixup_count].name, tokens[1]);
+            function_fixups[*function_fixup_count].instruction = (uint32_t)chunk->code_count;
+            ++*function_fixup_count;
+            function_index = 0u;
+        }
+        ins.opcode = OP_GENERATOR; ins.a = b; ins.b = (uint32_t)function_index; ins.c = a; ins.imm = (uint32_t)number;
+    } else if (strcmp(tokens[0], "YIELD") == 0) {
+        EXPECT(3); REG(tokens[1], a); REG(tokens[2], b);
+        ins.opcode = OP_YIELD; ins.a = a; ins.b = b;
+    } else if (strcmp(tokens[0], "NEXT") == 0) {
+        EXPECT(3); REG(tokens[1], a); REG(tokens[2], b);
+        ins.opcode = OP_NEXT; ins.a = a; ins.b = b;
+    } else if (strcmp(tokens[0], "ASYNC") == 0) {
+        size_t function_index;
+        EXPECT(5); REG(tokens[2], a); number = strtod(tokens[3], NULL); REG(tokens[4], b);
+        for (function_index = 0; function_index < chunk->function_count; ++function_index)
+            if (strcmp(tokens[1], chunk->functions[function_index].name) == 0) break;
+        if (number < 0.0 || number > LANA_MAX_REGISTERS) return LANA_ERR_FORMAT;
+        if (function_index == chunk->function_count) {
+            if (*function_fixup_count >= LANA_ASSEMBLER_MAX_FIXUPS ||
+                strlen(tokens[1]) >= sizeof(function_fixups[0].name)) return LANA_ERR_LIMIT;
+            strcpy(function_fixups[*function_fixup_count].name, tokens[1]);
+            function_fixups[*function_fixup_count].instruction = (uint32_t)chunk->code_count;
+            ++*function_fixup_count;
+            function_index = 0u;
+        }
+        ins.opcode = OP_ASYNC; ins.a = b; ins.b = (uint32_t)function_index; ins.c = a; ins.imm = (uint32_t)number;
+    } else if (strcmp(tokens[0], "AWAIT") == 0) {
+        EXPECT(3); REG(tokens[1], a); REG(tokens[2], b);
+        ins.opcode = OP_AWAIT; ins.a = a; ins.b = b;
+    } else if (strcmp(tokens[0], "RUN_ASYNC") == 0) {
+        EXPECT(3); REG(tokens[1], a); REG(tokens[2], b);
+        ins.opcode = OP_RUN_ASYNC; ins.a = a; ins.b = b;
+    } else if (strcmp(tokens[0], "LOAD_FUNCTION") == 0) {
+        size_t function_index;
+        EXPECT(3); REG(tokens[1], a);
+        for (function_index = 0; function_index < chunk->function_count; ++function_index)
+            if (strcmp(tokens[2], chunk->functions[function_index].name) == 0) break;
+        if (function_index == chunk->function_count) {
+            if (*function_fixup_count >= LANA_ASSEMBLER_MAX_FIXUPS ||
+                strlen(tokens[2]) >= sizeof(function_fixups[0].name)) return LANA_ERR_LIMIT;
+            strcpy(function_fixups[*function_fixup_count].name, tokens[2]);
+            function_fixups[*function_fixup_count].instruction = (uint32_t)chunk->code_count;
+            ++*function_fixup_count;
+            function_index = 0u;
+        }
+        ins.opcode = OP_LOAD_FUNCTION; ins.a = a; ins.b = (uint32_t)function_index; ins.c = 0u; ins.imm = 0u;
     } else if (strcmp(tokens[0], "JOINT_BUILD") == 0) {
         uint32_t joint_count;
         EXPECT(5); REG(tokens[1], a); REG(tokens[2], b);
@@ -795,7 +884,8 @@ LanaError lana_assemble_file(const char *path, LanaChunk *chunk, LanaErrorInfo *
                 result = LANA_ERR_FORMAT;
                 break;
             }
-            if ((uint32_t)version != LABC_VERSION && (uint32_t)version != LABC_VERSION_1) {
+            if ((uint32_t)version != LABC_VERSION && (uint32_t)version != LABC_VERSION_1 &&
+                (uint32_t)version != LABC_VERSION_3 && (uint32_t)version != LABC_VERSION_4) {
                 result = LANA_ERR_INCOMPATIBLE_FORMAT; break;
             }
             chunk->version = (uint32_t)version;

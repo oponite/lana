@@ -1,0 +1,10 @@
+// LIP-024: sleep. A sleep future completes after its duration and yields null.
+async fn main_async() {
+    let s = sleep(5);
+    let r = await s;
+    return r;
+}
+
+let r = run_async(main_async());
+assert(r == null, "sleep should yield null");
+print("ASYNC_SLEEP_PASS");

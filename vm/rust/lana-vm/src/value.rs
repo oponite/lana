@@ -222,6 +222,236 @@ pub struct Adt {
     pub fields: Vec<Value>,
 }
 
+/// A suspended generator frame (LIP-022 §2), mirroring `struct LanaGenerator`
+/// in `vm/include/value.h`. `registers` is the snapshot of the generator's
+/// frame registers; register 0 is reserved for the generator value itself and
+/// is never part of the saved state.
+#[derive(Debug, Clone)]
+pub struct Generator {
+    pub function: u32,
+    pub ip: usize,
+    pub registers: Vec<Value>,
+    pub exhausted: bool,
+}
+
+/// A suspended async frame (LIP-024 §5), mirroring `struct LanaFuture` in
+/// `vm/include/value.h`. `registers` is the snapshot of the async frame's
+/// registers; register 0 is reserved for the future value itself and is never
+/// part of the saved state. `ready` is false while the future is suspended on
+/// an `OP_AWAIT`; the event loop only schedules futures with `ready == true`.
+#[derive(Debug, Clone)]
+pub struct Future {
+    pub function: u32,
+    pub ip: usize,
+    pub registers: Vec<Value>,
+    pub exhausted: bool,
+    pub ready: bool,
+    /// Rust-internal event-loop state (not part of the C11 `LanaFuture`
+    /// contract): true while the future sits in the ready queue, so a future
+    /// is never enqueued twice.
+    pub queued: bool,
+}
+
+/// An immutable set of ordinary values (LIP-022 §1), mirroring `struct LanaSet`
+/// in `vm/include/value.h`. Membership is linear over `items` (no hash
+/// function), matching the C11 VM. `STATE`, `STATE_DIST`, and `Information` are
+/// not set members.
+#[derive(Debug, Clone, Default)]
+pub struct Set {
+    pub items: Vec<Value>,
+}
+
+/// A compiled regular expression (LIP-021 §2), mirroring `struct LanaRegex` in
+/// `vm/include/value.h`: a Thompson NFA program plus its character classes.
+/// No `Value` references inside, so it is shared immutably through `Arc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegexOp {
+    Char,
+    Any,
+    Class,
+    Bol,
+    Eol,
+    Split,
+    Jmp,
+    Match,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RegexInst {
+    pub op: RegexOp,
+    pub c: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegexClass {
+    pub bitmap: [u32; 8],
+    pub negated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Regex {
+    pub insts: Vec<RegexInst>,
+    pub classes: Vec<RegexClass>,
+}
+
+/// LIP-006 optimizer descriptor, mirroring `struct LanaOptimizer` in
+/// `vm/include/value.h`. `name` is "sgd" or "adam". For SGD, `learning_rate`
+/// and `momentum` are used and the Adam fields are zero; for Adam,
+/// `learning_rate`, `beta1`, `beta2`, and `epsilon` are used and `momentum` is
+/// zero.
+#[derive(Debug, Clone)]
+pub struct Optimizer {
+    pub name: Arc<str>,
+    pub learning_rate: f64,
+    pub momentum: f64,
+    pub beta1: f64,
+    pub beta2: f64,
+    pub epsilon: f64,
+}
+
+/// LIP-006 training result, mirroring `struct LanaTrainingResult` in
+/// `vm/include/value.h`: the trained parameters plus the per-step history.
+/// LIP-010 adds the model/loss function indices and the optimizer descriptor so
+/// an incremental `update` (or a reactive recomputation) can resume the
+/// optimizer from the last step map. LIP-014 adds the resolved dataset and the
+/// effective batch size so `resume` can continue the run from any step.
+#[derive(Debug, Clone)]
+pub struct TrainingResult {
+    pub params: Arc<Tensor>,
+    pub steps: Arc<Mutex<Array>>,
+    pub model_function: u32,
+    pub loss_function: u32,
+    pub optimizer: Arc<Optimizer>,
+    pub data: Value,
+    pub batch_size: usize,
+}
+
+/// LIP-009 inference algorithm descriptor, mirroring
+/// `struct LanaInferenceAlgorithm` in `vm/include/value.h`. `name` is "mcmc",
+/// "vi", or "smc". For MCMC, `samples` and `burn_in` are used; for VI, `family`
+/// ("gaussian"/"mean_field") and `iterations` are used; for SMC, `samples` is
+/// the particle count. Unused fields are zero (or `None` for `family`).
+#[derive(Debug, Clone)]
+pub struct InferenceAlgorithm {
+    pub name: Arc<str>,
+    pub family: Option<Arc<str>>,
+    pub samples: f64,
+    pub burn_in: f64,
+    pub iterations: f64,
+}
+
+/// LIP-009 posterior, mirroring `struct LanaPosterior` in `vm/include/value.h`:
+/// a distribution over parameters produced by `infer`. `mean` is the point
+/// estimate, `variance` the per-element uncertainty, `samples` the sample
+/// matrix (None for VI), `steps` the per-step provenance, and `seed` the RNG
+/// seed the run used.
+#[derive(Debug, Clone)]
+pub struct Posterior {
+    pub mean: Arc<Tensor>,
+    pub variance: Arc<Tensor>,
+    pub samples: Option<Arc<Tensor>>,
+    pub steps: Arc<Mutex<Array>>,
+    pub seed: u64,
+}
+
+/// LIP-015 lazy relational-algebra plan node, mirroring `struct LanaDataset` in
+/// `vm/include/value.h`. `op` selects the operator; `source` is the upstream
+/// plan (a `Lazy` value for `Source`, otherwise another `Dataset`). `function`
+/// is the predicate/transform function index for `Filter`/`Map`. `columns` is
+/// the column-name array for `Select`; `key` is the column name for
+/// `Sort`/`GroupBy`/`Join`; `limit` is the row cap for `Limit`; `other` is the
+/// right-hand dataset for `Join`; `aggregate` is the aggregate descriptor
+/// (e.g. `["sum","v"]` or `["count"]`) for `Aggregate`.
+#[derive(Debug, Clone)]
+pub struct Dataset {
+    pub op: DatasetOp,
+    pub source: Value,
+    pub function: u32,
+    pub columns: Value,
+    pub key: Value,
+    pub limit: Value,
+    pub other: Value,
+    pub aggregate: Value,
+}
+
+/// The dataset operator, matching `LanaDatasetOp` in `vm/include/value.h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatasetOp {
+    Source,
+    Filter,
+    Map,
+    Select,
+    Limit,
+    Sort,
+    GroupBy,
+    Aggregate,
+    Join,
+}
+
+/// A first-class tensor, mirroring `struct LanaTensor` in `vm/include/tensor.h`.
+///
+/// `data` is a row-major buffer of `f64` values; for a complex tensor the real
+/// and imaginary parts are interleaved `[re, im, re, im, …]`, so the buffer
+/// length is `prod(shape) * (is_complex ? 2 : 1)`. `offset` is the first
+/// element in elements (0 for a base tensor). A slicing view shares the source
+/// buffer through `Arc` and carries its own shape, strides, and offset, so
+/// strides may be non-contiguous; every element access goes through `offset`
+/// and `strides`. Tensors are immutable once constructed, so `Arc` sharing
+/// (matching the C11 VM's GC-rooted base chain) is sound.
+/// LIP-027: tensor numeric dtype. `is_complex` is derived from this: a
+/// `Complex` tensor has `is_complex == true`, every other dtype has it false.
+/// The default is `F64`, so existing programs are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorDtype {
+    F64,
+    F32,
+    F16,
+    Bf16,
+    Complex,
+}
+
+impl TensorDtype {
+    /// The dtype's string name, matching the C11 VM's `dtype_to_string`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TensorDtype::F64 => "f64",
+            TensorDtype::F32 => "f32",
+            TensorDtype::F16 => "f16",
+            TensorDtype::Bf16 => "bf16",
+            TensorDtype::Complex => "complex",
+        }
+    }
+
+    /// Parse a dtype string; `None` for an unknown string (the caller maps
+    /// that to `LanaError::InvalidParameters`).
+    pub fn from_str(s: &str) -> Option<TensorDtype> {
+        match s {
+            "f64" => Some(TensorDtype::F64),
+            "f32" => Some(TensorDtype::F32),
+            "f16" => Some(TensorDtype::F16),
+            "bf16" => Some(TensorDtype::Bf16),
+            "complex" => Some(TensorDtype::Complex),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Tensor {
+    pub ndim: usize,
+    pub shape: Vec<usize>,
+    pub strides: Vec<usize>,
+    pub is_complex: bool,
+    /// LIP-027: numeric dtype (F64 default).
+    pub dtype: TensorDtype,
+    pub data: Arc<Vec<f64>>,
+    pub offset: usize,
+    /// LIP-007: a STATE tensor (each element is a density matrix).
+    pub is_state: bool,
+}
+
 /// The reserved `unknown` variant tag, matching the C11 `0xFFFFFFFF`.
 pub const ADT_UNKNOWN_VARIANT: u32 = 0xFFFF_FFFF;
 
@@ -285,6 +515,7 @@ pub enum ReactiveKind {
     Binary,
     Compare,
     Unary,
+    Train,
 }
 
 /// The relationship kind, matching `LanaRelationshipKind`.
@@ -322,6 +553,9 @@ pub struct Reactive {
     pub constants: [Option<Value>; 2],
     pub current: Option<Value>,
     pub history: Vec<ReactiveVersion>,
+    /// LIP-010: a training data root accepts a single [x, target] observation
+    /// on `observe` (its support is structural, not a membership test).
+    pub is_training_data: bool,
 }
 
 /// A claim, matching `struct LanaClaim` in `vm/include/value.h`.
@@ -370,7 +604,7 @@ pub struct CapabilityToken {
     pub shared: Arc<SharedInformation>,
     pub id: u64,
     pub permissions: u32,
-    pub revoked: bool,
+    pub revoked: AtomicBool,
 }
 
 /// Capability permission bits, matching `LanaCapability` in
@@ -461,7 +695,21 @@ pub enum ValueKind {
     PathSet(Arc<PathSet>),
     Capability(Arc<CapabilityToken>),
     Adt(Arc<Adt>),
+    Tensor(Arc<Tensor>),
+    NQubitState(Arc<Tensor>),
+    Povm(Arc<Tensor>),
+    Channel(Arc<Tensor>),
+    Observable(Arc<Tensor>),
     Lazy { function: u32, bound: usize },
+    Generator(Arc<Mutex<Generator>>),
+    Future(Arc<Mutex<Future>>),
+    Set(Arc<Mutex<Set>>),
+    Regex(Arc<Regex>),
+    Optimizer(Arc<Optimizer>),
+    TrainingResult(Arc<TrainingResult>),
+    InferenceAlgorithm(Arc<InferenceAlgorithm>),
+    Posterior(Arc<Posterior>),
+    Dataset(Arc<Dataset>),
 }
 
 impl Value {
@@ -533,8 +781,64 @@ impl Value {
         Self { kind: ValueKind::Adt(adt), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
+    pub fn tensor(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::Tensor(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn nqubit_state(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::NQubitState(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn povm(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::Povm(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn channel(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::Channel(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn observable(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::Observable(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
     pub fn lazy(function: u32, bound: usize) -> Self {
         Self { kind: ValueKind::Lazy { function, bound }, derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn generator(generator: Arc<Mutex<Generator>>) -> Self {
+        Self { kind: ValueKind::Generator(generator), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn future(future: Arc<Mutex<Future>>) -> Self {
+        Self { kind: ValueKind::Future(future), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn set(set: Arc<Mutex<Set>>) -> Self {
+        Self { kind: ValueKind::Set(set), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn regex(regex: Arc<Regex>) -> Self {
+        Self { kind: ValueKind::Regex(regex), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn optimizer(optimizer: Arc<Optimizer>) -> Self {
+        Self { kind: ValueKind::Optimizer(optimizer), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn training_result(result: Arc<TrainingResult>) -> Self {
+        Self { kind: ValueKind::TrainingResult(result), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn inference_algorithm(algorithm: Arc<InferenceAlgorithm>) -> Self {
+        Self { kind: ValueKind::InferenceAlgorithm(algorithm), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn posterior(posterior: Arc<Posterior>) -> Self {
+        Self { kind: ValueKind::Posterior(posterior), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn dataset(dataset: Arc<Dataset>) -> Self {
+        Self { kind: ValueKind::Dataset(dataset), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
     /// The stable type tag, matching `ValueType` in `vm/include/value.h`.
@@ -557,7 +861,21 @@ impl Value {
             ValueKind::PathSet(_) => ValueType::PathSet,
             ValueKind::Capability(_) => ValueType::SharedCapability,
             ValueKind::Adt(_) => ValueType::Adt,
+            ValueKind::Tensor(_) => ValueType::Tensor,
+            ValueKind::NQubitState(_) => ValueType::NQubitState,
+            ValueKind::Povm(_) => ValueType::Povm,
+            ValueKind::Channel(_) => ValueType::Channel,
+            ValueKind::Observable(_) => ValueType::Observable,
             ValueKind::Lazy { .. } => ValueType::Lazy,
+            ValueKind::Generator(_) => ValueType::Generator,
+            ValueKind::Future(_) => ValueType::Future,
+            ValueKind::Set(_) => ValueType::Set,
+            ValueKind::Regex(_) => ValueType::Regex,
+            ValueKind::Optimizer(_) => ValueType::Optimizer,
+            ValueKind::TrainingResult(_) => ValueType::TrainingResult,
+            ValueKind::InferenceAlgorithm(_) => ValueType::InferenceAlgorithm,
+            ValueKind::Posterior(_) => ValueType::Posterior,
+            ValueKind::Dataset(_) => ValueType::Dataset,
         }
     }
 
@@ -581,7 +899,21 @@ impl Value {
             ValueKind::PathSet(_) => "paths",
             ValueKind::Capability(_) => "shared_capability",
             ValueKind::Adt(_) => "adt",
+            ValueKind::Tensor(_) => "tensor",
+            ValueKind::NQubitState(_) => "nqubit_state",
+            ValueKind::Povm(_) => "povm",
+            ValueKind::Channel(_) => "channel",
+            ValueKind::Observable(_) => "observable",
             ValueKind::Lazy { .. } => "lazy",
+            ValueKind::Generator(_) => "generator",
+            ValueKind::Future(_) => "future",
+            ValueKind::Set(_) => "set",
+            ValueKind::Regex(_) => "regex",
+            ValueKind::Optimizer(_) => "optimizer",
+            ValueKind::TrainingResult(_) => "training_result",
+            ValueKind::InferenceAlgorithm(_) => "inference_algorithm",
+            ValueKind::Posterior(_) => "posterior",
+            ValueKind::Dataset(_) => "dataset",
         }
     }
 
@@ -623,10 +955,54 @@ impl Value {
     /// `vm/c/vm.c`. Possibilities and path sets are always unresolved; arrays
     /// and maps are unresolved if any element is.
     pub fn is_unresolved(&self) -> bool {
-        match &self.kind {
+        self.is_unresolved_at(&mut std::collections::HashSet::new())
+    }
+
+    fn is_unresolved_at(&self, seen: &mut std::collections::HashSet<usize>) -> bool {
+        let current = self.reactive.as_ref().and_then(|r| r.lock().unwrap().current.clone());
+        let value = current.as_ref().unwrap_or(self);
+        match &value.kind {
             ValueKind::Possibility(_) | ValueKind::PathSet(_) => true,
-            ValueKind::Array(array) => array.lock().unwrap().items.iter().any(|item| item.is_unresolved()),
-            ValueKind::Map(map) => map.lock().unwrap().entries.iter().any(|entry| entry.value.is_unresolved()),
+            ValueKind::Array(array) => {
+                seen.insert(Arc::as_ptr(array) as usize) &&
+                    array.lock().unwrap().items.iter().any(|item| item.is_unresolved_at(seen))
+            }
+            ValueKind::Map(map) => {
+                seen.insert(Arc::as_ptr(map) as usize) &&
+                    map.lock().unwrap().entries.iter().any(|entry| entry.value.is_unresolved_at(seen))
+            }
+            ValueKind::Set(set) => {
+                seen.insert(Arc::as_ptr(set) as usize) &&
+                    set.lock().unwrap().items.iter().any(|item| item.is_unresolved_at(seen))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the value contains a revoked capability token, mirroring
+    /// `value_has_revoked_capability` in `vm/c/vm.c`. A capability is revoked
+    /// when its `revoked` flag is set; arrays and maps are checked recursively.
+    pub fn has_revoked_capability(&self) -> bool {
+        self.has_revoked_capability_at(&mut std::collections::HashSet::new())
+    }
+
+    fn has_revoked_capability_at(&self, seen: &mut std::collections::HashSet<usize>) -> bool {
+        let current = self.reactive.as_ref().and_then(|r| r.lock().unwrap().current.clone());
+        let value = current.as_ref().unwrap_or(self);
+        match &value.kind {
+            ValueKind::Capability(capability) => capability.revoked.load(Ordering::Acquire),
+            ValueKind::Array(array) => {
+                seen.insert(Arc::as_ptr(array) as usize) &&
+                    array.lock().unwrap().items.iter().any(|item| item.has_revoked_capability_at(seen))
+            }
+            ValueKind::Map(map) => {
+                seen.insert(Arc::as_ptr(map) as usize) &&
+                    map.lock().unwrap().entries.iter().any(|entry| entry.value.has_revoked_capability_at(seen))
+            }
+            ValueKind::Set(set) => {
+                seen.insert(Arc::as_ptr(set) as usize) &&
+                    set.lock().unwrap().items.iter().any(|item| item.has_revoked_capability_at(seen))
+            }
             _ => false,
         }
     }
@@ -740,8 +1116,88 @@ impl Value {
                 }
                 out.push('}');
             }
+            ValueKind::Tensor(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
+            }
+            ValueKind::NQubitState(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
+            }
+            ValueKind::Povm(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
+            }
+            ValueKind::Channel(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
+            }
+            ValueKind::Observable(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
+            }
             ValueKind::Lazy { function, bound } => {
                 let _ = write!(out, "lazy(function={function}, bound={bound})");
+            }
+            ValueKind::Generator(generator) => {
+                let generator = generator.lock().unwrap();
+                let _ = write!(
+                    out,
+                    "generator(function={}, exhausted={})",
+                    generator.function,
+                    generator.exhausted
+                );
+            }
+            ValueKind::Future(future) => {
+                let future = future.lock().unwrap();
+                let _ = write!(
+                    out,
+                    "future(function={}, exhausted={}, ready={})",
+                    future.function,
+                    future.exhausted,
+                    future.ready
+                );
+            }
+            ValueKind::Set(set) => {
+                out.push_str("set{");
+                let set = set.lock().unwrap();
+                for (index, item) in set.items.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    item.print_into(out);
+                }
+                out.push('}');
+            }
+            ValueKind::Regex(regex) => {
+                let _ = write!(out, "regex(insts={})", regex.insts.len());
+            }
+            ValueKind::Optimizer(optimizer) => {
+                let _ = write!(
+                    out,
+                    "optimizer(name={}, learning_rate={}, momentum={}, beta1={}, beta2={}, epsilon={})",
+                    optimizer.name,
+                    lana_bytecode::format_g(optimizer.learning_rate),
+                    lana_bytecode::format_g(optimizer.momentum),
+                    lana_bytecode::format_g(optimizer.beta1),
+                    lana_bytecode::format_g(optimizer.beta2),
+                    lana_bytecode::format_g(optimizer.epsilon)
+                );
+            }
+            ValueKind::TrainingResult(result) => {
+                let _ = write!(out, "training_result(steps={})", result.steps.lock().unwrap().items.len());
+            }
+            ValueKind::InferenceAlgorithm(algorithm) => {
+                let _ = write!(
+                    out,
+                    "inference_algorithm(name={}, family={}, samples={}, burn_in={}, iterations={})",
+                    algorithm.name,
+                    algorithm.family.as_deref().unwrap_or(""),
+                    lana_bytecode::format_g(algorithm.samples),
+                    lana_bytecode::format_g(algorithm.burn_in),
+                    lana_bytecode::format_g(algorithm.iterations)
+                );
+            }
+            ValueKind::Posterior(posterior) => {
+                let _ = write!(out, "posterior(steps={})", posterior.steps.lock().unwrap().items.len());
+            }
+            ValueKind::Dataset(dataset) => {
+                let _ = write!(out, "dataset(op={})", dataset.op as i32);
             }
         }
     }
@@ -757,6 +1213,35 @@ impl From<&lana_bytecode::Value> for Value {
             lana_bytecode::Value::String(string) => Value::string(Arc::from(string.as_str())),
         }
     }
+}
+
+/// Recursively render a tensor, mirroring `tensor_print_rec` in `vm/c/value.c`.
+/// Nested `[...]` with `, ` separators; real elements use `%.12g`, complex
+/// elements render as `[re, im]` with `%.12g` each. A 0-d tensor prints its
+/// single scalar (or `[re, im]` pair) with no brackets.
+fn tensor_print_rec(tensor: &Tensor, dim: usize, offset: usize, out: &mut String) {
+    use std::fmt::Write;
+    if dim == tensor.ndim {
+        if tensor.is_complex {
+            let _ = write!(
+                out,
+                "[{}, {}]",
+                lana_bytecode::format_g(tensor.data[offset * 2]),
+                lana_bytecode::format_g(tensor.data[offset * 2 + 1])
+            );
+        } else {
+            out.push_str(&lana_bytecode::format_g(tensor.data[offset]));
+        }
+        return;
+    }
+    out.push('[');
+    for i in 0..tensor.shape[dim] {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        tensor_print_rec(tensor, dim + 1, offset + i * tensor.strides[dim], out);
+    }
+    out.push(']');
 }
 
 #[cfg(test)]
@@ -788,7 +1273,7 @@ mod tests {
             shared,
             id: 1,
             permissions: LANA_CAPABILITY_ADMIN,
-            revoked: false,
+            revoked: AtomicBool::new(false),
         });
         assert_eq!(Value::capability(token).type_name(), "shared_capability");
     }

@@ -1,0 +1,8 @@
+// LIP-021 §3: explicit formatting (format, format_number).
+assert(format("value: {} ({})", 3, "ok") == "value: 3 (ok)", "format number+string");
+assert(format("{} {} {}", true, null, 5) == "true null 5", "format bool/null/number");
+assert(format("no placeholders") == "no placeholders", "format literal only");
+assert(format_number(0.5) == "0.5", "format_number round-trip");
+assert(format_number(3.14159, 2) == "3.14", "format_number precision 2");
+assert(format_number(3.14159, 0) == "3", "format_number precision 0");
+print("M21_FORMAT_PASS");

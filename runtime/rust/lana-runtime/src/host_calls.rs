@@ -15,12 +15,14 @@ use std::sync::{Arc, Mutex};
 use lana_bytecode::LanaError;
 use lana_vm::value::{Array, Map, Value, ValueKind};
 use lana_vm::{
-    LANA_HOST_LEDGER_APPEND, LANA_HOST_LEDGER_QUERY, LANA_HOST_POLICY_EVALUATE,
-    LANA_HOST_POLICY_STORE_DECISION, LANA_HOST_STORE_COMMIT, LANA_HOST_STORE_CURRENT_REVISION,
-    LANA_HOST_STORE_DELETE, LANA_HOST_STORE_GET, LANA_HOST_STORE_OPEN, LANA_HOST_STORE_PUT,
-    LANA_HOST_STORE_SCAN,
+    LANA_HOST_ADAPTER_FETCH, LANA_HOST_ADAPTER_LOAD, LANA_HOST_LEDGER_APPEND,
+    LANA_HOST_LEDGER_QUERY, LANA_HOST_POLICY_EVALUATE, LANA_HOST_POLICY_STORE_DECISION,
+    LANA_HOST_STORE_COMMIT, LANA_HOST_STORE_COMMIT_IF, LANA_HOST_STORE_CURRENT_REVISION,
+    LANA_HOST_STORE_DELETE, LANA_HOST_STORE_GET, LANA_HOST_STORE_GET_AT, LANA_HOST_STORE_OPEN,
+    LANA_HOST_STORE_PUT, LANA_HOST_STORE_SCAN, LANA_HOST_STORE_SNAPSHOT,
 };
 
+use crate::adapters::{self, Adapter, AdapterKind, AdapterOptions};
 use crate::ledger::{self, Event, EventInput, LedgerQuery};
 use crate::policy::{self, Decision, Policy, PolicyEvaluation, PolicyOutcome, PolicyRule, PolicyRuleKind};
 use crate::store::{self, Store, StoreOptions};
@@ -29,11 +31,12 @@ use crate::store::{self, Store, StoreOptions};
 /// store/policy/ledger host calls against it.
 pub struct StoreHost {
     store: Option<Store>,
+    adapter: Option<Adapter>,
 }
 
 impl StoreHost {
     pub fn new() -> Self {
-        Self { store: None }
+        Self { store: None, adapter: None }
     }
 
     /// Dispatch one durable-pipeline host call. Returns `LanaError::Format` for
@@ -48,6 +51,11 @@ impl StoreHost {
             LANA_HOST_STORE_COMMIT => self.store_commit(args, out),
             LANA_HOST_STORE_SCAN => self.store_scan(args, out),
             LANA_HOST_STORE_CURRENT_REVISION => self.store_current_revision(args, out),
+            LANA_HOST_STORE_GET_AT => self.store_get_at(args, out),
+            LANA_HOST_STORE_SNAPSHOT => self.store_snapshot(args, out),
+            LANA_HOST_STORE_COMMIT_IF => self.store_commit_if(args, out),
+            LANA_HOST_ADAPTER_LOAD => self.adapter_load(args, out),
+            LANA_HOST_ADAPTER_FETCH => self.adapter_fetch(args, out),
             LANA_HOST_POLICY_EVALUATE => self.policy_evaluate(args, out),
             LANA_HOST_POLICY_STORE_DECISION => self.policy_store_decision(args, out),
             LANA_HOST_LEDGER_APPEND => self.ledger_append(args, out),
@@ -196,6 +204,123 @@ impl StoreHost {
         match store::store_current_revision(store) {
             Ok(info) => {
                 *out = Value::number(info.revision_id as f64);
+                LanaError::Ok
+            }
+            Err(e) => e,
+        }
+    }
+
+    fn store_get_at(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+        if args.len() != 2 {
+            return LanaError::Type;
+        }
+        let ValueKind::Number(revision) = &args[0].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::String(key) = &args[1].kind else {
+            return LanaError::Type;
+        };
+        let store = match self.store.as_ref() {
+            Some(store) => store,
+            None => return LanaError::InvalidState,
+        };
+        match store::store_get_at(store, *revision as u64, key) {
+            Ok(value) => {
+                *out = value;
+                LanaError::Ok
+            }
+            Err(e) => e,
+        }
+    }
+
+    fn store_snapshot(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+        if !args.is_empty() {
+            return LanaError::Type;
+        }
+        let store = match self.store.as_mut() {
+            Some(store) => store,
+            None => return LanaError::InvalidState,
+        };
+        match store::store_snapshot(store) {
+            Ok((value, _info)) => {
+                *out = value;
+                LanaError::Ok
+            }
+            Err(e) => e,
+        }
+    }
+
+    fn store_commit_if(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+        if args.len() != 1 {
+            return LanaError::Type;
+        }
+        let ValueKind::Number(base_rev) = &args[0].kind else {
+            return LanaError::Type;
+        };
+        let store = match self.store.as_mut() {
+            Some(store) => store,
+            None => return LanaError::InvalidState,
+        };
+        let current = match store::store_current_revision(store) {
+            Ok(info) => info,
+            Err(e) => return e,
+        };
+        if current.revision_id != *base_rev as u64 {
+            return LanaError::Conflict;
+        }
+        match store::store_commit(store) {
+            Ok(info) => {
+                *out = Value::number(info.revision_id as f64);
+                LanaError::Ok
+            }
+            Err(e) => e,
+        }
+    }
+
+    fn adapter_load(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+        if args.len() != 2 {
+            return LanaError::Type;
+        }
+        let ValueKind::Number(kind) = &args[0].kind else {
+            return LanaError::Type;
+        };
+        let ValueKind::String(config) = &args[1].kind else {
+            return LanaError::Type;
+        };
+        let options = AdapterOptions {
+            schema_version: 1,
+            kind: match *kind as u32 {
+                0 => AdapterKind::Json,
+                1 => AdapterKind::Csv,
+                2 => AdapterKind::Sqlite,
+                _ => AdapterKind::HttpJson,
+            },
+            config: Some(config.clone()),
+        };
+        match adapters::adapter_load(&options) {
+            Ok(adapter) => {
+                self.adapter = Some(adapter);
+                *out = Value::null();
+                LanaError::Ok
+            }
+            Err(e) => e,
+        }
+    }
+
+    fn adapter_fetch(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+        if args.len() != 1 {
+            return LanaError::Type;
+        }
+        let ValueKind::String(query) = &args[0].kind else {
+            return LanaError::Type;
+        };
+        let adapter = match self.adapter.as_ref() {
+            Some(adapter) => adapter,
+            None => return LanaError::InvalidState,
+        };
+        match adapters::adapter_fetch(adapter, query) {
+            Ok(value) => {
+                *out = value;
                 LanaError::Ok
             }
             Err(e) => e,
@@ -586,6 +711,84 @@ mod tests {
         assert_eq!(code, LanaError::NotFound);
 
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn store_mvcc_get_at_and_snapshot() {
+        let path = temp_store("mvcc");
+        let mut host = StoreHost::new();
+        let (code, _) = dispatch(&mut host, LANA_HOST_STORE_OPEN, &[string(&path)]);
+        assert_eq!(code, LanaError::Ok);
+
+        // Rev 1: k = 1.
+        let (code, _) = dispatch(&mut host, LANA_HOST_STORE_PUT, &[string("k"), number(1.0)]);
+        assert_eq!(code, LanaError::Ok);
+        let (code, out) = dispatch(&mut host, LANA_HOST_STORE_COMMIT, &[]);
+        assert_eq!(code, LanaError::Ok);
+        assert_eq!(out.as_number(), 1.0);
+
+        // Rev 2: k = 2.
+        let (code, _) = dispatch(&mut host, LANA_HOST_STORE_PUT, &[string("k"), number(2.0)]);
+        assert_eq!(code, LanaError::Ok);
+        let (code, out) = dispatch(&mut host, LANA_HOST_STORE_COMMIT, &[]);
+        assert_eq!(code, LanaError::Ok);
+        assert_eq!(out.as_number(), 2.0);
+
+        // Point-in-time read at rev 1 sees the first value.
+        let (code, out) = dispatch(&mut host, LANA_HOST_STORE_GET_AT, &[number(1.0), string("k")]);
+        assert_eq!(code, LanaError::Ok);
+        assert_eq!(out.as_number(), 1.0);
+
+        // Snapshot reflects the current (rev 2) state.
+        let (code, out) = dispatch(&mut host, LANA_HOST_STORE_SNAPSHOT, &[]);
+        assert_eq!(code, LanaError::Ok);
+        let ValueKind::Map(map) = &out.kind else { panic!("expected map") };
+        let map = map.lock().unwrap();
+        assert_eq!(map.get("k").unwrap().as_number(), 2.0);
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn store_commit_if_optimistic() {
+        let path = temp_store("commit_if");
+        let mut host = StoreHost::new();
+        let (code, _) = dispatch(&mut host, LANA_HOST_STORE_OPEN, &[string(&path)]);
+        assert_eq!(code, LanaError::Ok);
+
+        // Commit against the current base (rev 0) succeeds.
+        let (code, _) = dispatch(&mut host, LANA_HOST_STORE_PUT, &[string("k"), number(1.0)]);
+        assert_eq!(code, LanaError::Ok);
+        let (code, out) = dispatch(&mut host, LANA_HOST_STORE_COMMIT_IF, &[number(0.0)]);
+        assert_eq!(code, LanaError::Ok);
+        assert_eq!(out.as_number(), 1.0);
+
+        // A stale base (rev 0 again) now conflicts.
+        let (code, _) = dispatch(&mut host, LANA_HOST_STORE_PUT, &[string("k"), number(2.0)]);
+        assert_eq!(code, LanaError::Ok);
+        let (code, _) = dispatch(&mut host, LANA_HOST_STORE_COMMIT_IF, &[number(0.0)]);
+        assert_eq!(code, LanaError::Conflict);
+
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn adapter_json_fetch() {
+        let mut host = StoreHost::new();
+        let (code, _) = dispatch(&mut host, LANA_HOST_ADAPTER_LOAD, &[number(0.0), string("{}")]);
+        assert_eq!(code, LanaError::Ok);
+
+        let (code, out) = dispatch(&mut host, LANA_HOST_ADAPTER_FETCH, &[string("[{\"a\":1}]")]);
+        assert_eq!(code, LanaError::Ok);
+        let ValueKind::Array(array) = &out.kind else { panic!("expected array") };
+        assert_eq!(array.lock().unwrap().items.len(), 1);
+    }
+
+    #[test]
+    fn adapter_fetch_without_load_is_invalid_state() {
+        let mut host = StoreHost::new();
+        let (code, _) = dispatch(&mut host, LANA_HOST_ADAPTER_FETCH, &[string("[]")]);
+        assert_eq!(code, LanaError::InvalidState);
     }
 
     #[test]

@@ -1,0 +1,47 @@
+// LIP-011: reverse-mode autodiff over the derivation DAG.
+
+// grad of sum(x * x) at [1,2,3] is 2*x = [2,4,6].
+fn square_sum(x) { return sum(x * x); }
+let x = tensor([1.0, 2.0, 3.0]);
+let g = grad(square_sum, x);
+assert(g[0] == 2.0, "grad mul[0]");
+assert(g[1] == 4.0, "grad mul[1]");
+assert(g[2] == 6.0, "grad mul[2]");
+
+// grad of mean(x * x) is (2/3)*x.
+fn square_mean(x) { return mean(x * x); }
+let gm = grad(square_mean, x);
+assert(gm[0] * 3.0 == 2.0, "grad mean[0]");
+assert(gm[1] * 3.0 == 4.0, "grad mean[1]");
+assert(gm[2] == 2.0, "grad mean[2]");
+
+// grad of sum(matmul(x, x)) (dot product) is 2*x.
+fn dot_sum(x) { return sum(matmul(x, x)); }
+let gd = grad(dot_sum, x);
+assert(gd[0] == 2.0, "grad dot[0]");
+assert(gd[1] == 4.0, "grad dot[1]");
+assert(gd[2] == 6.0, "grad dot[2]");
+
+// grad of sum(x + x) is 2 everywhere.
+fn add_sum(x) { return sum(x + x); }
+let ga = grad(add_sum, x);
+assert(ga[0] == 2.0, "grad add[0]");
+assert(ga[1] == 2.0, "grad add[1]");
+assert(ga[2] == 2.0, "grad add[2]");
+
+// grad of sum(x - x) is 0 everywhere.
+fn sub_sum(x) { return sum(x - x); }
+let gs = grad(sub_sum, x);
+assert(gs[0] == 0.0, "grad sub[0]");
+assert(gs[1] == 0.0, "grad sub[1]");
+assert(gs[2] == 0.0, "grad sub[2]");
+
+// vjp of x * x with v = [1,1,1] is 2*x = [2,4,6].
+fn square(x) { return x * x; }
+let v = tensor([1.0, 1.0, 1.0]);
+let j = vjp(square, x, v);
+assert(j[0] == 2.0, "vjp[0]");
+assert(j[1] == 4.0, "vjp[1]");
+assert(j[2] == 6.0, "vjp[2]");
+
+print("LIP011_GRAD_PASS");

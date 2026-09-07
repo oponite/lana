@@ -1,0 +1,98 @@
+// review_coverage_sweep.lana -- active-account review gap tracker.
+//
+// in_scope_accounts must be supplied by ARIS. The source spec is explicit
+// that only traded/under-discussion accounts need a daily review, not all
+// 2,000+ custody accounts, and that scope rule is ARIS's to define -- Lana
+// does not infer it from the data. This sweep only tells you which of the
+// accounts ARIS put in scope were, and were not, reviewed by the EOD cutoff.
+//
+// Every map this script BUILDS uses map_new()/map_set() instead of a {...}
+// literal, working around a confirmed compiler bug in this build's {...}
+// object-literal codegen (see account_hold_gate.lana's header and
+// task_3e124d4a); map_new()/map_set() was verified unaffected.
+//
+// Request:  {"schema":1, "kind":"review_coverage_request",
+//            "business_date", "eod_cutoff",
+//            "in_scope_accounts": [account_id, ...],
+//            "review_events": [{"account_id", "actor", "timestamp",
+//                                "geography_or_desk"}, ...],
+//            "last_reviewed_at": {account_id: <any value>, ...}
+//              (optional; only used to annotate a gap, not to close it. This
+//              gate does not parse dates or compute "days since" itself --
+//              Lana's date/calendar support (stdlib/datetime.lana) isn't
+//              wired into this gate, and the spec's "days since" number is
+//              trivial for ARIS to compute against its own calendar. Pass
+//              whatever ARIS wants echoed back per account -- a bare date
+//              string, or a richer {"date":..., "days_since":...} record --
+//              and it is copied verbatim into the matching gap.)}
+// Response: {"schema":1, "kind":"review_coverage_report", "business_date",
+//            "in_scope_count", "reviewed_count", "gap_count",
+//            "gaps": [{"account_id", "status", "last_reviewed_at"}, ...]}
+
+import "bridge.lana" as bridge;
+
+fn reviewed_set(review_events) {
+    let reviewed = map_new();
+    let index = 0;
+    while (index < array_length(review_events)) {
+        let event = review_events[index];
+        assert(map_has(event, "account_id"), "review event account_id is required");
+        map_set(reviewed, event["account_id"], event);
+        index = index + 1;
+    }
+    return reviewed;
+}
+
+fn last_reviewed_for(request, account_id) {
+    if (!map_has(request, "last_reviewed_at")) { return null; }
+    let history = request["last_reviewed_at"];
+    if (!map_has(history, account_id)) { return null; }
+    return history[account_id];
+}
+
+fn gate_contract(request) {
+    assert(request["schema"] == 1, "unsupported review_coverage schema");
+    assert(map_has(request, "kind"), "kind is required");
+    assert(request["kind"] == "review_coverage_request", "invalid review_coverage kind");
+    assert(map_has(request, "business_date"), "business_date is required");
+    assert(map_has(request, "in_scope_accounts"), "in_scope_accounts must be supplied by ARIS -- Lana does not infer daily-review scope");
+    assert(map_has(request, "review_events"), "review_events is required");
+    return true;
+}
+
+fn decide(request) {
+    gate_contract(request);
+    let in_scope = request["in_scope_accounts"];
+    let reviewed = reviewed_set(request["review_events"]);
+    let reviewed_today = [];
+    let gaps = [];
+    let index = 0;
+    while (index < array_length(in_scope)) {
+        let account_id = in_scope[index];
+        if (map_has(reviewed, account_id)) {
+            let reviewed_entry = map_new();
+            map_set(reviewed_entry, "account_id", account_id);
+            map_set(reviewed_entry, "reviewed_by", reviewed[account_id]);
+            array_push(reviewed_today, reviewed_entry);
+        } else {
+            let gap = map_new();
+            map_set(gap, "account_id", account_id);
+            map_set(gap, "status", "unknown");
+            map_set(gap, "last_reviewed_at", last_reviewed_for(request, account_id));
+            array_push(gaps, gap);
+        }
+        index = index + 1;
+    }
+    let response = map_new();
+    map_set(response, "schema", 1);
+    map_set(response, "kind", "review_coverage_report");
+    map_set(response, "business_date", request["business_date"]);
+    map_set(response, "in_scope_count", array_length(in_scope));
+    map_set(response, "reviewed_count", array_length(reviewed_today));
+    map_set(response, "gap_count", array_length(gaps));
+    map_set(response, "gaps", gaps);
+    return response;
+}
+
+let request = bridge.read_request();
+bridge.write_response(decide(request));

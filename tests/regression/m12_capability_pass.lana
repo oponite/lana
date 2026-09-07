@@ -1,0 +1,11 @@
+let admin = capability("gpu");
+let use = grant(admin, "use");
+let admin_grant = grant(admin, "admin");
+
+assert(shared_identity(admin) > 0, "capability identity was not stable");
+assert(shared_identity(use) == shared_identity(admin), "granted use capability lost identity");
+assert(shared_identity(admin_grant) == shared_identity(admin), "granted admin capability lost identity");
+
+revoke(use);
+revoke(admin_grant);
+print("M12_CAPABILITY_PASS");

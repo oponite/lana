@@ -1,0 +1,1 @@
+{"business_date":"2026-09-07","gap_count":2,"gaps":[{"account_id":"ACC-1002","last_reviewed_at":{"date":"2026-09-05","days_since":2},"status":"unknown"},{"account_id":"ACC-1004","last_reviewed_at":{"date":"2026-09-03","days_since":4},"status":"unknown"}],"in_scope_count":5,"kind":"review_coverage_report","reviewed_count":3,"schema":1}

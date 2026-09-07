@@ -1,0 +1,49 @@
+// LIP-004 section 5: matmul through the shared native backend.
+
+// 1d x 1d is a dot product (rank-zero tensor).
+let a = tensor([1.0, 2.0, 3.0]);
+let b = tensor([4.0, 5.0, 6.0]);
+let dot = matmul(a, b);
+assert(ndim(dot) == 0, "dot rank");
+assert(sum(dot) == 32.0, "dot value");
+
+// 2d x 2d.
+let m1 = tensor([[1.0, 2.0], [3.0, 4.0]]);
+let m2 = tensor([[5.0, 6.0], [7.0, 8.0]]);
+let prod = matmul(m1, m2);
+assert(sum(prod) == 134.0, "2d matmul sum"); // 19+22+43+50
+assert(prod[0, 0] == 19.0, "2d matmul [0,0]");
+assert(prod[1, 1] == 50.0, "2d matmul [1,1]");
+
+// 1d x 2d promotes the vector to a row.
+let vm = matmul(a, tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]));
+assert(ndim(vm) == 1, "vector-matrix rank");
+assert(sum(vm) == 50.0, "vector-matrix sum"); // 22+28
+
+// 2d x 1d promotes the vector to a column.
+let mv = matmul(tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), a);
+assert(ndim(mv) == 1, "matrix-vector rank");
+assert(sum(mv) == 46.0, "matrix-vector sum"); // 14+32
+
+// Complex zgemm: (iI) . (iI) = -I.
+let iI = tensor_complex([[0.0, 0.0], [0.0, 0.0]], [[1.0, 0.0], [0.0, 1.0]]);
+let negI = matmul(iI, iI);
+assert(dtype(negI) == "complex", "complex matmul dtype");
+assert(ndim(negI) == 2, "complex matmul rank");
+assert(shape(negI)[0] == 2.0, "complex matmul rows");
+assert(shape(negI)[1] == 2.0, "complex matmul cols");
+
+// Empty contraction (K = 0): [2,0] . [0,3] -> [2,3] of zeros.
+let empty = matmul(zeros([2, 0]), zeros([0, 3]));
+assert(shape(empty)[0] == 2.0, "empty contraction rows");
+assert(shape(empty)[1] == 3.0, "empty contraction cols");
+assert(sum(empty) == 0.0, "empty contraction sum");
+
+// Direct-strided view: columns 0:3 of a 2x4 base keep column stride 1 but
+// row stride 4, so lda = 4 > K = 3 and the backend reads the true row stride.
+let base = tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]);
+let view = base[0:2, 0:3];
+let strided = matmul(view, tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]));
+assert(sum(strided) == 34.0, "strided matmul sum"); // 4+5+12+13
+
+print("TENSOR_MATMUL_PASS");

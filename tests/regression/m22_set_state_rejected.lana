@@ -1,0 +1,6 @@
+import "../../stdlib/collections.lana" as collections;
+
+state q = probability(0.5);
+let s = collections.set_new();
+s = collections.set_add(s, q);
+print("SHOULD_NOT_REACH");

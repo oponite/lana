@@ -1,0 +1,64 @@
+// std/collections — an immutable set of ordinary values.
+// A set is a first-class value (VAL_SET) holding ordinary values; STATE,
+// STATE_DIST, and Information are rejected. Every operation is pure and
+// returns a new set; set_add does not mutate its argument.
+
+fn set_new() {
+    return set_new();
+}
+
+fn set_add(set, value) {
+    return set_add(set, value);
+}
+
+fn set_contains(set, value) {
+    return set_contains(set, value);
+}
+
+fn set_union(a, b) {
+    return set_union(a, b);
+}
+
+fn set_intersect(a, b) {
+    return set_intersect(a, b);
+}
+
+fn set_difference(a, b) {
+    return set_difference(a, b);
+}
+
+// Lazy iterators over arrays. Each is a generator: calling it returns a
+// generator value that yields one element per `next` call, so `for x in
+// iter(xs)` and `for x in xs` both work without materializing a copy.
+
+fn iter(xs) {
+    let i = 0;
+    while (i < array_length(xs)) {
+        yield xs[i];
+        i = i + 1;
+    }
+}
+
+fn enumerate(xs) {
+    let i = 0;
+    while (i < array_length(xs)) {
+        let pair = array_new(0);
+        array_push(pair, i);
+        array_push(pair, xs[i]);
+        yield pair;
+        i = i + 1;
+    }
+}
+
+fn zip(a, b) {
+    let i = 0;
+    let n = array_length(a);
+    if (array_length(b) < n) { n = array_length(b); }
+    while (i < n) {
+        let pair = array_new(0);
+        array_push(pair, a[i]);
+        array_push(pair, b[i]);
+        yield pair;
+        i = i + 1;
+    }
+}

@@ -1,0 +1,14 @@
+// std/json — JSON text codec (LIP-023 §1–4) over the json host calls.
+// `parse` returns Result<Information<Value>, E> as a tagged pair
+// `[true, value]` / `[false, error]`; the error carries the byte offset. The
+// parsed value is an Information value whose derivation records the source-text
+// identity (SHA-256). `stringify` returns deterministic text with object keys
+// sorted.
+
+fn parse(text) {
+    return json_parse(text);
+}
+
+fn stringify(value) {
+    return json_stringify(value);
+}

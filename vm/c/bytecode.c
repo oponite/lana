@@ -109,7 +109,9 @@ const char *lana_opcode_name(uint8_t opcode) {
         "MAP", "SUPPORT", "EXPECT", "VALIDATE", "REVISION",
         "ATTENUATE", "TRACE_DISTANCE", "APPEND_REDUNDANT",
         "APPEND_FULL_REDUNDANCY", "APPEND_COMPLEMENTARY",
-        "ADT_BUILD", "ADT_CASE", "ADT_GET", "LAZY", "FORCE", "BOOTSTRAP"
+        "ADT_BUILD", "ADT_CASE", "ADT_GET", "LAZY", "FORCE", "BOOTSTRAP",
+        "LOAD_FUNCTION", "GENERATOR", "YIELD", "NEXT",
+        "ASYNC", "AWAIT", "RUN_ASYNC"
     };
     return opcode < OP_COUNT ? names[opcode] : "UNKNOWN";
 }
@@ -129,6 +131,13 @@ static LanaError verify_register(LanaErrorInfo *error, size_t ip,
     return LANA_OK;
 }
 
+/* Highest valid opcode for a given LABC version. v1/v2 predate the generator
+ * opcodes, so they must reject OP_GENERATOR/OP_YIELD/OP_NEXT; v3 accepts them. */
+static unsigned max_opcode_for_version(uint32_t version) {
+    return (version == LABC_VERSION_3 || version == LABC_VERSION_4)
+               ? (unsigned)OP_COUNT : (unsigned)OP_GENERATOR;
+}
+
 LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
     size_t ip, function_index;
     if (error != NULL) memset(error, 0, sizeof(*error));
@@ -136,7 +145,8 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
         lana_error_set(error, LANA_ERR_FORMAT, 0, OP_NOP, 0, "chunk has no valid entry point");
         return LANA_ERR_FORMAT;
     }
-    if (chunk->version != LABC_VERSION && chunk->version != LABC_VERSION_1) {
+    if (chunk->version != LABC_VERSION && chunk->version != LABC_VERSION_1 &&
+        chunk->version != LABC_VERSION_3 && chunk->version != LABC_VERSION_4) {
         lana_error_set(error, LANA_ERR_FORMAT, 0, OP_NOP, 0,
                      "unsupported LABC version %u", chunk->version);
         return LANA_ERR_FORMAT;
@@ -153,7 +163,7 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
     for (ip = 0; ip < chunk->code_count; ++ip) {
         const LanaInstruction *ins = &chunk->code[ip];
         LanaError result = LANA_OK;
-        if (ins->opcode >= OP_COUNT) {
+        if (ins->opcode >= max_opcode_for_version(chunk->version)) {
             lana_error_set(error, LANA_ERR_OPCODE, ip, ins->opcode, ins->line,
                          "unknown opcode %u", ins->opcode);
             return LANA_ERR_OPCODE;
@@ -486,6 +496,38 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
                 if (result == LANA_OK) result = verify_register(error, ip, ins, ins->c);
                 if (result == LANA_OK) result = verify_register(error, ip, ins, ins->imm);
                 break;
+            case OP_GENERATOR:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == LANA_OK && ins->b >= chunk->function_count) result = LANA_ERR_FORMAT;
+                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->c + ins->imm > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
+                break;
+            case OP_YIELD:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == LANA_OK) result = verify_register(error, ip, ins, ins->b);
+                break;
+            case OP_NEXT:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == LANA_OK) result = verify_register(error, ip, ins, ins->b);
+                break;
+            case OP_ASYNC:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == LANA_OK && ins->b >= chunk->function_count) result = LANA_ERR_FORMAT;
+                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->c + ins->imm > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
+                break;
+            case OP_AWAIT:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == LANA_OK) result = verify_register(error, ip, ins, ins->b);
+                break;
+            case OP_RUN_ASYNC:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == LANA_OK) result = verify_register(error, ip, ins, ins->b);
+                break;
+            case OP_LOAD_FUNCTION:
+                result = verify_register(error, ip, ins, ins->a);
+                if (result == LANA_OK && ins->b >= chunk->function_count) result = LANA_ERR_FORMAT;
+                if (result == LANA_OK && ins->c != 0u) result = LANA_ERR_FORMAT;
+                if (result == LANA_OK && ins->imm != 0u) result = LANA_ERR_FORMAT;
+                break;
             case OP_COUNT: result = LANA_ERR_OPCODE; break;
         }
         if (result != LANA_OK) {
@@ -608,7 +650,8 @@ LanaError lana_chunk_read_file(LanaChunk *chunk, const char *path, LanaErrorInfo
         !read_u32(file, &functions) || !read_u32(file, &instructions) || !read_u32(file, &chunk->entry)) {
         result = LANA_ERR_FORMAT; goto failure;
     }
-    if (chunk->version != LABC_VERSION && chunk->version != LABC_VERSION_1) {
+    if (chunk->version != LABC_VERSION && chunk->version != LABC_VERSION_1 &&
+        chunk->version != LABC_VERSION_3 && chunk->version != LABC_VERSION_4) {
         result = LANA_ERR_INCOMPATIBLE_FORMAT; goto failure;
     }
     if (constants > 100000u || functions > 10000u || instructions > 1000000u) {
@@ -770,6 +813,27 @@ void lana_disassemble_instruction(const LanaChunk *chunk, size_t offset, FILE *o
             break;
         case OP_BOOTSTRAP:
             (void)fprintf(out, "R%u <- bootstrap(R%u, B=R%u, function[%u])", ins->a, ins->imm, ins->c, ins->b);
+            break;
+        case OP_GENERATOR:
+            (void)fprintf(out, "function[%u] R%u argc=%u -> R%u", ins->b, ins->c, ins->imm, ins->a);
+            break;
+        case OP_YIELD:
+            (void)fprintf(out, "yield R%u -> R%u", ins->b, ins->a);
+            break;
+        case OP_NEXT:
+            (void)fprintf(out, "R%u <- next(R%u)", ins->b, ins->a);
+            break;
+        case OP_ASYNC:
+            (void)fprintf(out, "function[%u] R%u argc=%u -> R%u", ins->b, ins->c, ins->imm, ins->a);
+            break;
+        case OP_AWAIT:
+            (void)fprintf(out, "await R%u -> R%u", ins->a, ins->b);
+            break;
+        case OP_RUN_ASYNC:
+            (void)fprintf(out, "R%u <- run_async(R%u)", ins->b, ins->a);
+            break;
+        case OP_LOAD_FUNCTION:
+            (void)fprintf(out, "R%u <- function[%u]", ins->a, ins->b);
             break;
         case OP_SAMPLE_STATE_DIST:
             (void)fprintf(out, "R%u -> R%u", ins->a, ins->b);

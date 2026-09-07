@@ -1,0 +1,7 @@
+// LIP-006 follow-up #53: grad over a non-differentiable op is a compile error.
+
+fn bad(x) { return max(x); }
+
+let x = tensor([1.0, 2.0, 3.0]);
+let g = grad(bad, x);
+print(g);

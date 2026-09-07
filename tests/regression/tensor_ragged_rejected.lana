@@ -1,0 +1,3 @@
+// A ragged tensor literal is LANA_ERR_INVALID_PARAMETERS.
+let t = tensor([[1.0, 2.0], [3.0]]);
+print(sum(t));

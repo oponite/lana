@@ -1,0 +1,10 @@
+// LIP-006: train without the `train` capability is denied before access.
+
+fn model(params, x) { return params * x; }
+fn loss(y, target) { return sum((y - target) * (y - target)); }
+
+let opt = sgd(0.1, 0.0);
+let data = [[tensor([1.0]), tensor([2.0])]];
+let init = tensor([0.0]);
+let result = train(model, data, loss, opt, init, 1, 1);
+print(result);

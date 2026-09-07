@@ -1,0 +1,23 @@
+// LIP-024: concurrent awaits completing on one thread. Three futures are
+// created before any is awaited; the single-threaded event loop interleaves
+// their bodies and all three results are observed.
+async fn work(n) {
+    let acc = 0;
+    let i = 0;
+    while (i < n) { acc = acc + 1; i = i + 1; }
+    return acc;
+}
+
+async fn main_async() {
+    let f1 = work(3);
+    let f2 = work(5);
+    let f3 = work(2);
+    let a = await f1;
+    let b = await f2;
+    let c = await f3;
+    return a + b + c;
+}
+
+let r = run_async(main_async());
+assert(r == 10, "concurrent await failed");
+print("ASYNC_CONCURRENT_PASS");

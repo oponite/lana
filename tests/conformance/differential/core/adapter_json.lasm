@@ -1,0 +1,11 @@
+.function main 0 16
+LOAD_CONST R0 0
+LOAD_CONST R1 {}
+HOST_CALL adapter_load R0 2 R2
+LOAD_STRING R3 5b7b2261223a317d2c7b2261223a327d5d
+HOST_CALL adapter_fetch R3 1 R4
+PRINT R4
+HOST_CALL dataset R4 1 R5
+HOST_CALL dataset_materialize R5 1 R6
+PRINT R6
+RETURN R0

@@ -1,0 +1,9 @@
+// LIP-009: infer without the `infer` capability is denied before access.
+
+fn model(params) { return params; }
+
+let mcmc_alg = mcmc(10, 1);
+let prior = tensor([0.0]);
+let data = tensor([1.0]);
+let result = infer(prior, model, data, mcmc_alg);
+print(result);

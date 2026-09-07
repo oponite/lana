@@ -1,0 +1,13 @@
+// LIP-024: a simple async fn + await + run_async.
+async fn add(a, b) {
+    return a + b;
+}
+
+async fn outer() {
+    let v = await add(2, 3);
+    return v;
+}
+
+let r = run_async(outer());
+assert(r == 5, "async add failed");
+print("ASYNC_SIMPLE_PASS");

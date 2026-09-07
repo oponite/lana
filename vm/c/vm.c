@@ -1,8 +1,20 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "vm.h"
+#include "backend.h"
+#include "metal.h"
 #include "data.h"
 #include "shared.h"
+#include "sha256.h"
+#include "tensor.h"
+#include "unicode_case.h"
+#include "store.h"
+#include "ledger.h"
+#include "policy.h"
+#include "adapters.h"
+
+static LanaError dataset_array_new(LanaVM *vm, LanaArray **out);
+static LanaError dataset_array_push(LanaVM *vm, LanaArray *array, const Value *value);
 
 #include <math.h>
 #include <ctype.h>
@@ -17,6 +29,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <dlfcn.h>
+#include <signal.h>
+#include <ffi.h>
 
 extern char *realpath(const char *path, char *resolved_path);
 
@@ -50,6 +65,21 @@ static LanaError vm_track_shared(LanaVM *vm, LanaSharedInformation *shared,
     return LANA_OK;
 }
 
+/* LIP-006 authorized execution: `train` requires a non-revoked READ capability
+ * over a shared information whose base snapshot is the string `name`. The
+ * capability is granted by `capability("train")` (LIP-012) and tracked in the
+ * VM's shared-reference list. */
+static bool vm_has_named_capability(LanaVM *vm, const char *name) {
+    LanaSharedReference *reference;
+    if (vm == NULL || name == NULL) return false;
+    for (reference = vm->shared_references; reference != NULL;
+         reference = reference->next) {
+        if (lana_shared_information_allows_named_read(reference->shared, name))
+            return true;
+    }
+    return false;
+}
+
 struct LanaPathExecution {
     LanaFrame *false_frames;
     LanaFrame *true_frames;
@@ -74,8 +104,10 @@ static LanaFrame *current_frame(LanaVM *vm) { return &vm->frames[vm->frame_count
 static LanaError consume_sampling_budget(LanaVM *vm);
 static bool joint_value_is_definite(const Value *value);
 static bool value_is_unresolved(const Value *value);
+static bool value_has_revoked_capability(const Value *value);
 static LanaError reactive_recompute_transaction(LanaVM *vm, LanaReactive *root,
-                                                const Value *replacement);
+                                                const Value *replacement,
+                                                uint32_t scratch_register);
 
 static const Value *reactive_value(const Value *value) {
     if (value != NULL && value->reactive != NULL &&
@@ -88,11 +120,46 @@ static LanaError clone_value(LanaVM *destination, const Value *source, Value *ou
 static LanaError wait_task(LanaVM *vm, LanaTask *task, double timeout_seconds, Value *out);
 static void scheduler_shutdown(LanaScheduler *scheduler);
 static void scheduler_destroy(LanaScheduler *scheduler);
+static LanaError ad_grad(LanaVM *vm, const Value *function_value, const Value *x,
+                         uint32_t scratch_register, Value *out);
+static LanaError ad_vjp(LanaVM *vm, const Value *function_value, const Value *x,
+                        const Value *v, uint32_t scratch_register, Value *out);
+static LanaError run_function2(LanaVM *vm, uint32_t function_index,
+                               const Value *arg0, const Value *arg1,
+                               uint32_t scratch_register, Value *result);
+static LanaError run_function(LanaVM *vm, uint32_t function_index,
+                              const Value *arg, uint32_t scratch_register,
+                              Value *result);
+static LanaError dataset_new(LanaVM *vm, LanaDatasetOp op, Value source,
+                             uint32_t function, Value columns, Value key,
+                             Value limit, Value other, Value aggregate,
+                             LanaDataset **out);
+static LanaError dataset_materialize(LanaVM *vm, const LanaDataset *dataset,
+                                    uint32_t scratch, LanaArray **out);
+static LanaError dataset_explain(LanaVM *vm, const LanaDataset *dataset, Value *out);
+static LanaError host_sgd(LanaVM *vm, const Value *arguments, size_t argc, Value *out);
+static LanaError host_adam(LanaVM *vm, const Value *arguments, size_t argc, Value *out);
+static LanaError host_train(LanaVM *vm, const Value *arguments, size_t argc,
+                            uint32_t scratch_register, Value *out);
+static LanaError host_update(LanaVM *vm, const Value *arguments, size_t argc,
+                             uint32_t scratch_register, Value *out);
+static LanaError host_resume(LanaVM *vm, const Value *arguments, size_t argc,
+                             uint32_t scratch_register, Value *out);
+static LanaError reactive_train_recompute(LanaVM *vm, LanaReactive *node,
+                                          const Value *observation,
+                                          uint32_t scratch_register, Value *out);
+static LanaError host_mcmc(LanaVM *vm, const Value *arguments, size_t argc, Value *out);
+static LanaError host_vi(LanaVM *vm, const Value *arguments, size_t argc, Value *out);
+static LanaError host_smc(LanaVM *vm, const Value *arguments, size_t argc, Value *out);
+static LanaError host_infer(LanaVM *vm, const Value *arguments, size_t argc,
+                            uint32_t scratch_register, Value *out);
+static bool vm_has_named_capability(LanaVM *vm, const char *name);
 
 static void gc_trace_value_contents(LanaGC *gc, const Value *value);
 static void gc_trace_value_block(LanaGC *gc, void *payload);
 static void gc_trace_array(LanaGC *gc, void *payload);
 static void gc_trace_map(LanaGC *gc, void *payload);
+static void gc_trace_dataset(LanaGC *gc, void *payload);
 static void gc_trace_joint(LanaGC *gc, void *payload);
 static void gc_trace_possibility(LanaGC *gc, void *payload);
 static void gc_trace_paths(LanaGC *gc, void *payload);
@@ -187,6 +254,36 @@ static void gc_trace_adt(LanaGC *gc, void *payload) {
     if (adt->fields != NULL) gc_mark_value_block(gc, adt->fields);
 }
 
+static void gc_trace_generator(LanaGC *gc, void *payload) {
+    LanaGenerator *generator = payload;
+    if (generator->registers != NULL) gc_mark_value_block(gc, generator->registers);
+}
+
+static void gc_trace_future(LanaGC *gc, void *payload) {
+    LanaFuture *future = payload;
+    size_t index;
+    if (future->registers != NULL) gc_mark_value_block(gc, future->registers);
+    if (future->inputs != NULL)
+        for (index = 0u; index < future->input_count; ++index)
+            gc_mark_object(gc, future->inputs[index], LANA_GC_FUTURE,
+                           gc_trace_future);
+}
+
+static void gc_trace_set(LanaGC *gc, void *payload) {
+    LanaSet *set = payload;
+    if (set->items != NULL) gc_mark_value_block(gc, set->items);
+}
+
+static void gc_trace_dataset(LanaGC *gc, void *payload) {
+    LanaDataset *dataset = payload;
+    gc_trace_value_contents(gc, &dataset->source);
+    gc_trace_value_contents(gc, &dataset->columns);
+    gc_trace_value_contents(gc, &dataset->key);
+    gc_trace_value_contents(gc, &dataset->limit);
+    gc_trace_value_contents(gc, &dataset->other);
+    gc_trace_value_contents(gc, &dataset->aggregate);
+}
+
 static void gc_trace_state_dist(LanaGC *gc, void *payload) {
     LanaStateDist *distribution = payload;
     LanaDistOperand *operands;
@@ -215,6 +312,19 @@ static void gc_trace_state_dist(LanaGC *gc, void *payload) {
     }
 }
 
+static void gc_trace_tensor_chain(LanaGC *gc, const LanaTensor *tensor) {
+    while (tensor != NULL) {
+        gc_mark_leaf(gc, tensor, LANA_GC_OPAQUE);
+        if (tensor->shape != NULL)
+            gc_mark_leaf(gc, tensor->shape, LANA_GC_OPAQUE);
+        if (tensor->strides != NULL)
+            gc_mark_leaf(gc, tensor->strides, LANA_GC_OPAQUE);
+        if (tensor->data != NULL)
+            gc_mark_leaf(gc, tensor->data, LANA_GC_OPAQUE);
+        tensor = tensor->base;
+    }
+}
+
 static void gc_trace_derivation(LanaGC *gc, void *payload) {
     LanaDerivation *derivation = payload;
     size_t index;
@@ -227,6 +337,15 @@ static void gc_trace_derivation(LanaGC *gc, void *payload) {
     for (index = 0u; index < derivation->input_count; ++index)
         gc_mark_object(gc, derivation->inputs[index], LANA_GC_DERIVATION,
                        gc_trace_derivation);
+    /* LIP-011 autodiff fields: saved operands, input derivations, and the
+     * accumulated gradient buffer. */
+    gc_trace_tensor_chain(gc, derivation->ad_a);
+    gc_trace_tensor_chain(gc, derivation->ad_b);
+    gc_mark_object(gc, derivation->ad_a_deriv, LANA_GC_DERIVATION,
+                   gc_trace_derivation);
+    gc_mark_object(gc, derivation->ad_b_deriv, LANA_GC_DERIVATION,
+                   gc_trace_derivation);
+    gc_trace_tensor_chain(gc, derivation->ad_grad);
 }
 
 static void gc_trace_reactive(LanaGC *gc, void *payload) {
@@ -301,6 +420,112 @@ static void gc_trace_value_contents(LanaGC *gc, const Value *value) {
         case VAL_ADT:
             gc_mark_object(gc, value->as.adt, LANA_GC_ADT, gc_trace_adt);
             break;
+        case VAL_GENERATOR:
+            gc_mark_object(gc, value->as.generator, LANA_GC_GENERATOR, gc_trace_generator);
+            break;
+        case VAL_FUTURE:
+            gc_mark_object(gc, value->as.future, LANA_GC_FUTURE, gc_trace_future);
+            break;
+        case VAL_SET:
+            gc_mark_object(gc, value->as.set, LANA_GC_SET, gc_trace_set);
+            break;
+        case VAL_DATASET:
+            gc_mark_object(gc, value->as.dataset, LANA_GC_OPAQUE, gc_trace_dataset);
+            break;
+        case VAL_REGEX:
+            gc_mark_leaf(gc, value->as.regex, LANA_GC_OPAQUE);
+            if (value->as.regex != NULL) {
+                gc_mark_leaf(gc, value->as.regex->insts, LANA_GC_OPAQUE);
+                gc_mark_leaf(gc, value->as.regex->classes, LANA_GC_OPAQUE);
+            }
+            break;
+        case VAL_TENSOR:
+        case VAL_NQUBIT_STATE:
+        case VAL_POVM:
+        case VAL_CHANNEL:
+        case VAL_OBSERVABLE: {
+            /* Walk the base chain so a view keeps its shared buffer alive; a
+             * chain is a loop, not recursion, so arbitrarily deep view chains
+             * cannot overflow the mark stack. */
+            const LanaTensor *tensor = value->as.tensor;
+            while (tensor != NULL) {
+                gc_mark_leaf(gc, tensor, LANA_GC_OPAQUE);
+                if (tensor->shape != NULL)
+                    gc_mark_leaf(gc, tensor->shape, LANA_GC_OPAQUE);
+                if (tensor->strides != NULL)
+                    gc_mark_leaf(gc, tensor->strides, LANA_GC_OPAQUE);
+                if (tensor->data != NULL)
+                    gc_mark_leaf(gc, tensor->data, LANA_GC_OPAQUE);
+                tensor = tensor->base;
+            }
+            break;
+        }
+        case VAL_OPTIMIZER:
+            if (value->as.optimizer != NULL) {
+                gc_mark_leaf(gc, value->as.optimizer, LANA_GC_OPAQUE);
+                gc_mark_leaf(gc, value->as.optimizer->name, LANA_GC_STRING);
+            }
+            break;
+        case VAL_TRAINING_RESULT: {
+            if (value->as.training_result != NULL) {
+                gc_mark_leaf(gc, value->as.training_result, LANA_GC_OPAQUE);
+                const LanaTensor *tensor = value->as.training_result->params;
+                while (tensor != NULL) {
+                    gc_mark_leaf(gc, tensor, LANA_GC_OPAQUE);
+                    if (tensor->shape != NULL)
+                        gc_mark_leaf(gc, tensor->shape, LANA_GC_OPAQUE);
+                    if (tensor->strides != NULL)
+                        gc_mark_leaf(gc, tensor->strides, LANA_GC_OPAQUE);
+                    if (tensor->data != NULL)
+                        gc_mark_leaf(gc, tensor->data, LANA_GC_OPAQUE);
+                    tensor = tensor->base;
+                }
+                gc_mark_object(gc, value->as.training_result->steps,
+                               LANA_GC_ARRAY, gc_trace_array);
+                if (value->as.training_result->optimizer != NULL) {
+                    gc_mark_leaf(gc, value->as.training_result->optimizer,
+                                 LANA_GC_OPAQUE);
+                    gc_mark_leaf(gc, value->as.training_result->optimizer->name,
+                                 LANA_GC_STRING);
+                }
+                if (value->as.training_result->data != NULL)
+                    gc_mark_value_pointer(gc, value->as.training_result->data);
+            }
+            break;
+        }
+        case VAL_INFERENCE_ALGORITHM:
+            if (value->as.inference_algorithm != NULL) {
+                gc_mark_leaf(gc, value->as.inference_algorithm, LANA_GC_OPAQUE);
+                gc_mark_leaf(gc, value->as.inference_algorithm->name, LANA_GC_STRING);
+                gc_mark_leaf(gc, value->as.inference_algorithm->family, LANA_GC_STRING);
+            }
+            break;
+        case VAL_POSTERIOR: {
+            if (value->as.posterior != NULL) {
+                gc_mark_leaf(gc, value->as.posterior, LANA_GC_OPAQUE);
+                const LanaTensor *tensors[3] = {
+                    value->as.posterior->mean,
+                    value->as.posterior->variance,
+                    value->as.posterior->samples
+                };
+                for (size_t t = 0; t < 3u; ++t) {
+                    const LanaTensor *tensor = tensors[t];
+                    while (tensor != NULL) {
+                        gc_mark_leaf(gc, tensor, LANA_GC_OPAQUE);
+                        if (tensor->shape != NULL)
+                            gc_mark_leaf(gc, tensor->shape, LANA_GC_OPAQUE);
+                        if (tensor->strides != NULL)
+                            gc_mark_leaf(gc, tensor->strides, LANA_GC_OPAQUE);
+                        if (tensor->data != NULL)
+                            gc_mark_leaf(gc, tensor->data, LANA_GC_OPAQUE);
+                        tensor = tensor->base;
+                    }
+                }
+                gc_mark_object(gc, value->as.posterior->steps,
+                               LANA_GC_ARRAY, gc_trace_array);
+            }
+            break;
+        }
         case VAL_NULL:
         case VAL_NUMBER:
         case VAL_BOOL:
@@ -360,6 +585,9 @@ static void gc_trace_vm_roots(LanaGC *gc, void *context) {
     size_t frame_index;
     for (frame_index = 0u; frame_index < vm->frame_count; ++frame_index)
         gc_trace_frame(gc, &vm->frames[frame_index]);
+    for (frame_index = 0u; frame_index < vm->ready_count; ++frame_index)
+        gc_mark_object(gc, vm->ready_queue[frame_index], LANA_GC_FUTURE,
+                       gc_trace_future);
     gc_trace_value_contents(gc, &vm->result);
     gc_mark_object(gc, vm->path_execution, LANA_GC_RUNTIME_INTERNAL,
                    gc_trace_path_execution);
@@ -681,6 +909,13 @@ static LanaDerivation *record_derivation(LanaVM *vm, LanaDerivationKind kind,
     node->details = derivation_string(vm, details);
     node->outcome = outcome;
     node->reason = derivation_string(vm, reason == NULL ? "none" : reason);
+    node->ad_op = -1;
+    node->ad_a = NULL;
+    node->ad_b = NULL;
+    node->ad_a_deriv = NULL;
+    node->ad_b_deriv = NULL;
+    node->ad_grad = NULL;
+    node->ad_axis = -1;
     if (node->operation == NULL || node->label == NULL || node->function == NULL ||
         node->details == NULL || node->reason == NULL) return NULL;
     return node;
@@ -959,6 +1194,17 @@ void lana_vm_free(LanaVM *vm) {
     if (owned_scheduler != NULL) {
         scheduler_destroy(owned_scheduler);
         vm->scheduler = NULL;
+    }
+    if (vm->ledger != NULL) { lana_ledger_close(vm->ledger); vm->ledger = NULL; }
+    if (vm->store != NULL) { lana_store_close(vm->store); vm->store = NULL; }
+    if (vm->adapter != NULL) { lana_adapter_close(vm->adapter); vm->adapter = NULL; }
+    if (vm->ffi_lib != NULL) { dlclose(vm->ffi_lib); vm->ffi_lib = NULL; }
+    if (vm->ffi_sigs != NULL) {
+        size_t index;
+        for (index = 0; index < vm->ffi_sig_count; ++index) free(vm->ffi_sigs[index]);
+        free(vm->ffi_sigs);
+        vm->ffi_sigs = NULL;
+        vm->ffi_sig_count = 0u;
     }
 }
 
@@ -1329,6 +1575,29 @@ static LanaError clone_value_memo(LanaVM *destination, const Value *source, Valu
             if (error != LANA_OK) return error;
         }
         out->as.adt = adt;
+    } else if (source->type == VAL_SET) {
+        LanaSet *set;
+        LanaContainerCloneMemo *entry;
+        for (entry = *containers; entry != NULL; entry = entry->next)
+            if (entry->type == VAL_SET && entry->source == source->as.set) {
+                out->as.set = entry->copy; return LANA_OK;
+            }
+        set = lana_vm_alloc(destination, sizeof(*set));
+        if (set == NULL) return LANA_ERR_OOM;
+        entry = malloc(sizeof(*entry));
+        if (entry == NULL) return LANA_ERR_OOM;
+        entry->source = source->as.set; entry->copy = set; entry->type = VAL_SET;
+        entry->next = *containers; *containers = entry;
+        set->count = source->as.set->count;
+        set->capacity = set->count;
+        set->items = lana_vm_alloc(destination, set->count * sizeof(*set->items));
+        if (set->items == NULL && set->count > 0u) return LANA_ERR_OOM;
+        for (index = 0; index < set->count; ++index) {
+            error = clone_value_memo(destination, &source->as.set->items[index],
+                                     &set->items[index], memo, containers, derivations);
+            if (error != LANA_OK) return error;
+        }
+        out->as.set = set;
     } else if (source->type == VAL_TASK) {
         return LANA_ERR_TYPE;
     } else if (source->type == VAL_SHARED_CAPABILITY) {
@@ -1608,6 +1877,20 @@ static bool value_equal_deep(const Value *left, const Value *right,
                     !value_equal_deep(left->as.paths->alternatives[index].result,
                         right->as.paths->alternatives[index].result, depth + 1u))
                     return false;
+            return true;
+        case VAL_SET:
+            if (left->as.set->count != right->as.set->count) return false;
+            for (index = 0u; index < left->as.set->count; ++index) {
+                size_t other;
+                bool found = false;
+                for (other = 0u; other < right->as.set->count; ++other)
+                    if (value_equal_deep(&left->as.set->items[index],
+                                         &right->as.set->items[other], depth + 1u)) {
+                        found = true;
+                        break;
+                    }
+                if (!found) return false;
+            }
             return true;
         default:
             return joint_value_equal(left, right);
@@ -2361,6 +2644,21 @@ static LanaError materialize_value(LanaVM *vm, const Value *source, Value *out) 
         *out = lana_value_map(map);
         return LANA_OK;
     }
+    if (current->type == VAL_SET && current->as.set != NULL) {
+        LanaSet *set = lana_vm_alloc(vm, sizeof(*set));
+        if (set == NULL) return LANA_ERR_OOM;
+        set->count = current->as.set->count;
+        set->capacity = set->count;
+        set->items = lana_vm_alloc(vm, set->count * sizeof(*set->items));
+        if (set->items == NULL && set->count > 0u) return LANA_ERR_OOM;
+        for (index = 0u; index < set->count; ++index) {
+            error = materialize_value(vm, &current->as.set->items[index],
+                                      &set->items[index]);
+            if (error != LANA_OK) return error;
+        }
+        *out = lana_value_set(set);
+        return LANA_OK;
+    }
     return clone_without_runtime_metadata(vm, current, out);
 }
 
@@ -2391,8 +2689,9 @@ LanaError lana_vm_reactive_root(LanaVM *vm, const Value *source,
     return LANA_OK;
 }
 
-LanaError lana_vm_reactive_observe(LanaVM *vm, const Value *source,
-                                   const Value *evidence, Value *out) {
+static LanaError reactive_observe_scratch(LanaVM *vm, const Value *source,
+                                          const Value *evidence,
+                                          uint32_t scratch_register, Value *out) {
     LanaReactive *root;
     const Value *current;
     const Value *replacement = reactive_value(evidence);
@@ -2422,14 +2721,29 @@ LanaError lana_vm_reactive_observe(LanaVM *vm, const Value *source,
                 break;
             }
         if (!supported) return LANA_ERR_INVALID_CONDITIONING;
+    } else if (root->is_training_data) {
+        /* LIP-010: a training data root's support is structural — a single
+         * [x, target] observation. */
+        if (replacement->type != VAL_ARRAY || replacement->as.array == NULL ||
+            replacement->as.array->count != 2u)
+            return LANA_ERR_INVALID_PARAMETERS;
+        supported = true;
     } else if (!joint_value_equal(current, replacement)) {
         return LANA_ERR_INVALID_CONDITIONING;
     }
-    error = reactive_recompute_transaction(vm, root, replacement);
+    error = reactive_recompute_transaction(vm, root, replacement, scratch_register);
     if (error != LANA_OK) return error;
     ++vm->observation_count;
     *out = *source;
     return LANA_OK;
+}
+
+LanaError lana_vm_reactive_observe(LanaVM *vm, const Value *source,
+                                   const Value *evidence, Value *out) {
+    /* The public entry point is only used for non-training observes (shared
+     * Information and tests), which never run a model/loss function, so the
+     * scratch register is unused. */
+    return reactive_observe_scratch(vm, source, evidence, 0u, out);
 }
 
 LanaError lana_vm_claim(LanaVM *vm, const Value *source, const char *proposition,
@@ -2500,6 +2814,7 @@ LanaError lana_vm_execute_planned_effect(LanaVM *vm, const Value *plan_value,
         if (receipt->revision == vm->revision)
             return clone_value(vm, receipt->result, out);
     if (value_is_unresolved(plan->payload)) return LANA_ERR_UNRESOLVED_VALUE;
+    if (value_has_revoked_capability(plan->payload)) return LANA_ERR_CLAIM_REVOKED;
     error = executor(vm, plan->kind, reactive_value(plan->payload), context, &result);
     if (error != LANA_OK) return error;
     receipt = lana_vm_alloc(vm, sizeof(*receipt));
@@ -2514,21 +2829,81 @@ LanaError lana_vm_execute_planned_effect(LanaVM *vm, const Value *plan_value,
     return clone_value(vm, receipt->result, out);
 }
 
-static bool value_is_unresolved(const Value *value) {
+typedef struct LanaValuePath {
+    const void *container;
+    const struct LanaValuePath *parent;
+} LanaValuePath;
+
+static bool value_is_unresolved_at(const Value *value, const LanaValuePath *parent) {
     size_t index;
     if (value == NULL) return false;
     value = reactive_value(value);
     if (value->type == VAL_POSSIBILITY || value->type == VAL_PATH_SET)
         return true;
+    const void *container = value->type == VAL_ARRAY ? (const void *)value->as.array :
+                            value->type == VAL_MAP ? (const void *)value->as.map :
+                            value->type == VAL_SET ? (const void *)value->as.set : NULL;
+    if (container == NULL) return false;
+    /* A back edge adds no new unresolved leaves. Keep checking its siblings.
+     * ponytail: O(depth^2) ancestor checks; use an iterative visited set if
+     * deeply nested general value traversal becomes a supported workload. */
+    for (const LanaValuePath *p = parent; p != NULL; p = p->parent)
+        if (p->container == container) return false;
+    LanaValuePath path = {container, parent};
     if (value->type == VAL_ARRAY && value->as.array != NULL) {
         for (index = 0; index < value->as.array->count; ++index)
-            if (value_is_unresolved(&value->as.array->items[index])) return true;
+            if (value_is_unresolved_at(&value->as.array->items[index], &path)) return true;
     }
     if (value->type == VAL_MAP && value->as.map != NULL) {
         for (index = 0; index < value->as.map->count; ++index)
-            if (value_is_unresolved(value->as.map->entries[index].value)) return true;
+            if (value_is_unresolved_at(value->as.map->entries[index].value, &path)) return true;
+    }
+    if (value->type == VAL_SET && value->as.set != NULL) {
+        for (index = 0; index < value->as.set->count; ++index)
+            if (value_is_unresolved_at(&value->as.set->items[index], &path)) return true;
     }
     return false;
+}
+
+static bool value_is_unresolved(const Value *value) {
+    return value_is_unresolved_at(value, NULL);
+}
+
+static bool value_has_revoked_capability_at(const Value *value,
+                                            const LanaValuePath *parent) {
+    size_t index;
+    if (value == NULL) return false;
+    value = reactive_value(value);
+    if (value->type == VAL_SHARED_CAPABILITY &&
+        !lana_shared_capability_allows(value->as.capability, 0u))
+        return true;
+    const void *container = value->type == VAL_ARRAY ? (const void *)value->as.array :
+                            value->type == VAL_MAP ? (const void *)value->as.map :
+                            value->type == VAL_SET ? (const void *)value->as.set : NULL;
+    if (container == NULL) return false;
+    for (const LanaValuePath *p = parent; p != NULL; p = p->parent)
+        if (p->container == container) return false;
+    LanaValuePath path = {container, parent};
+    if (value->type == VAL_ARRAY && value->as.array != NULL) {
+        for (index = 0; index < value->as.array->count; ++index)
+            if (value_has_revoked_capability_at(&value->as.array->items[index], &path))
+                return true;
+    }
+    if (value->type == VAL_MAP && value->as.map != NULL) {
+        for (index = 0; index < value->as.map->count; ++index)
+            if (value_has_revoked_capability_at(value->as.map->entries[index].value, &path))
+                return true;
+    }
+    if (value->type == VAL_SET && value->as.set != NULL) {
+        for (index = 0; index < value->as.set->count; ++index)
+            if (value_has_revoked_capability_at(&value->as.set->items[index], &path))
+                return true;
+    }
+    return false;
+}
+
+static bool value_has_revoked_capability(const Value *value) {
+    return value_has_revoked_capability_at(value, NULL);
 }
 
 LanaError lana_vm_joint_rename(LanaVM *vm, const LanaJointState *source,
@@ -2869,6 +3244,13 @@ static uint32_t shared_permission(const Value *value) {
     return 0u;
 }
 
+static uint32_t grant_permission(const Value *value) {
+    if (value->type != VAL_STRING) return 0u;
+    if (strcmp(value->as.string, "use") == 0) return LANA_CAPABILITY_READ;
+    if (strcmp(value->as.string, "admin") == 0) return LANA_CAPABILITY_ADMIN;
+    return 0u;
+}
+
 static bool nonnegative_integer(const Value *value) {
     return value->type == VAL_NUMBER && isfinite(value->as.number) &&
            value->as.number >= 0.0 && floor(value->as.number) == value->as.number &&
@@ -3149,8 +3531,3039 @@ static LanaError host_correlated(LanaVM *vm, const Value *x, const Value *y,
     return LANA_OK;
 }
 
+/* ===== LIP-004 tensor helpers ===== */
+
+/* LIP-027: dtype string conversion. `dtype_from_string` returns -1 for an
+ * unknown dtype string (the caller maps that to LANA_ERR_INVALID_PARAMETERS). */
+static const char *dtype_to_string(LanaTensorDtype dtype) {
+    switch (dtype) {
+        case LANA_TENSOR_F64: return "f64";
+        case LANA_TENSOR_F32: return "f32";
+        case LANA_TENSOR_F16: return "f16";
+        case LANA_TENSOR_BF16: return "bf16";
+        case LANA_TENSOR_COMPLEX: return "complex";
+    }
+    return "f64";
+}
+
+static int dtype_from_string(const char *s) {
+    if (s == NULL) return -1;
+    if (strcmp(s, "f64") == 0) return LANA_TENSOR_F64;
+    if (strcmp(s, "f32") == 0) return LANA_TENSOR_F32;
+    if (strcmp(s, "f16") == 0) return LANA_TENSOR_F16;
+    if (strcmp(s, "bf16") == 0) return LANA_TENSOR_BF16;
+    if (strcmp(s, "complex") == 0) return LANA_TENSOR_COMPLEX;
+    return -1;
+}
+
+static double f16_to_double(uint16_t h);
+
+/* LIP-027: round a double to binary16 (f16) precision, round-to-nearest-even,
+ * stored back as a double. Handles normal, subnormal, and overflow-to-inf. */
+static double round_f16(double x) {
+    if (!isfinite(x) || x == 0.0) return x;
+    union { double d; uint64_t u; } v;
+    v.d = x;
+    uint32_t sign = (uint32_t)(v.u >> 63);
+    int exp = (int)((v.u >> 52) & 0x7FF) - 1023;
+    uint64_t sig = (1ull << 52) | (v.u & ((1ull << 52) - 1)); /* 53-bit significand */
+
+    /* Round the 53-bit significand to 11 bits (1 implicit + 10 explicit). */
+    uint64_t drop = 42;
+    uint64_t round_bit = 1ull << (drop - 1);
+    uint64_t mask = (1ull << drop) - 1;
+    uint64_t lsb = 1ull << drop;
+    uint64_t rounded = sig + round_bit;
+    if ((sig & mask) == round_bit && (sig & lsb) == 0) rounded = sig;
+    uint64_t sig11 = rounded >> drop;
+    if (sig11 == (1ull << 11)) { sig11 = 0; exp += 1; }
+    uint64_t mant10 = sig11 & 0x3FF;
+
+    if (exp > 15) return sign ? -INFINITY : INFINITY; /* overflow */
+    if (exp >= -14) { /* normal f16 */
+        uint16_t h = (uint16_t)((sign << 15) | ((uint16_t)(exp + 15) << 10) | (uint16_t)mant10);
+        return f16_to_double(h);
+    }
+    /* subnormal: value = sig11 * 2^exp, exp < -14 */
+    int shift = -14 - exp;
+    if (shift >= 11) {
+        /* rounds to zero; exactly 2^-25 (halfway to min subnormal) rounds to
+         * zero (even) */
+        return sign ? -0.0 : 0.0;
+    }
+    uint64_t sub_mant = sig11 >> shift;
+    uint64_t dropped = sig11 & ((1ull << shift) - 1);
+    uint64_t half = 1ull << (shift - 1);
+    if (dropped > half || (dropped == half && (sub_mant & 1))) sub_mant += 1;
+    if (sub_mant == (1ull << 10)) { /* rounded up to min normal 2^-14 */
+        uint16_t h = (uint16_t)((sign << 15) | (1u << 10));
+        return f16_to_double(h);
+    }
+    uint16_t h = (uint16_t)((sign << 15) | (uint16_t)sub_mant);
+    return f16_to_double(h);
+}
+
+static double f16_to_double(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1;
+    uint32_t exp = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x3FF;
+    double value;
+    if (exp == 0) {
+        value = ldexp((double)mant, -24);
+    } else if (exp == 31) {
+        value = mant ? NAN : INFINITY;
+    } else {
+        value = ldexp((double)((1 << 10) | mant), (int)exp - 15 - 10);
+    }
+    return sign ? -value : value;
+}
+
+/* LIP-027: round a double to bfloat16 (bf16) precision, round-to-nearest-even,
+ * stored back as a double. bf16 shares fp32's exponent range; overflow to inf. */
+static double round_bf16(double x) {
+    if (!isfinite(x) || x == 0.0) return x;
+    union { double d; uint64_t u; } v;
+    v.d = x;
+    int exp = (int)((v.u >> 52) & 0x7FF) - 1023;
+    if (exp > 127) return x < 0 ? -INFINITY : INFINITY; /* overflow beyond fp32 range */
+    /* Round the 52-bit mantissa to 7 bits (drop 45), round-to-nearest-even. */
+    uint64_t low = v.u & 0x1FFFFFFFFFFF;
+    uint64_t half = 1ull << 44;
+    uint64_t lsb = 1ull << 45;
+    if (low > half || (low == half && (v.u & lsb))) v.u += 1ull << 45;
+    v.u &= ~0x1FFFFFFFFFFFull;
+    return v.d;
+}
+
+/* LIP-027: parse an optional trailing dtype string argument (the last of
+ * `argc` arguments). Returns the dtype, or -1 if the argument is not a valid
+ * dtype string. Callers must already have checked argc is 1 or 2. */
+static int tensor_optional_dtype(const Value *arguments, unsigned argc) {
+    if (argc == 1u) return LANA_TENSOR_F64;
+    if (arguments[1].type != VAL_STRING) return -1;
+    return dtype_from_string(arguments[1].as.string);
+}
+
+/* Allocate a zero-initialized tensor with the given shape. `shape` is copied;
+ * the caller owns the input array. Returns NULL on allocation failure or shape
+ * overflow. All memory is GC-managed so the tensor's buffer counts against the
+ * VM memory limit. */
+static LanaTensor *tensor_new(LanaVM *vm, size_t ndim, const size_t *shape, bool is_complex) {
+    if (ndim > LANA_TENSOR_MAX_RANK) return NULL;
+    LanaTensor *tensor = lana_vm_alloc(vm, sizeof(*tensor));
+    if (tensor == NULL) return NULL;
+    tensor->ndim = ndim;
+    tensor->is_complex = is_complex;
+    tensor->dtype = is_complex ? LANA_TENSOR_COMPLEX : LANA_TENSOR_F64;
+    tensor->is_state = false;
+    tensor->shape = NULL;
+    tensor->strides = NULL;
+    tensor->data = NULL;
+    tensor->offset = 0;
+    tensor->base = NULL;
+    if (ndim > 0) {
+        tensor->shape = lana_vm_alloc(vm, ndim * sizeof(*tensor->shape));
+        tensor->strides = lana_vm_alloc(vm, ndim * sizeof(*tensor->strides));
+        if (tensor->shape == NULL || tensor->strides == NULL) return NULL;
+        size_t stride = 1;
+        for (ssize_t i = (ssize_t)ndim - 1; i >= 0; --i) {
+            tensor->shape[i] = shape[i];
+            tensor->strides[i] = stride;
+            if (shape[i] != 0 && stride > SIZE_MAX / shape[i]) return NULL;
+            stride *= shape[i];
+        }
+    }
+    size_t total = 1;
+    for (size_t i = 0; i < ndim; ++i) {
+        if (shape[i] == 0) { total = 0; break; }
+        if (total > SIZE_MAX / shape[i]) return NULL;
+        total *= shape[i];
+    }
+    size_t components = is_complex ? 2u : 1u;
+    if (total > SIZE_MAX / components / sizeof(*tensor->data)) return NULL;
+    size_t elem_count = total * components;
+    if (elem_count > 0) {
+        tensor->data = lana_vm_alloc(vm, elem_count * sizeof(*tensor->data));
+        if (tensor->data == NULL) return NULL;
+        memset(tensor->data, 0, elem_count * sizeof(*tensor->data));
+    }
+    return tensor;
+}
+
+static LanaError tensor_dimension(double n, size_t *dimension) {
+    /* SIZE_MAX rounds up on a 64-bit host; use the exclusive power-of-two
+     * bound on every host so the floating-to-integer conversion is defined. */
+    double limit = ((double)(SIZE_MAX / 2u) + 1.0) * 2.0;
+    if (!isfinite(n) || n < 0.0 || floor(n) != n || n >= limit)
+        return LANA_ERR_INVALID_PARAMETERS;
+    *dimension = (size_t)n;
+    return LANA_OK;
+}
+
+/* Extract a shape from a VAL_ARRAY of numbers into VM-accounted scratch.
+ * Returns LANA_OK, or LANA_ERR_TYPE / LANA_ERR_INVALID_PARAMETERS / OOM.
+ * The buffer is GC memory; callers must not free it. */
+static LanaError tensor_shape_from_array(LanaVM *vm, const Value *v, size_t *ndim, size_t **shape) {
+    if (v->type != VAL_ARRAY) return LANA_ERR_TYPE;
+    LanaArray *arr = v->as.array;
+    if (arr->count > LANA_TENSOR_MAX_RANK) return LANA_ERR_INVALID_PARAMETERS;
+    *ndim = arr->count;
+    *shape = NULL;
+    if (arr->count == 0) return LANA_OK;
+    *shape = lana_vm_alloc(vm, arr->count * sizeof(**shape));
+    if (*shape == NULL) return LANA_ERR_OOM;
+    for (size_t i = 0; i < arr->count; ++i) {
+        const Value *item = &arr->items[i];
+        if (item->type != VAL_NUMBER) return LANA_ERR_TYPE;
+        LanaError error = tensor_dimension(item->as.number, &(*shape)[i]);
+        if (error != LANA_OK) return error;
+    }
+    return LANA_OK;
+}
+
+/* Compute the row-major broadcast strides of `t` against an output shape of
+ * `out_ndim` dims. A broadcast dimension (size 1 expanded to >1, or a missing
+ * leading dimension) gets stride 0. */
+static void tensor_broadcast_strides(const LanaTensor *t, size_t out_ndim,
+                                     const size_t *out_shape, size_t *strides) {
+    size_t offset = out_ndim - t->ndim;
+    for (size_t i = 0; i < out_ndim; ++i) {
+        if (i < offset) {
+            strides[i] = 0;
+        } else {
+            size_t ti = i - offset;
+            strides[i] = (t->shape[ti] == 1 && out_shape[i] != 1) ? 0 : t->strides[ti];
+        }
+    }
+}
+
+/* Element-wise binary op with NumPy broadcasting. op: 0=add 1=sub 2=mul 3=div. */
+static LanaError tensor_elementwise(LanaVM *vm, const LanaTensor *a, const LanaTensor *b,
+                                    int op, Value *out) {
+    if (a->is_complex != b->is_complex) return LANA_ERR_TYPE;
+    size_t out_ndim = a->ndim > b->ndim ? a->ndim : b->ndim;
+    size_t *out_shape = lana_vm_alloc(vm, out_ndim * sizeof(*out_shape));
+    if (out_shape == NULL && out_ndim > 0) return LANA_ERR_OOM;
+    for (size_t i = 0; i < out_ndim; ++i) {
+        size_t ai = (i < out_ndim - a->ndim) ? 1 : a->shape[i - (out_ndim - a->ndim)];
+        size_t bi = (i < out_ndim - b->ndim) ? 1 : b->shape[i - (out_ndim - b->ndim)];
+        if (ai == bi) out_shape[i] = ai;
+        else if (ai == 1) out_shape[i] = bi;
+        else if (bi == 1) out_shape[i] = ai;
+        else return LANA_ERR_INVALID_PARAMETERS;
+    }
+    LanaTensor *r = tensor_new(vm, out_ndim, out_shape, a->is_complex);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t *a_strides = lana_vm_alloc(vm, out_ndim * sizeof(*a_strides));
+    size_t *b_strides = lana_vm_alloc(vm, out_ndim * sizeof(*b_strides));
+    if ((a_strides == NULL || b_strides == NULL) && out_ndim > 0) return LANA_ERR_OOM;
+    tensor_broadcast_strides(a, out_ndim, out_shape, a_strides);
+    tensor_broadcast_strides(b, out_ndim, out_shape, b_strides);
+    size_t total = 1;
+    for (size_t i = 0; i < out_ndim; ++i) total *= out_shape[i];
+    size_t *idx = lana_vm_alloc(vm, out_ndim * sizeof(*idx));
+    if (idx == NULL && out_ndim > 0) return LANA_ERR_OOM;
+    bool complex = a->is_complex;
+    for (size_t lin = 0; lin < total; ++lin) {
+        size_t rem = lin;
+        for (ssize_t i = (ssize_t)out_ndim - 1; i >= 0; --i) {
+            idx[i] = (out_shape[i] == 0) ? 0 : rem % out_shape[i];
+            rem /= out_shape[i];
+        }
+        size_t ai = 0, bi = 0;
+        for (size_t i = 0; i < out_ndim; ++i) { ai += idx[i] * a_strides[i]; bi += idx[i] * b_strides[i]; }
+        if (complex) {
+            double ar = a->data[a->offset + 2 * ai], aim = a->data[a->offset + 2 * ai + 1];
+            double br = b->data[b->offset + 2 * bi], bim = b->data[b->offset + 2 * bi + 1];
+            double rr, ri;
+            switch (op) {
+                case 0: rr = ar + br; ri = aim + bim; break;
+                case 1: rr = ar - br; ri = aim - bim; break;
+                case 2: rr = ar * br - aim * bim; ri = ar * bim + aim * br; break;
+                default: {
+                    double den = br * br + bim * bim;
+                    if (den == 0.0) return LANA_ERR_INVALID_PARAMETERS;
+                    rr = (ar * br + aim * bim) / den;
+                    ri = (aim * br - ar * bim) / den;
+                    break;
+                }
+            }
+            r->data[2 * lin] = rr; r->data[2 * lin + 1] = ri;
+        } else {
+            double av = a->data[a->offset + ai], bv = b->data[b->offset + bi];
+            switch (op) {
+                case 0: r->data[lin] = av + bv; break;
+                case 1: r->data[lin] = av - bv; break;
+                case 2: r->data[lin] = av * bv; break;
+                default:
+                    if (bv == 0.0) return LANA_ERR_INVALID_PARAMETERS;
+                    r->data[lin] = av / bv; break;
+            }
+        }
+    }
+    *out = lana_value_tensor(r);
+    return LANA_OK;
+}
+
+/* General matmul following NumPy semantics: 1d x 1d is a dot product, 1d x Nd
+ * and Nd x 1d are vector-matrix, and Nd x Md contracts the last axis of the
+ * left with the second-to-last of the right, broadcasting batch dims. */
+static LanaError tensor_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor *b, Value *out) {
+    if (a->is_complex != b->is_complex) return LANA_ERR_TYPE;
+    if (a->ndim == 0 || b->ndim == 0) return LANA_ERR_INVALID_PARAMETERS;
+    bool complex = a->is_complex;
+    size_t a_ndim = a->ndim, b_ndim = b->ndim;
+    size_t a_rows = (a_ndim == 1) ? 1 : a->shape[a_ndim - 2];
+    size_t a_cols = a->shape[a_ndim - 1];
+    size_t b_rows = (b_ndim == 1) ? b->shape[0] : b->shape[b_ndim - 2];
+    size_t b_cols = (b_ndim == 1) ? 1 : b->shape[b_ndim - 1];
+    if (a_cols != b_rows) return LANA_ERR_INVALID_PARAMETERS;
+    size_t K = a_cols;
+    size_t a_batch = (a_ndim <= 2) ? 0 : a_ndim - 2;
+    size_t b_batch = (b_ndim <= 2) ? 0 : b_ndim - 2;
+    size_t batch_ndim = a_batch > b_batch ? a_batch : b_batch;
+    size_t *batch_shape = lana_vm_alloc(vm, batch_ndim * sizeof(*batch_shape));
+    if (batch_shape == NULL && batch_ndim > 0) return LANA_ERR_OOM;
+    for (size_t i = 0; i < batch_ndim; ++i) {
+        size_t ai = (i < batch_ndim - a_batch) ? 1 : a->shape[i - (batch_ndim - a_batch)];
+        size_t bi = (i < batch_ndim - b_batch) ? 1 : b->shape[i - (batch_ndim - b_batch)];
+        if (ai == bi) batch_shape[i] = ai;
+        else if (ai == 1) batch_shape[i] = bi;
+        else if (bi == 1) batch_shape[i] = ai;
+        else return LANA_ERR_INVALID_PARAMETERS;
+    }
+    bool a_vec = (a_ndim == 1), b_vec = (b_ndim == 1);
+    size_t out_ndim = batch_ndim + (a_vec ? 0 : 1) + (b_vec ? 0 : 1);
+    size_t *out_shape = lana_vm_alloc(vm, out_ndim * sizeof(*out_shape));
+    if (out_shape == NULL && out_ndim > 0) return LANA_ERR_OOM;
+    for (size_t i = 0; i < batch_ndim; ++i) out_shape[i] = batch_shape[i];
+    size_t pos = batch_ndim;
+    if (!a_vec) out_shape[pos++] = a_rows;
+    if (!b_vec) out_shape[pos++] = b_cols;
+    LanaTensor *r = tensor_new(vm, out_ndim, out_shape, complex);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t *a_batch_strides = lana_vm_alloc(vm, batch_ndim * sizeof(*a_batch_strides));
+    size_t *b_batch_strides = lana_vm_alloc(vm, batch_ndim * sizeof(*b_batch_strides));
+    if ((a_batch_strides == NULL || b_batch_strides == NULL) && batch_ndim > 0) return LANA_ERR_OOM;
+    for (size_t i = 0; i < batch_ndim; ++i) {
+        size_t a_dim = (i < batch_ndim - a_batch) ? 1 : a->shape[i - (batch_ndim - a_batch)];
+        size_t a_stride = (i < batch_ndim - a_batch) ? 0 : a->strides[i - (batch_ndim - a_batch)];
+        a_batch_strides[i] = (a_dim == 1 && batch_shape[i] != 1) ? 0 : a_stride;
+        size_t b_dim = (i < batch_ndim - b_batch) ? 1 : b->shape[i - (batch_ndim - b_batch)];
+        size_t b_stride = (i < batch_ndim - b_batch) ? 0 : b->strides[i - (batch_ndim - b_batch)];
+        b_batch_strides[i] = (b_dim == 1 && batch_shape[i] != 1) ? 0 : b_stride;
+    }
+    size_t batch_total = 1;
+    for (size_t i = 0; i < batch_ndim; ++i) batch_total *= batch_shape[i];
+    size_t a_row_stride = (a_ndim == 1) ? 0 : a->strides[a_ndim - 2];
+    size_t a_col_stride = a->strides[a_ndim - 1];
+    size_t b_row_stride = (b_ndim == 1) ? b->strides[0] : b->strides[b_ndim - 2];
+    size_t b_col_stride = (b_ndim == 1) ? 0 : b->strides[b_ndim - 1];
+    size_t m = a_rows, n = b_cols;
+    size_t mult = complex ? 2u : 1u;
+    /* BLAS needs row-major contiguous cores. A promoted vector is contiguous
+     * when its one live stride is 1; a matrix operand when its column stride
+     * is 1. Anything else is gathered into accounted scratch per batch
+     * element (LIP-004 section 5). */
+    bool pack_a = a_col_stride != 1u;
+    bool pack_b = b_col_stride != 1u;
+    /* Leading dimensions for direct (non-packed) operands: the true row
+     * stride of the view, which BLAS accepts instead of a copy. A promoted
+     * vector has one row (lda = K) or one column (ldb = its row stride). */
+    size_t a_ld = pack_a ? K : (a_vec ? K : a_row_stride);
+    size_t b_ld = pack_b ? n : b_row_stride;
+    size_t a_core = m * K * mult;
+    size_t b_core = K * n * mult;
+    double *a_packed = NULL, *b_packed = NULL;
+    if (pack_a && a_core > 0) {
+        a_packed = lana_vm_alloc(vm, a_core * sizeof(double));
+        if (a_packed == NULL) return LANA_ERR_OOM;
+    }
+    if (pack_b && b_core > 0) {
+        b_packed = lana_vm_alloc(vm, b_core * sizeof(double));
+        if (b_packed == NULL) return LANA_ERR_OOM;
+    }
+    for (size_t batch = 0; batch < batch_total; ++batch) {
+        size_t rem = batch, a_off = 0, b_off = 0;
+        for (ssize_t i = (ssize_t)batch_ndim - 1; i >= 0; --i) {
+            size_t bi = (batch_shape[i] == 0) ? 0 : rem % batch_shape[i];
+            rem /= batch_shape[i];
+            a_off += bi * a_batch_strides[i];
+            b_off += bi * b_batch_strides[i];
+        }
+        const double *a_ptr = a->data + (a->offset + a_off) * mult;
+        const double *b_ptr = b->data + (b->offset + b_off) * mult;
+        if (a_packed != NULL) {
+            for (size_t i = 0; i < m; ++i) {
+                for (size_t k = 0; k < K; ++k) {
+                    size_t src = (a->offset + a_off + i * a_row_stride + k * a_col_stride) * mult;
+                    size_t dst = (i * K + k) * mult;
+                    for (size_t w = 0; w < mult; ++w) a_packed[dst + w] = a->data[src + w];
+                }
+            }
+            a_ptr = a_packed;
+        }
+        if (b_packed != NULL) {
+            for (size_t k = 0; k < K; ++k) {
+                for (size_t j = 0; j < n; ++j) {
+                    size_t src = (b->offset + b_off + k * b_row_stride + j * b_col_stride) * mult;
+                    size_t dst = (k * n + j) * mult;
+                    for (size_t w = 0; w < mult; ++w) b_packed[dst + w] = b->data[src + w];
+                }
+            }
+            b_ptr = b_packed;
+        }
+        LanaGemmCall gemm = { m, K, n, complex, a_ptr, a_ld, b_ptr, b_ld,
+                              r->data + batch * m * n * mult };
+        lana_backend_gemm(&gemm);
+    }
+    *out = lana_value_tensor(r);
+    return LANA_OK;
+}
+
+/* Explicit GPU matmul (LIP-004 section 5). Mirrors `tensor_matmul`'s shape,
+ * batch, and broadcasting logic, but dispatches each batch element to the
+ * Metal device in float32. Complex operands are rejected (float32 complex
+ * Metal is a later extension); the binary64 -> float32 downcast is explicit
+ * and the float32 -> binary64 upcast is exact. The caller attaches the
+ * APPROXIMATE derivation. */
+static LanaError tensor_gpu_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor *b, Value *out) {
+    if (a->is_complex || b->is_complex) return LANA_ERR_TYPE;
+    if (a->ndim == 0 || b->ndim == 0) return LANA_ERR_INVALID_PARAMETERS;
+    size_t a_ndim = a->ndim, b_ndim = b->ndim;
+    size_t a_rows = (a_ndim == 1) ? 1 : a->shape[a_ndim - 2];
+    size_t a_cols = a->shape[a_ndim - 1];
+    size_t b_rows = (b_ndim == 1) ? b->shape[0] : b->shape[b_ndim - 2];
+    size_t b_cols = (b_ndim == 1) ? 1 : b->shape[b_ndim - 1];
+    if (a_cols != b_rows) return LANA_ERR_INVALID_PARAMETERS;
+    size_t K = a_cols;
+    size_t a_batch = (a_ndim <= 2) ? 0 : a_ndim - 2;
+    size_t b_batch = (b_ndim <= 2) ? 0 : b_ndim - 2;
+    size_t batch_ndim = a_batch > b_batch ? a_batch : b_batch;
+    size_t *batch_shape = lana_vm_alloc(vm, batch_ndim * sizeof(*batch_shape));
+    if (batch_shape == NULL && batch_ndim > 0) return LANA_ERR_OOM;
+    for (size_t i = 0; i < batch_ndim; ++i) {
+        size_t ai = (i < batch_ndim - a_batch) ? 1 : a->shape[i - (batch_ndim - a_batch)];
+        size_t bi = (i < batch_ndim - b_batch) ? 1 : b->shape[i - (batch_ndim - b_batch)];
+        if (ai == bi) batch_shape[i] = ai;
+        else if (ai == 1) batch_shape[i] = bi;
+        else if (bi == 1) batch_shape[i] = ai;
+        else return LANA_ERR_INVALID_PARAMETERS;
+    }
+    bool a_vec = (a_ndim == 1), b_vec = (b_ndim == 1);
+    size_t out_ndim = batch_ndim + (a_vec ? 0 : 1) + (b_vec ? 0 : 1);
+    size_t *out_shape = lana_vm_alloc(vm, out_ndim * sizeof(*out_shape));
+    if (out_shape == NULL && out_ndim > 0) return LANA_ERR_OOM;
+    for (size_t i = 0; i < batch_ndim; ++i) out_shape[i] = batch_shape[i];
+    size_t pos = batch_ndim;
+    if (!a_vec) out_shape[pos++] = a_rows;
+    if (!b_vec) out_shape[pos++] = b_cols;
+    LanaTensor *r = tensor_new(vm, out_ndim, out_shape, false);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t *a_batch_strides = lana_vm_alloc(vm, batch_ndim * sizeof(*a_batch_strides));
+    size_t *b_batch_strides = lana_vm_alloc(vm, batch_ndim * sizeof(*b_batch_strides));
+    if ((a_batch_strides == NULL || b_batch_strides == NULL) && batch_ndim > 0) return LANA_ERR_OOM;
+    for (size_t i = 0; i < batch_ndim; ++i) {
+        size_t a_dim = (i < batch_ndim - a_batch) ? 1 : a->shape[i - (batch_ndim - a_batch)];
+        size_t a_stride = (i < batch_ndim - a_batch) ? 0 : a->strides[i - (batch_ndim - a_batch)];
+        a_batch_strides[i] = (a_dim == 1 && batch_shape[i] != 1) ? 0 : a_stride;
+        size_t b_dim = (i < batch_ndim - b_batch) ? 1 : b->shape[i - (batch_ndim - b_batch)];
+        size_t b_stride = (i < batch_ndim - b_batch) ? 0 : b->strides[i - (batch_ndim - b_batch)];
+        b_batch_strides[i] = (b_dim == 1 && batch_shape[i] != 1) ? 0 : b_stride;
+    }
+    size_t batch_total = 1;
+    for (size_t i = 0; i < batch_ndim; ++i) batch_total *= batch_shape[i];
+    size_t a_row_stride = (a_ndim == 1) ? 0 : a->strides[a_ndim - 2];
+    size_t a_col_stride = a->strides[a_ndim - 1];
+    size_t b_row_stride = (b_ndim == 1) ? b->strides[0] : b->strides[b_ndim - 2];
+    size_t b_col_stride = (b_ndim == 1) ? 0 : b->strides[b_ndim - 1];
+    size_t m = a_rows, n = b_cols;
+    /* Metal needs contiguous row-major float32 cores, so the binary64 operands
+     * are downcast into float32 scratch per batch element (LIP-004 section 5:
+     * the downcast is explicit, never silent). */
+    float *a_float = lana_vm_alloc(vm, m * K * sizeof(float));
+    float *b_float = lana_vm_alloc(vm, K * n * sizeof(float));
+    float *c_float = lana_vm_alloc(vm, m * n * sizeof(float));
+    if ((a_float == NULL && m * K > 0) || (b_float == NULL && K * n > 0) ||
+        (c_float == NULL && m * n > 0)) return LANA_ERR_OOM;
+    for (size_t batch = 0; batch < batch_total; ++batch) {
+        size_t rem = batch, a_off = 0, b_off = 0;
+        for (ssize_t i = (ssize_t)batch_ndim - 1; i >= 0; --i) {
+            size_t bi = (batch_shape[i] == 0) ? 0 : rem % batch_shape[i];
+            rem /= batch_shape[i];
+            a_off += bi * a_batch_strides[i];
+            b_off += bi * b_batch_strides[i];
+        }
+        for (size_t i = 0; i < m; ++i)
+            for (size_t k = 0; k < K; ++k)
+                a_float[i * K + k] = (float)a->data[a->offset + a_off + i * a_row_stride + k * a_col_stride];
+        for (size_t k = 0; k < K; ++k)
+            for (size_t j = 0; j < n; ++j)
+                b_float[k * n + j] = (float)b->data[b->offset + b_off + k * b_row_stride + j * b_col_stride];
+        if (!lana_metal_sgemm(m, K, n, a_float, b_float, c_float))
+            return LANA_ERR_UNSUPPORTED_OPERATION;
+        for (size_t i = 0; i < m * n; ++i)
+            r->data[batch * m * n + i] = (double)c_float[i];
+    }
+    *out = lana_value_tensor(r);
+    return LANA_OK;
+}
+
+/* Reduce one strided fiber. op: 0=sum 1=mean 2=max 3=min. `offset` is
+ * relative to the tensor's first element; the tensor's own view offset is
+ * folded in here so every caller is automatically view-correct. */
+static LanaError tensor_reduce_fiber(const LanaTensor *t, size_t offset,
+                                     size_t count, size_t stride, int op,
+                                     double *re, double *im) {
+    if (t->is_complex && op >= 2) return LANA_ERR_TYPE;
+    if (count == 0 && op != 0) return LANA_ERR_INVALID_PARAMETERS;
+    double acc = op == 2 ? -INFINITY : op == 3 ? INFINITY : 0.0;
+    double imaginary = 0.0;
+    for (size_t i = 0; i < count; ++i) {
+        size_t index = t->offset + offset + i * stride;
+        double v = t->data[index * (t->is_complex ? 2u : 1u)];
+        if (!isfinite(v)) return LANA_ERR_INVALID_PARAMETERS;
+        if (op < 2) acc += v;
+        else if (op == 2 ? v > acc : v < acc) acc = v;
+        if (t->is_complex) {
+            double component = t->data[2 * index + 1];
+            if (!isfinite(component)) return LANA_ERR_INVALID_PARAMETERS;
+            imaginary += component;
+        }
+    }
+    if (op == 1) { acc /= (double)count; imaginary /= (double)count; }
+    if (!isfinite(acc) || !isfinite(imaginary)) return LANA_ERR_INVALID_PARAMETERS;
+    *re = acc; *im = imaginary;
+    return LANA_OK;
+}
+
+static LanaError tensor_reduce(LanaVM *vm, const LanaTensor *t, int op,
+                               const Value *axis_value, Value *out) {
+    if (t->is_complex && op >= 2) return LANA_ERR_TYPE;
+    if (axis_value == NULL) {
+        /* Full reduction over every element. A view may be non-contiguous, so
+         * traverse the strided layout per dimension instead of assuming a
+         * flat fiber. */
+        size_t total = 1;
+        for (size_t i = 0; i < t->ndim; ++i) total *= t->shape[i];
+        if (total == 0 && op != 0) return LANA_ERR_INVALID_PARAMETERS;
+        double acc = op == 2 ? -INFINITY : op == 3 ? INFINITY : 0.0;
+        double imaginary = 0.0;
+        for (size_t lin = 0; lin < total; ++lin) {
+            size_t rem = lin, index = t->offset;
+            for (size_t d = t->ndim; d-- > 0;) {
+                index += (t->shape[d] == 0 ? 0 : rem % t->shape[d]) * t->strides[d];
+                rem /= t->shape[d];
+            }
+            double v = t->data[index * (t->is_complex ? 2u : 1u)];
+            if (!isfinite(v)) return LANA_ERR_INVALID_PARAMETERS;
+            if (op < 2) acc += v;
+            else if (op == 2 ? v > acc : v < acc) acc = v;
+            if (t->is_complex) {
+                double component = t->data[2 * index + 1];
+                if (!isfinite(component)) return LANA_ERR_INVALID_PARAMETERS;
+                imaginary += component;
+            }
+        }
+        if (op == 1) { acc /= (double)total; imaginary /= (double)total; }
+        if (!isfinite(acc) || !isfinite(imaginary)) return LANA_ERR_INVALID_PARAMETERS;
+        if (!t->is_complex) { *out = lana_value_number(acc); return LANA_OK; }
+        LanaTensor *r = tensor_new(vm, 0, NULL, true);
+        if (r == NULL) return LANA_ERR_OOM;
+        r->data[0] = acc; r->data[1] = imaginary;
+        *out = lana_value_tensor(r);
+        return LANA_OK;
+    }
+    if (axis_value->type != VAL_NUMBER) return LANA_ERR_TYPE;
+    double axis_number = axis_value->as.number;
+    if (!isfinite(axis_number) || floor(axis_number) != axis_number ||
+        axis_number < -(double)t->ndim || axis_number >= (double)t->ndim)
+        return LANA_ERR_INVALID_PARAMETERS;
+    size_t axis = (size_t)(axis_number < 0 ? axis_number + (double)t->ndim : axis_number);
+    size_t count = t->shape[axis];
+    if (count == 0 && op != 0) return LANA_ERR_INVALID_PARAMETERS;
+    size_t shape[LANA_TENSOR_MAX_RANK];
+    for (size_t i = 0, j = 0; i < t->ndim; ++i)
+        if (i != axis) shape[j++] = t->shape[i];
+    LanaTensor *r = tensor_new(vm, t->ndim - 1, shape, t->is_complex);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t total = 1;
+    for (size_t i = 0; i < r->ndim; ++i) total *= r->shape[i];
+    for (size_t i = 0; i < total; ++i) {
+        size_t offset = 0, remaining = i;
+        for (size_t d = t->ndim; d-- > 0;) {
+            if (d == axis) continue;
+            offset += (remaining % t->shape[d]) * t->strides[d];
+            remaining /= t->shape[d];
+        }
+        double re, im;
+        LanaError error = tensor_reduce_fiber(t, offset, count, t->strides[axis], op, &re, &im);
+        if (error != LANA_OK) return error;
+        r->data[i * (t->is_complex ? 2u : 1u)] = re;
+        if (t->is_complex) r->data[2 * i + 1] = im;
+    }
+    *out = lana_value_tensor(r);
+    return LANA_OK;
+}
+
+/* ===== LIP-008 uncertainty-carrying tensor helpers ===== */
+
+/* Detect an uncertain tensor: a VAL_MAP with exactly the "prediction" and
+ * "uncertainty" keys, both VAL_TENSOR. A bare VAL_TENSOR is certain (pred set,
+ * var NULL, is_uncertain false). Any other value is a type error. */
+static LanaError tensor_uncertainty_unpack(const Value *v, const LanaTensor **pred,
+                                           const LanaTensor **var, bool *is_uncertain) {
+    *is_uncertain = false;
+    *pred = NULL;
+    *var = NULL;
+    if (v->type == VAL_TENSOR) { *pred = v->as.tensor; return LANA_OK; }
+    if (v->type != VAL_MAP) return LANA_ERR_TYPE;
+    const LanaMap *map = v->as.map;
+    if (map->count != 2u) return LANA_ERR_TYPE;
+    Value pred_value, var_value;
+    if (lana_map_get(map, "prediction", &pred_value) != LANA_OK) return LANA_ERR_TYPE;
+    if (lana_map_get(map, "uncertainty", &var_value) != LANA_OK) return LANA_ERR_TYPE;
+    if (pred_value.type != VAL_TENSOR || var_value.type != VAL_TENSOR) return LANA_ERR_TYPE;
+    *pred = pred_value.as.tensor;
+    *var = var_value.as.tensor;
+    *is_uncertain = true;
+    return LANA_OK;
+}
+
+/* Build the { prediction, uncertainty } map result. */
+static LanaError tensor_uncertain_result(LanaVM *vm, LanaTensor *pred, LanaTensor *var, Value *out) {
+    LanaMap *map;
+    LanaError error = lana_map_new(vm, 2u, &map);
+    if (error != LANA_OK) return error;
+    Value pred_value = lana_value_tensor(pred);
+    Value var_value = lana_value_tensor(var);
+    error = lana_map_set(vm, map, "prediction", &pred_value, false);
+    if (error != LANA_OK) return error;
+    error = lana_map_set(vm, map, "uncertainty", &var_value, false);
+    if (error != LANA_OK) return error;
+    *out = lana_value_map(map);
+    return LANA_OK;
+}
+
+/* A zero real tensor with the same shape as `t` (the variance of a certain
+ * operand). */
+static LanaTensor *tensor_zeros_like(LanaVM *vm, const LanaTensor *t) {
+    return tensor_new(vm, t->ndim, t->shape, false);
+}
+
+/* Whether every element of a freshly-allocated (contiguous) tensor is finite. */
+static bool tensor_all_finite(const LanaTensor *t) {
+    size_t total = 1;
+    for (size_t i = 0; i < t->ndim; ++i) total *= t->shape[i];
+    size_t mult = t->is_complex ? 2u : 1u;
+    for (size_t i = 0; i < total * mult; ++i) {
+        if (!isfinite(t->data[t->offset + i])) return false;
+    }
+    return true;
+}
+
+/* First-order variance propagation for element-wise + - * / (real-only). */
+static LanaError tensor_elementwise_uncertain(LanaVM *vm, const LanaTensor *a_pred,
+                                              const LanaTensor *a_var, const LanaTensor *b_pred,
+                                              const LanaTensor *b_var, int op, Value *out) {
+    if (a_pred->is_complex || b_pred->is_complex || a_var->is_complex || b_var->is_complex)
+        return LANA_ERR_TYPE;
+    Value pred_value;
+    LanaError error = tensor_elementwise(vm, a_pred, b_pred, op, &pred_value);
+    if (error != LANA_OK) return error;
+    Value var_value;
+    if (op == 0 || op == 1) {
+        /* add/sub: var = var_a + var_b */
+        error = tensor_elementwise(vm, a_var, b_var, 0, &var_value);
+    } else if (op == 2) {
+        /* mul: var = var_a * b^2 + var_b * a^2 */
+        Value b_sq, a_sq, t1, t2;
+        error = tensor_elementwise(vm, b_pred, b_pred, 2, &b_sq);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, a_pred, a_pred, 2, &a_sq);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, a_var, b_sq.as.tensor, 2, &t1);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, b_var, a_sq.as.tensor, 2, &t2);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, t1.as.tensor, t2.as.tensor, 0, &var_value);
+    } else {
+        /* div: var = var_a / b^2 + var_b * a^2 / b^4 */
+        Value b_sq, b_4, a_sq, t1, t2, t3;
+        error = tensor_elementwise(vm, b_pred, b_pred, 2, &b_sq);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, b_sq.as.tensor, b_sq.as.tensor, 2, &b_4);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, a_pred, a_pred, 2, &a_sq);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, a_var, b_sq.as.tensor, 3, &t1);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, b_var, a_sq.as.tensor, 2, &t2);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, t2.as.tensor, b_4.as.tensor, 3, &t3);
+        if (error != LANA_OK) return error;
+        error = tensor_elementwise(vm, t1.as.tensor, t3.as.tensor, 0, &var_value);
+    }
+    if (error != LANA_OK) return error;
+    if (!tensor_all_finite(var_value.as.tensor)) return LANA_ERR_INVALID_PARAMETERS;
+    return tensor_uncertain_result(vm, pred_value.as.tensor, var_value.as.tensor, out);
+}
+
+/* First-order variance propagation for matmul (real-only):
+ * var = matmul(var_a, b^2) + matmul(a^2, var_b). */
+static LanaError tensor_matmul_uncertain(LanaVM *vm, const LanaTensor *a_pred,
+                                         const LanaTensor *a_var, const LanaTensor *b_pred,
+                                         const LanaTensor *b_var, Value *out) {
+    if (a_pred->is_complex || b_pred->is_complex || a_var->is_complex || b_var->is_complex)
+        return LANA_ERR_TYPE;
+    Value pred_value;
+    LanaError error = tensor_matmul(vm, a_pred, b_pred, &pred_value);
+    if (error != LANA_OK) return error;
+    Value b_sq, a_sq, t1, t2, var_value;
+    error = tensor_elementwise(vm, b_pred, b_pred, 2, &b_sq);
+    if (error != LANA_OK) return error;
+    error = tensor_elementwise(vm, a_pred, a_pred, 2, &a_sq);
+    if (error != LANA_OK) return error;
+    error = tensor_matmul(vm, a_var, b_sq.as.tensor, &t1);
+    if (error != LANA_OK) return error;
+    error = tensor_matmul(vm, a_sq.as.tensor, b_var, &t2);
+    if (error != LANA_OK) return error;
+    error = tensor_elementwise(vm, t1.as.tensor, t2.as.tensor, 0, &var_value);
+    if (error != LANA_OK) return error;
+    if (!tensor_all_finite(var_value.as.tensor)) return LANA_ERR_INVALID_PARAMETERS;
+    return tensor_uncertain_result(vm, pred_value.as.tensor, var_value.as.tensor, out);
+}
+
+/* Reduce to a tensor, wrapping a full-reduction number in a rank-0 tensor. */
+static LanaError tensor_reduce_tensor(LanaVM *vm, const LanaTensor *t, int op,
+                                      const Value *axis_value, LanaTensor **out) {
+    Value result;
+    LanaError error = tensor_reduce(vm, t, op, axis_value, &result);
+    if (error != LANA_OK) return error;
+    if (result.type == VAL_TENSOR) { *out = result.as.tensor; return LANA_OK; }
+    LanaTensor *r = tensor_new(vm, 0, NULL, false);
+    if (r == NULL) return LANA_ERR_OOM;
+    r->data[0] = result.as.number;
+    *out = r;
+    return LANA_OK;
+}
+
+/* Scale a freshly-allocated (contiguous) tensor by a constant factor. */
+static LanaError tensor_scale(LanaVM *vm, const LanaTensor *t, double factor, LanaTensor **out) {
+    LanaTensor *r = tensor_new(vm, t->ndim, t->shape, t->is_complex);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t total = 1;
+    for (size_t i = 0; i < t->ndim; ++i) total *= t->shape[i];
+    size_t mult = t->is_complex ? 2u : 1u;
+    for (size_t i = 0; i < total * mult; ++i) r->data[i] = t->data[t->offset + i] * factor;
+    *out = r;
+    return LANA_OK;
+}
+
+/* First-order variance propagation for sum/mean reductions (real-only):
+ * sum: var = sum(var); mean: var = sum(var) / n^2. */
+static LanaError tensor_reduce_uncertain(LanaVM *vm, const LanaTensor *pred, const LanaTensor *var,
+                                         int op, const Value *axis_value, Value *out) {
+    if (pred->is_complex || var->is_complex) return LANA_ERR_TYPE;
+    LanaTensor *pred_tensor;
+    LanaError error = tensor_reduce_tensor(vm, pred, op, axis_value, &pred_tensor);
+    if (error != LANA_OK) return error;
+    LanaTensor *var_tensor;
+    error = tensor_reduce_tensor(vm, var, 0, axis_value, &var_tensor);
+    if (error != LANA_OK) return error;
+    if (op == 1) {
+        size_t n;
+        if (axis_value == NULL) {
+            n = 1;
+            for (size_t i = 0; i < pred->ndim; ++i) n *= pred->shape[i];
+        } else {
+            double axis_number = axis_value->as.number;
+            size_t axis = (size_t)(axis_number < 0 ? axis_number + (double)pred->ndim : axis_number);
+            n = pred->shape[axis];
+        }
+        double factor = (double)n * (double)n;
+        LanaTensor *scaled;
+        error = tensor_scale(vm, var_tensor, 1.0 / factor, &scaled);
+        if (error != LANA_OK) return error;
+        var_tensor = scaled;
+    }
+    if (!tensor_all_finite(var_tensor)) return LANA_ERR_INVALID_PARAMETERS;
+    return tensor_uncertain_result(vm, pred_tensor, var_tensor, out);
+}
+
+/* ===== LIP-011 reverse-mode autodiff helpers ===== */
+
+/* Total number of real elements in a tensor (autodiff is real-only). */
+static size_t tensor_element_count(const LanaTensor *t) {
+    size_t total = 1;
+    for (size_t i = 0; i < t->ndim; ++i) total *= t->shape[i];
+    return total;
+}
+
+static bool tensor_shape_equal(const LanaTensor *a, const LanaTensor *b) {
+    if (a->ndim != b->ndim) return false;
+    for (size_t i = 0; i < a->ndim; ++i)
+        if (a->shape[i] != b->shape[i]) return false;
+    return true;
+}
+
+/* A view of `t` with its last two axes swapped. Shares the source buffer. */
+static LanaTensor *tensor_transpose_last_two(LanaVM *vm, const LanaTensor *t) {
+    if (t->ndim < 2) return (LanaTensor *)t;
+    LanaTensor *view = lana_vm_alloc(vm, sizeof(*view));
+    if (view == NULL) return NULL;
+    view->ndim = t->ndim;
+    view->is_complex = t->is_complex;
+    view->shape = lana_vm_alloc(vm, t->ndim * sizeof(*view->shape));
+    view->strides = lana_vm_alloc(vm, t->ndim * sizeof(*view->strides));
+    if (view->shape == NULL || view->strides == NULL) return NULL;
+    for (size_t i = 0; i < t->ndim; ++i) {
+        view->shape[i] = t->shape[i];
+        view->strides[i] = t->strides[i];
+    }
+    size_t last = t->ndim - 1u, second = t->ndim - 2u;
+    size_t tmp = view->shape[last];
+    view->shape[last] = view->shape[second];
+    view->shape[second] = tmp;
+    tmp = view->strides[last];
+    view->strides[last] = view->strides[second];
+    view->strides[second] = tmp;
+    view->data = t->data;
+    view->offset = t->offset;
+    view->base = (LanaTensor *)t;
+    return view;
+}
+
+/* Outer product of two 1-D tensors: out[i,j] = u[i] * v[j]. */
+static LanaError tensor_outer(LanaVM *vm, const LanaTensor *u, const LanaTensor *v,
+                              LanaTensor **out) {
+    size_t k = u->shape[0], n = v->shape[0];
+    size_t shape[2] = {k, n};
+    LanaTensor *r = tensor_new(vm, 2, shape, false);
+    if (r == NULL) return LANA_ERR_OOM;
+    for (size_t i = 0; i < k; ++i)
+        for (size_t j = 0; j < n; ++j)
+            r->data[i * n + j] =
+                u->data[u->offset + i * u->strides[0]] *
+                v->data[v->offset + j * v->strides[0]];
+    *out = r;
+    return LANA_OK;
+}
+
+/* Negate a tensor into a fresh base tensor (view-correct). */
+static LanaError tensor_negate(LanaVM *vm, const LanaTensor *t, LanaTensor **out) {
+    LanaTensor *r = tensor_new(vm, t->ndim, t->shape, false);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t total = tensor_element_count(t);
+    size_t *idx = lana_vm_alloc(vm, t->ndim * sizeof(*idx));
+    if (idx == NULL && t->ndim > 0) return LANA_ERR_OOM;
+    for (size_t lin = 0; lin < total; ++lin) {
+        size_t rem = lin, index = t->offset;
+        for (size_t d = t->ndim; d-- > 0;) {
+            index += (t->shape[d] == 0 ? 0 : rem % t->shape[d]) * t->strides[d];
+            rem /= t->shape[d];
+        }
+        r->data[lin] = -t->data[index];
+    }
+    *out = r;
+    return LANA_OK;
+}
+
+/* Sum `g` over the broadcast dimensions so the result has `target`'s shape.
+ * `g` is a contiguous base tensor; `target` supplies only its shape. */
+static LanaError tensor_unbroadcast(LanaVM *vm, const LanaTensor *g,
+                                    const LanaTensor *target, LanaTensor **out) {
+    size_t out_ndim = target->ndim;
+    LanaTensor *r = tensor_new(vm, out_ndim, target->shape, false);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t total = tensor_element_count(g);
+    size_t *idx = lana_vm_alloc(vm, g->ndim * sizeof(*idx));
+    if (idx == NULL && g->ndim > 0) return LANA_ERR_OOM;
+    size_t offset = g->ndim - out_ndim;
+    for (size_t lin = 0; lin < total; ++lin) {
+        size_t rem = lin;
+        for (ssize_t i = (ssize_t)g->ndim - 1; i >= 0; --i) {
+            idx[i] = (g->shape[i] == 0) ? 0 : rem % g->shape[i];
+            rem /= g->shape[i];
+        }
+        size_t ti = 0;
+        for (size_t i = 0; i < out_ndim; ++i) {
+            size_t gi = i + offset;
+            size_t coord = (target->shape[i] == 1) ? 0 : idx[gi];
+            ti = ti * target->shape[i] + coord;
+        }
+        r->data[ti] += g->data[g->offset + lin];
+    }
+    *out = r;
+    return LANA_OK;
+}
+
+/* Broadcast a reduced gradient `g` back to `input`'s shape, scaled by `scale`.
+ * `axis` is the reduced axis (-1 for a full reduction). */
+static LanaError tensor_broadcast_reduce(LanaVM *vm, const LanaTensor *g,
+                                         const LanaTensor *input, int axis,
+                                         double scale, LanaTensor **out) {
+    LanaTensor *r = tensor_new(vm, input->ndim, input->shape, false);
+    if (r == NULL) return LANA_ERR_OOM;
+    size_t total = tensor_element_count(input);
+    size_t *idx = lana_vm_alloc(vm, input->ndim * sizeof(*idx));
+    if (idx == NULL && input->ndim > 0) return LANA_ERR_OOM;
+    size_t g_strides[LANA_TENSOR_MAX_RANK];
+    size_t stride = 1;
+    for (ssize_t i = (ssize_t)g->ndim - 1; i >= 0; --i) {
+        g_strides[i] = stride;
+        stride *= g->shape[i];
+    }
+    for (size_t lin = 0; lin < total; ++lin) {
+        size_t rem = lin;
+        for (ssize_t i = (ssize_t)input->ndim - 1; i >= 0; --i) {
+            idx[i] = (input->shape[i] == 0) ? 0 : rem % input->shape[i];
+            rem /= input->shape[i];
+        }
+        size_t gi = 0;
+        if (axis < 0) {
+            gi = 0;
+        } else {
+            size_t gd = 0;
+            for (size_t i = 0; i < input->ndim; ++i) {
+                if (i == (size_t)axis) continue;
+                gi += idx[i] * g_strides[gd++];
+            }
+        }
+        r->data[lin] = g->data[g->offset + gi] * scale;
+    }
+    *out = r;
+    return LANA_OK;
+}
+
+/* Thin wrappers that return the tensor directly (the public helpers return a
+ * Value). */
+static LanaError ad_elementwise(LanaVM *vm, const LanaTensor *a, const LanaTensor *b,
+                                int op, LanaTensor **out) {
+    Value result;
+    LanaError error = tensor_elementwise(vm, a, b, op, &result);
+    if (error != LANA_OK) return error;
+    *out = result.as.tensor;
+    return LANA_OK;
+}
+
+static LanaError ad_matmul(LanaVM *vm, const LanaTensor *a, const LanaTensor *b,
+                           LanaTensor **out) {
+    Value result;
+    LanaError error = tensor_matmul(vm, a, b, &result);
+    if (error != LANA_OK) return error;
+    *out = result.as.tensor;
+    return LANA_OK;
+}
+
+/* Forward declaration: read the (k, i, j) entry of a 3-D tensor as a complex
+ * number (defined below with the LIP-005 linear-algebra helpers). */
+static void linalg_get3(const LanaTensor *t, size_t k, size_t i, size_t j, double *re, double *im);
+
+/* Record a differentiable primitive onto `result`'s derivation. `ad_op` is
+ * 0=add 1=sub 2=mul 3=div 4=matmul 5=sum 6=mean. `b` is NULL for reductions. */
+static LanaError ad_record(LanaVM *vm, int ad_op, const Value *a, const Value *b,
+                           int ad_axis, Value *result) {
+    const Value *inputs[2];
+    size_t input_count = (b != NULL) ? 2u : 1u;
+    inputs[0] = a;
+    if (b != NULL) inputs[1] = b;
+    LanaDerivation *node = record_derivation(vm, LANA_DERIVATION_OPERATION, "autodiff",
+        inputs, input_count, "", 0u, LANA_EXACTNESS_EXACT, "autodiff",
+        LANA_DERIVATION_SUCCESS, "none");
+    if (node == NULL) return LANA_ERR_OOM;
+    node->ad_op = ad_op;
+    node->ad_a = a->as.tensor;
+    node->ad_b = (b != NULL) ? b->as.tensor : NULL;
+    node->ad_a_deriv = a->derivation;
+    node->ad_b_deriv = (b != NULL) ? b->derivation : NULL;
+    node->ad_axis = ad_axis;
+    result->derivation = node;
+    return LANA_OK;
+}
+
+/* Reverse-mode backward pass. `seed` is the cotangent of `node`'s output,
+ * a contiguous base tensor. Accumulates into each node's `ad_grad` and
+ * recurses into the input derivations in left-then-right order. */
+static LanaError ad_backward(LanaVM *vm, LanaDerivation *node, const LanaTensor *seed) {
+    if (node->ad_grad == NULL) {
+        node->ad_grad = tensor_new(vm, seed->ndim, seed->shape, seed->is_complex);
+        if (node->ad_grad == NULL) return LANA_ERR_OOM;
+    }
+    size_t count = tensor_element_count(seed);
+    size_t components = seed->is_complex ? 2u : 1u;
+    for (size_t i = 0; i < count * components; ++i)
+        node->ad_grad->data[i] += seed->data[seed->offset * components + i];
+
+    if (node->ad_op < 0) return LANA_OK;
+
+    switch (node->ad_op) {
+        case 0: /* add */
+        case 1: /* sub */
+        case 2: /* mul */
+        case 3: /* div */ {
+            LanaTensor *a = node->ad_a, *b = node->ad_b;
+            LanaTensor *ga = NULL, *gb = NULL;
+            LanaError error = LANA_OK;
+            switch (node->ad_op) {
+                case 0:
+                    ga = (LanaTensor *)seed;
+                    gb = (LanaTensor *)seed;
+                    break;
+                case 1:
+                    ga = (LanaTensor *)seed;
+                    error = tensor_negate(vm, seed, &gb);
+                    break;
+                case 2:
+                    error = ad_elementwise(vm, seed, b, 2, &ga);
+                    if (error == LANA_OK) error = ad_elementwise(vm, seed, a, 2, &gb);
+                    break;
+                default: {
+                    LanaTensor *t1 = NULL, *t2 = NULL, *t3 = NULL;
+                    error = ad_elementwise(vm, seed, b, 3, &ga);
+                    if (error == LANA_OK) error = ad_elementwise(vm, seed, a, 2, &t1);
+                    if (error == LANA_OK) error = ad_elementwise(vm, b, b, 2, &t2);
+                    if (error == LANA_OK) error = ad_elementwise(vm, t1, t2, 3, &t3);
+                    if (error == LANA_OK) error = tensor_negate(vm, t3, &gb);
+                    break;
+                }
+            }
+            if (error != LANA_OK) return error;
+            LanaTensor *ga_u = NULL, *gb_u = NULL;
+            error = tensor_unbroadcast(vm, ga, a, &ga_u);
+            if (error == LANA_OK) error = tensor_unbroadcast(vm, gb, b, &gb_u);
+            if (error != LANA_OK) return error;
+            if (node->ad_a_deriv != NULL) {
+                error = ad_backward(vm, node->ad_a_deriv, ga_u);
+                if (error != LANA_OK) return error;
+            }
+            if (node->ad_b_deriv != NULL) {
+                error = ad_backward(vm, node->ad_b_deriv, gb_u);
+                if (error != LANA_OK) return error;
+            }
+            return LANA_OK;
+        }
+        case 4: { /* matmul */
+            LanaTensor *a = node->ad_a, *b = node->ad_b;
+            size_t a_ndim = a->ndim, b_ndim = b->ndim;
+            LanaTensor *ga = NULL, *gb = NULL;
+            LanaError error = LANA_OK;
+            if (a_ndim == 1 && b_ndim == 1) {
+                error = ad_elementwise(vm, seed, b, 2, &ga);
+                if (error == LANA_OK) error = ad_elementwise(vm, seed, a, 2, &gb);
+            } else if (a_ndim == 1) {
+                LanaTensor *bt = tensor_transpose_last_two(vm, b);
+                if (bt == NULL) return LANA_ERR_OOM;
+                error = ad_matmul(vm, seed, bt, &ga);
+                if (error == LANA_OK) error = tensor_outer(vm, a, seed, &gb);
+            } else if (b_ndim == 1) {
+                LanaTensor *at = tensor_transpose_last_two(vm, a);
+                if (at == NULL) return LANA_ERR_OOM;
+                error = tensor_outer(vm, seed, b, &ga);
+                if (error == LANA_OK) error = ad_matmul(vm, at, seed, &gb);
+            } else {
+                LanaTensor *bt = tensor_transpose_last_two(vm, b);
+                LanaTensor *at = tensor_transpose_last_two(vm, a);
+                if (bt == NULL || at == NULL) return LANA_ERR_OOM;
+                LanaTensor *ga_raw = NULL, *gb_raw = NULL;
+                error = ad_matmul(vm, seed, bt, &ga_raw);
+                if (error == LANA_OK) error = ad_matmul(vm, at, seed, &gb_raw);
+                if (error == LANA_OK) error = tensor_unbroadcast(vm, ga_raw, a, &ga);
+                if (error == LANA_OK) error = tensor_unbroadcast(vm, gb_raw, b, &gb);
+            }
+            if (error != LANA_OK) return error;
+            if (node->ad_a_deriv != NULL) {
+                error = ad_backward(vm, node->ad_a_deriv, ga);
+                if (error != LANA_OK) return error;
+            }
+            if (node->ad_b_deriv != NULL) {
+                error = ad_backward(vm, node->ad_b_deriv, gb);
+                if (error != LANA_OK) return error;
+            }
+            return LANA_OK;
+        }
+        case 5: /* sum */
+        case 6: { /* mean */
+            LanaTensor *a = node->ad_a;
+            size_t n;
+            if (node->ad_axis < 0) {
+                n = tensor_element_count(a);
+            } else {
+                n = a->shape[node->ad_axis];
+            }
+            double scale = (node->ad_op == 6) ? 1.0 / (double)n : 1.0;
+            LanaTensor *ga = NULL;
+            LanaError error = tensor_broadcast_reduce(vm, seed, a, node->ad_axis, scale, &ga);
+            if (error != LANA_OK) return error;
+            if (node->ad_a_deriv != NULL) {
+                error = ad_backward(vm, node->ad_a_deriv, ga);
+                if (error != LANA_OK) return error;
+            }
+            return LANA_OK;
+        }
+        case 7: { /* append (LIP-007): mean-state distribution-valued APPEND */
+            LanaTensor *a = node->ad_a, *b = node->ad_b;
+            size_t d = a->shape[a->ndim - 1];
+            size_t batch = 1;
+            LanaTensor *ga, *gb;
+            for (size_t i = 0; i + 2 < a->ndim; ++i) batch *= a->shape[i];
+            ga = tensor_new(vm, a->ndim, a->shape, true);
+            gb = tensor_new(vm, b->ndim, b->shape, true);
+            if (ga == NULL || gb == NULL) return LANA_ERR_OOM;
+            for (size_t bi = 0; bi < batch; ++bi) {
+                const double *da = a->data + bi * d * d * 2;
+                const double *db = b->data + bi * d * d * 2;
+                const double *dg = seed->data + (seed->offset + bi * d * d) * 2;
+                double p_a = da[0], c_a_re = da[2], c_a_im = da[3];
+                double p_b = db[0], c_b_re = db[2], c_b_im = db[3];
+                double s_a = sqrt(p_a * (1.0 - p_a));
+                double s_b = sqrt(p_b * (1.0 - p_b));
+                double d_a_re = s_a > 0.0 ? c_a_re / s_a : 0.0;
+                double d_a_im = s_a > 0.0 ? c_a_im / s_a : 0.0;
+                double d_b_re = s_b > 0.0 ? c_b_re / s_b : 0.0;
+                double d_b_im = s_b > 0.0 ? c_b_im / s_b : 0.0;
+                double p_c = p_a + p_b - p_a * p_b;
+                double d_c_re = (d_a_re + d_b_re) / 2.0;
+                double d_c_im = (d_a_im + d_b_im) / 2.0;
+                double s_c = sqrt(p_c * (1.0 - p_c));
+                /* Reduce the seed to (g_p, g_c): the cotangents of p_C and c_C. */
+                double g_p = dg[0] - dg[6];
+                double g_c_re = dg[2] + dg[4];
+                double g_c_im = dg[3] - dg[5];
+                double g_dc_re = s_c * g_c_re;
+                double g_dc_im = s_c * g_c_im;
+                double g_sc = g_c_re * d_c_re + g_c_im * d_c_im;
+                double g_pc = g_p;
+                if (s_c > 0.0) g_pc += g_sc * (1.0 - 2.0 * p_c) / (2.0 * s_c);
+                double g_da_re = g_dc_re / 2.0, g_da_im = g_dc_im / 2.0;
+                double g_db_re = g_dc_re / 2.0, g_db_im = g_dc_im / 2.0;
+                double g_pa = g_pc * (1.0 - p_b);
+                double g_pb = g_pc * (1.0 - p_a);
+                double g_ca_re = 0.0, g_ca_im = 0.0, g_cb_re = 0.0, g_cb_im = 0.0;
+                if (s_a > 0.0) {
+                    g_ca_re = g_da_re / s_a;
+                    g_ca_im = g_da_im / s_a;
+                    double g_sa = -(g_da_re * c_a_re + g_da_im * c_a_im) / (s_a * s_a);
+                    g_pa += g_sa * (1.0 - 2.0 * p_a) / (2.0 * s_a);
+                }
+                if (s_b > 0.0) {
+                    g_cb_re = g_db_re / s_b;
+                    g_cb_im = g_db_im / s_b;
+                    double g_sb = -(g_db_re * c_b_re + g_db_im * c_b_im) / (s_b * s_b);
+                    g_pb += g_sb * (1.0 - 2.0 * p_b) / (2.0 * s_b);
+                }
+                double *ga_data = ga->data + bi * d * d * 2;
+                ga_data[0] = g_pa; ga_data[1] = 0.0;
+                ga_data[2] = g_ca_re; ga_data[3] = g_ca_im;
+                ga_data[4] = g_ca_re; ga_data[5] = g_ca_im == 0.0 ? 0.0 : -g_ca_im;
+                ga_data[6] = -g_pa; ga_data[7] = 0.0;
+                double *gb_data = gb->data + bi * d * d * 2;
+                gb_data[0] = g_pb; gb_data[1] = 0.0;
+                gb_data[2] = g_cb_re; gb_data[3] = g_cb_im;
+                gb_data[4] = g_cb_re; gb_data[5] = g_cb_im == 0.0 ? 0.0 : -g_cb_im;
+                gb_data[6] = -g_pb; gb_data[7] = 0.0;
+            }
+            if (node->ad_a_deriv != NULL) {
+                LanaError error = ad_backward(vm, node->ad_a_deriv, ga);
+                if (error != LANA_OK) return error;
+            }
+            if (node->ad_b_deriv != NULL) {
+                LanaError error = ad_backward(vm, node->ad_b_deriv, gb);
+                if (error != LANA_OK) return error;
+            }
+            return LANA_OK;
+        }
+        case 8: { /* measure (LIP-007): q[..., i] = Tr(ρ E_i) */
+            LanaTensor *s = node->ad_a;
+            LanaTensor *povm = node->ad_b;
+            size_t d = s->shape[s->ndim - 1];
+            size_t k = povm->shape[0];
+            size_t batch = 1;
+            LanaTensor *gs;
+            for (size_t i = 0; i + 2 < s->ndim; ++i) batch *= s->shape[i];
+            gs = tensor_new(vm, s->ndim, s->shape, true);
+            if (gs == NULL) return LANA_ERR_OOM;
+            for (size_t bi = 0; bi < batch; ++bi) {
+                for (size_t r = 0; r < d; ++r)
+                    for (size_t c = 0; c < d; ++c) {
+                        double re = 0.0, im = 0.0;
+                        for (size_t m = 0; m < k; ++m) {
+                            double seed_val = seed->data[seed->offset + bi * k + m];
+                            double e_re, e_im;
+                            linalg_get3(povm, m, c, r, &e_re, &e_im);
+                            re += seed_val * e_re;
+                            im += seed_val * (-e_im);
+                        }
+                        gs->data[(bi * d * d + r * d + c) * 2] = re;
+                        gs->data[(bi * d * d + r * d + c) * 2 + 1] = im;
+                    }
+            }
+            if (node->ad_a_deriv != NULL) {
+                LanaError error = ad_backward(vm, node->ad_a_deriv, gs);
+                if (error != LANA_OK) return error;
+            }
+            return LANA_OK;
+        }
+        case 9: { /* transform (LIP-007): Φ(ρ) = Σ_k K_k ρ K_k† */
+            LanaTensor *s = node->ad_a;
+            LanaTensor *chan = node->ad_b;
+            size_t d = s->shape[s->ndim - 1];
+            size_t k = chan->shape[0];
+            size_t batch = 1;
+            LanaTensor *gs;
+            for (size_t i = 0; i + 2 < s->ndim; ++i) batch *= s->shape[i];
+            gs = tensor_new(vm, s->ndim, s->shape, true);
+            if (gs == NULL) return LANA_ERR_OOM;
+            for (size_t bi = 0; bi < batch; ++bi) {
+                const double *dg = seed->data + (seed->offset + bi * d * d) * 2;
+                for (size_t m = 0; m < d; ++m)
+                    for (size_t n = 0; n < d; ++n) {
+                        double re = 0.0, im = 0.0;
+                        for (size_t kk = 0; kk < k; ++kk)
+                            for (size_t i = 0; i < d; ++i)
+                                for (size_t j = 0; j < d; ++j) {
+                                    double ki_re, ki_im, g_re, g_im, kj_re, kj_im;
+                                    linalg_get3(chan, kk, i, m, &ki_re, &ki_im);
+                                    g_re = dg[(i * d + j) * 2]; g_im = dg[(i * d + j) * 2 + 1];
+                                    linalg_get3(chan, kk, j, n, &kj_re, &kj_im);
+                                    /* conj(K[i][m]) * G[i][j] * K[j][n] */
+                                    double t_re = ki_re * g_re + ki_im * g_im;
+                                    double t_im = ki_re * g_im - ki_im * g_re;
+                                    re += t_re * kj_re - t_im * kj_im;
+                                    im += t_re * kj_im + t_im * kj_re;
+                                }
+                        gs->data[(bi * d * d + m * d + n) * 2] = re;
+                        gs->data[(bi * d * d + m * d + n) * 2 + 1] = im;
+                    }
+            }
+            if (node->ad_a_deriv != NULL) {
+                LanaError error = ad_backward(vm, node->ad_a_deriv, gs);
+                if (error != LANA_OK) return error;
+            }
+            return LANA_OK;
+        }
+        default:
+            return LANA_ERR_TYPE;
+    }
+}
+
+/* Recursively infer the shape of a nested array of numbers, one buffer per
+ * nesting level. Ragged input raises LANA_ERR_INVALID_PARAMETERS; non-number
+ * leaves raise LANA_ERR_TYPE. */
+/* Infer the shape of a nested numeric array into VM-accounted scratch.
+ * Returns LANA_OK, or LANA_ERR_TYPE / LANA_ERR_INVALID_PARAMETERS / OOM.
+ * The buffers are GC memory; callers must not free them. */
+static LanaError tensor_infer_shape_at(LanaVM *vm, const Value *v, size_t *ndim, size_t **shape,
+                                      size_t depth) {
+    if (v->type == VAL_NUMBER) { *ndim = 0; *shape = NULL; return LANA_OK; }
+    if (v->type != VAL_ARRAY) return LANA_ERR_TYPE;
+    if (depth == LANA_TENSOR_MAX_RANK) return LANA_ERR_INVALID_PARAMETERS;
+    LanaArray *arr = v->as.array;
+    if (arr->count == 0) {
+        *ndim = 1; *shape = lana_vm_alloc(vm, sizeof(**shape));
+        if (*shape == NULL) return LANA_ERR_OOM;
+        (*shape)[0] = 0; return LANA_OK;
+    }
+    size_t sub_ndim; size_t *sub_shape;
+    LanaError e = tensor_infer_shape_at(vm, &arr->items[0], &sub_ndim, &sub_shape, depth + 1u);
+    if (e != LANA_OK) return e;
+    for (size_t i = 1; i < arr->count; ++i) {
+        size_t s_ndim; size_t *s_shape;
+        e = tensor_infer_shape_at(vm, &arr->items[i], &s_ndim, &s_shape, depth + 1u);
+        if (e != LANA_OK) return e;
+        if (s_ndim != sub_ndim) return LANA_ERR_INVALID_PARAMETERS;
+        for (size_t d = 0; d < sub_ndim; ++d) {
+            if (s_shape[d] != sub_shape[d]) return LANA_ERR_INVALID_PARAMETERS;
+        }
+    }
+    *ndim = sub_ndim + 1;
+    *shape = lana_vm_alloc(vm, (*ndim) * sizeof(**shape));
+    if (*shape == NULL) return LANA_ERR_OOM;
+    (*shape)[0] = arr->count;
+    for (size_t d = 0; d < sub_ndim; ++d) (*shape)[d + 1] = sub_shape[d];
+    return LANA_OK;
+}
+
+static LanaError tensor_infer_shape(LanaVM *vm, const Value *v, size_t *ndim, size_t **shape) {
+    return tensor_infer_shape_at(vm, v, ndim, shape, 0u);
+}
+
+/* Recursively fill a tensor's data buffer in row-major order from a nested
+ * array of numbers. `offset` is advanced past the written elements. */
+static LanaError tensor_fill_data(const Value *v, double *data, size_t *offset) {
+    if (v->type == VAL_NUMBER) { data[(*offset)++] = v->as.number; return LANA_OK; }
+    if (v->type != VAL_ARRAY) return LANA_ERR_TYPE;
+    LanaArray *arr = v->as.array;
+    for (size_t i = 0; i < arr->count; ++i) {
+        LanaError e = tensor_fill_data(&arr->items[i], data, offset);
+        if (e != LANA_OK) return e;
+    }
+    return LANA_OK;
+}
+
+/* Recursively fill a complex tensor's interleaved [re, im] buffer from two
+ * parallel nested arrays. Shape mismatch raises LANA_ERR_INVALID_PARAMETERS. */
+static LanaError tensor_fill_complex(const Value *re, const Value *im, double *data, size_t *offset) {
+    if (re->type == VAL_NUMBER) {
+        if (im->type != VAL_NUMBER) return LANA_ERR_TYPE;
+        data[2 * (*offset)] = re->as.number;
+        data[2 * (*offset) + 1] = im->as.number;
+        (*offset)++;
+        return LANA_OK;
+    }
+    if (re->type != VAL_ARRAY || im->type != VAL_ARRAY) return LANA_ERR_TYPE;
+    LanaArray *ra = re->as.array, *ia = im->as.array;
+    if (ra->count != ia->count) return LANA_ERR_INVALID_PARAMETERS;
+    for (size_t i = 0; i < ra->count; ++i) {
+        LanaError e = tensor_fill_complex(&ra->items[i], &ia->items[i], data, offset);
+        if (e != LANA_OK) return e;
+    }
+    return LANA_OK;
+}
+
+/* LIP-004 indexing: resolve one integer position against a dimension of
+ * length `dim`. Negative counts from the end; a non-integer or non-finite
+ * number is LANA_ERR_TYPE, an adjusted position outside [0, dim) is
+ * LANA_ERR_KEY. */
+static LanaError tensor_resolve_index(double n, size_t dim, size_t *position) {
+    if (!isfinite(n) || floor(n) != n) return LANA_ERR_TYPE;
+    if (n < -(double)dim || n >= (double)dim) return LANA_ERR_KEY;
+    *position = (size_t)(n < 0.0 ? n + (double)dim : n);
+    return LANA_OK;
+}
+
+/* LIP-004 slicing: resolve one slice bound against a dimension of length
+ * `dim`. Negative counts from the end, then clamps into [0, dim]; slice
+ * bounds never range-error. Non-integer numbers are LANA_ERR_TYPE. */
+static LanaError tensor_resolve_slice_bound(double n, size_t dim, size_t *bound) {
+    if (!isfinite(n) || floor(n) != n) return LANA_ERR_TYPE;
+    double adjusted = n < 0.0 ? n + (double)dim : n;
+    if (adjusted < 0.0) adjusted = 0.0;
+    if (adjusted > (double)dim) adjusted = (double)dim;
+    *bound = (size_t)adjusted;
+    return LANA_OK;
+}
+
+/* LIP-004 indexing and slicing: build a view (or scalar) of `t` from a spec.
+ * The spec is a single VAL_NUMBER (one integer position) or a VAL_ARRAY of
+ * positions, each a VAL_NUMBER (integer position) or a two-element VAL_ARRAY
+ * [start, end] (slice). Fewer positions than the rank keep the remaining
+ * trailing axes whole. Integer positions drop their axis; slices keep it.
+ * Every non-fully-integer result shares the source buffer as a view. */
+static LanaError tensor_index(LanaVM *vm, LanaTensor *t, const Value *spec, Value *out) {
+    bool is_int[LANA_TENSOR_MAX_RANK];
+    size_t start[LANA_TENSOR_MAX_RANK], count[LANA_TENSOR_MAX_RANK];
+    size_t positions = 0;
+    LanaError error;
+
+    if (spec->type == VAL_NUMBER) {
+        if (t->ndim == 0) return LANA_ERR_INVALID_PARAMETERS;
+        error = tensor_resolve_index(spec->as.number, t->shape[0], &start[0]);
+        if (error != LANA_OK) return error;
+        is_int[0] = true; count[0] = 1; positions = 1;
+    } else if (spec->type == VAL_ARRAY) {
+        LanaArray *arr = spec->as.array;
+        if (arr->count > t->ndim) return LANA_ERR_INVALID_PARAMETERS;
+        if (arr->count > LANA_TENSOR_MAX_RANK) return LANA_ERR_INVALID_PARAMETERS;
+        for (size_t i = 0; i < arr->count; ++i) {
+            const Value *item = &arr->items[i];
+            if (item->type == VAL_NUMBER) {
+                error = tensor_resolve_index(item->as.number, t->shape[i], &start[i]);
+                if (error != LANA_OK) return error;
+                is_int[i] = true; count[i] = 1;
+            } else if (item->type == VAL_ARRAY) {
+                LanaArray *pair = item->as.array;
+                if (pair->count != 2u || pair->items[0].type != VAL_NUMBER ||
+                    pair->items[1].type != VAL_NUMBER) return LANA_ERR_TYPE;
+                size_t from, to;
+                error = tensor_resolve_slice_bound(pair->items[0].as.number, t->shape[i], &from);
+                if (error != LANA_OK) return error;
+                error = tensor_resolve_slice_bound(pair->items[1].as.number, t->shape[i], &to);
+                if (error != LANA_OK) return error;
+                is_int[i] = false; start[i] = from;
+                count[i] = to > from ? to - from : 0;
+            } else {
+                return LANA_ERR_TYPE;
+            }
+        }
+        positions = arr->count;
+    } else {
+        return LANA_ERR_TYPE;
+    }
+
+    /* Fold every axis into the view: integer axes contribute their offset and
+     * drop out; slice axes keep their (clamped) extent; trailing axes beyond
+     * the position list are full slices. */
+    bool all_int = true;
+    size_t view_offset = t->offset;
+    size_t view_ndim = 0;
+    size_t view_shape[LANA_TENSOR_MAX_RANK], view_strides[LANA_TENSOR_MAX_RANK];
+    for (size_t i = 0; i < t->ndim; ++i) {
+        bool integer = i < positions && is_int[i];
+        size_t axis_start = i < positions ? start[i] : 0;
+        size_t axis_count = i < positions ? count[i] : t->shape[i];
+        view_offset += axis_start * t->strides[i];
+        if (integer) continue;
+        all_int = false;
+        view_shape[view_ndim] = axis_count;
+        view_strides[view_ndim] = t->strides[i];
+        view_ndim++;
+    }
+
+    if (all_int) {
+        /* A full set of integer positions selects one element: a number, or
+         * the established rank-zero complex tensor for complex tensors. */
+        if (!t->is_complex) { *out = lana_value_number(t->data[view_offset]); return LANA_OK; }
+        LanaTensor *r = tensor_new(vm, 0, NULL, true);
+        if (r == NULL) return LANA_ERR_OOM;
+        r->data[0] = t->data[2 * view_offset];
+        r->data[1] = t->data[2 * view_offset + 1];
+        *out = lana_value_tensor(r);
+        return LANA_OK;
+    }
+
+    LanaTensor *view = lana_vm_alloc(vm, sizeof(*view));
+    if (view == NULL) return LANA_ERR_OOM;
+    view->ndim = view_ndim;
+    view->is_complex = t->is_complex;
+    view->shape = NULL;
+    view->strides = NULL;
+    view->data = t->data;      /* shared with the source; accounted once */
+    view->offset = view_offset;
+    view->base = t;            /* roots the source tensor and its buffer */
+    if (view_ndim > 0) {
+        view->shape = lana_vm_alloc(vm, view_ndim * sizeof(*view->shape));
+        view->strides = lana_vm_alloc(vm, view_ndim * sizeof(*view->strides));
+        if (view->shape == NULL || view->strides == NULL) return LANA_ERR_OOM;
+        for (size_t i = 0; i < view_ndim; ++i) {
+            view->shape[i] = view_shape[i];
+            view->strides[i] = view_strides[i];
+        }
+    }
+    *out = lana_value_tensor(view);
+    return LANA_OK;
+}
+
+/* A set member is an ordinary value: STATE, STATE_DIST, and Information
+ * (reactive, possibility, path-set) have no canonical hash and are rejected
+ * (LIP-022 §1). */
+static bool value_is_set_member(const Value *value) {
+    if (value == NULL || value->reactive != NULL) return false;
+    switch (value->type) {
+        case VAL_STATE:
+        case VAL_STATE_DIST:
+        case VAL_JOINT_STATE:
+        case VAL_POSSIBILITY:
+        case VAL_PATH_SET:
+            return false;
+        default:
+            return true;
+    }
+}
+
+/* Set membership equality: scalars compare by value, containers by pointer
+ * identity (matching `values_equal`). Byte-identical with the Rust VM. */
+static bool set_value_equal(const Value *left, const Value *right) {
+    if (left->type != right->type) return false;
+    switch (left->type) {
+        case VAL_NULL: return true;
+        case VAL_NUMBER: return left->as.number == right->as.number;
+        case VAL_BOOL: return left->as.boolean == right->as.boolean;
+        case VAL_STRING: return strcmp(left->as.string, right->as.string) == 0;
+        case VAL_SAMPLE: return left->as.sample == right->as.sample;
+        case VAL_STATE:
+            return left->as.state.state.p == right->as.state.state.p &&
+                   left->as.state.state.d_re == right->as.state.state.d_re &&
+                   left->as.state.state.d_im == right->as.state.state.d_im;
+        case VAL_DISTRIBUTION:
+            return left->as.distribution.p0 == right->as.distribution.p0 &&
+                   left->as.distribution.p1 == right->as.distribution.p1;
+        case VAL_FUNCTION: return left->as.function == right->as.function;
+        case VAL_LAZY:
+            return left->as.lazy.function == right->as.lazy.function &&
+                   left->as.lazy.bound == right->as.lazy.bound;
+        case VAL_DATASET:
+            return left->as.dataset == right->as.dataset;
+        default: return left->as.array == right->as.array;
+    }
+}
+
+static bool set_contains_value(const LanaSet *set, const Value *value) {
+    size_t index;
+    for (index = 0u; index < set->count; ++index)
+        if (set_value_equal(&set->items[index], value)) return true;
+    return false;
+}
+
+static LanaError set_alloc(LanaVM *vm, size_t count, LanaSet **out) {
+    LanaSet *set = lana_vm_alloc(vm, sizeof(*set));
+    if (set == NULL) return LANA_ERR_OOM;
+    set->count = count;
+    set->capacity = count;
+    set->items = lana_vm_alloc(vm, count * sizeof(*set->items));
+    if (set->items == NULL && count > 0u) return LANA_ERR_OOM;
+    *out = set;
+    return LANA_OK;
+}
+
+static LanaError make_result(LanaVM *vm, bool ok, Value value, Value *out);
+
+/* LIP-024 async/await event-loop helpers (defined after make_result). */
+static LanaError enqueue_future(LanaVM *vm, LanaFuture *future);
+static LanaFuture *dequeue_future(LanaVM *vm);
+static void complete_future(LanaVM *vm, LanaFuture *future, Value result);
+static LanaError run_composite_future(LanaVM *vm, LanaFuture *future);
+static LanaError run_async_function(LanaVM *vm, LanaFuture *future);
+static LanaError run_event_loop(LanaVM *vm, LanaFuture *target, Value *out);
+static LanaError vm_step(LanaVM *vm);
+
+/* Growable string builder over GC memory, used by the `format` host call. */
+typedef struct {
+    char *data;
+    size_t length;
+    size_t capacity;
+} FormatBuffer;
+
+static LanaError format_reserve(LanaVM *vm, FormatBuffer *buffer, size_t extra) {
+    size_t needed = buffer->length + extra + 1u;
+    size_t capacity;
+    char *grown;
+    if (needed <= buffer->capacity) return LANA_OK;
+    capacity = buffer->capacity == 0u ? 64u : buffer->capacity;
+    while (capacity < needed) {
+        if (capacity > SIZE_MAX / 2u) return LANA_ERR_LIMIT;
+        capacity *= 2u;
+    }
+    grown = lana_vm_alloc(vm, capacity);
+    if (grown == NULL) return LANA_ERR_OOM;
+    if (buffer->length > 0u) memcpy(grown, buffer->data, buffer->length);
+    buffer->data = grown;
+    buffer->capacity = capacity;
+    return LANA_OK;
+}
+
+static LanaError format_add(LanaVM *vm, FormatBuffer *buffer, const char *text, size_t length) {
+    LanaError error = format_reserve(vm, buffer, length);
+    if (error != LANA_OK) return error;
+    memcpy(buffer->data + buffer->length, text, length);
+    buffer->length += length;
+    return LANA_OK;
+}
+
+/* Append the stringified form of a value, mirroring the Rust `format_value`. */
+static LanaError format_value(LanaVM *vm, FormatBuffer *buffer, const Value *value) {
+    char number[64];
+    int written;
+    switch (value->type) {
+        case VAL_NULL: return format_add(vm, buffer, "null", 4u);
+        case VAL_BOOL:
+            return format_add(vm, buffer, value->as.boolean ? "true" : "false",
+                              value->as.boolean ? 4u : 5u);
+        case VAL_NUMBER:
+            written = snprintf(number, sizeof(number), "%.17g", value->as.number);
+            if (written < 0 || (size_t)written >= sizeof(number)) return LANA_ERR_FORMAT;
+            return format_add(vm, buffer, number, (size_t)written);
+        case VAL_STRING:
+            return format_add(vm, buffer, value->as.string, strlen(value->as.string));
+        case VAL_ARRAY:
+        case VAL_MAP: {
+            Value stringified;
+            LanaError error = lana_json_stringify(vm, value, &stringified);
+            if (error != LANA_OK) return error;
+            return format_add(vm, buffer, stringified.as.string, strlen(stringified.as.string));
+        }
+        default: return LANA_ERR_TYPE;
+    }
+}
+
+/* Decode one UTF-8 code point from `s` (of `len` bytes). On success sets
+ * `*cp` and `*consumed` and returns LANA_OK; on invalid UTF-8 (overlong
+ * encodings, surrogates, out-of-range, truncated sequences) returns
+ * LANA_ERR_SCHEMA. Mirrors the Rust `utf8_decode`. */
+static LanaError utf8_decode(const unsigned char *s, size_t len, uint32_t *cp,
+                             size_t *consumed) {
+    unsigned char b0;
+    if (len == 0u) return LANA_ERR_SCHEMA;
+    b0 = s[0];
+    if (b0 < 0x80u) { *cp = b0; *consumed = 1u; return LANA_OK; }
+    if (b0 < 0xC2u) return LANA_ERR_SCHEMA;
+    if (b0 < 0xE0u) {
+        if (len < 2u || (s[1] & 0xC0u) != 0x80u) return LANA_ERR_SCHEMA;
+        *cp = ((uint32_t)(b0 & 0x1Fu) << 6u) | (uint32_t)(s[1] & 0x3Fu);
+        *consumed = 2u; return LANA_OK;
+    }
+    if (b0 < 0xF0u) {
+        if (len < 3u || (s[1] & 0xC0u) != 0x80u || (s[2] & 0xC0u) != 0x80u)
+            return LANA_ERR_SCHEMA;
+        if (b0 == 0xE0u && s[1] < 0xA0u) return LANA_ERR_SCHEMA;
+        if (b0 == 0xEDu && s[1] >= 0xA0u) return LANA_ERR_SCHEMA;
+        *cp = ((uint32_t)(b0 & 0x0Fu) << 12u) | ((uint32_t)(s[1] & 0x3Fu) << 6u) |
+              (uint32_t)(s[2] & 0x3Fu);
+        *consumed = 3u; return LANA_OK;
+    }
+    if (b0 < 0xF5u) {
+        if (len < 4u || (s[1] & 0xC0u) != 0x80u || (s[2] & 0xC0u) != 0x80u ||
+            (s[3] & 0xC0u) != 0x80u)
+            return LANA_ERR_SCHEMA;
+        if (b0 == 0xF0u && s[1] < 0x90u) return LANA_ERR_SCHEMA;
+        if (b0 == 0xF4u && s[1] >= 0x90u) return LANA_ERR_SCHEMA;
+        *cp = ((uint32_t)(b0 & 0x07u) << 18u) | ((uint32_t)(s[1] & 0x3Fu) << 12u) |
+              ((uint32_t)(s[2] & 0x3Fu) << 6u) | (uint32_t)(s[3] & 0x3Fu);
+        *consumed = 4u; return LANA_OK;
+    }
+    return LANA_ERR_SCHEMA;
+}
+
+/* Number of bytes needed to encode `cp` as UTF-8. */
+static size_t utf8_encode_len(uint32_t cp) {
+    if (cp < 0x80u) return 1u;
+    if (cp < 0x800u) return 2u;
+    if (cp < 0x10000u) return 3u;
+    return 4u;
+}
+
+/* Encode `cp` as UTF-8 into `out` (which has room for utf8_encode_len bytes);
+ * returns the number of bytes written. */
+static size_t utf8_encode(uint32_t cp, unsigned char *out) {
+    if (cp < 0x80u) { out[0] = (unsigned char)cp; return 1u; }
+    if (cp < 0x800u) {
+        out[0] = (unsigned char)(0xC0u | (cp >> 6u));
+        out[1] = (unsigned char)(0x80u | (cp & 0x3Fu));
+        return 2u;
+    }
+    if (cp < 0x10000u) {
+        out[0] = (unsigned char)(0xE0u | (cp >> 12u));
+        out[1] = (unsigned char)(0x80u | ((cp >> 6u) & 0x3Fu));
+        out[2] = (unsigned char)(0x80u | (cp & 0x3Fu));
+        return 3u;
+    }
+    out[0] = (unsigned char)(0xF0u | (cp >> 18u));
+    out[1] = (unsigned char)(0x80u | ((cp >> 12u) & 0x3Fu));
+    out[2] = (unsigned char)(0x80u | ((cp >> 6u) & 0x3Fu));
+    out[3] = (unsigned char)(0x80u | (cp & 0x3Fu));
+    return 4u;
+}
+
+/* ===== Regular expression engine (LIP-021 §2) =====
+ * A Thompson NFA engine: parse the pattern into a program of instructions,
+ * then simulate the active-state set one byte at a time. Linear in the text
+ * length (no backtracking), so pathological patterns cannot blow up. The
+ * program and classes are built in a malloc'd growable buffer and copied into
+ * GC-tracked memory once complete. */
+
+typedef struct {
+    LanaVM *vm;
+    const char *pattern;
+    size_t len;
+    size_t pos;
+    LanaRegexInst *insts;
+    size_t inst_count;
+    size_t inst_cap;
+    LanaRegexClass *classes;
+    size_t class_count;
+    size_t class_cap;
+    LanaError error;
+    const char *message;
+} RegexCompiler;
+
+static void regex_fail(RegexCompiler *c, const char *message) {
+    if (c->error == LANA_OK) { c->error = LANA_ERR_SCHEMA; c->message = message; }
+}
+
+static bool regex_emit(RegexCompiler *c, LanaRegexOp op, uint32_t a, uint32_t b, uint32_t d) {
+    LanaRegexInst inst;
+    if (c->inst_count == c->inst_cap) {
+        size_t new_cap = c->inst_cap == 0u ? 16u : c->inst_cap * 2u;
+        LanaRegexInst *grown = realloc(c->insts, new_cap * sizeof(*grown));
+        if (grown == NULL) { c->error = LANA_ERR_OOM; return false; }
+        c->insts = grown;
+        c->inst_cap = new_cap;
+    }
+    inst.op = op;
+    inst.c = a;
+    inst.x = b;
+    inst.y = d;
+    c->insts[c->inst_count++] = inst;
+    return true;
+}
+
+static bool regex_add_class(RegexCompiler *c, const uint32_t *bitmap, bool negated) {
+    LanaRegexClass cls;
+    if (c->class_count == c->class_cap) {
+        size_t new_cap = c->class_cap == 0u ? 4u : c->class_cap * 2u;
+        LanaRegexClass *grown = realloc(c->classes, new_cap * sizeof(*grown));
+        if (grown == NULL) { c->error = LANA_ERR_OOM; return false; }
+        c->classes = grown;
+        c->class_cap = new_cap;
+    }
+    memcpy(cls.bitmap, bitmap, sizeof(cls.bitmap));
+    cls.negated = negated;
+    c->classes[c->class_count++] = cls;
+    return true;
+}
+
+static void regex_class_set(uint32_t *bitmap, uint32_t b) {
+    bitmap[b >> 5u] |= 1u << (b & 31u);
+}
+
+static bool regex_class_has(const uint32_t *bitmap, uint32_t b) {
+    return (bitmap[b >> 5u] & (1u << (b & 31u))) != 0u;
+}
+
+static uint32_t regex_compile_alternation(RegexCompiler *c);
+static uint32_t regex_compile_concat(RegexCompiler *c);
+static uint32_t regex_compile_repeat(RegexCompiler *c);
+static uint32_t regex_compile_atom(RegexCompiler *c);
+
+/* Compile a character class `[...]`. Returns the index of the CLASS
+ * instruction. */
+static uint32_t regex_compile_class(RegexCompiler *c) {
+    uint32_t bitmap[8] = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
+    bool negated = false;
+    bool first = true;
+    uint32_t start;
+    c->pos++;  /* skip '[' */
+    if (c->pos < c->len && c->pattern[c->pos] == '^') {
+        negated = true;
+        c->pos++;
+    }
+    while (c->pos < c->len) {
+        char ch = c->pattern[c->pos];
+        if (ch == ']' && !first) {
+            c->pos++;
+            break;
+        }
+        first = false;
+        {
+            uint32_t lo = (unsigned char)ch;
+            c->pos++;
+            if (c->pos + 1u < c->len && c->pattern[c->pos] == '-' &&
+                c->pattern[c->pos + 1u] != ']') {
+                uint32_t hi, b;
+                c->pos++;  /* skip '-' */
+                hi = (unsigned char)c->pattern[c->pos];
+                c->pos++;
+                if (hi < lo) {
+                    regex_fail(c, "invalid range in character class");
+                    return 0u;
+                }
+                for (b = lo; b <= hi; ++b) regex_class_set(bitmap, b);
+            } else {
+                regex_class_set(bitmap, lo);
+            }
+        }
+    }
+    if (c->pos >= c->len) {
+        regex_fail(c, "unterminated character class");
+        return 0u;
+    }
+    if (!regex_add_class(c, bitmap, negated)) return 0u;
+    start = (uint32_t)c->inst_count;
+    if (!regex_emit(c, LANA_REGEX_CLASS, (uint32_t)(c->class_count - 1u), 0u, 0u)) return 0u;
+    return start;
+}
+
+static uint32_t regex_compile_atom(RegexCompiler *c) {
+    uint32_t start;
+    char ch;
+    if (c->pos >= c->len) {
+        regex_fail(c, "unexpected end of pattern");
+        return 0u;
+    }
+    ch = c->pattern[c->pos];
+    switch (ch) {
+        case '.':
+            c->pos++;
+            start = (uint32_t)c->inst_count;
+            if (!regex_emit(c, LANA_REGEX_ANY, 0u, 0u, 0u)) return 0u;
+            return start;
+        case '^':
+            c->pos++;
+            start = (uint32_t)c->inst_count;
+            if (!regex_emit(c, LANA_REGEX_BOL, 0u, 0u, 0u)) return 0u;
+            return start;
+        case '$':
+            c->pos++;
+            start = (uint32_t)c->inst_count;
+            if (!regex_emit(c, LANA_REGEX_EOL, 0u, 0u, 0u)) return 0u;
+            return start;
+        case '[':
+            return regex_compile_class(c);
+        case '(':
+            c->pos++;
+            start = regex_compile_alternation(c);
+            if (c->error != LANA_OK) return start;
+            if (c->pos >= c->len || c->pattern[c->pos] != ')') {
+                regex_fail(c, "unterminated group");
+                return start;
+            }
+            c->pos++;  /* skip ')' */
+            return start;
+        case ')':
+            regex_fail(c, "unmatched ')'");
+            return 0u;
+        case '*':
+        case '+':
+        case '?':
+        case '|':
+            regex_fail(c, "dangling metacharacter");
+            return 0u;
+        case '\\':
+            c->pos++;
+            if (c->pos >= c->len) {
+                regex_fail(c, "trailing backslash");
+                return 0u;
+            }
+            ch = c->pattern[c->pos];
+            c->pos++;
+            start = (uint32_t)c->inst_count;
+            if (!regex_emit(c, LANA_REGEX_CHAR, (unsigned char)ch, 0u, 0u)) return 0u;
+            return start;
+        default:
+            c->pos++;
+            start = (uint32_t)c->inst_count;
+            if (!regex_emit(c, LANA_REGEX_CHAR, (unsigned char)ch, 0u, 0u)) return 0u;
+            return start;
+    }
+}
+
+/* Compile an atom plus an optional `*`/`+`/`?` suffix. For `*` and `?` the
+ * SPLIT must precede the atom, so the atom is shifted down one slot with
+ * memmove after emitting the wrapper. */
+static uint32_t regex_compile_repeat(RegexCompiler *c) {
+    uint32_t atom_start = regex_compile_atom(c);
+    uint32_t split;
+    if (c->error != LANA_OK || c->pos >= c->len) return atom_start;
+    switch (c->pattern[c->pos]) {
+        case '*': {
+            c->pos++;
+            split = (uint32_t)c->inst_count;
+            if (!regex_emit(c, LANA_REGEX_SPLIT, 0u, 0u, 0u)) return 0u;
+            if (!regex_emit(c, LANA_REGEX_JMP, 0u, 0u, 0u)) return 0u;
+            memmove(c->insts + atom_start + 1u, c->insts + atom_start,
+                    (split - atom_start) * sizeof(*c->insts));
+            c->insts[atom_start].op = LANA_REGEX_SPLIT;
+            c->insts[atom_start].c = 0u;
+            c->insts[atom_start].x = atom_start + 1u;
+            c->insts[atom_start].y = split + 2u;
+            c->insts[split + 1u].op = LANA_REGEX_JMP;
+            c->insts[split + 1u].c = 0u;
+            c->insts[split + 1u].x = atom_start;
+            c->insts[split + 1u].y = 0u;
+            return atom_start;
+        }
+        case '+': {
+            c->pos++;
+            split = (uint32_t)c->inst_count;
+            if (!regex_emit(c, LANA_REGEX_SPLIT, 0u, 0u, 0u)) return 0u;
+            c->insts[split].x = atom_start;
+            c->insts[split].y = split + 1u;
+            return atom_start;
+        }
+        case '?': {
+            c->pos++;
+            split = (uint32_t)c->inst_count;
+            if (!regex_emit(c, LANA_REGEX_SPLIT, 0u, 0u, 0u)) return 0u;
+            memmove(c->insts + atom_start + 1u, c->insts + atom_start,
+                    (split - atom_start) * sizeof(*c->insts));
+            c->insts[atom_start].op = LANA_REGEX_SPLIT;
+            c->insts[atom_start].c = 0u;
+            c->insts[atom_start].x = atom_start + 1u;
+            c->insts[atom_start].y = split + 1u;
+            return atom_start;
+        }
+        default:
+            return atom_start;
+    }
+}
+
+static uint32_t regex_compile_concat(RegexCompiler *c) {
+    uint32_t start = (uint32_t)c->inst_count;
+    while (c->error == LANA_OK && c->pos < c->len) {
+        char ch = c->pattern[c->pos];
+        if (ch == '|' || ch == ')') break;
+        (void)regex_compile_repeat(c);
+    }
+    return start;
+}
+
+static uint32_t regex_compile_alternation(RegexCompiler *c) {
+    uint32_t start = regex_compile_concat(c);
+    while (c->error == LANA_OK && c->pos < c->len && c->pattern[c->pos] == '|') {
+        uint32_t split, jmp, right;
+        c->pos++;  /* skip '|' */
+        split = (uint32_t)c->inst_count;
+        if (!regex_emit(c, LANA_REGEX_SPLIT, 0u, 0u, 0u)) return start;
+        if (!regex_emit(c, LANA_REGEX_JMP, 0u, 0u, 0u)) return start;
+        memmove(c->insts + start + 1u, c->insts + start,
+                (split - start) * sizeof(*c->insts));
+        c->insts[start].op = LANA_REGEX_SPLIT;
+        c->insts[start].c = 0u;
+        c->insts[start].x = start + 1u;
+        c->insts[start].y = 0u;  /* patched below */
+        c->insts[split + 1u].op = LANA_REGEX_JMP;
+        c->insts[split + 1u].c = 0u;
+        c->insts[split + 1u].x = 0u;  /* patched below */
+        c->insts[split + 1u].y = 0u;
+        right = regex_compile_concat(c);
+        if (c->error != LANA_OK) return start;
+        jmp = split + 1u;
+        c->insts[start].y = right;
+        c->insts[jmp].x = (uint32_t)c->inst_count;
+    }
+    return start;
+}
+
+/* Compile a pattern into a GC-tracked LanaRegex. On success returns LANA_OK
+ * with `*out` set; on an invalid pattern returns LANA_ERR_SCHEMA with
+ * `*error_msg` set to a static string; on allocation failure returns
+ * LANA_ERR_OOM. */
+static LanaError regex_compile(LanaVM *vm, const char *pattern, LanaRegex **out,
+                               const char **error_msg) {
+    RegexCompiler c;
+    LanaRegex *re;
+    memset(&c, 0, sizeof(c));
+    c.vm = vm;
+    c.pattern = pattern;
+    c.len = strlen(pattern);
+    c.error = LANA_OK;
+    (void)regex_compile_alternation(&c);
+    if (c.error != LANA_OK) {
+        free(c.insts);
+        free(c.classes);
+        if (c.error == LANA_ERR_SCHEMA) *error_msg = c.message;
+        return c.error;
+    }
+    if (c.pos < c.len) {
+        free(c.insts);
+        free(c.classes);
+        *error_msg = "unmatched ')'";
+        return LANA_ERR_SCHEMA;
+    }
+    if (!regex_emit(&c, LANA_REGEX_MATCH, 0u, 0u, 0u)) {
+        free(c.insts);
+        free(c.classes);
+        return LANA_ERR_OOM;
+    }
+    re = lana_vm_alloc(vm, sizeof(*re));
+    if (re == NULL) { free(c.insts); free(c.classes); return LANA_ERR_OOM; }
+    re->insts = lana_vm_alloc(vm, c.inst_count * sizeof(*re->insts));
+    re->classes = lana_vm_alloc(vm, c.class_count * sizeof(*re->classes));
+    if (re->insts == NULL || re->classes == NULL) {
+        free(c.insts); free(c.classes); return LANA_ERR_OOM;
+    }
+    memcpy(re->insts, c.insts, c.inst_count * sizeof(*re->insts));
+    memcpy(re->classes, c.classes, c.class_count * sizeof(*re->classes));
+    re->inst_count = c.inst_count;
+    re->class_count = c.class_count;
+    free(c.insts);
+    free(c.classes);
+    *out = re;
+    *error_msg = NULL;
+    return LANA_OK;
+}
+
+/* Add `pc` to the active-state list, following epsilon transitions (SPLIT,
+ * JMP) and zero-width assertions (BOL/EOL) that hold at position `pos`. */
+static void regex_addstate(const LanaRegex *re, uint32_t *list, size_t *count,
+                           bool *seen, uint32_t pc, size_t pos, size_t len) {
+    const LanaRegexInst *inst;
+    if (seen[pc]) return;
+    seen[pc] = true;
+    inst = &re->insts[pc];
+    switch (inst->op) {
+        case LANA_REGEX_SPLIT:
+            regex_addstate(re, list, count, seen, inst->x, pos, len);
+            regex_addstate(re, list, count, seen, inst->y, pos, len);
+            break;
+        case LANA_REGEX_JMP:
+            regex_addstate(re, list, count, seen, inst->x, pos, len);
+            break;
+        case LANA_REGEX_BOL:
+            if (pos == 0u) regex_addstate(re, list, count, seen, pc + 1u, pos, len);
+            break;
+        case LANA_REGEX_EOL:
+            if (pos == len) regex_addstate(re, list, count, seen, pc + 1u, pos, len);
+            break;
+        default:
+            list[(*count)++] = pc;
+            break;
+    }
+}
+
+/* Advance the active set by one byte `c` at position `pos`. */
+static void regex_step(const LanaRegex *re, const uint32_t *clist, size_t clist_count,
+                       uint32_t *nlist, size_t *nlist_count, bool *seen,
+                       unsigned char c, size_t pos, size_t len) {
+    size_t i;
+    for (i = 0u; i < clist_count; ++i) {
+        uint32_t pc = clist[i];
+        const LanaRegexInst *inst = &re->insts[pc];
+        switch (inst->op) {
+            case LANA_REGEX_CHAR:
+                if (inst->c == (uint32_t)c)
+                    regex_addstate(re, nlist, nlist_count, seen, pc + 1u, pos + 1u, len);
+                break;
+            case LANA_REGEX_ANY:
+                if (c != '\n')
+                    regex_addstate(re, nlist, nlist_count, seen, pc + 1u, pos + 1u, len);
+                break;
+            case LANA_REGEX_CLASS: {
+                const LanaRegexClass *cls = &re->classes[inst->c];
+                bool in = regex_class_has(cls->bitmap, (uint32_t)c);
+                if (cls->negated) in = !in;
+                if (in)
+                    regex_addstate(re, nlist, nlist_count, seen, pc + 1u, pos + 1u, len);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+}
+
+static bool regex_has_match(const LanaRegex *re, const uint32_t *list, size_t count) {
+    size_t i;
+    for (i = 0u; i < count; ++i)
+        if (re->insts[list[i]].op == LANA_REGEX_MATCH) return true;
+    return false;
+}
+
+/* Run the NFA from `start`, returning the longest (greedy) match end. Returns
+ * LANA_OK (match, `*end` set), LANA_ERR_KEY (no match), or LANA_ERR_OOM. */
+static LanaError regex_match_from(LanaVM *vm, const LanaRegex *re, const char *text,
+                                  size_t len, size_t start, size_t *end) {
+    uint32_t *cur = lana_vm_alloc(vm, re->inst_count * sizeof(*cur));
+    uint32_t *next = lana_vm_alloc(vm, re->inst_count * sizeof(*next));
+    bool *seen = lana_vm_alloc(vm, re->inst_count * sizeof(*seen));
+    size_t cur_count, next_count, pos;
+    bool matched = false;
+    if (cur == NULL || next == NULL || seen == NULL) return LANA_ERR_OOM;
+    memset(seen, 0, re->inst_count * sizeof(*seen));
+    cur_count = 0u;
+    regex_addstate(re, cur, &cur_count, seen, 0u, start, len);
+    if (regex_has_match(re, cur, cur_count)) { *end = start; matched = true; }
+    for (pos = start; pos < len; ++pos) {
+        uint32_t *tmp;
+        memset(seen, 0, re->inst_count * sizeof(*seen));
+        next_count = 0u;
+        regex_step(re, cur, cur_count, next, &next_count, seen,
+                   (unsigned char)text[pos], pos, len);
+        tmp = cur; cur = next; next = tmp;
+        cur_count = next_count;
+        if (regex_has_match(re, cur, cur_count)) { *end = pos + 1u; matched = true; }
+    }
+    return matched ? LANA_OK : LANA_ERR_KEY;
+}
+
+/* Unanchored search: the leftmost-longest (greedy) match. Returns LANA_OK
+ * (match, `*start`/`*end` set) or LANA_ERR_KEY (no match). */
+static LanaError regex_search(LanaVM *vm, const LanaRegex *re, const char *text,
+                              size_t len, size_t from, size_t *start, size_t *end) {
+    size_t s;
+    for (s = from; s <= len; ++s) {
+        LanaError error = regex_match_from(vm, re, text, len, s, end);
+        if (error == LANA_OK) { *start = s; return LANA_OK; }
+        if (error == LANA_ERR_OOM) return LANA_ERR_OOM;
+    }
+    return LANA_ERR_KEY;
+}
+
+/* Build a Match map {start, end, text} for a match over `text`. */
+static LanaError regex_make_match(LanaVM *vm, const char *text, size_t start,
+                                  size_t end, Value *out) {
+    LanaMap *map;
+    LanaError error;
+    char *sub = lana_vm_alloc(vm, end - start + 1u);
+    if (sub == NULL) return LANA_ERR_OOM;
+    memcpy(sub, text + start, end - start);
+    sub[end - start] = '\0';
+    if ((error = lana_map_new(vm, 3u, &map)) != LANA_OK) return error;
+    if ((error = map_put(vm, map, "start", lana_value_number((double)start))) != LANA_OK ||
+        (error = map_put(vm, map, "end", lana_value_number((double)end))) != LANA_OK ||
+        (error = map_put(vm, map, "text", lana_value_string(sub))) != LANA_OK)
+        return error;
+    *out = lana_value_map(map);
+    return LANA_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * LIP-005 linear algebra on STATEs. The four first-class value types
+ * (VAL_NQUBIT_STATE, VAL_POVM, VAL_CHANNEL, VAL_OBSERVABLE) are thin wrappers
+ * over a complex VAL_TENSOR: a density operator is a d×d matrix, a POVM or
+ * channel is a [k, d, d] stack of operators, and an observable is a d×d
+ * Hermitian matrix. The arithmetic below is scalar double loops; the tensor
+ * backend (LIP-004) supplies matmul/trace/reductions where a host call
+ * composes them.
+ * ------------------------------------------------------------------------- */
+
+/* Read the (i, j) entry of a 2-D tensor as a complex number. A real tensor
+ * has zero imaginary part. */
+static void linalg_get2(const LanaTensor *t, size_t i, size_t j, double *re, double *im) {
+    size_t lin = t->offset + i * t->strides[0] + j * t->strides[1];
+    if (t->is_complex) {
+        *re = t->data[lin * 2];
+        *im = t->data[lin * 2 + 1];
+    } else {
+        *re = t->data[lin];
+        *im = 0.0;
+    }
+}
+
+/* Write the (i, j) entry of a 2-D complex tensor. */
+static void linalg_set2(LanaTensor *t, size_t i, size_t j, double re, double im) {
+    size_t lin = t->offset + i * t->strides[0] + j * t->strides[1];
+    t->data[lin * 2] = re;
+    t->data[lin * 2 + 1] = im;
+}
+
+/* Read the (k, i, j) entry of a 3-D tensor as a complex number. */
+static void linalg_get3(const LanaTensor *t, size_t k, size_t i, size_t j, double *re, double *im) {
+    size_t lin = t->offset + k * t->strides[0] + i * t->strides[1] + j * t->strides[2];
+    if (t->is_complex) {
+        *re = t->data[lin * 2];
+        *im = t->data[lin * 2 + 1];
+    } else {
+        *re = t->data[lin];
+        *im = 0.0;
+    }
+}
+
+/* Write the (k, i, j) entry of a 3-D complex tensor. */
+static void linalg_set3(LanaTensor *t, size_t k, size_t i, size_t j, double re, double im) {
+    size_t lin = t->offset + k * t->strides[0] + i * t->strides[1] + j * t->strides[2];
+    t->data[lin * 2] = re;
+    t->data[lin * 2 + 1] = im;
+}
+
+/* Copy a 2-D tensor (real or complex) into a fresh complex tensor. */
+static LanaTensor *linalg_copy_complex2(LanaVM *vm, const LanaTensor *t) {
+    size_t shape[2] = { t->shape[0], t->shape[1] };
+    LanaTensor *r = tensor_new(vm, 2, shape, true);
+    size_t i, j;
+    if (r == NULL) return NULL;
+    for (i = 0; i < t->shape[0]; ++i)
+        for (j = 0; j < t->shape[1]; ++j) {
+            double re, im;
+            linalg_get2(t, i, j, &re, &im);
+            linalg_set2(r, i, j, re, im);
+        }
+    return r;
+}
+
+/* The base-2 logarithm of a power-of-two dimension (the qubit count). */
+static size_t linalg_qubits(size_t d) {
+    size_t n = 0;
+    while (d > 1u) { d >>= 1u; ++n; }
+    return n;
+}
+
+/* Jacobi eigenvalue algorithm for a Hermitian d×d matrix stored as an
+ * interleaved [re, im] row-major array. On return the diagonal holds the real
+ * eigenvalues (the off-diagonal has been driven to ~0). */
+static void linalg_jacobi(double *a, size_t d, double *eigenvalues) {
+    const double tol = 1e-12;
+    const size_t max_sweeps = 50;
+    size_t sweep, p, q, k;
+    for (sweep = 0; sweep < max_sweeps; ++sweep) {
+        double off = 0.0;
+        for (p = 0; p < d; ++p)
+            for (q = p + 1; q < d; ++q) {
+                double re = a[(p * d + q) * 2];
+                double im = a[(p * d + q) * 2 + 1];
+                off += re * re + im * im;
+            }
+        if (off <= tol * tol) break;
+        for (p = 0; p < d; ++p) {
+            for (q = p + 1; q < d; ++q) {
+                double apq_re = a[(p * d + q) * 2];
+                double apq_im = a[(p * d + q) * 2 + 1];
+                double m = hypot(apq_re, apq_im);
+                if (m <= tol) continue;
+                double app = a[(p * d + p) * 2];
+                double aqq = a[(q * d + q) * 2];
+                double theta = 0.5 * atan2(2.0 * m, app - aqq);
+                double c = cos(theta);
+                double s = sin(theta);
+                double cos_phi = apq_re / m;
+                double sin_phi = apq_im / m;
+                a[(p * d + p) * 2] = c * c * app + 2.0 * c * s * m + s * s * aqq;
+                a[(p * d + p) * 2 + 1] = 0.0;
+                a[(q * d + q) * 2] = s * s * app - 2.0 * c * s * m + c * c * aqq;
+                a[(q * d + q) * 2 + 1] = 0.0;
+                a[(p * d + q) * 2] = 0.0;
+                a[(p * d + q) * 2 + 1] = 0.0;
+                a[(q * d + p) * 2] = 0.0;
+                a[(q * d + p) * 2 + 1] = 0.0;
+                for (k = 0; k < d; ++k) {
+                    if (k == p || k == q) continue;
+                    double akp_re = a[(k * d + p) * 2];
+                    double akp_im = a[(k * d + p) * 2 + 1];
+                    double akq_re = a[(k * d + q) * 2];
+                    double akq_im = a[(k * d + q) * 2 + 1];
+                    /* new_akp = c*akp + s*e^{-iφ}*akq */
+                    double t_re = cos_phi * akq_re + sin_phi * akq_im;
+                    double t_im = cos_phi * akq_im - sin_phi * akq_re;
+                    double new_akp_re = c * akp_re + s * t_re;
+                    double new_akp_im = c * akp_im + s * t_im;
+                    /* new_akq = -s*e^{iφ}*akp + c*akq */
+                    double u_re = cos_phi * akp_re - sin_phi * akp_im;
+                    double u_im = cos_phi * akp_im + sin_phi * akp_re;
+                    double new_akq_re = -s * u_re + c * akq_re;
+                    double new_akq_im = -s * u_im + c * akq_im;
+                    a[(k * d + p) * 2] = new_akp_re;
+                    a[(k * d + p) * 2 + 1] = new_akp_im;
+                    a[(p * d + k) * 2] = new_akp_re;
+                    a[(p * d + k) * 2 + 1] = -new_akp_im;
+                    a[(k * d + q) * 2] = new_akq_re;
+                    a[(k * d + q) * 2 + 1] = new_akq_im;
+                    a[(q * d + k) * 2] = new_akq_re;
+                    a[(q * d + k) * 2 + 1] = -new_akq_im;
+                }
+            }
+        }
+    }
+    for (p = 0; p < d; ++p) eigenvalues[p] = a[(p * d + p) * 2];
+}
+
+/* Whether a 2-D tensor is Hermitian (A[i][j] == conj(A[j][i])) within tol. */
+static bool linalg_is_hermitian(const LanaTensor *t, double tol) {
+    size_t i, j;
+    size_t d = t->shape[0];
+    for (i = 0; i < d; ++i)
+        for (j = i; j < d; ++j) {
+            double a_re, a_im, b_re, b_im;
+            linalg_get2(t, i, j, &a_re, &a_im);
+            linalg_get2(t, j, i, &b_re, &b_im);
+            if (fabs(a_re - b_re) > tol || fabs(a_im + b_im) > tol) return false;
+        }
+    return true;
+}
+
+/* Trace of a 2-D tensor (the real part; the imaginary part is ~0 for a
+ * Hermitian matrix). */
+static double linalg_trace(const LanaTensor *t) {
+    size_t i;
+    double sum = 0.0;
+    for (i = 0; i < t->shape[0]; ++i) {
+        double re, im;
+        linalg_get2(t, i, i, &re, &im);
+        sum += re;
+    }
+    return sum;
+}
+
+/* Eigenvalues of a 2-D tensor (assumed Hermitian), in GC scratch. */
+static LanaError linalg_eigenvalues(LanaVM *vm, const LanaTensor *t, double **out) {
+    size_t d = t->shape[0];
+    double *a = lana_vm_alloc(vm, d * d * 2 * sizeof(*a));
+    double *eig = lana_vm_alloc(vm, d * sizeof(*eig));
+    size_t i, j;
+    if (a == NULL || eig == NULL) return LANA_ERR_OOM;
+    for (i = 0; i < d; ++i)
+        for (j = 0; j < d; ++j) {
+            double re, im;
+            linalg_get2(t, i, j, &re, &im);
+            a[(i * d + j) * 2] = re;
+            a[(i * d + j) * 2 + 1] = im;
+        }
+    linalg_jacobi(a, d, eig);
+    *out = eig;
+    return LANA_OK;
+}
+
+/* Whether a 2-D tensor is positive semidefinite (all eigenvalues >= -1e-9). */
+static bool linalg_is_psd(LanaVM *vm, const LanaTensor *t) {
+    double *eig;
+    size_t i;
+    if (linalg_eigenvalues(vm, t, &eig) != LANA_OK) return false;
+    for (i = 0; i < t->shape[0]; ++i)
+        if (eig[i] < -1e-9) return false;
+    return true;
+}
+
+/* density_operator from an N=1 STATE: the 2×2 matrix [[p, c], [c*, 1-p]]. */
+static LanaError linalg_density_from_state(LanaVM *vm, const LanaState *state, Value *out) {
+    double c_re, c_im;
+    size_t shape[2] = { 2, 2 };
+    LanaTensor *r = tensor_new(vm, 2, shape, true);
+    if (r == NULL) return LANA_ERR_OOM;
+    lana_state_reconstruct_c(state, &c_re, &c_im);
+    linalg_set2(r, 0, 0, state->p, 0.0);
+    linalg_set2(r, 0, 1, c_re, c_im);
+    linalg_set2(r, 1, 0, c_re, c_im == 0.0 ? 0.0 : -c_im); /* normalize -0.0 */
+    linalg_set2(r, 1, 1, 1.0 - state->p, 0.0);
+    *out = lana_value_nqubit_state(r);
+    return LANA_OK;
+}
+
+/* density_operator from a tensor: validate Hermitian, PSD, unit trace, and
+ * that d = 2^N with N <= 10. */
+static LanaError linalg_density_from_tensor(LanaVM *vm, const LanaTensor *t, Value *out) {
+    size_t d, n;
+    LanaTensor *r;
+    if (t->ndim != 2 || t->shape[0] != t->shape[1]) return LANA_ERR_INVALID_STATE;
+    d = t->shape[0];
+    if (d == 0 || (d & (d - 1u)) != 0u) return LANA_ERR_INVALID_STATE;
+    n = linalg_qubits(d);
+    if (n > 10) return LANA_ERR_INVALID_PARAMETERS;
+    if (!linalg_is_hermitian(t, 1e-9)) return LANA_ERR_INVALID_STATE;
+    if (!linalg_is_psd(vm, t)) return LANA_ERR_INVALID_STATE;
+    if (fabs(linalg_trace(t) - 1.0) > 1e-9) return LANA_ERR_INVALID_STATE;
+    r = linalg_copy_complex2(vm, t);
+    if (r == NULL) return LANA_ERR_OOM;
+    *out = lana_value_nqubit_state(r);
+    return LANA_OK;
+}
+
+/* povm([E...]): stack the operators and validate each PSD and Σ E_i = I. */
+static LanaError linalg_povm(LanaVM *vm, const Value *arg, Value *out) {
+    LanaArray *arr;
+    size_t k, d, i, r, c;
+    LanaTensor *stack;
+    if (arg->type != VAL_ARRAY) return LANA_ERR_TYPE;
+    arr = arg->as.array;
+    k = arr->count;
+    if (k == 0) return LANA_ERR_INVALID_PARAMETERS;
+    if (arr->items[0].type != VAL_TENSOR) return LANA_ERR_TYPE;
+    if (arr->items[0].as.tensor->ndim != 2 ||
+        arr->items[0].as.tensor->shape[0] != arr->items[0].as.tensor->shape[1])
+        return LANA_ERR_INVALID_PARAMETERS;
+    d = arr->items[0].as.tensor->shape[0];
+    {
+        size_t shape[3] = { k, d, d };
+        stack = tensor_new(vm, 3, shape, true);
+    }
+    if (stack == NULL) return LANA_ERR_OOM;
+    for (i = 0; i < k; ++i) {
+        const LanaTensor *e;
+        if (arr->items[i].type != VAL_TENSOR) return LANA_ERR_TYPE;
+        e = arr->items[i].as.tensor;
+        if (e->ndim != 2 || e->shape[0] != d || e->shape[1] != d)
+            return LANA_ERR_INVALID_PARAMETERS;
+        if (!linalg_is_psd(vm, e)) return LANA_ERR_INVALID_PARAMETERS;
+        for (r = 0; r < d; ++r)
+            for (c = 0; c < d; ++c) {
+                double re, im;
+                linalg_get2(e, r, c, &re, &im);
+                linalg_set3(stack, i, r, c, re, im);
+            }
+    }
+    for (r = 0; r < d; ++r)
+        for (c = 0; c < d; ++c) {
+            double re = 0.0, im = 0.0;
+            for (i = 0; i < k; ++i) {
+                double e_re, e_im;
+                linalg_get3(stack, i, r, c, &e_re, &e_im);
+                re += e_re;
+                im += e_im;
+            }
+            double want_re = (r == c) ? 1.0 : 0.0;
+            if (fabs(re - want_re) > 1e-9 || fabs(im) > 1e-9)
+                return LANA_ERR_INVALID_PARAMETERS;
+        }
+    *out = lana_value_povm(stack);
+    return LANA_OK;
+}
+
+/* channel([K...]): stack the Kraus operators and validate Σ K_k† K_k = I. */
+static LanaError linalg_channel(LanaVM *vm, const Value *arg, Value *out) {
+    LanaArray *arr;
+    size_t k, d, i, r, c, m;
+    LanaTensor *stack;
+    if (arg->type != VAL_ARRAY) return LANA_ERR_TYPE;
+    arr = arg->as.array;
+    k = arr->count;
+    if (k == 0) return LANA_ERR_INVALID_PARAMETERS;
+    if (arr->items[0].type != VAL_TENSOR) return LANA_ERR_TYPE;
+    if (arr->items[0].as.tensor->ndim != 2 ||
+        arr->items[0].as.tensor->shape[0] != arr->items[0].as.tensor->shape[1])
+        return LANA_ERR_INVALID_PARAMETERS;
+    d = arr->items[0].as.tensor->shape[0];
+    {
+        size_t shape[3] = { k, d, d };
+        stack = tensor_new(vm, 3, shape, true);
+    }
+    if (stack == NULL) return LANA_ERR_OOM;
+    for (i = 0; i < k; ++i) {
+        const LanaTensor *e;
+        if (arr->items[i].type != VAL_TENSOR) return LANA_ERR_TYPE;
+        e = arr->items[i].as.tensor;
+        if (e->ndim != 2 || e->shape[0] != d || e->shape[1] != d)
+            return LANA_ERR_INVALID_PARAMETERS;
+        for (r = 0; r < d; ++r)
+            for (c = 0; c < d; ++c) {
+                double re, im;
+                linalg_get2(e, r, c, &re, &im);
+                linalg_set3(stack, i, r, c, re, im);
+            }
+    }
+    for (r = 0; r < d; ++r)
+        for (c = 0; c < d; ++c) {
+            double re = 0.0, im = 0.0;
+            for (i = 0; i < k; ++i)
+                for (m = 0; m < d; ++m) {
+                    double k_mr_re, k_mr_im, k_mc_re, k_mc_im;
+                    linalg_get3(stack, i, m, r, &k_mr_re, &k_mr_im);
+                    linalg_get3(stack, i, m, c, &k_mc_re, &k_mc_im);
+                    /* conj(K[m][r]) * K[m][c] */
+                    re += k_mr_re * k_mc_re + k_mr_im * k_mc_im;
+                    im += k_mr_re * k_mc_im - k_mr_im * k_mc_re;
+                }
+            double want_re = (r == c) ? 1.0 : 0.0;
+            if (fabs(re - want_re) > 1e-9 || fabs(im) > 1e-9)
+                return LANA_ERR_INVALID_PARAMETERS;
+        }
+    *out = lana_value_channel(stack);
+    return LANA_OK;
+}
+
+/* observable(A): validate Hermitian. */
+static LanaError linalg_observable(LanaVM *vm, const Value *arg, Value *out) {
+    const LanaTensor *t;
+    LanaTensor *r;
+    if (arg->type != VAL_TENSOR) return LANA_ERR_TYPE;
+    t = arg->as.tensor;
+    if (t->ndim != 2 || t->shape[0] != t->shape[1]) return LANA_ERR_INVALID_PARAMETERS;
+    if (!linalg_is_hermitian(t, 1e-9)) return LANA_ERR_INVALID_PARAMETERS;
+    r = linalg_copy_complex2(vm, t);
+    if (r == NULL) return LANA_ERR_OOM;
+    *out = lana_value_observable(r);
+    return LANA_OK;
+}
+
+/* tensor_product(a, b): the Kronecker product ρ_A ⊗ ρ_B. */
+static LanaError linalg_tensor_product(LanaVM *vm, const LanaTensor *a, const LanaTensor *b, Value *out) {
+    size_t da = a->shape[0], db = b->shape[0];
+    size_t shape[2] = { da * db, da * db };
+    LanaTensor *r = tensor_new(vm, 2, shape, true);
+    size_t i1, i2, j1, j2;
+    if (r == NULL) return LANA_ERR_OOM;
+    for (i1 = 0; i1 < da; ++i1)
+        for (i2 = 0; i2 < da; ++i2)
+            for (j1 = 0; j1 < db; ++j1)
+                for (j2 = 0; j2 < db; ++j2) {
+                    double a_re, a_im, b_re, b_im;
+                    linalg_get2(a, i1, i2, &a_re, &a_im);
+                    linalg_get2(b, j1, j2, &b_re, &b_im);
+                    linalg_set2(r, i1 * db + j1, i2 * db + j2,
+                                a_re * b_re - a_im * b_im, a_re * b_im + a_im * b_re);
+                }
+    *out = lana_value_nqubit_state(r);
+    return LANA_OK;
+}
+
+/* partial_trace(ab, subsystem): trace out the second subsystem, keeping the
+ * first `subsystem` qubits. `subsystem` is the qubit count of the kept
+ * subsystem A (1 <= subsystem < N). */
+static LanaError linalg_partial_trace(LanaVM *vm, const LanaTensor *ab, double subsystem, Value *out) {
+    size_t d = ab->shape[0];
+    size_t n = linalg_qubits(d);
+    size_t k, da, db, i, j, m;
+    LanaTensor *r;
+    if (!isfinite(subsystem) || subsystem < 1.0 || floor(subsystem) != subsystem)
+        return LANA_ERR_INVALID_PARAMETERS;
+    k = (size_t)subsystem;
+    if (k >= n) return LANA_ERR_INVALID_PARAMETERS;
+    da = (size_t)1u << k;
+    db = d / da;
+    {
+        size_t shape[2] = { da, da };
+        r = tensor_new(vm, 2, shape, true);
+    }
+    if (r == NULL) return LANA_ERR_OOM;
+    for (i = 0; i < da; ++i)
+        for (j = 0; j < da; ++j) {
+            double re = 0.0, im = 0.0;
+            for (m = 0; m < db; ++m) {
+                double e_re, e_im;
+                linalg_get2(ab, i * db + m, j * db + m, &e_re, &e_im);
+                re += e_re;
+                im += e_im;
+            }
+            linalg_set2(r, i, j, re, im);
+        }
+    *out = lana_value_nqubit_state(r);
+    return LANA_OK;
+}
+
+/* measure_with(rho, povm): the outcome distribution p(i) = Tr(ρ E_i). */
+static LanaError linalg_measure_with(LanaVM *vm, const LanaTensor *rho, const LanaTensor *povm, Value *out) {
+    size_t k = povm->shape[0];
+    size_t d = povm->shape[1];
+    LanaArray *arr = lana_vm_alloc(vm, sizeof(*arr));
+    size_t i, r, c;
+    if (arr == NULL) return LANA_ERR_OOM;
+    arr->count = k;
+    arr->capacity = k;
+    arr->items = lana_vm_alloc(vm, k * sizeof(*arr->items));
+    if (arr->items == NULL && k > 0) return LANA_ERR_OOM;
+    for (i = 0; i < k; ++i) {
+        double re = 0.0;
+        for (r = 0; r < d; ++r)
+            for (c = 0; c < d; ++c) {
+                double rho_re, rho_im, e_re, e_im;
+                linalg_get2(rho, r, c, &rho_re, &rho_im);
+                linalg_get3(povm, i, c, r, &e_re, &e_im);
+                re += rho_re * e_re - rho_im * e_im;
+            }
+        arr->items[i] = lana_value_number(re);
+    }
+    *out = lana_value_array(arr);
+    return LANA_OK;
+}
+
+/* apply_to(chan, rho): Φ(ρ) = Σ_k K_k ρ K_k†. */
+static LanaError linalg_apply_to(LanaVM *vm, const LanaTensor *chan, const LanaTensor *rho, Value *out) {
+    size_t k = chan->shape[0];
+    size_t d = chan->shape[1];
+    size_t shape[2] = { d, d };
+    LanaTensor *r = tensor_new(vm, 2, shape, true);
+    size_t i, j, m, n, kk;
+    if (r == NULL) return LANA_ERR_OOM;
+    for (kk = 0; kk < k; ++kk)
+        for (i = 0; i < d; ++i)
+            for (j = 0; j < d; ++j) {
+                double re = 0.0, im = 0.0;
+                for (m = 0; m < d; ++m)
+                    for (n = 0; n < d; ++n) {
+                        double k_re, k_im, rho_re, rho_im, kd_re, kd_im;
+                        linalg_get3(chan, kk, i, m, &k_re, &k_im);
+                        linalg_get2(rho, m, n, &rho_re, &rho_im);
+                        linalg_get3(chan, kk, j, n, &kd_re, &kd_im);
+                        /* K[i][m] * ρ[m][n] * conj(K[j][n]) */
+                        double t_re = k_re * rho_re - k_im * rho_im;
+                        double t_im = k_re * rho_im + k_im * rho_re;
+                        re += t_re * kd_re + t_im * kd_im;
+                        im += t_im * kd_re - t_re * kd_im;
+                    }
+                double cur_re, cur_im;
+                linalg_get2(r, i, j, &cur_re, &cur_im);
+                linalg_set2(r, i, j, cur_re + re, cur_im + im);
+            }
+    *out = lana_value_nqubit_state(r);
+    return LANA_OK;
+}
+
+/* expect(rho, obs): ⟨A⟩ = Tr(ρ A). */
+static LanaError linalg_expect(const LanaTensor *rho, const LanaTensor *obs, Value *out) {
+    size_t d = rho->shape[0];
+    double re = 0.0;
+    size_t r, c;
+    for (r = 0; r < d; ++r)
+        for (c = 0; c < d; ++c) {
+            double rho_re, rho_im, a_re, a_im;
+            linalg_get2(rho, r, c, &rho_re, &rho_im);
+            linalg_get2(obs, c, r, &a_re, &a_im);
+            re += rho_re * a_re - rho_im * a_im;
+        }
+    *out = lana_value_number(re);
+    return LANA_OK;
+}
+
+/* mix(a, b, w): the convex mixture w·a + (1-w)·b. */
+static LanaError linalg_mix(LanaVM *vm, const LanaTensor *a, const LanaTensor *b, double w, Value *out) {
+    size_t d = a->shape[0];
+    size_t shape[2] = { d, d };
+    LanaTensor *r = tensor_new(vm, 2, shape, true);
+    size_t i, j;
+    if (r == NULL) return LANA_ERR_OOM;
+    for (i = 0; i < d; ++i)
+        for (j = 0; j < d; ++j) {
+            double a_re, a_im, b_re, b_im;
+            linalg_get2(a, i, j, &a_re, &a_im);
+            linalg_get2(b, i, j, &b_re, &b_im);
+            linalg_set2(r, i, j, w * a_re + (1.0 - w) * b_re, w * a_im + (1.0 - w) * b_im);
+        }
+    *out = lana_value_nqubit_state(r);
+    return LANA_OK;
+}
+
+/* trace_distance(a, b): ½‖ρ − σ‖₁ = ½ Σ |λ_i(ρ − σ)|. */
+static LanaError linalg_trace_distance(LanaVM *vm, const LanaTensor *a, const LanaTensor *b, Value *out) {
+    size_t d = a->shape[0];
+    double *diff = lana_vm_alloc(vm, d * d * 2 * sizeof(*diff));
+    double *eig = lana_vm_alloc(vm, d * sizeof(*eig));
+    size_t i, j;
+    double sum = 0.0;
+    if (diff == NULL || eig == NULL) return LANA_ERR_OOM;
+    for (i = 0; i < d; ++i)
+        for (j = 0; j < d; ++j) {
+            double a_re, a_im, b_re, b_im;
+            linalg_get2(a, i, j, &a_re, &a_im);
+            linalg_get2(b, i, j, &b_re, &b_im);
+            diff[(i * d + j) * 2] = a_re - b_re;
+            diff[(i * d + j) * 2 + 1] = a_im - b_im;
+        }
+    linalg_jacobi(diff, d, eig);
+    for (i = 0; i < d; ++i) sum += fabs(eig[i]);
+    *out = lana_value_number(0.5 * sum);
+    return LANA_OK;
+}
+
+/* is_separable(ab, bipartition): the PPT (Peres-Horodecki) criterion. A
+ * negative partial-transpose eigenvalue proves entanglement; a PSD partial
+ * transpose proves separability for 2×2 and 2×3 systems and is otherwise
+ * inconclusive. `bipartition` is the qubit count of the first subsystem. */
+static LanaError linalg_is_separable(LanaVM *vm, const LanaTensor *ab, double bipartition, Value *out) {
+    size_t d = ab->shape[0];
+    size_t n = linalg_qubits(d);
+    size_t k, da, db, i1, i2, j1, j2;
+    double *pt, *eig;
+    bool negative = false;
+    bool provably_separable;
+    if (!isfinite(bipartition) || bipartition < 1.0 || floor(bipartition) != bipartition)
+        return LANA_ERR_INVALID_PARAMETERS;
+    k = (size_t)bipartition;
+    if (k >= n) return LANA_ERR_INVALID_PARAMETERS;
+    da = (size_t)1u << k;
+    db = d / da;
+    pt = lana_vm_alloc(vm, d * d * 2 * sizeof(*pt));
+    eig = lana_vm_alloc(vm, d * sizeof(*eig));
+    if (pt == NULL || eig == NULL) return LANA_ERR_OOM;
+    for (i1 = 0; i1 < da; ++i1)
+        for (i2 = 0; i2 < da; ++i2)
+            for (j1 = 0; j1 < db; ++j1)
+                for (j2 = 0; j2 < db; ++j2) {
+                    double re, im;
+                    linalg_get2(ab, i1 * db + j2, i2 * db + j1, &re, &im);
+                    pt[((i1 * db + j1) * d + (i2 * db + j2)) * 2] = re;
+                    pt[((i1 * db + j1) * d + (i2 * db + j2)) * 2 + 1] = im;
+                }
+    linalg_jacobi(pt, d, eig);
+    for (i1 = 0; i1 < d; ++i1)
+        if (eig[i1] < -1e-9) { negative = true; break; }
+    provably_separable = (da == 1u || db == 1u) ||
+        (da == 2u && db == 2u) || (da == 2u && db == 3u) || (da == 3u && db == 2u);
+    if (negative) *out = lana_value_string("entangled");
+    else if (provably_separable) *out = lana_value_string("separable");
+    else *out = lana_value_string("inconclusive");
+    return LANA_OK;
+}
+
+/* to_state(rho): recover the N=1 (p, d_re, d_im) form from a 1-qubit density
+ * operator. */
+static LanaError linalg_to_state(const LanaTensor *rho, Value *out) {
+    double p, c_re, c_im, scale, dummy;
+    LanaState state;
+    LanaError error;
+    if (rho->shape[0] != 2) return LANA_ERR_INVALID_PARAMETERS;
+    linalg_get2(rho, 0, 0, &p, &dummy);
+    linalg_get2(rho, 0, 1, &c_re, &c_im);
+    scale = sqrt(p * (1.0 - p));
+    if (scale > 0.0)
+        error = lana_state_make_complex(p, c_re / scale, c_im / scale, &state);
+    else
+        error = lana_state_make_complex(p, 0.0, 0.0, &state);
+    if (error != LANA_OK) return error;
+    *out = lana_value_state(state);
+    return LANA_OK;
+}
+
+/* ===== LIP-007 differentiable STATE tensors ===== */
+
+/* Validate a d×d density matrix stored as interleaved [re, im] row-major data.
+ * Checks Hermitian, PSD, and unit trace (LIP-005 §1.2). */
+static LanaError linalg_validate_density_data(LanaVM *vm, const double *data, size_t d) {
+    size_t i, j;
+    for (i = 0; i < d; ++i)
+        for (j = i; j < d; ++j) {
+            double a_re = data[(i * d + j) * 2], a_im = data[(i * d + j) * 2 + 1];
+            double b_re = data[(j * d + i) * 2], b_im = data[(j * d + i) * 2 + 1];
+            if (fabs(a_re - b_re) > 1e-9 || fabs(a_im + b_im) > 1e-9)
+                return LANA_ERR_INVALID_STATE;
+        }
+    {
+        double *a = lana_vm_alloc(vm, d * d * 2 * sizeof(*a));
+        double *eig = lana_vm_alloc(vm, d * sizeof(*eig));
+        if (a == NULL || eig == NULL) return LANA_ERR_OOM;
+        memcpy(a, data, d * d * 2 * sizeof(*a));
+        linalg_jacobi(a, d, eig);
+        for (i = 0; i < d; ++i)
+            if (eig[i] < -1e-9) return LANA_ERR_INVALID_STATE;
+    }
+    {
+        double trace = 0.0;
+        for (i = 0; i < d; ++i) trace += data[(i * d + i) * 2];
+        if (fabs(trace - 1.0) > 1e-9) return LANA_ERR_INVALID_STATE;
+    }
+    return LANA_OK;
+}
+
+/* Recursively fill a complex tensor's interleaved [re, im] buffer from a nested
+ * array of real numbers (imaginary parts are zero). */
+static LanaError tensor_fill_state(const Value *v, double *data, size_t *offset) {
+    if (v->type == VAL_NUMBER) {
+        data[2 * (*offset)] = v->as.number;
+        data[2 * (*offset) + 1] = 0.0;
+        (*offset)++;
+        return LANA_OK;
+    }
+    if (v->type != VAL_ARRAY) return LANA_ERR_TYPE;
+    LanaArray *arr = v->as.array;
+    for (size_t i = 0; i < arr->count; ++i) {
+        LanaError e = tensor_fill_state(&arr->items[i], data, offset);
+        if (e != LANA_OK) return e;
+    }
+    return LANA_OK;
+}
+
+/* state_tensor(literal): construct a STATE tensor from a nested literal of
+ * density matrices (real entries; imaginary parts are zero). The literal shape
+ * is [s_1, ..., s_k, d, d]; each d×d element is validated as a density
+ * operator. */
+static LanaError linalg_state_tensor(LanaVM *vm, const Value *arg, Value *out) {
+    size_t ndim, *shape, d, n, batch, i;
+    LanaTensor *t;
+    LanaError error;
+    if (arg->type != VAL_ARRAY) return LANA_ERR_TYPE;
+    error = tensor_infer_shape(vm, arg, &ndim, &shape);
+    if (error != LANA_OK) return error;
+    if (ndim < 2) return LANA_ERR_INVALID_PARAMETERS;
+    if (shape[ndim - 1] != shape[ndim - 2]) return LANA_ERR_INVALID_PARAMETERS;
+    d = shape[ndim - 1];
+    if (d < 2 || (d & (d - 1u)) != 0u) return LANA_ERR_INVALID_PARAMETERS;
+    n = linalg_qubits(d);
+    if (n > 10) return LANA_ERR_INVALID_PARAMETERS;
+    t = tensor_new(vm, ndim, shape, true);
+    if (t == NULL) return LANA_ERR_OOM;
+    t->is_state = true;
+    {
+        size_t offset = 0;
+        error = tensor_fill_state(arg, t->data, &offset);
+        if (error != LANA_OK) return error;
+    }
+    batch = 1;
+    for (i = 0; i + 2 < ndim; ++i) batch *= shape[i];
+    for (i = 0; i < batch; ++i) {
+        error = linalg_validate_density_data(vm, t->data + i * d * d * 2, d);
+        if (error != LANA_OK) return error;
+    }
+    *out = lana_value_tensor(t);
+    return LANA_OK;
+}
+
+/* append(a, b): element-wise distribution-valued APPEND (mean state). N=1
+ * (single-qubit) only. */
+static LanaError linalg_state_append(LanaVM *vm, const LanaTensor *a, const LanaTensor *b, Value *out) {
+    size_t d, batch, i;
+    LanaTensor *r;
+    if (a->ndim != b->ndim) return LANA_ERR_INVALID_PARAMETERS;
+    for (i = 0; i < a->ndim; ++i)
+        if (a->shape[i] != b->shape[i]) return LANA_ERR_INVALID_PARAMETERS;
+    if (a->ndim < 2) return LANA_ERR_INVALID_PARAMETERS;
+    d = a->shape[a->ndim - 1];
+    if (d != 2) return LANA_ERR_INVALID_PARAMETERS;
+    r = tensor_new(vm, a->ndim, a->shape, true);
+    if (r == NULL) return LANA_ERR_OOM;
+    r->is_state = true;
+    batch = 1;
+    for (i = 0; i + 2 < a->ndim; ++i) batch *= a->shape[i];
+    for (i = 0; i < batch; ++i) {
+        const double *da = a->data + i * d * d * 2;
+        const double *db = b->data + i * d * d * 2;
+        double *dr = r->data + i * d * d * 2;
+        double p_a = da[0], c_a_re = da[2], c_a_im = da[3];
+        double p_b = db[0], c_b_re = db[2], c_b_im = db[3];
+        double s_a = sqrt(p_a * (1.0 - p_a));
+        double s_b = sqrt(p_b * (1.0 - p_b));
+        double d_a_re = s_a > 0.0 ? c_a_re / s_a : 0.0;
+        double d_a_im = s_a > 0.0 ? c_a_im / s_a : 0.0;
+        double d_b_re = s_b > 0.0 ? c_b_re / s_b : 0.0;
+        double d_b_im = s_b > 0.0 ? c_b_im / s_b : 0.0;
+        double p_c = p_a + p_b - p_a * p_b;
+        double d_c_re = (d_a_re + d_b_re) / 2.0;
+        double d_c_im = (d_a_im + d_b_im) / 2.0;
+        double s_c = sqrt(p_c * (1.0 - p_c));
+        double c_c_re = d_c_re * s_c;
+        double c_c_im = d_c_im * s_c;
+        /* ρ_C = [[p_C, c_C], [c_C*, 1-p_C]]. */
+        dr[0] = p_c; dr[1] = 0.0;
+        dr[2] = c_c_re; dr[3] = c_c_im;
+        dr[4] = c_c_re; dr[5] = c_c_im == 0.0 ? 0.0 : -c_c_im;
+        dr[6] = 1.0 - p_c; dr[7] = 0.0;
+    }
+    *out = lana_value_tensor(r);
+    return LANA_OK;
+}
+
+/* measure(s, povm): element-wise outcome probability q[..., i] = Tr(ρ E_i). */
+static LanaError linalg_state_measure(LanaVM *vm, const LanaTensor *s, const LanaTensor *povm, Value *out) {
+    size_t d = s->shape[s->ndim - 1];
+    size_t k = povm->shape[0];
+    size_t batch, i, r, c, m;
+    size_t out_ndim = s->ndim - 1;
+    size_t *out_shape;
+    LanaTensor *res;
+    if (povm->shape[1] != d || povm->shape[2] != d) return LANA_ERR_INVALID_PARAMETERS;
+    batch = 1;
+    for (i = 0; i + 2 < s->ndim; ++i) batch *= s->shape[i];
+    out_shape = lana_vm_alloc(vm, out_ndim * sizeof(*out_shape));
+    if (out_shape == NULL && out_ndim > 0) return LANA_ERR_OOM;
+    for (i = 0; i + 2 < s->ndim; ++i) out_shape[i] = s->shape[i];
+    out_shape[out_ndim - 1] = k;
+    res = tensor_new(vm, out_ndim, out_shape, false);
+    if (res == NULL) return LANA_ERR_OOM;
+    for (i = 0; i < batch; ++i) {
+        const double *ds = s->data + i * d * d * 2;
+        for (m = 0; m < k; ++m) {
+            double re = 0.0;
+            for (r = 0; r < d; ++r)
+                for (c = 0; c < d; ++c) {
+                    double rho_re = ds[(r * d + c) * 2], rho_im = ds[(r * d + c) * 2 + 1];
+                    double e_re, e_im;
+                    linalg_get3(povm, m, c, r, &e_re, &e_im);
+                    re += rho_re * e_re - rho_im * e_im;
+                }
+            res->data[i * k + m] = re;
+        }
+    }
+    *out = lana_value_tensor(res);
+    return LANA_OK;
+}
+
+/* transform(s, chan): element-wise channel application Φ(ρ) = Σ_k K_k ρ K_k†. */
+static LanaError linalg_state_transform(LanaVM *vm, const LanaTensor *s, const LanaTensor *chan, Value *out) {
+    size_t d = s->shape[s->ndim - 1];
+    size_t k = chan->shape[0];
+    size_t batch, i, r, c, m, n, kk;
+    LanaTensor *res;
+    if (chan->shape[1] != d || chan->shape[2] != d) return LANA_ERR_INVALID_PARAMETERS;
+    batch = 1;
+    for (i = 0; i + 2 < s->ndim; ++i) batch *= s->shape[i];
+    res = tensor_new(vm, s->ndim, s->shape, true);
+    if (res == NULL) return LANA_ERR_OOM;
+    res->is_state = true;
+    for (i = 0; i < batch; ++i) {
+        const double *ds = s->data + i * d * d * 2;
+        double *dr = res->data + i * d * d * 2;
+        for (r = 0; r < d; ++r)
+            for (c = 0; c < d; ++c) {
+                double re = 0.0, im = 0.0;
+                for (kk = 0; kk < k; ++kk)
+                    for (m = 0; m < d; ++m)
+                        for (n = 0; n < d; ++n) {
+                            double k_re, k_im, rho_re, rho_im, kd_re, kd_im;
+                            linalg_get3(chan, kk, r, m, &k_re, &k_im);
+                            rho_re = ds[(m * d + n) * 2]; rho_im = ds[(m * d + n) * 2 + 1];
+                            linalg_get3(chan, kk, c, n, &kd_re, &kd_im);
+                            /* K[r][m] * ρ[m][n] * conj(K[c][n]) */
+                            double t_re = k_re * rho_re - k_im * rho_im;
+                            double t_im = k_re * rho_im + k_im * rho_re;
+                            re += t_re * kd_re + t_im * kd_im;
+                            im += t_im * kd_re - t_re * kd_im;
+                        }
+                dr[(r * d + c) * 2] = re;
+                dr[(r * d + c) * 2 + 1] = im;
+            }
+    }
+    *out = lana_value_tensor(res);
+    return LANA_OK;
+}
+
+/* ---------------------------------------------------------------------------
+ * LIP-018 two-way FFI.
+ *
+ * `ffi_declare` parses a C-style signature string and stores it in a per-VM
+ * table; `ffi_load` dlopens a shared library; `ffi_call` marshals a bounded
+ * set of argument types, invokes the symbol through libffi, and unmarshals the
+ * return. A faulting callee is contained by a sigsetjmp guard and reported as
+ * `LANA_ERR_EXTERNAL` rather than taking down the VM.
+ * ------------------------------------------------------------------------- */
+
+typedef enum {
+    LANA_FFI_VOID = 0,
+    LANA_FFI_INT,
+    LANA_FFI_DOUBLE,
+    LANA_FFI_STRING,
+    LANA_FFI_ARRAY
+} FfiType;
+
+typedef struct {
+    FfiType ret;
+    char name[128];
+    FfiType args[16];
+    size_t arg_count;
+} FfiSignature;
+
+static bool ffi_type_end(char c) {
+    return c == ' ' || c == '\t' || c == ')' || c == ',' || c == '\0';
+}
+
+static bool ffi_parse_type(const char **cursor, FfiType *out) {
+    const char *p = *cursor;
+    while (*p == ' ' || *p == '\t') ++p;
+    if (strncmp(p, "void", 4) == 0 && ffi_type_end(p[4])) { *cursor = p + 4; *out = LANA_FFI_VOID; return true; }
+    if (strncmp(p, "int", 3) == 0 && ffi_type_end(p[3])) { *cursor = p + 3; *out = LANA_FFI_INT; return true; }
+    if (strncmp(p, "double", 6) == 0 && ffi_type_end(p[6])) { *cursor = p + 6; *out = LANA_FFI_DOUBLE; return true; }
+    if (strncmp(p, "const char *", 12) == 0) { *cursor = p + 12; *out = LANA_FFI_STRING; return true; }
+    if (strncmp(p, "array", 5) == 0 && ffi_type_end(p[5])) { *cursor = p + 5; *out = LANA_FFI_ARRAY; return true; }
+    return false;
+}
+
+static bool ffi_parse_signature(const char *sig, FfiSignature *out) {
+    const char *p;
+    size_t i;
+    if (sig == NULL) return false;
+    memset(out, 0, sizeof(*out));
+    p = sig;
+    if (!ffi_parse_type(&p, &out->ret)) return false;
+    while (*p == ' ' || *p == '\t') ++p;
+    i = 0u;
+    while (*p != '\0' && *p != '(' && i + 1u < sizeof(out->name)) out->name[i++] = *p++;
+    out->name[i] = '\0';
+    if (*p != '(') return false;
+    ++p;
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p == ')') return true; /* no arguments */
+    /* C's `(void)` means no arguments. */
+    if (strncmp(p, "void", 4) == 0 && p[4] == ')') return true;
+    for (;;) {
+        if (out->arg_count >= 16u) return false;
+        if (!ffi_parse_type(&p, &out->args[out->arg_count])) return false;
+        ++out->arg_count;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (*p == ',') { ++p; continue; }
+        if (*p == ')') return true;
+        return false;
+    }
+}
+
+/* Crash containment: the single VM currently under the FFI guard. A fault in
+ * the callee longjmps back to the guard, which reports LANA_ERR_EXTERNAL. */
+static LanaVM *ffi_guarded_vm = NULL;
+
+static void ffi_fault_handler(int signal_number) {
+    (void)signal_number;
+    if (ffi_guarded_vm != NULL) {
+        ffi_guarded_vm->ffi_faulted = true;
+        siglongjmp(ffi_guarded_vm->ffi_jmp, 1);
+    }
+}
+
+static bool ffi_validate_args(const FfiSignature *sig, const Value *args, size_t argc) {
+    size_t i;
+    if (argc != sig->arg_count) return false;
+    for (i = 0u; i < argc; ++i) {
+        switch (sig->args[i]) {
+            case LANA_FFI_INT:
+            case LANA_FFI_DOUBLE:
+                if (args[i].type != VAL_NUMBER) return false;
+                break;
+            case LANA_FFI_STRING:
+                if (args[i].type != VAL_STRING) return false;
+                break;
+            case LANA_FFI_ARRAY:
+                if (args[i].type != VAL_ARRAY) return false;
+                break;
+            default:
+                return false;
+        }
+    }
+    return true;
+}
+
+static LanaError ffi_result_map(LanaVM *vm, const char *key, const Value *value,
+                                Value *out) {
+    LanaMap *map;
+    LanaError error = lana_map_new(vm, 1u, &map);
+    if (error != LANA_OK) return error;
+    error = lana_map_set(vm, map, key, value, true);
+    if (error != LANA_OK) return error;
+    *out = lana_value_map(map);
+    return LANA_OK;
+}
+
+static LanaError ffi_call_impl(LanaVM *vm, const FfiSignature *sig, void *lib,
+                               const Value *args, size_t argc, Value *out) {
+    ffi_cif cif;
+    ffi_type *arg_types[16];
+    void *arg_values[16];
+    double dargs[16];
+    int iargs[16];
+    const char *sargs[16];
+    struct { void *data; size_t len; } aargs[16];
+    union { void *p; void (*f)(void); } sym;
+    ffi_type *ret_type;
+    union { double d; int i; } ret;
+    struct sigaction old_segv, old_bus, act;
+    size_t i;
+
+    if (argc != sig->arg_count) return LANA_ERR_TYPE;
+    if (lib == NULL) return LANA_ERR_INVALID_STATE;
+
+    for (i = 0u; i < argc; ++i) {
+        switch (sig->args[i]) {
+            case LANA_FFI_INT:
+                if (args[i].type != VAL_NUMBER) return LANA_ERR_TYPE;
+                iargs[i] = (int)args[i].as.number;
+                arg_types[i] = &ffi_type_sint;
+                arg_values[i] = &iargs[i];
+                break;
+            case LANA_FFI_DOUBLE:
+                if (args[i].type != VAL_NUMBER) return LANA_ERR_TYPE;
+                dargs[i] = args[i].as.number;
+                arg_types[i] = &ffi_type_double;
+                arg_values[i] = &dargs[i];
+                break;
+            case LANA_FFI_STRING:
+                if (args[i].type != VAL_STRING) return LANA_ERR_TYPE;
+                sargs[i] = args[i].as.string;
+                arg_types[i] = &ffi_type_pointer;
+                arg_values[i] = &sargs[i];
+                break;
+            case LANA_FFI_ARRAY:
+                if (args[i].type != VAL_ARRAY) return LANA_ERR_TYPE;
+                aargs[i].data = args[i].as.array->items;
+                aargs[i].len = args[i].as.array->count;
+                arg_types[i] = &ffi_type_pointer;
+                arg_values[i] = &aargs[i];
+                break;
+            default:
+                return LANA_ERR_TYPE;
+        }
+    }
+
+    switch (sig->ret) {
+        case LANA_FFI_VOID: ret_type = &ffi_type_void; break;
+        case LANA_FFI_INT: ret_type = &ffi_type_sint; break;
+        case LANA_FFI_DOUBLE: ret_type = &ffi_type_double; break;
+        default: return LANA_ERR_TYPE;
+    }
+
+    if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, (unsigned)argc, ret_type, arg_types) != FFI_OK)
+        return LANA_ERR_EXTERNAL;
+
+    sym.p = dlsym(lib, sig->name);
+    if (sym.p == NULL) return LANA_ERR_EXTERNAL;
+
+    vm->ffi_faulted = false;
+    ffi_guarded_vm = vm;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = ffi_fault_handler;
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = 0;
+    sigaction(SIGSEGV, &act, &old_segv);
+    sigaction(SIGBUS, &act, &old_bus);
+    if (sigsetjmp(vm->ffi_jmp, 1) == 0) {
+        ffi_call(&cif, sym.f, &ret, arg_values);
+    }
+    sigaction(SIGSEGV, &old_segv, NULL);
+    sigaction(SIGBUS, &old_bus, NULL);
+    ffi_guarded_vm = NULL;
+    if (vm->ffi_faulted) return LANA_ERR_EXTERNAL;
+
+    switch (sig->ret) {
+        case LANA_FFI_VOID: *out = lana_value_null(); break;
+        case LANA_FFI_INT: *out = lana_value_number((double)ret.i); break;
+        case LANA_FFI_DOUBLE: *out = lana_value_number(ret.d); break;
+        default: return LANA_ERR_TYPE;
+    }
+    return LANA_OK;
+}
+
 static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *arguments,
-                                 size_t argc, Value *out) {
+                                 size_t argc, uint32_t scratch_register, Value *out) {
     size_t index;
     *out = lana_value_null();
     switch ((LanaHostCallId)host_id) {
@@ -3231,6 +6644,318 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
         case LANA_HOST_RANDOM:
             if (argc != 0u) return LANA_ERR_TYPE;
             *out = lana_value_number((double)lana_vm_random(vm) / 4294967296.0); return LANA_OK;
+        case LANA_HOST_TENSOR_ALLOC: {
+            // Arguments: shape array (VAL_ARRAY), optional is_complex (VAL_BOOL).
+            if (argc < 1u || argc > 2u) return LANA_ERR_TYPE;
+            bool is_complex = false;
+            if (argc == 2u) {
+                if (arguments[1].type != VAL_BOOL) return LANA_ERR_TYPE;
+                is_complex = arguments[1].as.boolean;
+            }
+            size_t ndim; size_t *shape;
+            LanaError e = tensor_shape_from_array(vm, &arguments[0], &ndim, &shape);
+            if (e != LANA_OK) return e;
+            LanaTensor *t = tensor_new(vm, ndim, shape, is_complex);
+            if (t == NULL) return LANA_ERR_OOM;
+            *out = lana_value_tensor(t);
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_ZEROS: {
+            if (argc != 1u && argc != 2u) return LANA_ERR_TYPE;
+            int dtype = tensor_optional_dtype(arguments, argc);
+            if (dtype < 0) return LANA_ERR_INVALID_PARAMETERS;
+            size_t ndim; size_t *shape;
+            LanaError e = tensor_shape_from_array(vm, &arguments[0], &ndim, &shape);
+            if (e != LANA_OK) return e;
+            LanaTensor *t = tensor_new(vm, ndim, shape, false);
+            if (t == NULL) return LANA_ERR_OOM;
+            t->dtype = (LanaTensorDtype)dtype;
+            *out = lana_value_tensor(t);
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_ONES: {
+            if (argc != 1u && argc != 2u) return LANA_ERR_TYPE;
+            int dtype = tensor_optional_dtype(arguments, argc);
+            if (dtype < 0) return LANA_ERR_INVALID_PARAMETERS;
+            size_t ndim; size_t *shape;
+            LanaError e = tensor_shape_from_array(vm, &arguments[0], &ndim, &shape);
+            if (e != LANA_OK) return e;
+            LanaTensor *t = tensor_new(vm, ndim, shape, false);
+            if (t == NULL) return LANA_ERR_OOM;
+            t->dtype = (LanaTensorDtype)dtype;
+            size_t total = 1;
+            for (size_t i = 0; i < ndim; ++i) total *= t->shape[i];
+            for (size_t i = 0; i < total; ++i) t->data[i] = 1.0;
+            *out = lana_value_tensor(t);
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_EYE: {
+            if (argc != 1u && argc != 2u) return LANA_ERR_TYPE;
+            if (arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+            int dtype = tensor_optional_dtype(arguments, argc);
+            if (dtype < 0) return LANA_ERR_INVALID_PARAMETERS;
+            size_t n;
+            LanaError error = tensor_dimension(arguments[0].as.number, &n);
+            if (error != LANA_OK) return error;
+            size_t shape[2] = {n, n};
+            LanaTensor *t = tensor_new(vm, 2, shape, false);
+            if (t == NULL) return LANA_ERR_OOM;
+            t->dtype = (LanaTensorDtype)dtype;
+            for (size_t i = 0; i < n; ++i) t->data[i * n + i] = 1.0;
+            *out = lana_value_tensor(t);
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_DTYPE: {
+            if (argc != 1u) return LANA_ERR_TYPE;
+            if (arguments[0].type != VAL_TENSOR) return LANA_ERR_TYPE;
+            *out = lana_value_string(dtype_to_string(arguments[0].as.tensor->dtype));
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_SHAPE: {
+            if (argc != 1u) return LANA_ERR_TYPE;
+            if (arguments[0].type != VAL_TENSOR) return LANA_ERR_TYPE;
+            const LanaTensor *t = arguments[0].as.tensor;
+            LanaArray *arr = lana_vm_alloc(vm, sizeof(*arr));
+            if (arr == NULL) return LANA_ERR_OOM;
+            arr->count = t->ndim;
+            arr->capacity = t->ndim;
+            arr->items = lana_vm_alloc(vm, t->ndim * sizeof(*arr->items));
+            if (arr->items == NULL && t->ndim > 0) return LANA_ERR_OOM;
+            for (size_t i = 0; i < t->ndim; ++i) {
+                arr->items[i] = lana_value_number((double)t->shape[i]);
+            }
+            *out = lana_value_array(arr);
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_NDIM: {
+            if (argc != 1u) return LANA_ERR_TYPE;
+            if (arguments[0].type != VAL_TENSOR) return LANA_ERR_TYPE;
+            *out = lana_value_number((double)arguments[0].as.tensor->ndim);
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_ADD:
+        case LANA_HOST_TENSOR_SUB:
+        case LANA_HOST_TENSOR_MUL:
+        case LANA_HOST_TENSOR_DIV: {
+            if (argc != 2u) return LANA_ERR_TYPE;
+            int op = (int)(host_id - LANA_HOST_TENSOR_ADD);
+            const LanaTensor *a_pred = NULL, *a_var = NULL, *b_pred = NULL, *b_var = NULL;
+            bool a_unc = false, b_unc = false;
+            LanaError unpack_error = tensor_uncertainty_unpack(&arguments[0], &a_pred, &a_var, &a_unc);
+            if (unpack_error != LANA_OK) return unpack_error;
+            unpack_error = tensor_uncertainty_unpack(&arguments[1], &b_pred, &b_var, &b_unc);
+            if (unpack_error != LANA_OK) return unpack_error;
+            if (a_unc || b_unc) {
+                if (!a_unc) { a_var = tensor_zeros_like(vm, a_pred); if (a_var == NULL) return LANA_ERR_OOM; }
+                if (!b_unc) { b_var = tensor_zeros_like(vm, b_pred); if (b_var == NULL) return LANA_ERR_OOM; }
+                return tensor_elementwise_uncertain(vm, a_pred, a_var, b_pred, b_var, op, out);
+            }
+            LanaError error = tensor_elementwise(vm, a_pred, b_pred, op, out);
+            if (error != LANA_OK) return error;
+            if (vm->ad_recording)
+                return ad_record(vm, op, &arguments[0], &arguments[1], -1, out);
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_MATMUL: {
+            if (argc != 2u) return LANA_ERR_TYPE;
+            const LanaTensor *a_pred = NULL, *a_var = NULL, *b_pred = NULL, *b_var = NULL;
+            bool a_unc = false, b_unc = false;
+            LanaError unpack_error = tensor_uncertainty_unpack(&arguments[0], &a_pred, &a_var, &a_unc);
+            if (unpack_error != LANA_OK) return unpack_error;
+            unpack_error = tensor_uncertainty_unpack(&arguments[1], &b_pred, &b_var, &b_unc);
+            if (unpack_error != LANA_OK) return unpack_error;
+            if (a_unc || b_unc) {
+                if (!a_unc) { a_var = tensor_zeros_like(vm, a_pred); if (a_var == NULL) return LANA_ERR_OOM; }
+                if (!b_unc) { b_var = tensor_zeros_like(vm, b_pred); if (b_var == NULL) return LANA_ERR_OOM; }
+                return tensor_matmul_uncertain(vm, a_pred, a_var, b_pred, b_var, out);
+            }
+            LanaError error = tensor_matmul(vm, a_pred, b_pred, out);
+            if (error != LANA_OK) return error;
+            if (vm->ad_recording)
+                return ad_record(vm, 4, &arguments[0], &arguments[1], -1, out);
+            return LANA_OK;
+        }
+        case LANA_HOST_GPU_MATMUL: {
+            if (argc != 3u || arguments[0].type != VAL_TENSOR || arguments[1].type != VAL_TENSOR ||
+                arguments[2].type != VAL_STRING)
+                return LANA_ERR_TYPE;
+            if (strcmp(arguments[2].as.string, "float32") != 0)
+                return LANA_ERR_TYPE;
+            return tensor_gpu_matmul(vm, arguments[0].as.tensor, arguments[1].as.tensor, out);
+        }
+        case LANA_HOST_TENSOR_SUM:
+        case LANA_HOST_TENSOR_MEAN:
+        case LANA_HOST_TENSOR_MAX:
+        case LANA_HOST_TENSOR_MIN: {
+            if (argc != 1u && argc != 2u) return LANA_ERR_TYPE;
+            int op = (int)(host_id - LANA_HOST_TENSOR_SUM);
+            const LanaTensor *pred = NULL, *var = NULL;
+            bool unc = false;
+            LanaError unpack_error = tensor_uncertainty_unpack(&arguments[0], &pred, &var, &unc);
+            if (unpack_error != LANA_OK) return unpack_error;
+            if (unc) {
+                if (op >= 2) return LANA_ERR_TYPE;
+                return tensor_reduce_uncertain(vm, pred, var, op,
+                                               argc == 2u ? &arguments[1] : NULL, out);
+            }
+            LanaError error = tensor_reduce(vm, pred, op,
+                                            argc == 2u ? &arguments[1] : NULL, out);
+            if (error != LANA_OK) return error;
+            if (vm->ad_recording && op < 2) {
+                int ad_axis = -1;
+                if (argc == 2u) {
+                    double axis_number = arguments[1].as.number;
+                    size_t ndim = pred->ndim;
+                    ad_axis = (int)(axis_number < 0 ? axis_number + (double)ndim : axis_number);
+                }
+                return ad_record(vm, 5 + op, &arguments[0], NULL, ad_axis, out);
+            }
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR: {
+            if (argc != 1u && argc != 2u) return LANA_ERR_TYPE;
+            int dtype = tensor_optional_dtype(arguments, argc);
+            if (dtype < 0) return LANA_ERR_INVALID_PARAMETERS;
+            size_t ndim; size_t *shape;
+            LanaError e = tensor_infer_shape(vm, &arguments[0], &ndim, &shape);
+            if (e != LANA_OK) return e;
+            LanaTensor *t = tensor_new(vm, ndim, shape, false);
+            if (t == NULL) return LANA_ERR_OOM;
+            t->dtype = (LanaTensorDtype)dtype;
+            size_t offset = 0;
+            e = tensor_fill_data(&arguments[0], t->data, &offset);
+            if (e != LANA_OK) return e;
+            /* LIP-027: round to the target precision at construction. */
+            if (dtype == LANA_TENSOR_F16 || dtype == LANA_TENSOR_BF16) {
+                size_t total = 1;
+                for (size_t i = 0; i < ndim; ++i) total *= t->shape[i];
+                for (size_t i = 0; i < total; ++i) {
+                    t->data[i] = (dtype == LANA_TENSOR_F16) ? round_f16(t->data[i]) : round_bf16(t->data[i]);
+                }
+            }
+            *out = lana_value_tensor(t);
+            return LANA_OK;
+        }
+        case LANA_HOST_TENSOR_COMPLEX: {
+            if (argc != 2u) return LANA_ERR_TYPE;
+            size_t ndim; size_t *shape;
+            LanaError e = tensor_infer_shape(vm, &arguments[0], &ndim, &shape);
+            if (e != LANA_OK) return e;
+            LanaTensor *t = tensor_new(vm, ndim, shape, true);
+            if (t == NULL) return LANA_ERR_OOM;
+            size_t offset = 0;
+            e = tensor_fill_complex(&arguments[0], &arguments[1], t->data, &offset);
+            if (e != LANA_OK) return e;
+            *out = lana_value_tensor(t);
+            return LANA_OK;
+        }
+        case LANA_HOST_DENSITY_OPERATOR: {
+            if (argc != 1u) return LANA_ERR_TYPE;
+            if (arguments[0].type == VAL_STATE)
+                return linalg_density_from_state(vm, &arguments[0].as.state.state, out);
+            if (arguments[0].type != VAL_TENSOR) return LANA_ERR_TYPE;
+            return linalg_density_from_tensor(vm, arguments[0].as.tensor, out);
+        }
+        case LANA_HOST_POVM:
+            if (argc != 1u) return LANA_ERR_TYPE;
+            return linalg_povm(vm, &arguments[0], out);
+        case LANA_HOST_CHANNEL:
+            if (argc != 1u) return LANA_ERR_TYPE;
+            return linalg_channel(vm, &arguments[0], out);
+        case LANA_HOST_OBSERVABLE:
+            if (argc != 1u) return LANA_ERR_TYPE;
+            return linalg_observable(vm, &arguments[0], out);
+        case LANA_HOST_TENSOR_PRODUCT: {
+            if (argc != 2u || arguments[0].type != VAL_NQUBIT_STATE ||
+                arguments[1].type != VAL_NQUBIT_STATE)
+                return LANA_ERR_TYPE;
+            return linalg_tensor_product(vm, arguments[0].as.tensor, arguments[1].as.tensor, out);
+        }
+        case LANA_HOST_PARTIAL_TRACE: {
+            if (argc != 2u || arguments[0].type != VAL_NQUBIT_STATE ||
+                arguments[1].type != VAL_NUMBER)
+                return LANA_ERR_TYPE;
+            return linalg_partial_trace(vm, arguments[0].as.tensor, arguments[1].as.number, out);
+        }
+        case LANA_HOST_MEASURE_WITH: {
+            if (argc != 2u || arguments[0].type != VAL_NQUBIT_STATE ||
+                arguments[1].type != VAL_POVM)
+                return LANA_ERR_TYPE;
+            return linalg_measure_with(vm, arguments[0].as.tensor, arguments[1].as.tensor, out);
+        }
+        case LANA_HOST_APPLY_TO: {
+            if (argc != 2u || arguments[0].type != VAL_CHANNEL ||
+                arguments[1].type != VAL_NQUBIT_STATE)
+                return LANA_ERR_TYPE;
+            return linalg_apply_to(vm, arguments[0].as.tensor, arguments[1].as.tensor, out);
+        }
+        case LANA_HOST_EXPECT: {
+            if (argc != 2u || arguments[0].type != VAL_NQUBIT_STATE ||
+                arguments[1].type != VAL_OBSERVABLE)
+                return LANA_ERR_TYPE;
+            return linalg_expect(arguments[0].as.tensor, arguments[1].as.tensor, out);
+        }
+        case LANA_HOST_MIX: {
+            if (argc != 3u || arguments[0].type != VAL_NQUBIT_STATE ||
+                arguments[1].type != VAL_NQUBIT_STATE || arguments[2].type != VAL_NUMBER)
+                return LANA_ERR_TYPE;
+            if (!isfinite(arguments[2].as.number) || arguments[2].as.number < 0.0 ||
+                arguments[2].as.number > 1.0)
+                return LANA_ERR_INVALID_PARAMETERS;
+            return linalg_mix(vm, arguments[0].as.tensor, arguments[1].as.tensor,
+                              arguments[2].as.number, out);
+        }
+        case LANA_HOST_TRACE_DISTANCE: {
+            if (argc != 2u || arguments[0].type != VAL_NQUBIT_STATE ||
+                arguments[1].type != VAL_NQUBIT_STATE)
+                return LANA_ERR_TYPE;
+            return linalg_trace_distance(vm, arguments[0].as.tensor, arguments[1].as.tensor, out);
+        }
+        case LANA_HOST_IS_SEPARABLE: {
+            if (argc != 2u || arguments[0].type != VAL_NQUBIT_STATE ||
+                arguments[1].type != VAL_NUMBER)
+                return LANA_ERR_TYPE;
+            return linalg_is_separable(vm, arguments[0].as.tensor, arguments[1].as.number, out);
+        }
+        case LANA_HOST_TO_STATE: {
+            if (argc != 1u || arguments[0].type != VAL_NQUBIT_STATE) return LANA_ERR_TYPE;
+            return linalg_to_state(arguments[0].as.tensor, out);
+        }
+        case LANA_HOST_STATE_TENSOR: {
+            if (argc != 1u) return LANA_ERR_TYPE;
+            return linalg_state_tensor(vm, &arguments[0], out);
+        }
+        case LANA_HOST_APPEND: {
+            if (argc != 2u || arguments[0].type != VAL_TENSOR || arguments[1].type != VAL_TENSOR)
+                return LANA_ERR_TYPE;
+            if (!arguments[0].as.tensor->is_state || !arguments[1].as.tensor->is_state)
+                return LANA_ERR_TYPE;
+            LanaError error = linalg_state_append(vm, arguments[0].as.tensor, arguments[1].as.tensor, out);
+            if (error != LANA_OK) return error;
+            if (vm->ad_recording)
+                return ad_record(vm, 7, &arguments[0], &arguments[1], -1, out);
+            return LANA_OK;
+        }
+        case LANA_HOST_MEASURE: {
+            if (argc != 2u || arguments[0].type != VAL_TENSOR || arguments[1].type != VAL_POVM)
+                return LANA_ERR_TYPE;
+            if (!arguments[0].as.tensor->is_state) return LANA_ERR_TYPE;
+            LanaError error = linalg_state_measure(vm, arguments[0].as.tensor, arguments[1].as.tensor, out);
+            if (error != LANA_OK) return error;
+            if (vm->ad_recording)
+                return ad_record(vm, 8, &arguments[0], &arguments[1], -1, out);
+            return LANA_OK;
+        }
+        case LANA_HOST_TRANSFORM: {
+            if (argc != 2u || arguments[0].type != VAL_TENSOR || arguments[1].type != VAL_CHANNEL)
+                return LANA_ERR_TYPE;
+            if (!arguments[0].as.tensor->is_state) return LANA_ERR_TYPE;
+            LanaError error = linalg_state_transform(vm, arguments[0].as.tensor, arguments[1].as.tensor, out);
+            if (error != LANA_OK) return error;
+            if (vm->ad_recording)
+                return ad_record(vm, 9, &arguments[0], &arguments[1], -1, out);
+            return LANA_OK;
+        }
         case LANA_HOST_ASSERT:
             if (argc != 2u ||
                 arguments[0].type != VAL_BOOL ||
@@ -3284,6 +7009,8 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
         }
         case LANA_HOST_INDEX_GET:
             if (argc != 2u) return LANA_ERR_TYPE;
+            if (arguments[0].type == VAL_TENSOR)
+                return tensor_index(vm, arguments[0].as.tensor, &arguments[1], out);
             if (arguments[0].type == VAL_MAP && arguments[1].type == VAL_STRING)
                 return lana_map_get(arguments[0].as.map, arguments[1].as.string, out);
             if (arguments[0].type == VAL_ARRAY && arguments[1].type == VAL_NUMBER &&
@@ -3309,8 +7036,41 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
                 *out = arguments[2]; return LANA_OK;
             }
             return arguments[0].type == VAL_ARRAY ? LANA_ERR_LIMIT : LANA_ERR_TYPE;
-        case LANA_HOST_JSON_PARSE:
-            return argc == 1u && arguments[0].type == VAL_STRING ? lana_json_parse(vm, arguments[0].as.string, out) : LANA_ERR_TYPE;
+        case LANA_HOST_JSON_PARSE: {
+            Value value; size_t offset = 0u; LanaError error; char message[64]; char *stored;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            error = lana_json_parse_offset(vm, arguments[0].as.string, &value, &offset);
+            if (error != LANA_OK) {
+                (void)snprintf(message, sizeof(message), "invalid JSON at byte %zu", offset);
+                stored = lana_vm_alloc(vm, strlen(message) + 1u);
+                if (stored == NULL) return LANA_ERR_OOM;
+                (void)strcpy(stored, message);
+                return make_result(vm, false, lana_value_string(stored), out);
+            }
+            /* LIP-023 §4: root the parsed value as Information and record the
+             * source-text identity (SHA-256) so a decision that consumed the
+             * record can be audited and replayed against the exact input. */
+            {
+                unsigned char digest[LANA_SHA256_DIGEST_SIZE];
+                char hex[LANA_SHA256_DIGEST_SIZE * 2u + 1u];
+                static const char digits[] = "0123456789abcdef";
+                size_t i;
+                Value rooted;
+                lana_sha256(arguments[0].as.string, strlen(arguments[0].as.string), digest);
+                for (i = 0u; i < LANA_SHA256_DIGEST_SIZE; ++i) {
+                    hex[i * 2u] = digits[digest[i] >> 4u];
+                    hex[i * 2u + 1u] = digits[digest[i] & 15u];
+                }
+                hex[LANA_SHA256_DIGEST_SIZE * 2u] = '\0';
+                error = lana_vm_reactive_root(vm, &value, LANA_EXACTNESS_EXACT, &rooted);
+                if (error != LANA_OK) return error;
+                error = attach_derivation(vm, &rooted, LANA_DERIVATION_EVIDENCE,
+                                          "json_parse", NULL, 0u, hex, 0u,
+                                          LANA_EXACTNESS_EXACT, "root");
+                if (error != LANA_OK) return error;
+                return make_result(vm, true, rooted, out);
+            }
+        }
         case LANA_HOST_JSON_STRINGIFY:
             return argc == 1u ? lana_json_stringify(vm, &arguments[0], out) : LANA_ERR_TYPE;
         case LANA_HOST_CSV_READ:
@@ -3628,6 +7388,425 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
                 return LANA_ERR_TYPE;
             return lana_shared_capability_revoke(arguments[0].as.capability,
                                                  arguments[1].as.capability);
+        case LANA_HOST_GRANT: {
+            LanaCapabilityToken *capability;
+            uint32_t permission;
+            if (argc != 2u || arguments[0].type != VAL_SHARED_CAPABILITY)
+                return LANA_ERR_TYPE;
+            permission = grant_permission(&arguments[1]);
+            if (permission == 0u) return LANA_ERR_TYPE;
+            {
+                LanaError error = lana_shared_capability_grant(
+                    arguments[0].as.capability, permission, &capability);
+                if (error != LANA_OK) return error;
+            }
+            *out = lana_value_shared_capability(capability);
+            return LANA_OK;
+        }
+        case LANA_HOST_REVOKE:
+            if (argc != 1u || arguments[0].type != VAL_SHARED_CAPABILITY)
+                return LANA_ERR_TYPE;
+            return lana_shared_capability_invalidate(arguments[0].as.capability);
+        case LANA_HOST_SET_NEW: {
+            LanaSet *set;
+            LanaError error;
+            if (argc != 0u) return LANA_ERR_TYPE;
+            error = set_alloc(vm, 0u, &set);
+            if (error == LANA_OK) *out = lana_value_set(set);
+            return error;
+        }
+        case LANA_HOST_SET_ADD: {
+            LanaSet *set;
+            LanaError error;
+            size_t count;
+            if (argc != 2u || arguments[0].type != VAL_SET) return LANA_ERR_TYPE;
+            if (!value_is_set_member(&arguments[1])) return LANA_ERR_TYPE;
+            count = arguments[0].as.set->count +
+                    (set_contains_value(arguments[0].as.set, &arguments[1]) ? 0u : 1u);
+            error = set_alloc(vm, count, &set);
+            if (error != LANA_OK) return error;
+            for (index = 0u; index < arguments[0].as.set->count; ++index)
+                set->items[index] = arguments[0].as.set->items[index];
+            if (count > arguments[0].as.set->count)
+                set->items[arguments[0].as.set->count] = arguments[1];
+            *out = lana_value_set(set);
+            return LANA_OK;
+        }
+        case LANA_HOST_SET_CONTAINS: {
+            if (argc != 2u || arguments[0].type != VAL_SET) return LANA_ERR_TYPE;
+            if (!value_is_set_member(&arguments[1])) return LANA_ERR_TYPE;
+            *out = lana_value_bool(set_contains_value(arguments[0].as.set, &arguments[1]));
+            return LANA_OK;
+        }
+        case LANA_HOST_SET_UNION: {
+            LanaSet *set;
+            LanaError error;
+            size_t count;
+            if (argc != 2u || arguments[0].type != VAL_SET || arguments[1].type != VAL_SET)
+                return LANA_ERR_TYPE;
+            count = arguments[0].as.set->count;
+            for (index = 0u; index < arguments[1].as.set->count; ++index)
+                if (!set_contains_value(arguments[0].as.set, &arguments[1].as.set->items[index]))
+                    ++count;
+            error = set_alloc(vm, count, &set);
+            if (error != LANA_OK) return error;
+            for (index = 0u; index < arguments[0].as.set->count; ++index)
+                set->items[index] = arguments[0].as.set->items[index];
+            count = arguments[0].as.set->count;
+            for (index = 0u; index < arguments[1].as.set->count; ++index) {
+                if (!set_contains_value(arguments[0].as.set, &arguments[1].as.set->items[index]))
+                    set->items[count++] = arguments[1].as.set->items[index];
+            }
+            *out = lana_value_set(set);
+            return LANA_OK;
+        }
+        case LANA_HOST_SET_INTERSECT: {
+            LanaSet *set;
+            LanaError error;
+            size_t count = 0u;
+            if (argc != 2u || arguments[0].type != VAL_SET || arguments[1].type != VAL_SET)
+                return LANA_ERR_TYPE;
+            for (index = 0u; index < arguments[0].as.set->count; ++index)
+                if (set_contains_value(arguments[1].as.set, &arguments[0].as.set->items[index]))
+                    ++count;
+            error = set_alloc(vm, count, &set);
+            if (error != LANA_OK) return error;
+            count = 0u;
+            for (index = 0u; index < arguments[0].as.set->count; ++index) {
+                if (set_contains_value(arguments[1].as.set, &arguments[0].as.set->items[index]))
+                    set->items[count++] = arguments[0].as.set->items[index];
+            }
+            *out = lana_value_set(set);
+            return LANA_OK;
+        }
+        case LANA_HOST_SET_DIFFERENCE: {
+            LanaSet *set;
+            LanaError error;
+            size_t count = 0u;
+            if (argc != 2u || arguments[0].type != VAL_SET || arguments[1].type != VAL_SET)
+                return LANA_ERR_TYPE;
+            for (index = 0u; index < arguments[0].as.set->count; ++index)
+                if (!set_contains_value(arguments[1].as.set, &arguments[0].as.set->items[index]))
+                    ++count;
+            error = set_alloc(vm, count, &set);
+            if (error != LANA_OK) return error;
+            count = 0u;
+            for (index = 0u; index < arguments[0].as.set->count; ++index) {
+                if (!set_contains_value(arguments[1].as.set, &arguments[0].as.set->items[index]))
+                    set->items[count++] = arguments[0].as.set->items[index];
+            }
+            *out = lana_value_set(set);
+            return LANA_OK;
+        }
+        case LANA_HOST_GETENV: {
+            const char *value;
+            char *copy;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            value = getenv(arguments[0].as.string);
+            if (value == NULL) value = "";
+            copy = lana_vm_alloc(vm, strlen(value) + 1u);
+            if (copy == NULL) return LANA_ERR_OOM;
+            (void)strcpy(copy, value);
+            *out = lana_value_string(copy);
+            return LANA_OK;
+        }
+        case LANA_HOST_RANDOM_SEED: {
+            if (argc != 1u || arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+            lana_vm_seed(vm, (uint64_t)arguments[0].as.number);
+            *out = lana_value_null();
+            return LANA_OK;
+        }
+        case LANA_HOST_FLOOR: {
+            if (argc != 1u || arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+            *out = lana_value_number(floor(arguments[0].as.number));
+            return LANA_OK;
+        }
+        case LANA_HOST_STRING_TO_NUMBER: {
+            char *end;
+            double number;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            number = strtod(arguments[0].as.string, &end);
+            if (end == arguments[0].as.string || *end != '\0') {
+                char *message = lana_vm_alloc(vm, 15u);
+                if (message == NULL) return LANA_ERR_OOM;
+                (void)strcpy(message, "invalid number");
+                return make_result(vm, false, lana_value_string(message), out);
+            }
+            return make_result(vm, true, lana_value_number(number), out);
+        }
+        case LANA_HOST_TYPE_OF: {
+            const char *name;
+            char *copy;
+            if (argc != 1u) return LANA_ERR_TYPE;
+            switch (arguments[0].type) {
+                case VAL_NULL: name = "null"; break;
+                case VAL_NUMBER: name = "number"; break;
+                case VAL_BOOL: name = "bool"; break;
+                case VAL_STRING: name = "string"; break;
+                case VAL_STATE: name = "state"; break;
+                case VAL_DISTRIBUTION: name = "distribution"; break;
+                case VAL_SAMPLE: name = "sample"; break;
+                case VAL_JOINT_STATE: name = "joint_state"; break;
+                case VAL_ARRAY: name = "array"; break;
+                case VAL_FUNCTION: name = "function"; break;
+                case VAL_TASK: name = "task"; break;
+                case VAL_STATE_DIST: name = "state_dist"; break;
+                case VAL_MAP: name = "map"; break;
+                case VAL_POSSIBILITY: name = "possibility"; break;
+                case VAL_PATH_SET: name = "path_set"; break;
+                case VAL_SHARED_CAPABILITY: name = "shared_capability"; break;
+                case VAL_ADT: name = "adt"; break;
+                case VAL_TENSOR: name = "tensor"; break;
+                case VAL_NQUBIT_STATE: name = "nqubit_state"; break;
+                case VAL_POVM: name = "povm"; break;
+                case VAL_CHANNEL: name = "channel"; break;
+                case VAL_OBSERVABLE: name = "observable"; break;
+                case VAL_LAZY: name = "lazy"; break;
+                case VAL_GENERATOR: name = "generator"; break;
+                case VAL_FUTURE: name = "future"; break;
+                case VAL_SET: name = "set"; break;
+                case VAL_DATASET: name = "dataset"; break;
+                default: name = "unknown"; break;
+            }
+            copy = lana_vm_alloc(vm, strlen(name) + 1u);
+            if (copy == NULL) return LANA_ERR_OOM;
+            (void)strcpy(copy, name);
+            *out = lana_value_string(copy);
+            return LANA_OK;
+        }
+        case LANA_HOST_FORMAT: {
+            const char *format;
+            size_t format_length, arg_index = 1u, i;
+            FormatBuffer buffer = {0};
+            LanaError error;
+            if (argc < 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            format = arguments[0].as.string;
+            format_length = strlen(format);
+            for (i = 0u; i < format_length; ++i) {
+                if (format[i] == '{' && i + 1u < format_length && format[i + 1u] == '}') {
+                    if (arg_index >= argc) return LANA_ERR_FORMAT;
+                    error = format_value(vm, &buffer, &arguments[arg_index]);
+                    if (error != LANA_OK) return error;
+                    arg_index += 1u;
+                    i += 1u;
+                } else {
+                    error = format_add(vm, &buffer, &format[i], 1u);
+                    if (error != LANA_OK) return error;
+                }
+            }
+            if (arg_index != argc) return LANA_ERR_FORMAT;
+            error = format_reserve(vm, &buffer, 1u);
+            if (error != LANA_OK) return error;
+            buffer.data[buffer.length] = '\0';
+            *out = lana_value_string(buffer.data);
+            return LANA_OK;
+        }
+        case LANA_HOST_FORMAT_NUMBER: {
+            char *copy;
+            int written;
+            if (argc == 1u) {
+                if (arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+                written = snprintf(NULL, 0, "%.17g", arguments[0].as.number);
+            } else if (argc == 2u) {
+                int precision;
+                if (arguments[0].type != VAL_NUMBER || arguments[1].type != VAL_NUMBER ||
+                    arguments[1].as.number < 0.0 ||
+                    floor(arguments[1].as.number) != arguments[1].as.number ||
+                    arguments[1].as.number > 1000.0) return LANA_ERR_TYPE;
+                precision = (int)arguments[1].as.number;
+                written = snprintf(NULL, 0, "%.*f", precision, arguments[0].as.number);
+            } else {
+                return LANA_ERR_TYPE;
+            }
+            if (written < 0) return LANA_ERR_FORMAT;
+            copy = lana_vm_alloc(vm, (size_t)written + 1u);
+            if (copy == NULL) return LANA_ERR_OOM;
+            if (argc == 1u) {
+                (void)snprintf(copy, (size_t)written + 1u, "%.17g", arguments[0].as.number);
+            } else {
+                (void)snprintf(copy, (size_t)written + 1u, "%.*f",
+                               (int)arguments[1].as.number, arguments[0].as.number);
+            }
+            *out = lana_value_string(copy);
+            return LANA_OK;
+        }
+        case LANA_HOST_CHAR_LENGTH: {
+            const unsigned char *s; size_t len, i = 0u, count = 0u;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            s = (const unsigned char *)arguments[0].as.string;
+            len = strlen(arguments[0].as.string);
+            while (i < len) {
+                uint32_t cp; size_t consumed;
+                if (utf8_decode(s + i, len - i, &cp, &consumed) != LANA_OK)
+                    return LANA_ERR_SCHEMA;
+                i += consumed; count += 1u;
+            }
+            *out = lana_value_number((double)count); return LANA_OK;
+        }
+        case LANA_HOST_STRING_CODEPOINT_SLICE: {
+            const unsigned char *s; size_t len, i, cp_index;
+            size_t start, end, start_byte, end_byte, cp_count = 0u;
+            char *copy;
+            if (argc != 3u || arguments[0].type != VAL_STRING ||
+                arguments[1].type != VAL_NUMBER || arguments[2].type != VAL_NUMBER ||
+                arguments[1].as.number < 0.0 || arguments[2].as.number < 0.0 ||
+                floor(arguments[1].as.number) != arguments[1].as.number ||
+                floor(arguments[2].as.number) != arguments[2].as.number)
+                return LANA_ERR_TYPE;
+            start = (size_t)arguments[1].as.number;
+            end = (size_t)arguments[2].as.number;
+            if (start > end) return LANA_ERR_LIMIT;
+            s = (const unsigned char *)arguments[0].as.string;
+            len = strlen(arguments[0].as.string);
+            for (i = 0u; i < len;) {
+                uint32_t cp; size_t consumed;
+                if (utf8_decode(s + i, len - i, &cp, &consumed) != LANA_OK)
+                    return LANA_ERR_SCHEMA;
+                i += consumed; cp_count += 1u;
+            }
+            if (end > cp_count) return LANA_ERR_LIMIT;
+            start_byte = len; end_byte = len;
+            for (i = 0u, cp_index = 0u; i < len;) {
+                uint32_t cp; size_t consumed;
+                (void)utf8_decode(s + i, len - i, &cp, &consumed);
+                if (cp_index == start) start_byte = i;
+                if (cp_index == end) end_byte = i;
+                i += consumed; cp_index += 1u;
+            }
+            copy = lana_vm_alloc(vm, end_byte - start_byte + 1u);
+            if (copy == NULL) return LANA_ERR_OOM;
+            memcpy(copy, s + start_byte, end_byte - start_byte);
+            copy[end_byte - start_byte] = '\0';
+            *out = lana_value_string(copy); return LANA_OK;
+        }
+        case LANA_HOST_TO_UPPER:
+        case LANA_HOST_TO_LOWER: {
+            const unsigned char *s; size_t len, i, out_len = 0u;
+            char *result;
+            bool upper = (host_id == LANA_HOST_TO_UPPER);
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            s = (const unsigned char *)arguments[0].as.string;
+            len = strlen(arguments[0].as.string);
+            for (i = 0u; i < len;) {
+                uint32_t cp, mapped; size_t consumed;
+                if (utf8_decode(s + i, len - i, &cp, &consumed) != LANA_OK)
+                    return LANA_ERR_SCHEMA;
+                mapped = upper ? lana_unicode_upper(cp) : lana_unicode_lower(cp);
+                out_len += utf8_encode_len(mapped);
+                i += consumed;
+            }
+            result = lana_vm_alloc(vm, out_len + 1u);
+            if (result == NULL) return LANA_ERR_OOM;
+            out_len = 0u;
+            for (i = 0u; i < len;) {
+                uint32_t cp, mapped; size_t consumed;
+                (void)utf8_decode(s + i, len - i, &cp, &consumed);
+                mapped = upper ? lana_unicode_upper(cp) : lana_unicode_lower(cp);
+                out_len += utf8_encode(mapped, (unsigned char *)result + out_len);
+                i += consumed;
+            }
+            result[out_len] = '\0';
+            *out = lana_value_string(result); return LANA_OK;
+        }
+        case LANA_HOST_REGEX_COMPILE: {
+            LanaRegex *re = NULL;
+            const char *error_msg = NULL;
+            LanaError error;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            error = regex_compile(vm, arguments[0].as.string, &re, &error_msg);
+            if (error == LANA_ERR_OOM) return LANA_ERR_OOM;
+            if (error != LANA_OK) {
+                char *msg = host_string_copy(vm, error_msg);
+                if (msg == NULL) return LANA_ERR_OOM;
+                return make_result(vm, false, lana_value_string(msg), out);
+            }
+            return make_result(vm, true, lana_value_regex(re), out);
+        }
+        case LANA_HOST_REGEX_MATCH:
+        case LANA_HOST_REGEX_SEARCH: {
+            const LanaRegex *re;
+            const char *text;
+            size_t len, start, end;
+            LanaError error;
+            if (argc != 2u || arguments[0].type != VAL_REGEX ||
+                arguments[1].type != VAL_STRING) return LANA_ERR_TYPE;
+            re = arguments[0].as.regex;
+            text = arguments[1].as.string;
+            len = strlen(text);
+            if (host_id == LANA_HOST_REGEX_MATCH) {
+                error = regex_match_from(vm, re, text, len, 0u, &end);
+                if (error == LANA_ERR_OOM) return LANA_ERR_OOM;
+                if (error != LANA_OK || end != len) {
+                    char *msg = host_string_copy(vm, "no match");
+                    if (msg == NULL) return LANA_ERR_OOM;
+                    return make_result(vm, false, lana_value_string(msg), out);
+                }
+                {
+                    Value match_value;
+                    error = regex_make_match(vm, text, 0u, len, &match_value);
+                    if (error != LANA_OK) return error;
+                    return make_result(vm, true, match_value, out);
+                }
+            }
+            error = regex_search(vm, re, text, len, 0u, &start, &end);
+            if (error == LANA_ERR_OOM) return LANA_ERR_OOM;
+            if (error != LANA_OK) {
+                char *msg = host_string_copy(vm, "no match");
+                if (msg == NULL) return LANA_ERR_OOM;
+                return make_result(vm, false, lana_value_string(msg), out);
+            }
+            {
+                Value match_value;
+                error = regex_make_match(vm, text, start, end, &match_value);
+                if (error != LANA_OK) return error;
+                return make_result(vm, true, match_value, out);
+            }
+        }
+        case LANA_HOST_REGEX_REPLACE: {
+            const LanaRegex *re;
+            const char *text, *replacement;
+            size_t len, repl_len, pos = 0u;
+            FormatBuffer buffer = {0};
+            LanaError error;
+            if (argc != 3u || arguments[0].type != VAL_REGEX ||
+                arguments[1].type != VAL_STRING || arguments[2].type != VAL_STRING)
+                return LANA_ERR_TYPE;
+            re = arguments[0].as.regex;
+            text = arguments[1].as.string;
+            replacement = arguments[2].as.string;
+            len = strlen(text);
+            repl_len = strlen(replacement);
+            while (pos <= len) {
+                size_t start, end;
+                error = regex_search(vm, re, text, len, pos, &start, &end);
+                if (error == LANA_ERR_OOM) return LANA_ERR_OOM;
+                if (error != LANA_OK) {
+                    error = format_add(vm, &buffer, text + pos, len - pos);
+                    if (error != LANA_OK) return error;
+                    break;
+                }
+                error = format_add(vm, &buffer, text + pos, start - pos);
+                if (error != LANA_OK) return error;
+                error = format_add(vm, &buffer, replacement, repl_len);
+                if (error != LANA_OK) return error;
+                pos = end;
+                if (start == end) {
+                    /* Empty match: advance one byte to avoid an infinite loop. */
+                    if (pos < len) {
+                        error = format_add(vm, &buffer, text + pos, 1u);
+                        if (error != LANA_OK) return error;
+                        pos += 1u;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            error = format_reserve(vm, &buffer, 1u);
+            if (error != LANA_OK) return error;
+            buffer.data[buffer.length] = '\0';
+            *out = lana_value_string(buffer.data);
+            return LANA_OK;
+        }
         case LANA_HOST_SHARED_SNAPSHOT: {
             LanaSharedInformation *shared;
             if (argc != 1u || arguments[0].type != VAL_SHARED_CAPABILITY)
@@ -3769,6 +7948,439 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             }
             *out = lana_value_map(inspection);
             return LANA_OK;
+        }
+        case LANA_HOST_SGD:
+            return host_sgd(vm, arguments, argc, out);
+        case LANA_HOST_ADAM:
+            return host_adam(vm, arguments, argc, out);
+        case LANA_HOST_MCMC:
+            return host_mcmc(vm, arguments, argc, out);
+        case LANA_HOST_VI:
+            return host_vi(vm, arguments, argc, out);
+        case LANA_HOST_SMC:
+            return host_smc(vm, arguments, argc, out);
+        case LANA_HOST_RUN_ASYNC: {
+            /* Run the event loop to completion on a future and return its
+             * result. Nested invocations run a nested loop. */
+            LanaFuture *target;
+            if (argc != 1u || arguments[0].type != VAL_FUTURE) return LANA_ERR_TYPE;
+            target = arguments[0].as.future;
+            if (target->exhausted) { *out = target->registers[0]; return LANA_OK; }
+            {
+                LanaError error = enqueue_future(vm, target);
+                if (error != LANA_OK) return error;
+                return run_event_loop(vm, target, out);
+            }
+        }
+        case LANA_HOST_FUTURE_ALL: {
+            /* A future that completes when all input futures complete,
+             * yielding an array of their results in input order. */
+            LanaFuture *future;
+            size_t index;
+            if (argc != 1u || arguments[0].type != VAL_ARRAY) return LANA_ERR_TYPE;
+            future = lana_vm_alloc(vm, sizeof(*future));
+            if (future == NULL) return LANA_ERR_OOM;
+            future->function = UINT32_MAX;
+            future->ip = 0u;
+            future->register_count = 1u;
+            future->exhausted = false;
+            future->ready = false;
+            future->is_composite = true;
+            future->composite_kind = LANA_FUTURE_ALL;
+            future->input_count = arguments[0].as.array->count;
+            future->inputs = lana_vm_alloc(vm, future->input_count * sizeof(*future->inputs));
+            if (future->inputs == NULL) return LANA_ERR_OOM;
+            for (index = 0u; index < future->input_count; ++index) {
+                if (arguments[0].as.array->items[index].type != VAL_FUTURE) return LANA_ERR_TYPE;
+                future->inputs[index] = arguments[0].as.array->items[index].as.future;
+            }
+            future->wake_time = 0.0;
+            future->registers = lana_vm_alloc(vm, sizeof(Value));
+            if (future->registers == NULL) return LANA_ERR_OOM;
+            future->registers[0] = lana_value_null();
+            *out = lana_value_future(future);
+            return LANA_OK;
+        }
+        case LANA_HOST_FUTURE_RACE: {
+            /* A future that completes with the first input future to complete,
+             * yielding that future's result. */
+            LanaFuture *future;
+            size_t index;
+            if (argc != 1u || arguments[0].type != VAL_ARRAY) return LANA_ERR_TYPE;
+            future = lana_vm_alloc(vm, sizeof(*future));
+            if (future == NULL) return LANA_ERR_OOM;
+            future->function = UINT32_MAX;
+            future->ip = 0u;
+            future->register_count = 1u;
+            future->exhausted = false;
+            future->ready = false;
+            future->is_composite = true;
+            future->composite_kind = LANA_FUTURE_RACE;
+            future->input_count = arguments[0].as.array->count;
+            future->inputs = lana_vm_alloc(vm, future->input_count * sizeof(*future->inputs));
+            if (future->inputs == NULL) return LANA_ERR_OOM;
+            for (index = 0u; index < future->input_count; ++index) {
+                if (arguments[0].as.array->items[index].type != VAL_FUTURE) return LANA_ERR_TYPE;
+                future->inputs[index] = arguments[0].as.array->items[index].as.future;
+            }
+            future->wake_time = 0.0;
+            future->registers = lana_vm_alloc(vm, sizeof(Value));
+            if (future->registers == NULL) return LANA_ERR_OOM;
+            future->registers[0] = lana_value_null();
+            *out = lana_value_future(future);
+            return LANA_OK;
+        }
+        case LANA_HOST_SLEEP: {
+            /* A future that completes after `ms` milliseconds, yielding null. */
+            LanaFuture *future;
+            struct timespec now;
+            double ms;
+            if (argc != 1u || arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+            ms = arguments[0].as.number;
+            if (ms < 0.0) return LANA_ERR_INVALID_PARAMETERS;
+            if (timespec_get(&now, TIME_UTC) != TIME_UTC) return LANA_ERR_TYPE;
+            future = lana_vm_alloc(vm, sizeof(*future));
+            if (future == NULL) return LANA_ERR_OOM;
+            future->function = UINT32_MAX;
+            future->ip = 0u;
+            future->register_count = 1u;
+            future->exhausted = false;
+            future->ready = false;
+            future->is_composite = true;
+            future->composite_kind = LANA_FUTURE_SLEEP;
+            future->inputs = NULL;
+            future->input_count = 0u;
+            future->wake_time = (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0
+                                + ms / 1000.0;
+            future->registers = lana_vm_alloc(vm, sizeof(Value));
+            if (future->registers == NULL) return LANA_ERR_OOM;
+            future->registers[0] = lana_value_null();
+            *out = lana_value_future(future);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET: {
+            LanaDataset *ds;
+            /* LIP-015 §3: accept either a lazy generator (the lazy path) or an
+             * in-memory array of rows (the persistence / adapter load path). */
+            if (argc != 1u || (arguments[0].type != VAL_LAZY &&
+                               arguments[0].type != VAL_ARRAY)) return LANA_ERR_TYPE;
+            if (dataset_new(vm, LANA_DATASET_SOURCE, arguments[0], 0u,
+                            lana_value_null(), lana_value_null(), lana_value_null(),
+                            lana_value_null(), lana_value_null(), &ds) != LANA_OK)
+                return LANA_ERR_OOM;
+            *out = lana_value_dataset(ds);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_FILTER: {
+            LanaDataset *ds;
+            if (argc != 2u || arguments[0].type != VAL_DATASET ||
+                arguments[1].type != VAL_FUNCTION) return LANA_ERR_TYPE;
+            if (dataset_new(vm, LANA_DATASET_FILTER, arguments[0],
+                            arguments[1].as.function, lana_value_null(),
+                            lana_value_null(), lana_value_null(), lana_value_null(),
+                            lana_value_null(), &ds) != LANA_OK)
+                return LANA_ERR_OOM;
+            *out = lana_value_dataset(ds);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_MAP: {
+            LanaDataset *ds;
+            if (argc != 2u || arguments[0].type != VAL_DATASET ||
+                arguments[1].type != VAL_FUNCTION) return LANA_ERR_TYPE;
+            if (dataset_new(vm, LANA_DATASET_MAP, arguments[0],
+                            arguments[1].as.function, lana_value_null(),
+                            lana_value_null(), lana_value_null(), lana_value_null(),
+                            lana_value_null(), &ds) != LANA_OK)
+                return LANA_ERR_OOM;
+            *out = lana_value_dataset(ds);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_SELECT: {
+            LanaDataset *ds;
+            if (argc != 2u || arguments[0].type != VAL_DATASET ||
+                arguments[1].type != VAL_ARRAY) return LANA_ERR_TYPE;
+            if (dataset_new(vm, LANA_DATASET_SELECT, arguments[0], 0u,
+                            arguments[1], lana_value_null(), lana_value_null(),
+                            lana_value_null(), lana_value_null(), &ds) != LANA_OK)
+                return LANA_ERR_OOM;
+            *out = lana_value_dataset(ds);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_LIMIT: {
+            LanaDataset *ds;
+            if (argc != 2u || arguments[0].type != VAL_DATASET ||
+                arguments[1].type != VAL_NUMBER || arguments[1].as.number < 0.0)
+                return LANA_ERR_TYPE;
+            if (dataset_new(vm, LANA_DATASET_LIMIT, arguments[0], 0u,
+                            lana_value_null(), lana_value_null(), arguments[1],
+                            lana_value_null(), lana_value_null(), &ds) != LANA_OK)
+                return LANA_ERR_OOM;
+            *out = lana_value_dataset(ds);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_SORT: {
+            LanaDataset *ds;
+            if (argc != 2u || arguments[0].type != VAL_DATASET ||
+                arguments[1].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (dataset_new(vm, LANA_DATASET_SORT, arguments[0], 0u,
+                            lana_value_null(), arguments[1], lana_value_null(),
+                            lana_value_null(), lana_value_null(), &ds) != LANA_OK)
+                return LANA_ERR_OOM;
+            *out = lana_value_dataset(ds);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_GROUP_BY: {
+            LanaDataset *ds;
+            if (argc != 2u || arguments[0].type != VAL_DATASET ||
+                arguments[1].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (dataset_new(vm, LANA_DATASET_GROUP_BY, arguments[0], 0u,
+                            lana_value_null(), arguments[1], lana_value_null(),
+                            lana_value_null(), lana_value_null(), &ds) != LANA_OK)
+                return LANA_ERR_OOM;
+            *out = lana_value_dataset(ds);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_AGGREGATE: {
+            LanaDataset *ds;
+            if (argc != 2u || arguments[0].type != VAL_DATASET ||
+                arguments[1].type != VAL_ARRAY) return LANA_ERR_TYPE;
+            if (dataset_new(vm, LANA_DATASET_AGGREGATE, arguments[0], 0u,
+                            lana_value_null(), lana_value_null(), lana_value_null(),
+                            lana_value_null(), arguments[1], &ds) != LANA_OK)
+                return LANA_ERR_OOM;
+            *out = lana_value_dataset(ds);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_JOIN: {
+            LanaDataset *ds;
+            if (argc != 3u || arguments[0].type != VAL_DATASET ||
+                arguments[1].type != VAL_DATASET || arguments[2].type != VAL_STRING)
+                return LANA_ERR_TYPE;
+            if (dataset_new(vm, LANA_DATASET_JOIN, arguments[0], 0u,
+                            lana_value_null(), arguments[2], lana_value_null(),
+                            arguments[1], lana_value_null(), &ds) != LANA_OK)
+                return LANA_ERR_OOM;
+            *out = lana_value_dataset(ds);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_MATERIALIZE: {
+            LanaArray *rows;
+            LanaError err;
+            if (argc != 1u || arguments[0].type != VAL_DATASET) return LANA_ERR_TYPE;
+            err = dataset_materialize(vm, arguments[0].as.dataset, scratch_register,
+                                      &rows);
+            if (err != LANA_OK) return err;
+            *out = lana_value_array(rows);
+            return LANA_OK;
+        }
+        case LANA_HOST_DATASET_EXPLAIN: {
+            Value plan;
+            if (argc != 1u || arguments[0].type != VAL_DATASET) return LANA_ERR_TYPE;
+            if (dataset_explain(vm, arguments[0].as.dataset, &plan) != LANA_OK)
+                return LANA_ERR_TYPE;
+            *out = plan;
+            return LANA_OK;
+        }
+        case LANA_HOST_STORE_OPEN: {
+            LanaStoreOptions options;
+            LanaStore *store;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (vm->store != NULL) return LANA_ERR_CONFLICT;
+            memset(&options, 0, sizeof(options));
+            options.struct_size = sizeof(options);
+            options.schema_version = 1u;
+            options.path = arguments[0].as.string;
+            options.timeout_ms = 0u;
+            if (lana_store_open(&options, &store) != LANA_OK) return LANA_ERR_IO;
+            vm->store = store;
+            *out = lana_value_null();
+            return LANA_OK;
+        }
+        case LANA_HOST_STORE_PUT: {
+            if (argc != 2u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+            return lana_store_put(vm->store, arguments[0].as.string, arguments[1]);
+        }
+        case LANA_HOST_STORE_GET: {
+            Value value;
+            LanaError error;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+            error = lana_store_get(vm->store, vm, arguments[0].as.string, &value);
+            if (error != LANA_OK) return error;
+            *out = value;
+            return LANA_OK;
+        }
+        case LANA_HOST_STORE_DELETE: {
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+            return lana_store_delete(vm->store, arguments[0].as.string);
+        }
+        case LANA_HOST_STORE_COMMIT: {
+            LanaStoreRevisionInfo info;
+            if (argc != 0u) return LANA_ERR_TYPE;
+            if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+            if (lana_store_commit(vm->store, &info) != LANA_OK) return LANA_ERR_UNSUPPORTED_OPERATION;
+            *out = lana_value_number((double)info.revision_id);
+            return LANA_OK;
+        }
+        case LANA_HOST_STORE_SCAN: {
+            LanaStoreScanRecord *records = NULL;
+            LanaArray *array;
+            size_t count = 0u, index;
+            LanaError error;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+            error = lana_store_scan(vm->store, vm, arguments[0].as.string, &records, &count);
+            if (error != LANA_OK) return error;
+            if (dataset_array_new(vm, &array) != LANA_OK) {
+                lana_store_scan_free(records, count); return LANA_ERR_OOM;
+            }
+            for (index = 0u; index < count; ++index) {
+                LanaMap *map;
+                Value map_value, key_value;
+                if (lana_map_new(vm, 2u, &map) != LANA_OK) {
+                    lana_store_scan_free(records, count); return LANA_ERR_OOM;
+                }
+                key_value = lana_value_string(records[index].key);
+                if (lana_map_set(vm, map, "key", &key_value, true) != LANA_OK ||
+                    lana_map_set(vm, map, "value", &records[index].value, true) != LANA_OK) {
+                    lana_store_scan_free(records, count); return LANA_ERR_OOM;
+                }
+                map_value = lana_value_map(map);
+                if (dataset_array_push(vm, array, &map_value) != LANA_OK) {
+                    lana_store_scan_free(records, count); return LANA_ERR_OOM;
+                }
+            }
+            lana_store_scan_free(records, count);
+            *out = lana_value_array(array);
+            return LANA_OK;
+        }
+        case LANA_HOST_STORE_CURRENT_REVISION: {
+            LanaStoreRevisionInfo info;
+            if (argc != 0u) return LANA_ERR_TYPE;
+            if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+            if (lana_store_current_revision(vm->store, &info) != LANA_OK) return LANA_ERR_IO;
+            *out = lana_value_number((double)info.revision_id);
+            return LANA_OK;
+        }
+        case LANA_HOST_STORE_GET_AT: {
+            Value value;
+            LanaError error;
+            if (argc != 2u || arguments[0].type != VAL_NUMBER ||
+                arguments[1].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+            error = lana_store_get_at(vm->store, vm, (uint64_t)arguments[0].as.number,
+                                      arguments[1].as.string, &value);
+            if (error != LANA_OK) return error;
+            *out = value;
+            return LANA_OK;
+        }
+        case LANA_HOST_STORE_SNAPSHOT: {
+            Value value;
+            LanaStoreRevisionInfo info;
+            if (argc != 0u) return LANA_ERR_TYPE;
+            if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+            if (lana_store_snapshot(vm->store, vm, &value, &info) != LANA_OK) return LANA_ERR_IO;
+            *out = value;
+            return LANA_OK;
+        }
+        case LANA_HOST_STORE_COMMIT_IF: {
+            LanaStoreRevisionInfo current, info;
+            if (argc != 1u || arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+            if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+            if (lana_store_current_revision(vm->store, &current) != LANA_OK) return LANA_ERR_IO;
+            if (current.revision_id != (uint64_t)arguments[0].as.number) return LANA_ERR_CONFLICT;
+            if (lana_store_commit(vm->store, &info) != LANA_OK) return LANA_ERR_UNSUPPORTED_OPERATION;
+            *out = lana_value_number((double)info.revision_id);
+            return LANA_OK;
+        }
+        case LANA_HOST_ADAPTER_LOAD: {
+            LanaAdapterOptions options;
+            void *adapter;
+            if (argc != 2u || arguments[0].type != VAL_NUMBER ||
+                arguments[1].type != VAL_STRING) return LANA_ERR_TYPE;
+            memset(&options, 0, sizeof(options));
+            options.struct_size = sizeof(options);
+            options.schema_version = 1u;
+            options.kind = (LanaAdapterKind)(uint32_t)arguments[0].as.number;
+            options.config = arguments[1].as.string;
+            if (lana_adapter_load(&options, &adapter) != LANA_OK) return LANA_ERR_IO;
+            if (vm->adapter != NULL) lana_adapter_close(vm->adapter);
+            vm->adapter = adapter;
+            *out = lana_value_null();
+            return LANA_OK;
+        }
+        case LANA_HOST_ADAPTER_FETCH: {
+            Value value;
+            LanaError error;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (vm->adapter == NULL) return LANA_ERR_INVALID_STATE;
+            error = lana_adapter_fetch(vm->adapter, vm, arguments[0].as.string, &value);
+            if (error != LANA_OK) return error;
+            *out = value;
+            return LANA_OK;
+        }
+        case LANA_HOST_FFI_DECLARE: {
+            FfiSignature sig;
+            char *copy;
+            char **new_sigs;
+            size_t index;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (!ffi_parse_signature(arguments[0].as.string, &sig)) return LANA_ERR_EXTERNAL;
+            copy = strdup(arguments[0].as.string);
+            if (copy == NULL) return LANA_ERR_OOM;
+            new_sigs = realloc(vm->ffi_sigs, (vm->ffi_sig_count + 1u) * sizeof(*new_sigs));
+            if (new_sigs == NULL) { free(copy); return LANA_ERR_OOM; }
+            vm->ffi_sigs = new_sigs;
+            index = vm->ffi_sig_count++;
+            vm->ffi_sigs[index] = copy;
+            *out = lana_value_number((double)index);
+            return LANA_OK;
+        }
+        case LANA_HOST_FFI_LOAD: {
+            void *lib;
+            if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+            if (!vm_has_named_capability(vm, "ffi")) return LANA_ERR_EXTERNAL;
+            lib = dlopen(arguments[0].as.string, RTLD_NOW);
+            if (lib == NULL) return LANA_ERR_EXTERNAL;
+            if (vm->ffi_lib != NULL) dlclose(vm->ffi_lib);
+            vm->ffi_lib = lib;
+            *out = lana_value_null();
+            return LANA_OK;
+        }
+        case LANA_HOST_FFI_CALL: {
+            FfiSignature sig;
+            Value result, error_value;
+            LanaError error;
+            if (argc != 3u || arguments[0].type != VAL_NUMBER ||
+                arguments[1].type != VAL_NUMBER || arguments[2].type != VAL_ARRAY)
+                return LANA_ERR_TYPE;
+            if (!vm_has_named_capability(vm, "ffi")) return LANA_ERR_EXTERNAL;
+            if ((size_t)arguments[1].as.number >= vm->ffi_sig_count) return LANA_ERR_EXTERNAL;
+            if (!ffi_parse_signature(vm->ffi_sigs[(size_t)arguments[1].as.number], &sig))
+                return LANA_ERR_EXTERNAL;
+            /* Validate the argument types before the library check so a bad
+             * argument is reported as a Result error even with no library
+             * loaded (deterministic across both VMs). */
+            if (!ffi_validate_args(&sig, arguments[2].as.array->items,
+                                   arguments[2].as.array->count)) {
+                error_value = lana_value_string("type");
+                return ffi_result_map(vm, "error", &error_value, out);
+            }
+            if (vm->ffi_lib == NULL) return LANA_ERR_INVALID_STATE;
+            error = ffi_call_impl(vm, &sig, vm->ffi_lib, arguments[2].as.array->items,
+                                  arguments[2].as.array->count, &result);
+            if (error == LANA_ERR_TYPE) {
+                error_value = lana_value_string("type");
+                return ffi_result_map(vm, "error", &error_value, out);
+            }
+            if (error == LANA_ERR_EXTERNAL) {
+                error_value = lana_value_string("external");
+                return ffi_result_map(vm, "error", &error_value, out);
+            }
+            if (error != LANA_OK) return error;
+            return ffi_result_map(vm, "ok", &result, out);
         }
         default: return LANA_ERR_FORMAT;
     }
@@ -4799,6 +9411,7 @@ static LanaError estimate_basis_probability(LanaVM *vm, const LanaStateDist *dis
 static LanaError values_equal(const Value *left, const Value *right, bool *out) {
     if (left->type == VAL_STATE_DIST || right->type == VAL_STATE_DIST ||
         left->type == VAL_MAP || right->type == VAL_MAP ||
+        left->type == VAL_SET || right->type == VAL_SET ||
         left->type == VAL_JOINT_STATE || right->type == VAL_JOINT_STATE ||
         left->type == VAL_POSSIBILITY || right->type == VAL_POSSIBILITY ||
         left->type == VAL_PATH_SET || right->type == VAL_PATH_SET ||
@@ -4864,6 +9477,22 @@ static LanaError lift_binary_raw(LanaVM *vm, const Value *left, const Value *rig
     const LanaPossibility *right_possibility = right->type == VAL_POSSIBILITY ? right->as.possibility : NULL;
     size_t count, index, left_index, right_index;
     LanaError error;
+    if (left->type == VAL_TENSOR || right->type == VAL_TENSOR ||
+        left->type == VAL_MAP || right->type == VAL_MAP) {
+        if (kind != LANA_PURE_BINARY) return LANA_ERR_TYPE;
+        const LanaTensor *a_pred = NULL, *a_var = NULL, *b_pred = NULL, *b_var = NULL;
+        bool a_unc = false, b_unc = false;
+        LanaError unpack_error = tensor_uncertainty_unpack(left, &a_pred, &a_var, &a_unc);
+        if (unpack_error != LANA_OK) return unpack_error;
+        unpack_error = tensor_uncertainty_unpack(right, &b_pred, &b_var, &b_unc);
+        if (unpack_error != LANA_OK) return unpack_error;
+        if (a_unc || b_unc) {
+            if (!a_unc) { a_var = tensor_zeros_like(vm, a_pred); if (a_var == NULL) return LANA_ERR_OOM; }
+            if (!b_unc) { b_var = tensor_zeros_like(vm, b_pred); if (b_var == NULL) return LANA_ERR_OOM; }
+            return tensor_elementwise_uncertain(vm, a_pred, a_var, b_pred, b_var, (int)operation, out);
+        }
+        return tensor_elementwise(vm, a_pred, b_pred, (int)operation, out);
+    }
     if (left_paths != NULL || right_paths != NULL) {
         LanaPathSet *paths;
         if (left_paths != NULL && right_paths != NULL &&
@@ -5109,7 +9738,8 @@ static const Value *reactive_staged_input(const LanaReactiveList *list,
 }
 
 static LanaError reactive_recompute_transaction(LanaVM *vm, LanaReactive *root,
-                                                const Value *replacement) {
+                                                const Value *replacement,
+                                                uint32_t scratch_register) {
     LanaReactiveList list = {0};
     Value **staged = NULL;
     LanaReactiveVersion **histories = NULL;
@@ -5169,6 +9799,9 @@ static LanaError reactive_recompute_transaction(LanaVM *vm, LanaReactive *root,
                                         node->operation, staged[index]);
             else if (node->kind == LANA_REACTIVE_UNARY)
                 error = lift_unary_raw(vm, left, node->operation, staged[index]);
+            else if (node->kind == LANA_REACTIVE_TRAIN)
+                error = reactive_train_recompute(vm, node, left, scratch_register,
+                                                 staged[index]);
             else
                 error = LANA_ERR_UNSUPPORTED_OPERATION;
         }
@@ -5239,6 +9872,170 @@ static LanaError bootstrap_resample(LanaVM *vm, const LanaArray *data,
 static LanaError run_function(LanaVM *vm, uint32_t function_index,
                               const Value *arg, uint32_t scratch_register,
                               Value *result);
+
+/* Build a Result tagged pair [tag, value] as a 2-element array, mirroring the
+ * compiler's `emit_tagged_pair` encoding (`result_ok` -> [true, v],
+ * `result_error` -> [false, e]). */
+static LanaError make_result(LanaVM *vm, bool ok, Value value, Value *out) {
+    LanaArray *array = lana_vm_alloc(vm, sizeof(*array));
+    if (array == NULL) return LANA_ERR_OOM;
+    array->count = array->capacity = 2u;
+    array->items = lana_vm_alloc(vm, 2u * sizeof(*array->items));
+    if (array->items == NULL) return LANA_ERR_OOM;
+    array->items[0] = lana_value_bool(ok);
+    array->items[1] = value;
+    *out = lana_value_array(array);
+    return LANA_OK;
+}
+
+/* LIP-024 async/await event loop. The ready queue is a FIFO of runnable
+ * futures; `ready` on a future mirrors membership in the queue. Scheduling is
+ * deterministic: the oldest runnable future runs next. */
+
+static LanaError enqueue_future(LanaVM *vm, LanaFuture *future) {
+    if (future->ready) return LANA_OK;
+    if (vm->ready_count >= vm->ready_capacity) {
+        size_t new_capacity = vm->ready_capacity == 0u ? 8u : vm->ready_capacity * 2u;
+        LanaFuture **new_queue = lana_vm_alloc(vm, new_capacity * sizeof(*new_queue));
+        if (new_queue == NULL) return LANA_ERR_OOM;
+        if (vm->ready_queue != NULL)
+            memcpy(new_queue, vm->ready_queue, vm->ready_count * sizeof(*new_queue));
+        vm->ready_queue = new_queue;
+        vm->ready_capacity = new_capacity;
+    }
+    vm->ready_queue[vm->ready_count++] = future;
+    future->ready = true;
+    return LANA_OK;
+}
+
+static LanaFuture *dequeue_future(LanaVM *vm) {
+    LanaFuture *future = vm->ready_queue[0];
+    --vm->ready_count;
+    memmove(vm->ready_queue, &vm->ready_queue[1],
+            vm->ready_count * sizeof(*vm->ready_queue));
+    future->ready = false;
+    return future;
+}
+
+static void complete_future(LanaVM *vm, LanaFuture *future, Value result) {
+    (void)vm;
+    future->exhausted = true;
+    future->ready = false;
+    future->registers[0] = result;
+}
+
+/* Run a composite future's completion check. If its condition is met it
+ * completes; otherwise it re-queues itself (and any not-yet-run inputs) so the
+ * loop re-checks it later. */
+static LanaError run_composite_future(LanaVM *vm, LanaFuture *future) {
+    size_t index;
+    switch (future->composite_kind) {
+        case LANA_FUTURE_ALL: {
+            bool all_done = true;
+            for (index = 0u; index < future->input_count; ++index)
+                if (!future->inputs[index]->exhausted) { all_done = false; break; }
+            if (all_done) {
+                LanaArray *array = lana_vm_alloc(vm, sizeof(*array));
+                if (array == NULL) return LANA_ERR_OOM;
+                array->count = array->capacity = future->input_count;
+                array->items = lana_vm_alloc(vm, future->input_count * sizeof(*array->items));
+                if (array->items == NULL) return LANA_ERR_OOM;
+                for (index = 0u; index < future->input_count; ++index)
+                    array->items[index] = future->inputs[index]->registers[0];
+                complete_future(vm, future, lana_value_array(array));
+            } else {
+                for (index = 0u; index < future->input_count; ++index) {
+                    LanaFuture *input = future->inputs[index];
+                    if (!input->exhausted) {
+                        LanaError error = enqueue_future(vm, input);
+                        if (error != LANA_OK) return error;
+                    }
+                }
+                return enqueue_future(vm, future);
+            }
+            break;
+        }
+        case LANA_FUTURE_RACE: {
+            LanaFuture *winner = NULL;
+            for (index = 0u; index < future->input_count; ++index)
+                if (future->inputs[index]->exhausted) { winner = future->inputs[index]; break; }
+            if (winner != NULL) {
+                complete_future(vm, future, winner->registers[0]);
+            } else {
+                for (index = 0u; index < future->input_count; ++index) {
+                    LanaFuture *input = future->inputs[index];
+                    if (!input->exhausted) {
+                        LanaError error = enqueue_future(vm, input);
+                        if (error != LANA_OK) return error;
+                    }
+                }
+                return enqueue_future(vm, future);
+            }
+            break;
+        }
+        case LANA_FUTURE_SLEEP: {
+            struct timespec now;
+            double now_seconds;
+            if (timespec_get(&now, TIME_UTC) != TIME_UTC) return LANA_ERR_TYPE;
+            now_seconds = (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
+            if (now_seconds >= future->wake_time) {
+                complete_future(vm, future, lana_value_null());
+            } else {
+                return enqueue_future(vm, future);
+            }
+            break;
+        }
+        default:
+            return LANA_ERR_TYPE;
+    }
+    return LANA_OK;
+}
+
+/* Push a fresh frame for a function future and run it until it suspends on an
+ * OP_AWAIT or returns (both pop the frame). Mirrors OP_NEXT's frame setup. */
+static LanaError run_async_function(LanaVM *vm, LanaFuture *future) {
+    LanaFrame *callee;
+    size_t saved_frame_count = vm->frame_count;
+    size_t index;
+    if (vm->frame_count >= LANA_MAX_CALL_FRAMES) return LANA_ERR_LIMIT;
+    callee = &vm->frames[vm->frame_count++];
+    for (index = 0u; index < future->register_count; ++index) {
+        callee->registers[index] = future->registers[index];
+        memset(&callee->histories[index], 0, sizeof(callee->histories[index]));
+    }
+    callee->registers[0] = lana_value_future(future);
+    callee->return_ip = vm->ip;
+    callee->return_register = 0u;
+    callee->function = future->function;
+    callee->is_generator = false;
+    callee->is_async = true;
+    vm->ip = future->ip;
+    while (vm->frame_count > saved_frame_count && vm->running) {
+        LanaError error = vm_step(vm);
+        if (error != LANA_OK) return error;
+    }
+    return LANA_OK;
+}
+
+/* Drive the single-threaded cooperative event loop until `target` is exhausted,
+ * then return its result. Nested invocations simply run a nested loop. */
+static LanaError run_event_loop(LanaVM *vm, LanaFuture *target, Value *out) {
+    size_t saved_ip = vm->ip;
+    LanaError error = LANA_OK;
+    while (vm->ready_count > 0u && !target->exhausted) {
+        LanaFuture *future = dequeue_future(vm);
+        if (future->is_composite)
+            error = run_composite_future(vm, future);
+        else
+            error = run_async_function(vm, future);
+        if (error != LANA_OK) break;
+    }
+    vm->ip = saved_ip;
+    if (error != LANA_OK) return error;
+    if (!target->exhausted) return LANA_ERR_TYPE;
+    *out = target->registers[0];
+    return LANA_OK;
+}
 
 static LanaError vm_step(LanaVM *vm) {
     LanaFrame *frame;
@@ -5712,9 +10509,9 @@ static LanaError vm_step(LanaVM *vm) {
                     vm->chunk->constants[ins->c].type != VAL_STRING)
                     error = LANA_ERR_TYPE;
                 else if (source->reactive != NULL)
-                    error = lana_vm_reactive_observe(
+                    error = reactive_observe_scratch(
                         vm, source, &frame->registers[ins->imm],
-                        &frame->registers[ins->b]);
+                        ins->b, &frame->registers[ins->b]);
                 else if (source->type != VAL_JOINT_STATE)
                     error = LANA_ERR_TYPE;
                 else
@@ -5851,6 +10648,36 @@ static LanaError vm_step(LanaVM *vm) {
                 }
                 else if (source->type == VAL_DISTRIBUTION && ins->c <= 1u)
                     frame->registers[ins->b] = lana_value_number(ins->c == 0u ? source->as.distribution.p0 : source->as.distribution.p1);
+                else if (source->type == VAL_TRAINING_RESULT &&
+                         source->as.training_result != NULL && ins->c <= 1u) {
+                    /* LIP-010: reactive parameters resolve to the current
+                     * training result, not the frozen one captured at `train`. */
+                    const Value *effective = reactive_value(source);
+                    if (effective->type != VAL_TRAINING_RESULT ||
+                        effective->as.training_result == NULL)
+                        error = LANA_ERR_TYPE;
+                    else if (ins->c == 0u)
+                        frame->registers[ins->b] = lana_value_tensor(
+                            effective->as.training_result->params);
+                    else
+                        frame->registers[ins->b] = lana_value_array(
+                            effective->as.training_result->steps);
+                }
+                else if (source->type == VAL_POSTERIOR &&
+                         source->as.posterior != NULL && ins->c <= 3u) {
+                    if (ins->c == 0u)
+                        frame->registers[ins->b] = lana_value_tensor(
+                            source->as.posterior->mean);
+                    else if (ins->c == 1u)
+                        frame->registers[ins->b] = lana_value_tensor(
+                            source->as.posterior->variance);
+                    else if (ins->c == 2u)
+                        frame->registers[ins->b] = lana_value_tensor(
+                            source->as.posterior->samples);
+                    else
+                        frame->registers[ins->b] = lana_value_array(
+                            source->as.posterior->steps);
+                }
                 else error = LANA_ERR_TYPE;
                 break;
             }
@@ -5899,7 +10726,11 @@ static LanaError vm_step(LanaVM *vm) {
                 const Value *left = &frame->registers[ins->a], *right = &frame->registers[ins->b];
                 error = lift_binary(vm, left, right, LANA_PURE_BINARY, ins->imm,
                                     &frame->registers[ins->c]);
-                if (error == LANA_OK && (left->derivation != NULL || right->derivation != NULL)) {
+                if (error == LANA_OK && vm->ad_recording &&
+                    left->type == VAL_TENSOR && right->type == VAL_TENSOR) {
+                    error = ad_record(vm, (int)ins->imm, left, right, -1,
+                                      &frame->registers[ins->c]);
+                } else if (error == LANA_OK && (left->derivation != NULL || right->derivation != NULL)) {
                     const Value *inputs[] = {left, right};
                     error = attach_derivation(vm, &frame->registers[ins->c],
                         LANA_DERIVATION_OPERATION, "binary", inputs, 2u, "",
@@ -5967,7 +10798,7 @@ static LanaError vm_step(LanaVM *vm) {
                     callee->registers[index] = lana_value_null();
                     memset(&callee->histories[index], 0, sizeof(callee->histories[index]));
                 }
-                callee->return_ip = vm->ip; callee->return_register = ins->a; callee->function = ins->b;
+                callee->return_ip = vm->ip; callee->return_register = ins->a; callee->function = ins->b; callee->is_generator = false;
                 for (index = 0; index < ins->imm; ++index) {
                     callee->registers[index] = frame->registers[ins->c + index];
                     error = clone_history(vm, &frame->histories[ins->c + index],
@@ -6015,6 +10846,7 @@ static LanaError vm_step(LanaVM *vm) {
                 }
                 callee->return_ip = vm->ip; callee->return_register = ins->a;
                 callee->function = lazy_value->as.lazy.function;
+                callee->is_generator = false;
                 callee->registers[0] = *index_value;
                 error = clone_history(vm, &frame->histories[ins->c],
                                       &callee->histories[0]);
@@ -6232,17 +11064,215 @@ static LanaError vm_step(LanaVM *vm) {
                             vm, &frame->registers[ins->c + argument],
                             &arguments[argument]);
                 }
-                if (error == LANA_OK)
-                    error = execute_host_call(vm, ins->b, arguments, ins->imm,
-                                              &frame->registers[ins->a]);
+                Value result = lana_value_null();
+                if (error == LANA_OK) {
+                    if (ins->b == LANA_HOST_GRAD) {
+                        if (ins->imm != 2u) error = LANA_ERR_TYPE;
+                        else error = ad_grad(vm, &arguments[0], &arguments[1],
+                                             ins->a, &result);
+                    } else if (ins->b == LANA_HOST_VJP) {
+                        if (ins->imm != 3u) error = LANA_ERR_TYPE;
+                        else error = ad_vjp(vm, &arguments[0], &arguments[1],
+                                            &arguments[2], ins->a, &result);
+                    } else if (ins->b == LANA_HOST_TRAIN) {
+                        error = host_train(vm, arguments, ins->imm, ins->a, &result);
+                    } else if (ins->b == LANA_HOST_UPDATE) {
+                        error = host_update(vm, arguments, ins->imm, ins->a, &result);
+                    } else if (ins->b == LANA_HOST_RESUME) {
+                        error = host_resume(vm, arguments, ins->imm, ins->a, &result);
+                    } else if (ins->b == LANA_HOST_INFER) {
+                        error = host_infer(vm, arguments, ins->imm, ins->a, &result);
+                    } else {
+                        error = execute_host_call(vm, ins->b, arguments, ins->imm,
+                                                  ins->a, &result);
+                    }
+                }
                 if (error == LANA_ERR_ASSERTION && ins->b == LANA_HOST_ASSERT &&
                     ins->imm == 2u && frame->registers[ins->c + 1u].type == VAL_STRING)
                     error_message = frame->registers[ins->c + 1u].as.string;
+                if (error == LANA_OK && ins->b == LANA_HOST_GPU_MATMUL) {
+                    const Value *inputs[] = { &arguments[0], &arguments[1] };
+                    error = attach_derivation(vm, &result, LANA_DERIVATION_APPROXIMATION,
+                        "gpu_matmul", inputs, 2u, "", ins->line,
+                        LANA_EXACTNESS_APPROXIMATE, "backend=metal precision=float32");
+                }
+                if (error == LANA_OK) frame->registers[ins->a] = result;
                 break;
             }
+            case OP_GENERATOR: {
+                const LanaFunction *function = &vm->chunk->functions[ins->b];
+                LanaGenerator *generator;
+                size_t index;
+                if (ins->imm != function->arity) { error = LANA_ERR_TYPE; break; }
+                generator = lana_vm_alloc(vm, sizeof(*generator));
+                if (generator == NULL) { error = LANA_ERR_OOM; break; }
+                generator->function = ins->b;
+                generator->ip = function->entry;
+                generator->register_count = function->register_count;
+                generator->exhausted = false;
+                generator->registers = lana_vm_alloc(vm, function->register_count * sizeof(Value));
+                if (generator->registers == NULL) { error = LANA_ERR_OOM; break; }
+                for (index = 0; index < function->register_count; ++index)
+                    generator->registers[index] = lana_value_null();
+                for (index = 0; index < ins->imm; ++index)
+                    generator->registers[1u + index] = frame->registers[ins->c + index];
+                frame->registers[ins->a] = lana_value_generator(generator);
+                break;
+            }
+            case OP_YIELD: {
+                Value *gen_value = &frame->registers[ins->a];
+                LanaGenerator *generator;
+                Value yielded = frame->registers[ins->b];
+                size_t index;
+                if (gen_value->type != VAL_GENERATOR) { error = LANA_ERR_TYPE; break; }
+                generator = gen_value->as.generator;
+                generator->ip = vm->ip;
+                for (index = 1u; index < generator->register_count; ++index)
+                    generator->registers[index] = frame->registers[index];
+                generator->registers[0] = lana_value_null();
+                if (vm->frame_count == 1u) { error = LANA_ERR_TYPE; break; }
+                {
+                    size_t return_ip = frame->return_ip;
+                    uint32_t destination = frame->return_register;
+                    --vm->frame_count;
+                    error = make_result(vm, true, yielded,
+                                        &current_frame(vm)->registers[destination]);
+                    if (error == LANA_OK) vm->ip = return_ip;
+                }
+                break;
+            }
+            case OP_NEXT: {
+                Value *gen_value = &frame->registers[ins->a];
+                LanaGenerator *generator;
+                LanaFrame *callee;
+                size_t index;
+                if (gen_value->type != VAL_GENERATOR) { error = LANA_ERR_TYPE; break; }
+                generator = gen_value->as.generator;
+                if (generator->exhausted) {
+                    char *exhausted = lana_vm_alloc(vm, sizeof("exhausted"));
+                    if (exhausted == NULL) { error = LANA_ERR_OOM; break; }
+                    memcpy(exhausted, "exhausted", sizeof("exhausted"));
+                    error = make_result(vm, false, lana_value_string(exhausted),
+                                        &frame->registers[ins->b]);
+                    break;
+                }
+                if (vm->frame_count >= LANA_MAX_CALL_FRAMES) { error = LANA_ERR_LIMIT; break; }
+                callee = &vm->frames[vm->frame_count++];
+                for (index = 0; index < generator->register_count; ++index) {
+                    callee->registers[index] = generator->registers[index];
+                    memset(&callee->histories[index], 0, sizeof(callee->histories[index]));
+                }
+                callee->registers[0] = *gen_value;
+                callee->return_ip = vm->ip;
+                callee->return_register = ins->b;
+                callee->function = generator->function;
+                callee->is_generator = true;
+                vm->ip = generator->ip;
+                break;
+            }
+            case OP_ASYNC: {
+                /* Create a cold future: allocate the frame but do not execute
+                 * the body (mirrors OP_GENERATOR). */
+                const LanaFunction *function = &vm->chunk->functions[ins->b];
+                LanaFuture *future;
+                size_t index;
+                if (ins->imm != function->arity) { error = LANA_ERR_TYPE; break; }
+                future = lana_vm_alloc(vm, sizeof(*future));
+                if (future == NULL) { error = LANA_ERR_OOM; break; }
+                future->function = ins->b;
+                future->ip = function->entry;
+                future->register_count = function->register_count;
+                future->exhausted = false;
+                future->ready = false;
+                future->is_composite = false;
+                future->composite_kind = 0u;
+                future->inputs = NULL;
+                future->input_count = 0u;
+                future->wake_time = 0.0;
+                future->registers = lana_vm_alloc(vm, function->register_count * sizeof(Value));
+                if (future->registers == NULL) { error = LANA_ERR_OOM; break; }
+                for (index = 0u; index < function->register_count; ++index)
+                    future->registers[index] = lana_value_null();
+                for (index = 0u; index < ins->imm; ++index)
+                    future->registers[1u + index] = frame->registers[ins->c + index];
+                frame->registers[ins->a] = lana_value_future(future);
+                break;
+            }
+            case OP_AWAIT: {
+                /* Suspend the current async frame until the awaited future
+                 * completes, then store its result and yield to the loop. */
+                Value *future_value = &frame->registers[ins->a];
+                LanaFuture *current, *awaited;
+                size_t index;
+                if (future_value->type != VAL_FUTURE) { error = LANA_ERR_TYPE; break; }
+                awaited = future_value->as.future;
+                if (awaited->exhausted) {
+                    frame->registers[ins->b] = awaited->registers[0];
+                    break;
+                }
+                if (frame->registers[0].type != VAL_FUTURE) { error = LANA_ERR_TYPE; break; }
+                current = frame->registers[0].as.future;
+                /* Resume at the AWAIT instruction itself (not the next one) so
+                 * the re-executed AWAIT observes the awaited future's result. */
+                current->ip = instruction_ip;
+                for (index = 1u; index < current->register_count; ++index)
+                    current->registers[index] = frame->registers[index];
+                current->registers[0] = lana_value_null();
+                if (vm->frame_count == 1u) { error = LANA_ERR_TYPE; break; }
+                --vm->frame_count;
+                error = enqueue_future(vm, awaited);
+                if (error == LANA_OK) error = enqueue_future(vm, current);
+                break;
+            }
+            case OP_RUN_ASYNC: {
+                /* Run the event loop to completion on the target future. */
+                Value *future_value = &frame->registers[ins->a];
+                LanaFuture *target;
+                if (future_value->type != VAL_FUTURE) { error = LANA_ERR_TYPE; break; }
+                target = future_value->as.future;
+                if (target->exhausted) {
+                    frame->registers[ins->b] = target->registers[0];
+                    break;
+                }
+                error = enqueue_future(vm, target);
+                if (error == LANA_OK)
+                    error = run_event_loop(vm, target, &frame->registers[ins->b]);
+                break;
+            }
+            case OP_LOAD_FUNCTION:
+                frame->registers[ins->a] = lana_value_function(ins->b);
+                break;
             case OP_RETURN: {
                 Value returned = frame->registers[ins->a];
-                if (vm->frame_count == 1u) { vm->result = returned; vm->running = false; }
+                if (frame->is_generator) {
+                    Value *gen_value = &frame->registers[0];
+                    char *exhausted;
+                    if (gen_value->type != VAL_GENERATOR) { error = LANA_ERR_TYPE; break; }
+                    gen_value->as.generator->exhausted = true;
+                    if (vm->frame_count == 1u) { error = LANA_ERR_TYPE; break; }
+                    exhausted = lana_vm_alloc(vm, sizeof("exhausted"));
+                    if (exhausted == NULL) { error = LANA_ERR_OOM; break; }
+                    memcpy(exhausted, "exhausted", sizeof("exhausted"));
+                    {
+                        size_t return_ip = frame->return_ip;
+                        uint32_t destination = frame->return_register;
+                        --vm->frame_count;
+                        error = make_result(vm, false, lana_value_string(exhausted),
+                                            &current_frame(vm)->registers[destination]);
+                        if (error == LANA_OK) vm->ip = return_ip;
+                    }
+                } else if (frame->is_async) {
+                    /* An async frame returning completes its future. The
+                     * event loop's run_async_function observes the frame pop
+                     * and continues with the next ready future. */
+                    Value *future_value = &frame->registers[0];
+                    LanaFuture *future;
+                    if (future_value->type != VAL_FUTURE) { error = LANA_ERR_TYPE; break; }
+                    future = future_value->as.future;
+                    complete_future(vm, future, returned);
+                    if (vm->frame_count == 1u) { error = LANA_ERR_TYPE; break; }
+                    --vm->frame_count;
+                } else if (vm->frame_count == 1u) { vm->result = returned; vm->running = false; }
                 else { size_t return_ip = frame->return_ip; uint32_t destination = frame->return_register; --vm->frame_count; current_frame(vm)->registers[destination] = returned; vm->ip = return_ip; }
                 break;
             }
@@ -6298,6 +11328,7 @@ static LanaError run_function(LanaVM *vm, uint32_t function_index,
     callee->return_ip = vm->ip;
     callee->return_register = scratch_register;
     callee->function = function_index;
+    callee->is_generator = false;
     callee->registers[0] = *arg;
     vm->ip = function->entry;
     while (vm->frame_count > saved_frame_count && vm->running) {
@@ -6308,6 +11339,2262 @@ static LanaError run_function(LanaVM *vm, uint32_t function_index,
         }
     }
     *result = caller->registers[scratch_register];
+    return LANA_OK;
+}
+
+/* Run a two-argument Lana function to completion, mirroring `run_function`.
+ * Used by `train` to invoke the model (params, x) and loss (y, target)
+ * functions, which are ordinary arity-2 functions over tensors. */
+static LanaError run_function2(LanaVM *vm, uint32_t function_index,
+                               const Value *arg0, const Value *arg1,
+                               uint32_t scratch_register, Value *result) {
+    const LanaFunction *function = &vm->chunk->functions[function_index];
+    LanaFrame *caller = current_frame(vm);
+    LanaFrame *callee;
+    size_t saved_frame_count = vm->frame_count;
+    size_t index;
+    if (function->arity != 2u) return LANA_ERR_TYPE;
+    if (vm->frame_count >= LANA_MAX_CALL_FRAMES) return LANA_ERR_LIMIT;
+    callee = &vm->frames[vm->frame_count++];
+    for (index = 0; index < function->register_count; ++index) {
+        callee->registers[index] = lana_value_null();
+        memset(&callee->histories[index], 0, sizeof(callee->histories[index]));
+    }
+    callee->return_ip = vm->ip;
+    callee->return_register = scratch_register;
+    callee->function = function_index;
+    callee->is_generator = false;
+    callee->registers[0] = *arg0;
+    callee->registers[1] = *arg1;
+    vm->ip = function->entry;
+    while (vm->frame_count > saved_frame_count && vm->running) {
+        LanaError error = vm_step(vm);
+        if (error != LANA_OK) {
+            vm->frame_count = saved_frame_count;
+            return error;
+        }
+    }
+    *result = caller->registers[scratch_register];
+    return LANA_OK;
+}
+
+/* ===== LIP-015: lazy relational-algebra dataset engine ===== */
+
+static LanaError dataset_new(LanaVM *vm, LanaDatasetOp op, Value source,
+                             uint32_t function, Value columns, Value key,
+                             Value limit, Value other, Value aggregate,
+                             LanaDataset **out) {
+    LanaDataset *dataset = lana_vm_alloc(vm, sizeof(*dataset));
+    if (dataset == NULL) return LANA_ERR_OOM;
+    dataset->op = op;
+    dataset->source = source;
+    dataset->function = function;
+    dataset->columns = columns;
+    dataset->key = key;
+    dataset->limit = limit;
+    dataset->other = other;
+    dataset->aggregate = aggregate;
+    *out = dataset;
+    return LANA_OK;
+}
+
+static LanaError dataset_array_new(LanaVM *vm, LanaArray **out) {
+    LanaArray *array = lana_vm_alloc(vm, sizeof(*array));
+    if (array == NULL) return LANA_ERR_OOM;
+    array->count = 0u;
+    array->capacity = 0u;
+    array->items = NULL;
+    *out = array;
+    return LANA_OK;
+}
+
+static LanaError dataset_array_push(LanaVM *vm, LanaArray *array, const Value *value) {
+    Value *items;
+    if (array->count == SIZE_MAX / sizeof(*items)) return LANA_ERR_LIMIT;
+    if (array->count == array->capacity) {
+        size_t capacity = array->capacity == 0u ? 8u : array->capacity * 2u;
+        if (capacity <= array->capacity) return LANA_ERR_LIMIT;
+        items = lana_vm_alloc(vm, capacity * sizeof(*items));
+        if (items == NULL) return LANA_ERR_OOM;
+        if (array->count > 0u)
+            memcpy(items, array->items, array->count * sizeof(*items));
+        array->items = items;
+        array->capacity = capacity;
+    }
+    array->items[array->count++] = *value;
+    return LANA_OK;
+}
+
+/* Materialize a source into an array of rows. A lazy source is materialized by
+ * invoking the generator function for each index in [0, bound); an in-memory
+ * array source (LIP-015 §3 persistence / adapter load path) is returned as-is.
+ * The output array is GC-rooted for the duration so a collection triggered by
+ * a generator call cannot free it. */
+static LanaError dataset_materialize_source(LanaVM *vm, const Value *lazy_value,
+                                            uint32_t scratch, LanaArray **out) {
+    LanaArray *rows;
+    Value rows_value;
+    size_t bound, i;
+    if (lazy_value->type == VAL_ARRAY) {
+        *out = lazy_value->as.array;
+        return LANA_OK;
+    }
+    if (lazy_value->type != VAL_LAZY) return LANA_ERR_TYPE;
+    bound = lazy_value->as.lazy.bound;
+    if (dataset_array_new(vm, &rows) != LANA_OK) return LANA_ERR_OOM;
+    rows_value = lana_value_array(rows);
+    size_t root_base = lana_vm_root_push(vm, &rows_value);
+    for (i = 0u; i < bound; ++i) {
+        Value index_value = lana_value_number((double)i);
+        Value row;
+        LanaError error = run_function(vm, lazy_value->as.lazy.function,
+                                       &index_value, scratch, &row);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        error = dataset_array_push(vm, rows, &row);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+    }
+    lana_vm_root_pop(vm, root_base);
+    *out = rows;
+    return LANA_OK;
+}
+
+/* Read the value of `key` from a row (a map). */
+static LanaError dataset_row_key(const Value *row, const char *key, Value *out) {
+    if (row->type != VAL_MAP || row->as.map == NULL) return LANA_ERR_TYPE;
+    return lana_map_get(row->as.map, key, out);
+}
+
+/* Compare two values for sort ordering. Returns <0, 0, >0. Numbers compare
+ * numerically; strings byte-wise; bools false<true; everything else by type
+ * tag then pointer. */
+static int dataset_compare_values(const Value *a, const Value *b) {
+    if (a->type == VAL_NUMBER && b->type == VAL_NUMBER) {
+        if (a->as.number < b->as.number) return -1;
+        if (a->as.number > b->as.number) return 1;
+        return 0;
+    }
+    if (a->type == VAL_STRING && b->type == VAL_STRING)
+        return strcmp(a->as.string, b->as.string);
+    if (a->type == VAL_BOOL && b->type == VAL_BOOL)
+        return (a->as.boolean ? 1 : 0) - (b->as.boolean ? 1 : 0);
+    if (a->type != b->type) return (int)a->type - (int)b->type;
+    return (a->as.array > b->as.array) - (a->as.array < b->as.array);
+}
+
+/* Materialize a dataset plan to an array of rows. `scratch` is a caller
+ * register used to run predicate/transform functions. */
+static LanaError dataset_materialize(LanaVM *vm, const LanaDataset *dataset,
+                                     uint32_t scratch, LanaArray **out) {
+    LanaError error;
+    switch (dataset->op) {
+        case LANA_DATASET_SOURCE:
+            return dataset_materialize_source(vm, &dataset->source, scratch, out);
+
+        case LANA_DATASET_FILTER: {
+            LanaArray *source_rows, *result;
+            Value result_value;
+            size_t i;
+            error = dataset_materialize(vm, dataset->source.as.dataset, scratch,
+                                        &source_rows);
+            if (error != LANA_OK) return error;
+            if (dataset_array_new(vm, &result) != LANA_OK) return LANA_ERR_OOM;
+            result_value = lana_value_array(result);
+            size_t root_base = lana_vm_root_push(vm, &result_value);
+            for (i = 0u; i < source_rows->count; ++i) {
+                Value pred_result;
+                error = run_function(vm, dataset->function,
+                                      &source_rows->items[i], scratch, &pred_result);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+                if (pred_result.type == VAL_BOOL && pred_result.as.boolean) {
+                    error = dataset_array_push(vm, result, &source_rows->items[i]);
+                    if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+                }
+            }
+            lana_vm_root_pop(vm, root_base);
+            *out = result;
+            return LANA_OK;
+        }
+
+        case LANA_DATASET_MAP: {
+            LanaArray *source_rows, *result;
+            Value result_value;
+            size_t i;
+            error = dataset_materialize(vm, dataset->source.as.dataset, scratch,
+                                        &source_rows);
+            if (error != LANA_OK) return error;
+            if (dataset_array_new(vm, &result) != LANA_OK) return LANA_ERR_OOM;
+            result_value = lana_value_array(result);
+            size_t root_base = lana_vm_root_push(vm, &result_value);
+            for (i = 0u; i < source_rows->count; ++i) {
+                Value mapped;
+                error = run_function(vm, dataset->function,
+                                     &source_rows->items[i], scratch, &mapped);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+                error = dataset_array_push(vm, result, &mapped);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            }
+            lana_vm_root_pop(vm, root_base);
+            *out = result;
+            return LANA_OK;
+        }
+
+        case LANA_DATASET_SELECT: {
+            LanaArray *source_rows, *result;
+            Value result_value;
+            size_t i, c;
+            if (dataset->columns.type != VAL_ARRAY) return LANA_ERR_TYPE;
+            error = dataset_materialize(vm, dataset->source.as.dataset, scratch,
+                                        &source_rows);
+            if (error != LANA_OK) return error;
+            if (dataset_array_new(vm, &result) != LANA_OK) return LANA_ERR_OOM;
+            result_value = lana_value_array(result);
+            size_t root_base = lana_vm_root_push(vm, &result_value);
+            for (i = 0u; i < source_rows->count; ++i) {
+                const Value *row = &source_rows->items[i];
+                LanaMap *projected;
+                if (row->type != VAL_MAP) { lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE; }
+                if (lana_map_new(vm, dataset->columns.as.array->count, &projected) != LANA_OK) {
+                    lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                }
+                for (c = 0u; c < dataset->columns.as.array->count; ++c) {
+                    const Value *col = &dataset->columns.as.array->items[c];
+                    Value col_value;
+                    if (col->type != VAL_STRING) { lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE; }
+                    if (lana_map_get(row->as.map, col->as.string, &col_value) != LANA_OK) {
+                        lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+                    }
+                    if (lana_map_set(vm, projected, col->as.string, &col_value, false) != LANA_OK) {
+                        lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                    }
+                }
+                Value projected_value = lana_value_map(projected);
+                error = dataset_array_push(vm, result, &projected_value);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            }
+            lana_vm_root_pop(vm, root_base);
+            *out = result;
+            return LANA_OK;
+        }
+
+        case LANA_DATASET_LIMIT: {
+            LanaArray *source_rows, *result;
+            size_t n, i;
+            if (dataset->limit.type != VAL_NUMBER || dataset->limit.as.number < 0.0)
+                return LANA_ERR_TYPE;
+            n = (size_t)dataset->limit.as.number;
+            error = dataset_materialize(vm, dataset->source.as.dataset, scratch,
+                                        &source_rows);
+            if (error != LANA_OK) return error;
+            if (dataset_array_new(vm, &result) != LANA_OK) return LANA_ERR_OOM;
+            if (n > source_rows->count) n = source_rows->count;
+            for (i = 0u; i < n; ++i) {
+                error = dataset_array_push(vm, result, &source_rows->items[i]);
+                if (error != LANA_OK) return error;
+            }
+            *out = result;
+            return LANA_OK;
+        }
+
+        case LANA_DATASET_SORT: {
+            LanaArray *source_rows, *result;
+            size_t i, j;
+            if (dataset->key.type != VAL_STRING) return LANA_ERR_TYPE;
+            error = dataset_materialize(vm, dataset->source.as.dataset, scratch,
+                                        &source_rows);
+            if (error != LANA_OK) return error;
+            if (dataset_array_new(vm, &result) != LANA_OK) return LANA_ERR_OOM;
+            for (i = 0u; i < source_rows->count; ++i) {
+                error = dataset_array_push(vm, result, &source_rows->items[i]);
+                if (error != LANA_OK) return error;
+            }
+            /* Insertion sort by key value (rows are maps). */
+            for (i = 1u; i < result->count; ++i) {
+                Value key_i, key_j;
+                if (dataset_row_key(&result->items[i], dataset->key.as.string, &key_i) != LANA_OK)
+                    return LANA_ERR_TYPE;
+                Value pivot = result->items[i];
+                j = i;
+                while (j > 0u) {
+                    if (dataset_row_key(&result->items[j - 1u], dataset->key.as.string, &key_j) != LANA_OK)
+                        return LANA_ERR_TYPE;
+                    if (dataset_compare_values(&key_j, &key_i) <= 0) break;
+                    result->items[j] = result->items[j - 1u];
+                    --j;
+                }
+                result->items[j] = pivot;
+            }
+            *out = result;
+            return LANA_OK;
+        }
+
+        case LANA_DATASET_GROUP_BY: {
+            LanaArray *source_rows, *result;
+            Value result_value;
+            size_t i, g;
+            if (dataset->key.type != VAL_STRING) return LANA_ERR_TYPE;
+            error = dataset_materialize(vm, dataset->source.as.dataset, scratch,
+                                        &source_rows);
+            if (error != LANA_OK) return error;
+            if (dataset_array_new(vm, &result) != LANA_OK) return LANA_ERR_OOM;
+            result_value = lana_value_array(result);
+            size_t root_base = lana_vm_root_push(vm, &result_value);
+            for (i = 0u; i < source_rows->count; ++i) {
+                Value key_value;
+                LanaMap *group_map = NULL;
+                Value group_value;
+                LanaArray *group_rows;
+                if (dataset_row_key(&source_rows->items[i], dataset->key.as.string,
+                                    &key_value) != LANA_OK) {
+                    lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+                }
+                /* Find an existing group record with this key. */
+                for (g = 0u; g < result->count; ++g) {
+                    Value existing_key;
+                    if (result->items[g].type != VAL_MAP) { lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE; }
+                    if (lana_map_get(result->items[g].as.map, "key", &existing_key) != LANA_OK) {
+                        lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+                    }
+                    if (set_value_equal(&existing_key, &key_value)) {
+                        group_map = result->items[g].as.map;
+                        break;
+                    }
+                }
+                if (group_map == NULL) {
+                    if (lana_map_new(vm, 2u, &group_map) != LANA_OK) {
+                        lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                    }
+                    if (dataset_array_new(vm, &group_rows) != LANA_OK) {
+                        lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                    }
+                    Value group_rows_value = lana_value_array(group_rows);
+                    if (lana_map_set(vm, group_map, "key", &key_value, false) != LANA_OK ||
+                        lana_map_set(vm, group_map, "rows", &group_rows_value, false) != LANA_OK) {
+                        lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                    }
+                    group_value = lana_value_map(group_map);
+                    error = dataset_array_push(vm, result, &group_value);
+                    if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+                } else {
+                    if (lana_map_get(group_map, "rows", &group_value) != LANA_OK) {
+                        lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+                    }
+                    group_rows = group_value.as.array;
+                }
+                error = dataset_array_push(vm, group_rows, &source_rows->items[i]);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            }
+            lana_vm_root_pop(vm, root_base);
+            *out = result;
+            return LANA_OK;
+        }
+
+        case LANA_DATASET_AGGREGATE: {
+            LanaArray *group_records, *result;
+            Value result_value;
+            size_t i, r;
+            const char *agg_op, *agg_col = NULL;
+            if (dataset->aggregate.type != VAL_ARRAY ||
+                dataset->aggregate.as.array->count < 1u ||
+                dataset->aggregate.as.array->items[0].type != VAL_STRING)
+                return LANA_ERR_TYPE;
+            agg_op = dataset->aggregate.as.array->items[0].as.string;
+            if (dataset->aggregate.as.array->count >= 2u) {
+                if (dataset->aggregate.as.array->items[1].type != VAL_STRING)
+                    return LANA_ERR_TYPE;
+                agg_col = dataset->aggregate.as.array->items[1].as.string;
+            }
+            error = dataset_materialize(vm, dataset->source.as.dataset, scratch,
+                                        &group_records);
+            if (error != LANA_OK) return error;
+            if (dataset_array_new(vm, &result) != LANA_OK) return LANA_ERR_OOM;
+            result_value = lana_value_array(result);
+            size_t root_base = lana_vm_root_push(vm, &result_value);
+            for (i = 0u; i < group_records->count; ++i) {
+                const Value *record = &group_records->items[i];
+                Value key_value, rows_value;
+                LanaArray *rows;
+                LanaMap *out_row;
+                Value agg_value;
+                if (record->type != VAL_MAP ||
+                    lana_map_get(record->as.map, "key", &key_value) != LANA_OK ||
+                    lana_map_get(record->as.map, "rows", &rows_value) != LANA_OK ||
+                    rows_value.type != VAL_ARRAY) {
+                    lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+                }
+                rows = rows_value.as.array;
+                if (strcmp(agg_op, "count") == 0) {
+                    agg_value = lana_value_number((double)rows->count);
+                } else {
+                    double acc = 0.0;
+                    bool have = false;
+                    if (agg_col == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE; }
+                    for (r = 0u; r < rows->count; ++r) {
+                        Value cell;
+                        if (dataset_row_key(&rows->items[r], agg_col, &cell) != LANA_OK ||
+                            cell.type != VAL_NUMBER) {
+                            lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+                        }
+                        if (!have) { acc = cell.as.number; have = true; }
+                        else if (strcmp(agg_op, "sum") == 0 || strcmp(agg_op, "mean") == 0)
+                            acc += cell.as.number;
+                        else if (strcmp(agg_op, "max") == 0) { if (cell.as.number > acc) acc = cell.as.number; }
+                        else if (strcmp(agg_op, "min") == 0) { if (cell.as.number < acc) acc = cell.as.number; }
+                        else { lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE; }
+                    }
+                    if (strcmp(agg_op, "mean") == 0) {
+                        if (rows->count == 0u) { lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE; }
+                        acc /= (double)rows->count;
+                    }
+                    agg_value = lana_value_number(acc);
+                }
+                if (lana_map_new(vm, 2u, &out_row) != LANA_OK) {
+                    lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                }
+                /* Output row: {<group key name>: key_value, <op>: agg_value}. */
+                const char *key_name = "key";
+                if (dataset->source.type == VAL_DATASET &&
+                    dataset->source.as.dataset->op == LANA_DATASET_GROUP_BY &&
+                    dataset->source.as.dataset->key.type == VAL_STRING)
+                    key_name = dataset->source.as.dataset->key.as.string;
+                if (lana_map_set(vm, out_row, key_name, &key_value, false) != LANA_OK ||
+                    lana_map_set(vm, out_row, agg_op, &agg_value, false) != LANA_OK) {
+                    lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                }
+                Value out_value = lana_value_map(out_row);
+                error = dataset_array_push(vm, result, &out_value);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            }
+            lana_vm_root_pop(vm, root_base);
+            *out = result;
+            return LANA_OK;
+        }
+
+        case LANA_DATASET_JOIN: {
+            LanaArray *left_rows, *right_rows, *result;
+            Value result_value;
+            size_t i, j;
+            if (dataset->key.type != VAL_STRING) return LANA_ERR_TYPE;
+            error = dataset_materialize(vm, dataset->source.as.dataset, scratch,
+                                        &left_rows);
+            if (error != LANA_OK) return error;
+            error = dataset_materialize(vm, dataset->other.as.dataset, scratch,
+                                        &right_rows);
+            if (error != LANA_OK) return error;
+            if (dataset_array_new(vm, &result) != LANA_OK) return LANA_ERR_OOM;
+            result_value = lana_value_array(result);
+            size_t root_base = lana_vm_root_push(vm, &result_value);
+            for (i = 0u; i < left_rows->count; ++i) {
+                Value left_key;
+                if (dataset_row_key(&left_rows->items[i], dataset->key.as.string,
+                                    &left_key) != LANA_OK) {
+                    lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+                }
+                for (j = 0u; j < right_rows->count; ++j) {
+                    Value right_key;
+                    if (dataset_row_key(&right_rows->items[j], dataset->key.as.string,
+                                        &right_key) != LANA_OK) {
+                        lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+                    }
+                    if (!set_value_equal(&left_key, &right_key)) continue;
+                    /* Merge left and right rows into one map. */
+                    LanaMap *merged;
+                    size_t e;
+                    if (lana_map_new(vm, left_rows->items[i].as.map->count +
+                                        right_rows->items[j].as.map->count, &merged) != LANA_OK) {
+                        lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                    }
+                    for (e = 0u; e < left_rows->items[i].as.map->count; ++e) {
+                        const LanaMapEntry *entry = &left_rows->items[i].as.map->entries[e];
+                        if (lana_map_set(vm, merged, entry->key, entry->value, false) != LANA_OK) {
+                            lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                        }
+                    }
+                    for (e = 0u; e < right_rows->items[j].as.map->count; ++e) {
+                        const LanaMapEntry *entry = &right_rows->items[j].as.map->entries[e];
+                        if (lana_map_set(vm, merged, entry->key, entry->value, false) != LANA_OK) {
+                            lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM;
+                        }
+                    }
+                    Value merged_value = lana_value_map(merged);
+                    error = dataset_array_push(vm, result, &merged_value);
+                    if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+                }
+            }
+            lana_vm_root_pop(vm, root_base);
+            *out = result;
+            return LANA_OK;
+        }
+
+        default:
+            return LANA_ERR_TYPE;
+    }
+}
+
+/* Build an inspectable plan value for `explain(ds)`. */
+static LanaError dataset_explain(LanaVM *vm, const LanaDataset *dataset, Value *out) {
+    static const char *op_names[] = {
+        "source", "filter", "map", "select", "limit", "sort",
+        "group_by", "aggregate", "join"
+    };
+    LanaMap *map;
+    Value op_value, source_value;
+    if (dataset == NULL) return LANA_ERR_TYPE;
+    if (lana_map_new(vm, 4u, &map) != LANA_OK) return LANA_ERR_OOM;
+    op_value = lana_value_string(op_names[dataset->op]);
+    if (lana_map_set(vm, map, "op", &op_value, false) != LANA_OK) return LANA_ERR_OOM;
+    if (dataset->op == LANA_DATASET_SOURCE) {
+        /* LIP-015 §3: a source is either a lazy generator (report its bound) or
+         * an in-memory array of rows (report the row count). */
+        if (dataset->source.type == VAL_LAZY) {
+            Value bound_value = lana_value_number((double)dataset->source.as.lazy.bound);
+            if (lana_map_set(vm, map, "bound", &bound_value, false) != LANA_OK) return LANA_ERR_OOM;
+        } else if (dataset->source.type == VAL_ARRAY) {
+            Value count_value = lana_value_number((double)dataset->source.as.array->count);
+            if (lana_map_set(vm, map, "rows", &count_value, false) != LANA_OK) return LANA_ERR_OOM;
+        } else {
+            return LANA_ERR_TYPE;
+        }
+    } else {
+        if (dataset->source.type != VAL_DATASET) return LANA_ERR_TYPE;
+        if (dataset_explain(vm, dataset->source.as.dataset, &source_value) != LANA_OK)
+            return LANA_ERR_TYPE;
+        if (lana_map_set(vm, map, "source", &source_value, false) != LANA_OK) return LANA_ERR_OOM;
+    }
+    if (dataset->op == LANA_DATASET_FILTER || dataset->op == LANA_DATASET_MAP) {
+        Value fn_value = lana_value_function(dataset->function);
+        if (lana_map_set(vm, map, "function", &fn_value, false) != LANA_OK) return LANA_ERR_OOM;
+    }
+    if (dataset->op == LANA_DATASET_SELECT) {
+        if (lana_map_set(vm, map, "columns", &dataset->columns, false) != LANA_OK) return LANA_ERR_OOM;
+    }
+    if (dataset->op == LANA_DATASET_LIMIT) {
+        if (lana_map_set(vm, map, "limit", &dataset->limit, false) != LANA_OK) return LANA_ERR_OOM;
+    }
+    if (dataset->op == LANA_DATASET_SORT || dataset->op == LANA_DATASET_GROUP_BY ||
+        dataset->op == LANA_DATASET_JOIN) {
+        if (lana_map_set(vm, map, "key", &dataset->key, false) != LANA_OK) return LANA_ERR_OOM;
+    }
+    if (dataset->op == LANA_DATASET_AGGREGATE) {
+        if (lana_map_set(vm, map, "aggregate", &dataset->aggregate, false) != LANA_OK) return LANA_ERR_OOM;
+    }
+    if (dataset->op == LANA_DATASET_JOIN) {
+        Value other_value;
+        if (dataset->other.type != VAL_DATASET) return LANA_ERR_TYPE;
+        if (dataset_explain(vm, dataset->other.as.dataset, &other_value) != LANA_OK)
+            return LANA_ERR_TYPE;
+        if (lana_map_set(vm, map, "other", &other_value, false) != LANA_OK) return LANA_ERR_OOM;
+    }
+    *out = lana_value_map(map);
+    return LANA_OK;
+}
+
+/* ===== LIP-011 grad / vjp host calls ===== */
+
+/* Validate `f`/`x`, create the input leaf, and run `f(x)` with recording on.
+ * On success `*leaf_out` is the input leaf and `*result_out` is `f`'s output. */
+static LanaError ad_run(LanaVM *vm, const Value *function_value, const Value *x,
+                        uint32_t scratch_register, LanaDerivation **leaf_out,
+                        Value *result_out) {
+    if (function_value->type != VAL_FUNCTION) return LANA_ERR_TYPE;
+    if (x->type != VAL_TENSOR) return LANA_ERR_TYPE;
+    if (x->as.tensor->is_complex && !x->as.tensor->is_state) return LANA_ERR_TYPE;
+    uint32_t function_index = function_value->as.function;
+    if (function_index >= vm->chunk->function_count) return LANA_ERR_TYPE;
+    if (vm->chunk->functions[function_index].arity != 1u) return LANA_ERR_TYPE;
+    LanaDerivation *leaf = record_derivation(vm, LANA_DERIVATION_OPERATION, "input",
+        NULL, 0u, "", 0u, LANA_EXACTNESS_EXACT, "autodiff",
+        LANA_DERIVATION_SUCCESS, "none");
+    if (leaf == NULL) return LANA_ERR_OOM;
+    leaf->ad_a = x->as.tensor;
+    Value x_with_deriv = *x;
+    x_with_deriv.derivation = leaf;
+    vm->ad_recording = true;
+    LanaError error = run_function(vm, function_index, &x_with_deriv,
+                                   scratch_register, result_out);
+    vm->ad_recording = false;
+    if (error != LANA_OK) return error;
+    *leaf_out = leaf;
+    return LANA_OK;
+}
+
+/* Read the leaf's accumulated gradient, check finiteness, and return a fresh
+ * tensor carrying a provenance derivation that traces to the input leaf. */
+static LanaError ad_finish(LanaVM *vm, LanaDerivation *leaf, const char *operation,
+                           Value *out) {
+    LanaTensor *grad = leaf->ad_grad;
+    if (grad == NULL) {
+        grad = tensor_new(vm, leaf->ad_a->ndim, leaf->ad_a->shape, leaf->ad_a->is_complex);
+        if (grad == NULL) return LANA_ERR_OOM;
+    }
+    size_t count = tensor_element_count(grad);
+    size_t components = grad->is_complex ? 2u : 1u;
+    for (size_t i = 0; i < count * components; ++i)
+        if (!isfinite(grad->data[i])) return LANA_ERR_INVALID_PARAMETERS;
+    LanaTensor *result_tensor = tensor_new(vm, grad->ndim, grad->shape, grad->is_complex);
+    if (result_tensor == NULL) return LANA_ERR_OOM;
+    memcpy(result_tensor->data, grad->data, count * components * sizeof(double));
+    Value leaf_value = lana_value_tensor(leaf->ad_a);
+    leaf_value.derivation = leaf;
+    const Value *inputs[] = { &leaf_value };
+    LanaDerivation *grad_deriv = record_derivation(vm, LANA_DERIVATION_OPERATION,
+        operation, inputs, 1u, "", 0u, LANA_EXACTNESS_EXACT, "autodiff",
+        LANA_DERIVATION_SUCCESS, "none");
+    if (grad_deriv == NULL) return LANA_ERR_OOM;
+    Value grad_value = lana_value_tensor(result_tensor);
+    grad_value.derivation = grad_deriv;
+    *out = grad_value;
+    return LANA_OK;
+}
+
+static LanaError ad_grad(LanaVM *vm, const Value *function_value, const Value *x,
+                         uint32_t scratch_register, Value *out) {
+    LanaDerivation *leaf = NULL;
+    Value result;
+    LanaError error = ad_run(vm, function_value, x, scratch_register, &leaf, &result);
+    if (error != LANA_OK) return error;
+    if (result.type != VAL_NUMBER) return LANA_ERR_TYPE;
+    LanaTensor *seed = tensor_new(vm, 0, NULL, false);
+    if (seed == NULL) return LANA_ERR_OOM;
+    seed->data[0] = 1.0;
+    if (result.derivation != NULL) {
+        error = ad_backward(vm, result.derivation, seed);
+        if (error != LANA_OK) return error;
+    }
+    return ad_finish(vm, leaf, "grad", out);
+}
+
+static LanaError ad_vjp(LanaVM *vm, const Value *function_value, const Value *x,
+                        const Value *v, uint32_t scratch_register, Value *out) {
+    if (v->type != VAL_TENSOR) return LANA_ERR_TYPE;
+    if (v->as.tensor->is_complex) return LANA_ERR_TYPE;
+    LanaDerivation *leaf = NULL;
+    Value result;
+    LanaError error = ad_run(vm, function_value, x, scratch_register, &leaf, &result);
+    if (error != LANA_OK) return error;
+    if (result.type != VAL_TENSOR) return LANA_ERR_TYPE;
+    if (!tensor_shape_equal(v->as.tensor, result.as.tensor)) return LANA_ERR_TYPE;
+    LanaTensor *seed = tensor_new(vm, v->as.tensor->ndim, v->as.tensor->shape, false);
+    if (seed == NULL) return LANA_ERR_OOM;
+    size_t count = tensor_element_count(v->as.tensor);
+    size_t *idx = lana_vm_alloc(vm, v->as.tensor->ndim * sizeof(*idx));
+    if (idx == NULL && v->as.tensor->ndim > 0) return LANA_ERR_OOM;
+    for (size_t lin = 0; lin < count; ++lin) {
+        size_t rem = lin, index = v->as.tensor->offset;
+        for (size_t d = v->as.tensor->ndim; d-- > 0;) {
+            index += (v->as.tensor->shape[d] == 0 ? 0 : rem % v->as.tensor->shape[d]) *
+                     v->as.tensor->strides[d];
+            rem /= v->as.tensor->shape[d];
+        }
+        seed->data[lin] = v->as.tensor->data[index];
+    }
+    if (result.derivation != NULL) {
+        error = ad_backward(vm, result.derivation, seed);
+        if (error != LANA_OK) return error;
+    }
+    return ad_finish(vm, leaf, "vjp", out);
+}
+
+/* ===== LIP-006 sgd / adam / train host calls ===== */
+
+/* Copy a tensor (possibly a view) into a fresh contiguous base tensor. */
+static LanaTensor *tensor_copy_contiguous(LanaVM *vm, const LanaTensor *t) {
+    LanaTensor *copy = tensor_new(vm, t->ndim, t->shape, t->is_complex);
+    if (copy == NULL) return NULL;
+    copy->is_state = t->is_state;
+    size_t count = tensor_element_count(t);
+    size_t *idx = lana_vm_alloc(vm, t->ndim * sizeof(*idx));
+    if (idx == NULL && t->ndim > 0) return NULL;
+    for (size_t lin = 0; lin < count; ++lin) {
+        size_t rem = lin, index = t->offset;
+        for (size_t d = t->ndim; d-- > 0;) {
+            index += (t->shape[d] == 0 ? 0 : rem % t->shape[d]) * t->strides[d];
+            rem /= t->shape[d];
+        }
+        if (t->is_complex) {
+            copy->data[2 * lin] = t->data[2 * index];
+            copy->data[2 * lin + 1] = t->data[2 * index + 1];
+        } else {
+            copy->data[lin] = t->data[index];
+        }
+    }
+    return copy;
+}
+
+static LanaError host_sgd(LanaVM *vm, const Value *arguments, size_t argc, Value *out) {
+    double learning_rate = 0.01;
+    double momentum = 0.9;
+    if (argc > 2u) return LANA_ERR_TYPE;
+    if (argc >= 1u) {
+        if (arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        learning_rate = arguments[0].as.number;
+    }
+    if (argc >= 2u) {
+        if (arguments[1].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        momentum = arguments[1].as.number;
+    }
+    if (!isfinite(learning_rate) || learning_rate <= 0.0 ||
+        !isfinite(momentum) || momentum < 0.0 || momentum >= 1.0)
+        return LANA_ERR_INVALID_PARAMETERS;
+    LanaOptimizer *optimizer = lana_vm_alloc(vm, sizeof(*optimizer));
+    if (optimizer == NULL) return LANA_ERR_OOM;
+    optimizer->name = derivation_string(vm, "sgd");
+    if (optimizer->name == NULL) return LANA_ERR_OOM;
+    optimizer->learning_rate = learning_rate;
+    optimizer->momentum = momentum;
+    optimizer->beta1 = 0.0;
+    optimizer->beta2 = 0.0;
+    optimizer->epsilon = 0.0;
+    *out = lana_value_optimizer(optimizer);
+    return LANA_OK;
+}
+
+static LanaError host_adam(LanaVM *vm, const Value *arguments, size_t argc, Value *out) {
+    double learning_rate = 0.001;
+    double beta1 = 0.9;
+    double beta2 = 0.999;
+    double epsilon = 1e-8;
+    if (argc > 4u) return LANA_ERR_TYPE;
+    if (argc >= 1u) {
+        if (arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        learning_rate = arguments[0].as.number;
+    }
+    if (argc >= 2u) {
+        if (arguments[1].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        beta1 = arguments[1].as.number;
+    }
+    if (argc >= 3u) {
+        if (arguments[2].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        beta2 = arguments[2].as.number;
+    }
+    if (argc >= 4u) {
+        if (arguments[3].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        epsilon = arguments[3].as.number;
+    }
+    if (!isfinite(learning_rate) || learning_rate <= 0.0 ||
+        !isfinite(beta1) || beta1 < 0.0 || beta1 >= 1.0 ||
+        !isfinite(beta2) || beta2 < 0.0 || beta2 >= 1.0 ||
+        !isfinite(epsilon) || epsilon <= 0.0)
+        return LANA_ERR_INVALID_PARAMETERS;
+    LanaOptimizer *optimizer = lana_vm_alloc(vm, sizeof(*optimizer));
+    if (optimizer == NULL) return LANA_ERR_OOM;
+    optimizer->name = derivation_string(vm, "adam");
+    if (optimizer->name == NULL) return LANA_ERR_OOM;
+    optimizer->learning_rate = learning_rate;
+    optimizer->momentum = 0.0;
+    optimizer->beta1 = beta1;
+    optimizer->beta2 = beta2;
+    optimizer->epsilon = epsilon;
+    *out = lana_value_optimizer(optimizer);
+    return LANA_OK;
+}
+
+static LanaError host_train(LanaVM *vm, const Value *arguments, size_t argc,
+                            uint32_t scratch_register, Value *out) {
+    /* train(model, data, loss, optimizer, initial_params, [epochs], [batch_size]) */
+    if (argc < 5u || argc > 7u) return LANA_ERR_TYPE;
+    const Value *model = &arguments[0];
+    const Value *data = &arguments[1];
+    const Value *loss = &arguments[2];
+    const Value *optimizer_value = &arguments[3];
+    const Value *initial_params = &arguments[4];
+    /* LIP-010: a live data root produces reactive parameters. Resolve the
+     * current dataset and remember whether the data was reactive so the result
+     * can be wired into the reactive DAG. */
+    bool data_is_reactive = data->reactive != NULL;
+    const Value *data_current = reactive_value(data);
+
+    if (model->type != VAL_FUNCTION || loss->type != VAL_FUNCTION)
+        return LANA_ERR_TYPE;
+    if (model->as.function >= vm->chunk->function_count ||
+        loss->as.function >= vm->chunk->function_count)
+        return LANA_ERR_TYPE;
+    if (vm->chunk->functions[model->as.function].arity != 2u ||
+        vm->chunk->functions[loss->as.function].arity != 2u)
+        return LANA_ERR_TYPE;
+
+    if (optimizer_value->type != VAL_OPTIMIZER || optimizer_value->as.optimizer == NULL)
+        return LANA_ERR_TYPE;
+    const LanaOptimizer *optimizer = optimizer_value->as.optimizer;
+
+    if (initial_params->type != VAL_TENSOR ||
+        (initial_params->as.tensor->is_complex && !initial_params->as.tensor->is_state))
+        return LANA_ERR_TYPE;
+
+    double epochs = 10.0;
+    double batch_size = 0.0; /* 0 = full dataset */
+    if (argc >= 6u) {
+        if (arguments[5].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        epochs = arguments[5].as.number;
+    }
+    if (argc >= 7u) {
+        if (arguments[6].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        batch_size = arguments[6].as.number;
+    }
+    if (!isfinite(epochs) || epochs < 1.0 || floor(epochs) != epochs ||
+        epochs > (double)SIZE_MAX)
+        return LANA_ERR_INVALID_PARAMETERS;
+    if (!isfinite(batch_size) || batch_size < 0.0 || floor(batch_size) != batch_size ||
+        batch_size > (double)SIZE_MAX)
+        return LANA_ERR_INVALID_PARAMETERS;
+
+    /* Authorized execution: `train` requires the `train` capability (LIP-012). */
+    if (!vm_has_named_capability(vm, "train")) return LANA_ERR_CAPABILITY;
+
+    size_t dataset_size;
+    if (data_current->type == VAL_ARRAY) {
+        dataset_size = data_current->as.array->count;
+    } else if (data_current->type == VAL_LAZY) {
+        if (data_current->as.lazy.function >= vm->chunk->function_count ||
+            vm->chunk->functions[data_current->as.lazy.function].arity != 1u)
+            return LANA_ERR_TYPE;
+        dataset_size = data_current->as.lazy.bound;
+    } else {
+        return LANA_ERR_TYPE;
+    }
+    if (dataset_size == 0u) return LANA_ERR_INVALID_PARAMETERS;
+
+    size_t batch = (size_t)batch_size;
+    if (batch == 0u || batch > dataset_size) batch = dataset_size;
+    size_t epoch_count = (size_t)epochs;
+
+    LanaTensor *params = tensor_copy_contiguous(vm, initial_params->as.tensor);
+    if (params == NULL) return LANA_ERR_OOM;
+    size_t param_count = tensor_element_count(params);
+    size_t param_components = params->is_complex ? 2u : 1u;
+
+    bool is_adam = strcmp(optimizer->name, "adam") == 0;
+    LanaTensor *velocity = NULL;
+    LanaTensor *m = NULL;
+    LanaTensor *v = NULL;
+    size_t adam_t = 0u;
+    if (is_adam) {
+        m = tensor_new(vm, params->ndim, params->shape, params->is_complex);
+        v = tensor_new(vm, params->ndim, params->shape, params->is_complex);
+        if (m == NULL || v == NULL) return LANA_ERR_OOM;
+    } else if (optimizer->momentum != 0.0) {
+        velocity = tensor_new(vm, params->ndim, params->shape, params->is_complex);
+        if (velocity == NULL) return LANA_ERR_OOM;
+    }
+
+    LanaTensor *batch_grad = tensor_new(vm, params->ndim, params->shape, params->is_complex);
+    if (batch_grad == NULL) return LANA_ERR_OOM;
+
+    size_t total_steps = epoch_count * ((dataset_size + batch - 1u) / batch);
+    LanaArray *steps = lana_vm_alloc(vm, sizeof(*steps));
+    if (steps == NULL) return LANA_ERR_OOM;
+    steps->count = 0u;
+    steps->capacity = total_steps;
+    steps->items = lana_vm_alloc(vm, total_steps * sizeof(*steps->items));
+    if (steps->items == NULL && total_steps > 0u) return LANA_ERR_OOM;
+
+    /* Root mutable locals so they survive function calls (which may collect). */
+    Value params_root = lana_value_tensor(params);
+    size_t root_base = lana_vm_root_push(vm, &params_root);
+    Value velocity_root = lana_value_null();
+    Value m_root = lana_value_null();
+    Value v_root = lana_value_null();
+    Value steps_root = lana_value_array(steps);
+    Value batch_grad_root = lana_value_tensor(batch_grad);
+    if (velocity != NULL) {
+        velocity_root = lana_value_tensor(velocity);
+        (void)lana_vm_root_push(vm, &velocity_root);
+    }
+    if (m != NULL) {
+        m_root = lana_value_tensor(m);
+        (void)lana_vm_root_push(vm, &m_root);
+    }
+    if (v != NULL) {
+        v_root = lana_value_tensor(v);
+        (void)lana_vm_root_push(vm, &v_root);
+    }
+    (void)lana_vm_root_push(vm, &steps_root);
+    (void)lana_vm_root_push(vm, &batch_grad_root);
+
+    LanaDerivation *params_deriv = NULL;
+
+    for (size_t epoch = 0; epoch < epoch_count; ++epoch) {
+        for (size_t batch_start = 0; batch_start < dataset_size; batch_start += batch) {
+            size_t batch_end = batch_start + batch;
+            if (batch_end > dataset_size) batch_end = dataset_size;
+            size_t batch_actual = batch_end - batch_start;
+
+            memset(batch_grad->data, 0, param_count * param_components * sizeof(double));
+
+            for (size_t i = batch_start; i < batch_end; ++i) {
+                Value pair;
+                LanaError error;
+                if (data_current->type == VAL_ARRAY) {
+                    pair = data_current->as.array->items[i];
+                } else {
+                    Value index_value = lana_value_number((double)i);
+                    error = run_function(vm, data_current->as.lazy.function, &index_value,
+                                         scratch_register, &pair);
+                    if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+                }
+                if (pair.type != VAL_ARRAY || pair.as.array->count != 2u) {
+                    lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+                }
+                const Value *x = &pair.as.array->items[0];
+                const Value *target = &pair.as.array->items[1];
+
+                LanaDerivation *leaf = record_derivation(vm, LANA_DERIVATION_OPERATION,
+                    "input", NULL, 0u, "", 0u, LANA_EXACTNESS_EXACT, "autodiff",
+                    LANA_DERIVATION_SUCCESS, "none");
+                if (leaf == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+                leaf->ad_a = params;
+                Value params_with_deriv = lana_value_tensor(params);
+                params_with_deriv.derivation = leaf;
+
+                vm->ad_recording = true;
+                Value y;
+                error = run_function2(vm, model->as.function, &params_with_deriv, x,
+                                      scratch_register, &y);
+                if (error == LANA_OK)
+                    error = run_function2(vm, loss->as.function, &y, target,
+                                          scratch_register, &y);
+                vm->ad_recording = false;
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+
+                if (y.type != VAL_NUMBER) { lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE; }
+                if (!isfinite(y.as.number)) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
+
+                LanaTensor *seed = tensor_new(vm, 0, NULL, false);
+                if (seed == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+                seed->data[0] = 1.0 / (double)batch_actual;
+                if (y.derivation != NULL) {
+                    error = ad_backward(vm, y.derivation, seed);
+                    if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+                }
+
+                LanaTensor *grad = leaf->ad_grad;
+                if (grad == NULL) {
+                    grad = tensor_new(vm, params->ndim, params->shape, params->is_complex);
+                    if (grad == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+                }
+                for (size_t k = 0; k < param_count * param_components; ++k) {
+                    if (!isfinite(grad->data[k])) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
+                    batch_grad->data[k] += grad->data[k];
+                }
+            }
+
+            /* Update params. */
+            LanaTensor *new_params = tensor_new(vm, params->ndim, params->shape, params->is_complex);
+            if (new_params == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            new_params->is_state = params->is_state;
+            if (is_adam) {
+                ++adam_t;
+                double bc1 = 1.0 - pow(optimizer->beta1, (double)adam_t);
+                double bc2 = 1.0 - pow(optimizer->beta2, (double)adam_t);
+                for (size_t k = 0; k < param_count * param_components; ++k) {
+                    double g = batch_grad->data[k];
+                    m->data[k] = optimizer->beta1 * m->data[k] + (1.0 - optimizer->beta1) * g;
+                    v->data[k] = optimizer->beta2 * v->data[k] + (1.0 - optimizer->beta2) * g * g;
+                    double m_hat = m->data[k] / bc1;
+                    double v_hat = v->data[k] / bc2;
+                    new_params->data[k] = params->data[k] -
+                        optimizer->learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon);
+                }
+            } else if (velocity != NULL) {
+                for (size_t k = 0; k < param_count * param_components; ++k) {
+                    velocity->data[k] = optimizer->momentum * velocity->data[k] -
+                        optimizer->learning_rate * batch_grad->data[k];
+                    new_params->data[k] = params->data[k] + velocity->data[k];
+                }
+            } else {
+                for (size_t k = 0; k < param_count * param_components; ++k) {
+                    new_params->data[k] = params->data[k] -
+                        optimizer->learning_rate * batch_grad->data[k];
+                }
+            }
+
+            /* Attach provenance to the post-update params: a derivation node
+             * whose inputs are the pre-update params and the batch gradient,
+             * with the batch identity in the details string. */
+            Value pre_value = lana_value_tensor(params);
+            pre_value.derivation = params_deriv;
+            LanaTensor *grad_snap = tensor_copy_contiguous(vm, batch_grad);
+            if (grad_snap == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            Value grad_value = lana_value_tensor(grad_snap);
+            const Value *inputs[2] = { &pre_value, &grad_value };
+            char details[64];
+            (void)snprintf(details, sizeof(details), "epoch=%zu batch=%zu",
+                           epoch, batch_start / batch);
+            LanaDerivation *step_deriv = record_derivation(vm, LANA_DERIVATION_OPERATION,
+                "train_step", inputs, 2u, "", 0u, LANA_EXACTNESS_EXACT, details,
+                LANA_DERIVATION_SUCCESS, "none");
+            if (step_deriv == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            Value new_params_value = lana_value_tensor(new_params);
+            new_params_value.derivation = step_deriv;
+
+            /* Build the step map. */
+            LanaMap *step_map;
+            LanaError error = lana_map_new(vm, 5u, &step_map);
+            if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            if ((error = map_put(vm, step_map, "epoch", lana_value_number((double)epoch))) != LANA_OK ||
+                (error = map_put(vm, step_map, "batch", lana_value_number((double)(batch_start / batch)))) != LANA_OK ||
+                (error = map_put(vm, step_map, "parameters", new_params_value)) != LANA_OK ||
+                (error = map_put(vm, step_map, "gradient", grad_value)) != LANA_OK) {
+                lana_vm_root_pop(vm, root_base); return error;
+            }
+
+            /* Optimizer state snapshot. */
+            LanaMap *state_map;
+            error = lana_map_new(vm, 3u, &state_map);
+            if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            if (is_adam) {
+                LanaTensor *m_snap = tensor_copy_contiguous(vm, m);
+                LanaTensor *v_snap = tensor_copy_contiguous(vm, v);
+                if (m_snap == NULL || v_snap == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+                if ((error = map_put(vm, state_map, "m", lana_value_tensor(m_snap))) != LANA_OK ||
+                    (error = map_put(vm, state_map, "v", lana_value_tensor(v_snap))) != LANA_OK ||
+                    (error = map_put(vm, state_map, "t", lana_value_number((double)adam_t))) != LANA_OK) {
+                    lana_vm_root_pop(vm, root_base); return error;
+                }
+            } else if (velocity != NULL) {
+                LanaTensor *vel_snap = tensor_copy_contiguous(vm, velocity);
+                if (vel_snap == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+                if ((error = map_put(vm, state_map, "velocity", lana_value_tensor(vel_snap))) != LANA_OK) {
+                    lana_vm_root_pop(vm, root_base); return error;
+                }
+            }
+            if ((error = map_put(vm, step_map, "optimizer_state", lana_value_map(state_map))) != LANA_OK) {
+                lana_vm_root_pop(vm, root_base); return error;
+            }
+
+            steps->items[steps->count++] = lana_value_map(step_map);
+
+            params = new_params;
+            params_root.as.tensor = new_params;
+            params_deriv = step_deriv;
+        }
+    }
+
+    lana_vm_root_pop(vm, root_base);
+
+    LanaTrainingResult *result = lana_vm_alloc(vm, sizeof(*result));
+    if (result == NULL) return LANA_ERR_OOM;
+    result->params = params;
+    result->steps = steps;
+    result->model_function = model->as.function;
+    result->loss_function = loss->as.function;
+    result->optimizer = (LanaOptimizer *)optimizer;
+    /* LIP-014: keep the resolved dataset and effective batch size so `resume`
+     * can continue the run from any step. The dataset is immutable, so a
+     * shallow copy (sharing the array/lazy payload) is sufficient. */
+    Value *data_copy = lana_vm_alloc(vm, sizeof(*data_copy));
+    if (data_copy == NULL) return LANA_ERR_OOM;
+    *data_copy = *data_current;
+    data_copy->reactive = NULL;
+    data_copy->claim = NULL;
+    data_copy->planned_effect = NULL;
+    result->data = data_copy;
+    result->batch_size = batch;
+    Value result_value = lana_value_training_result(result);
+    if (data_is_reactive) {
+        /* Wire the training result into the reactive DAG: a TRAIN node whose
+         * input is the data root. On `observe` the node is recomputed with one
+         * incremental optimizer step over the new observation. */
+        LanaReactive *node = lana_vm_alloc(vm, sizeof(*node));
+        if (node == NULL) return LANA_ERR_OOM;
+        memset(node, 0, sizeof(*node));
+        node->id = vm->next_reactive_id++;
+        node->kind = LANA_REACTIVE_TRAIN;
+        node->revision = vm->revision;
+        node->exactness = data->reactive->exactness;
+        node->relationship = LANA_RELATION_EXACT;
+        node->dependency_id = data->reactive->dependency_id;
+        node->inputs[0] = data->reactive;
+        data->reactive->is_training_data = true;
+        LanaError error = allocate_plain_value(vm, &result_value, &node->current);
+        if (error != LANA_OK) return error;
+        result_value.reactive = node;
+    }
+    *out = result_value;
+    return LANA_OK;
+}
+
+/* ===== LIP-010 incremental / online learning ===== */
+
+/* Run `step_count` incremental optimizer steps over `data_current` (an array
+ * of [x, target] pairs or a lazy dataset), extending the prior training
+ * result's step history. The prior result is unchanged; a new
+ * VAL_TRAINING_RESULT is returned. Shared by `update` (explicit) and the
+ * reactive `observe` path. */
+static LanaError incremental_train(LanaVM *vm, const LanaTrainingResult *prior,
+                                   const Value *data_current, size_t dataset_size,
+                                   size_t step_count, uint32_t scratch_register,
+                                   Value *out) {
+    if (prior == NULL || prior->params == NULL || prior->steps == NULL ||
+        prior->optimizer == NULL)
+        return LANA_ERR_TYPE;
+    if (prior->model_function >= vm->chunk->function_count ||
+        prior->loss_function >= vm->chunk->function_count)
+        return LANA_ERR_TYPE;
+    if (vm->chunk->functions[prior->model_function].arity != 2u ||
+        vm->chunk->functions[prior->loss_function].arity != 2u)
+        return LANA_ERR_TYPE;
+    if (dataset_size == 0u) return LANA_ERR_INVALID_PARAMETERS;
+
+    const LanaOptimizer *optimizer = prior->optimizer;
+    bool is_adam = strcmp(optimizer->name, "adam") == 0;
+    size_t prior_count = prior->steps->count;
+
+    /* Recover the optimizer state and params provenance from the last step
+     * map, so the incremental run resumes exactly where batch training left
+     * off. */
+    LanaTensor *m = NULL;
+    LanaTensor *v = NULL;
+    LanaTensor *velocity = NULL;
+    size_t adam_t = 0u;
+    LanaDerivation *params_deriv = NULL;
+    if (prior_count > 0u) {
+        Value last_step = prior->steps->items[prior_count - 1u];
+        if (last_step.type != VAL_MAP || last_step.as.map == NULL)
+            return LANA_ERR_TYPE;
+        Value state_value;
+        if (lana_map_get(last_step.as.map, "optimizer_state", &state_value) != LANA_OK ||
+            state_value.type != VAL_MAP || state_value.as.map == NULL)
+            return LANA_ERR_TYPE;
+        if (is_adam) {
+            Value m_value, v_value, t_value;
+            if (lana_map_get(state_value.as.map, "m", &m_value) != LANA_OK ||
+                lana_map_get(state_value.as.map, "v", &v_value) != LANA_OK ||
+                lana_map_get(state_value.as.map, "t", &t_value) != LANA_OK)
+                return LANA_ERR_TYPE;
+            if (m_value.type != VAL_TENSOR || v_value.type != VAL_TENSOR ||
+                t_value.type != VAL_NUMBER)
+                return LANA_ERR_TYPE;
+            m = tensor_copy_contiguous(vm, m_value.as.tensor);
+            v = tensor_copy_contiguous(vm, v_value.as.tensor);
+            if (m == NULL || v == NULL) return LANA_ERR_OOM;
+            adam_t = (size_t)t_value.as.number;
+        } else if (optimizer->momentum != 0.0) {
+            Value vel_value;
+            if (lana_map_get(state_value.as.map, "velocity", &vel_value) != LANA_OK ||
+                vel_value.type != VAL_TENSOR)
+                return LANA_ERR_TYPE;
+            velocity = tensor_copy_contiguous(vm, vel_value.as.tensor);
+            if (velocity == NULL) return LANA_ERR_OOM;
+        }
+        Value params_value;
+        if (lana_map_get(last_step.as.map, "parameters", &params_value) != LANA_OK)
+            return LANA_ERR_TYPE;
+        params_deriv = params_value.derivation;
+    } else if (is_adam) {
+        m = tensor_new(vm, prior->params->ndim, prior->params->shape, false);
+        v = tensor_new(vm, prior->params->ndim, prior->params->shape, false);
+        if (m == NULL || v == NULL) return LANA_ERR_OOM;
+    } else if (optimizer->momentum != 0.0) {
+        velocity = tensor_new(vm, prior->params->ndim, prior->params->shape, false);
+        if (velocity == NULL) return LANA_ERR_OOM;
+    }
+
+    LanaTensor *params = prior->params;
+    size_t param_count = tensor_element_count(params);
+
+    LanaTensor *batch_grad = tensor_new(vm, params->ndim, params->shape, false);
+    if (batch_grad == NULL) return LANA_ERR_OOM;
+
+    LanaArray *steps = lana_vm_alloc(vm, sizeof(*steps));
+    if (steps == NULL) return LANA_ERR_OOM;
+    steps->count = 0u;
+    steps->capacity = prior_count + step_count;
+    steps->items = lana_vm_alloc(vm, (prior_count + step_count) * sizeof(*steps->items));
+    if (steps->items == NULL && prior_count + step_count > 0u) return LANA_ERR_OOM;
+    for (size_t i = 0u; i < prior_count; ++i)
+        steps->items[steps->count++] = prior->steps->items[i];
+
+    /* Root mutable locals so they survive function calls (which may collect). */
+    Value params_root = lana_value_tensor(params);
+    size_t root_base = lana_vm_root_push(vm, &params_root);
+    Value velocity_root = lana_value_null();
+    Value m_root = lana_value_null();
+    Value v_root = lana_value_null();
+    Value steps_root = lana_value_array(steps);
+    Value batch_grad_root = lana_value_tensor(batch_grad);
+    Value data_root = *data_current;
+    if (velocity != NULL) {
+        velocity_root = lana_value_tensor(velocity);
+        (void)lana_vm_root_push(vm, &velocity_root);
+    }
+    if (m != NULL) {
+        m_root = lana_value_tensor(m);
+        (void)lana_vm_root_push(vm, &m_root);
+    }
+    if (v != NULL) {
+        v_root = lana_value_tensor(v);
+        (void)lana_vm_root_push(vm, &v_root);
+    }
+    (void)lana_vm_root_push(vm, &steps_root);
+    (void)lana_vm_root_push(vm, &batch_grad_root);
+    (void)lana_vm_root_push(vm, &data_root);
+
+    for (size_t step = 0u; step < step_count; ++step) {
+        memset(batch_grad->data, 0, param_count * sizeof(double));
+
+        for (size_t i = 0u; i < dataset_size; ++i) {
+            Value pair;
+            LanaError error;
+            if (data_current->type == VAL_ARRAY) {
+                pair = data_current->as.array->items[i];
+            } else {
+                Value index_value = lana_value_number((double)i);
+                error = run_function(vm, data_current->as.lazy.function, &index_value,
+                                     scratch_register, &pair);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            }
+            if (pair.type != VAL_ARRAY || pair.as.array->count != 2u) {
+                lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+            }
+            const Value *x = &pair.as.array->items[0];
+            const Value *target = &pair.as.array->items[1];
+
+            LanaDerivation *leaf = record_derivation(vm, LANA_DERIVATION_OPERATION,
+                "input", NULL, 0u, "", 0u, LANA_EXACTNESS_EXACT, "autodiff",
+                LANA_DERIVATION_SUCCESS, "none");
+            if (leaf == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            leaf->ad_a = params;
+            Value params_with_deriv = lana_value_tensor(params);
+            params_with_deriv.derivation = leaf;
+
+            vm->ad_recording = true;
+            Value y;
+            error = run_function2(vm, prior->model_function, &params_with_deriv, x,
+                                  scratch_register, &y);
+            if (error == LANA_OK)
+                error = run_function2(vm, prior->loss_function, &y, target,
+                                      scratch_register, &y);
+            vm->ad_recording = false;
+            if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+
+            if (y.type != VAL_NUMBER) { lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE; }
+            if (!isfinite(y.as.number)) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
+
+            LanaTensor *seed = tensor_new(vm, 0, NULL, false);
+            if (seed == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            seed->data[0] = 1.0 / (double)dataset_size;
+            if (y.derivation != NULL) {
+                error = ad_backward(vm, y.derivation, seed);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            }
+
+            LanaTensor *grad = leaf->ad_grad;
+            if (grad == NULL) {
+                grad = tensor_new(vm, params->ndim, params->shape, false);
+                if (grad == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            }
+            for (size_t k = 0; k < param_count; ++k) {
+                if (!isfinite(grad->data[k])) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
+                batch_grad->data[k] += grad->data[k];
+            }
+        }
+
+        /* Update params. */
+        LanaTensor *new_params = tensor_new(vm, params->ndim, params->shape, false);
+        if (new_params == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+        if (is_adam) {
+            ++adam_t;
+            double bc1 = 1.0 - pow(optimizer->beta1, (double)adam_t);
+            double bc2 = 1.0 - pow(optimizer->beta2, (double)adam_t);
+            for (size_t k = 0; k < param_count; ++k) {
+                double g = batch_grad->data[k];
+                m->data[k] = optimizer->beta1 * m->data[k] + (1.0 - optimizer->beta1) * g;
+                v->data[k] = optimizer->beta2 * v->data[k] + (1.0 - optimizer->beta2) * g * g;
+                double m_hat = m->data[k] / bc1;
+                double v_hat = v->data[k] / bc2;
+                new_params->data[k] = params->data[k] -
+                    optimizer->learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon);
+            }
+        } else if (velocity != NULL) {
+            for (size_t k = 0; k < param_count; ++k) {
+                velocity->data[k] = optimizer->momentum * velocity->data[k] -
+                    optimizer->learning_rate * batch_grad->data[k];
+                new_params->data[k] = params->data[k] + velocity->data[k];
+            }
+        } else {
+            for (size_t k = 0; k < param_count; ++k) {
+                new_params->data[k] = params->data[k] -
+                    optimizer->learning_rate * batch_grad->data[k];
+            }
+        }
+
+        /* Attach provenance to the post-update params. */
+        Value pre_value = lana_value_tensor(params);
+        pre_value.derivation = params_deriv;
+        LanaTensor *grad_snap = tensor_copy_contiguous(vm, batch_grad);
+        if (grad_snap == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+        Value grad_value = lana_value_tensor(grad_snap);
+        const Value *inputs[2] = { &pre_value, &grad_value };
+        char details[64];
+        (void)snprintf(details, sizeof(details), "epoch=%zu batch=%zu",
+                       prior_count + step, (size_t)0u);
+        LanaDerivation *step_deriv = record_derivation(vm, LANA_DERIVATION_OPERATION,
+            "train_step", inputs, 2u, "", 0u, LANA_EXACTNESS_EXACT, details,
+            LANA_DERIVATION_SUCCESS, "none");
+        if (step_deriv == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+        Value new_params_value = lana_value_tensor(new_params);
+        new_params_value.derivation = step_deriv;
+
+        /* Build the step map. */
+        LanaMap *step_map;
+        LanaError error = lana_map_new(vm, 5u, &step_map);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        if ((error = map_put(vm, step_map, "epoch", lana_value_number((double)(prior_count + step)))) != LANA_OK ||
+            (error = map_put(vm, step_map, "batch", lana_value_number(0.0))) != LANA_OK ||
+            (error = map_put(vm, step_map, "parameters", new_params_value)) != LANA_OK ||
+            (error = map_put(vm, step_map, "gradient", grad_value)) != LANA_OK) {
+            lana_vm_root_pop(vm, root_base); return error;
+        }
+
+        /* Optimizer state snapshot. */
+        LanaMap *state_map;
+        error = lana_map_new(vm, 3u, &state_map);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        if (is_adam) {
+            LanaTensor *m_snap = tensor_copy_contiguous(vm, m);
+            LanaTensor *v_snap = tensor_copy_contiguous(vm, v);
+            if (m_snap == NULL || v_snap == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            if ((error = map_put(vm, state_map, "m", lana_value_tensor(m_snap))) != LANA_OK ||
+                (error = map_put(vm, state_map, "v", lana_value_tensor(v_snap))) != LANA_OK ||
+                (error = map_put(vm, state_map, "t", lana_value_number((double)adam_t))) != LANA_OK) {
+                lana_vm_root_pop(vm, root_base); return error;
+            }
+        } else if (velocity != NULL) {
+            LanaTensor *vel_snap = tensor_copy_contiguous(vm, velocity);
+            if (vel_snap == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            if ((error = map_put(vm, state_map, "velocity", lana_value_tensor(vel_snap))) != LANA_OK) {
+                lana_vm_root_pop(vm, root_base); return error;
+            }
+        }
+        if ((error = map_put(vm, step_map, "optimizer_state", lana_value_map(state_map))) != LANA_OK) {
+            lana_vm_root_pop(vm, root_base); return error;
+        }
+
+        steps->items[steps->count++] = lana_value_map(step_map);
+
+        params = new_params;
+        params_root.as.tensor = new_params;
+        params_deriv = step_deriv;
+    }
+
+    lana_vm_root_pop(vm, root_base);
+
+    LanaTrainingResult *result = lana_vm_alloc(vm, sizeof(*result));
+    if (result == NULL) return LANA_ERR_OOM;
+    result->params = params;
+    result->steps = steps;
+    result->model_function = prior->model_function;
+    result->loss_function = prior->loss_function;
+    result->optimizer = prior->optimizer;
+    result->data = prior->data;
+    result->batch_size = prior->batch_size;
+    *out = lana_value_training_result(result);
+    return LANA_OK;
+}
+
+/* update(model, new_data, steps) -> VAL_TRAINING_RESULT. The prior result is
+ * unchanged; the returned result extends its step history with `steps`
+ * incremental optimizer steps over `new_data`. */
+static LanaError host_update(LanaVM *vm, const Value *arguments, size_t argc,
+                             uint32_t scratch_register, Value *out) {
+    if (argc != 3u) return LANA_ERR_TYPE;
+    const Value *model = &arguments[0];
+    const Value *new_data = &arguments[1];
+    const Value *steps_value = &arguments[2];
+
+    if (model->type != VAL_TRAINING_RESULT || model->as.training_result == NULL)
+        return LANA_ERR_TYPE;
+    const LanaTrainingResult *prior = model->as.training_result;
+
+    if (steps_value->type != VAL_NUMBER) return LANA_ERR_TYPE;
+    double steps = steps_value->as.number;
+    if (!isfinite(steps) || steps < 1.0 || floor(steps) != steps ||
+        steps > (double)SIZE_MAX)
+        return LANA_ERR_INVALID_PARAMETERS;
+    size_t step_count = (size_t)steps;
+
+    /* Authorized execution: `update` is the non-reactive form of `train`. */
+    if (!vm_has_named_capability(vm, "train")) return LANA_ERR_CAPABILITY;
+
+    const Value *data_current = reactive_value(new_data);
+    size_t dataset_size;
+    if (data_current->type == VAL_ARRAY) {
+        dataset_size = data_current->as.array->count;
+    } else if (data_current->type == VAL_LAZY) {
+        if (data_current->as.lazy.function >= vm->chunk->function_count ||
+            vm->chunk->functions[data_current->as.lazy.function].arity != 1u)
+            return LANA_ERR_TYPE;
+        dataset_size = data_current->as.lazy.bound;
+    } else {
+        return LANA_ERR_TYPE;
+    }
+    if (dataset_size == 0u) return LANA_ERR_INVALID_PARAMETERS;
+
+    return incremental_train(vm, prior, data_current, dataset_size, step_count,
+                             scratch_register, out);
+}
+
+/* Recompute a LANA_REACTIVE_TRAIN node on `observe`: run one incremental
+ * optimizer step over the new observation (a [x, target] point). */
+static LanaError reactive_train_recompute(LanaVM *vm, LanaReactive *node,
+                                          const Value *observation,
+                                          uint32_t scratch_register, Value *out) {
+    if (node->current == NULL || node->current->type != VAL_TRAINING_RESULT ||
+        node->current->as.training_result == NULL)
+        return LANA_ERR_TYPE;
+    const LanaTrainingResult *prior = node->current->as.training_result;
+
+    LanaArray *single = lana_vm_alloc(vm, sizeof(*single));
+    if (single == NULL) return LANA_ERR_OOM;
+    single->count = single->capacity = 1u;
+    single->items = lana_vm_alloc(vm, sizeof(*single->items));
+    if (single->items == NULL) return LANA_ERR_OOM;
+    single->items[0] = *observation;
+    Value single_value = lana_value_array(single);
+
+    size_t root_base = lana_vm_root_push(vm, &single_value);
+    LanaError error = incremental_train(vm, prior, &single_value, 1u, 1u,
+                                        scratch_register, out);
+    lana_vm_root_pop(vm, root_base);
+    return error;
+}
+
+/* ===== LIP-014 whole-run reproducibility and resumability ===== */
+
+/* resume(run, i) -> VAL_TRAINING_RESULT. The original run is unchanged; the
+ * returned run continues from step `i` with the parameters and optimizer state
+ * the original run had at that step, recomputing steps `i+1..` byte-identically
+ * to the original. The training loop is deterministic (no RNG consumption), so
+ * the continuation is byte-identical by construction given the same data, batch
+ * size, and recovered state. */
+static LanaError host_resume(LanaVM *vm, const Value *arguments, size_t argc,
+                             uint32_t scratch_register, Value *out) {
+    if (argc != 2u) return LANA_ERR_TYPE;
+    const Value *run = &arguments[0];
+    const Value *index_value = &arguments[1];
+
+    if (run->type != VAL_TRAINING_RESULT || run->as.training_result == NULL)
+        return LANA_ERR_TYPE;
+    const LanaTrainingResult *prior = run->as.training_result;
+
+    /* Step index must be a nonnegative integer. */
+    if (index_value->type != VAL_NUMBER) return LANA_ERR_INVALID_PARAMETERS;
+    double index = index_value->as.number;
+    if (!isfinite(index) || index < 0.0 || floor(index) != index ||
+        index > (double)SIZE_MAX)
+        return LANA_ERR_INVALID_PARAMETERS;
+    size_t step_index = (size_t)index;
+
+    if (prior->params == NULL || prior->steps == NULL || prior->optimizer == NULL)
+        return LANA_ERR_TYPE;
+    if (prior->model_function >= vm->chunk->function_count ||
+        prior->loss_function >= vm->chunk->function_count)
+        return LANA_ERR_TYPE;
+    if (vm->chunk->functions[prior->model_function].arity != 2u ||
+        vm->chunk->functions[prior->loss_function].arity != 2u)
+        return LANA_ERR_TYPE;
+
+    /* Authorized execution: `resume` is the batch counterpart of `train`. */
+    if (!vm_has_named_capability(vm, "train")) return LANA_ERR_CAPABILITY;
+
+    size_t total_steps = prior->steps->count;
+    if (step_index >= total_steps) return LANA_ERR_KEY;
+
+    /* Resolve the stored dataset and effective batch size. */
+    const Value *data_current = prior->data;
+    if (data_current == NULL) return LANA_ERR_TYPE;
+    size_t dataset_size;
+    if (data_current->type == VAL_ARRAY) {
+        dataset_size = data_current->as.array->count;
+    } else if (data_current->type == VAL_LAZY) {
+        if (data_current->as.lazy.function >= vm->chunk->function_count ||
+            vm->chunk->functions[data_current->as.lazy.function].arity != 1u)
+            return LANA_ERR_TYPE;
+        dataset_size = data_current->as.lazy.bound;
+    } else {
+        return LANA_ERR_TYPE;
+    }
+    if (dataset_size == 0u) return LANA_ERR_INVALID_PARAMETERS;
+
+    size_t batch = prior->batch_size;
+    if (batch == 0u || batch > dataset_size) batch = dataset_size;
+    size_t batches_per_epoch = (dataset_size + batch - 1u) / batch;
+
+    const LanaOptimizer *optimizer = prior->optimizer;
+    bool is_adam = strcmp(optimizer->name, "adam") == 0;
+
+    /* Recover the parameters and optimizer state from the step map at
+     * `step_index`, so the continuation resumes exactly where the original run
+     * was at that step. */
+    LanaTensor *m = NULL;
+    LanaTensor *v = NULL;
+    LanaTensor *velocity = NULL;
+    size_t adam_t = 0u;
+    LanaDerivation *params_deriv = NULL;
+    LanaTensor *params = NULL;
+
+    Value step_value = prior->steps->items[step_index];
+    if (step_value.type != VAL_MAP || step_value.as.map == NULL)
+        return LANA_ERR_TYPE;
+    Value state_value;
+    if (lana_map_get(step_value.as.map, "optimizer_state", &state_value) != LANA_OK ||
+        state_value.type != VAL_MAP || state_value.as.map == NULL)
+        return LANA_ERR_TYPE;
+    if (is_adam) {
+        Value m_value, v_value, t_value;
+        if (lana_map_get(state_value.as.map, "m", &m_value) != LANA_OK ||
+            lana_map_get(state_value.as.map, "v", &v_value) != LANA_OK ||
+            lana_map_get(state_value.as.map, "t", &t_value) != LANA_OK)
+            return LANA_ERR_TYPE;
+        if (m_value.type != VAL_TENSOR || v_value.type != VAL_TENSOR ||
+            t_value.type != VAL_NUMBER)
+            return LANA_ERR_TYPE;
+        m = tensor_copy_contiguous(vm, m_value.as.tensor);
+        v = tensor_copy_contiguous(vm, v_value.as.tensor);
+        if (m == NULL || v == NULL) return LANA_ERR_OOM;
+        adam_t = (size_t)t_value.as.number;
+    } else if (optimizer->momentum != 0.0) {
+        Value vel_value;
+        if (lana_map_get(state_value.as.map, "velocity", &vel_value) != LANA_OK ||
+            vel_value.type != VAL_TENSOR)
+            return LANA_ERR_TYPE;
+        velocity = tensor_copy_contiguous(vm, vel_value.as.tensor);
+        if (velocity == NULL) return LANA_ERR_OOM;
+    }
+    Value params_value;
+    if (lana_map_get(step_value.as.map, "parameters", &params_value) != LANA_OK ||
+        params_value.type != VAL_TENSOR)
+        return LANA_ERR_TYPE;
+    params = tensor_copy_contiguous(vm, params_value.as.tensor);
+    if (params == NULL) return LANA_ERR_OOM;
+    params_deriv = params_value.derivation;
+
+    size_t param_count = tensor_element_count(params);
+
+    LanaTensor *batch_grad = tensor_new(vm, params->ndim, params->shape, false);
+    if (batch_grad == NULL) return LANA_ERR_OOM;
+
+    /* New step history: copy steps 0..step_index, recompute step_index+1.. */
+    LanaArray *steps = lana_vm_alloc(vm, sizeof(*steps));
+    if (steps == NULL) return LANA_ERR_OOM;
+    steps->count = 0u;
+    steps->capacity = total_steps;
+    steps->items = lana_vm_alloc(vm, total_steps * sizeof(*steps->items));
+    if (steps->items == NULL && total_steps > 0u) return LANA_ERR_OOM;
+    for (size_t i = 0u; i <= step_index; ++i)
+        steps->items[steps->count++] = prior->steps->items[i];
+
+    /* Root mutable locals so they survive function calls (which may collect). */
+    Value params_root = lana_value_tensor(params);
+    size_t root_base = lana_vm_root_push(vm, &params_root);
+    Value velocity_root = lana_value_null();
+    Value m_root = lana_value_null();
+    Value v_root = lana_value_null();
+    Value steps_root = lana_value_array(steps);
+    Value batch_grad_root = lana_value_tensor(batch_grad);
+    Value data_root = *data_current;
+    if (velocity != NULL) {
+        velocity_root = lana_value_tensor(velocity);
+        (void)lana_vm_root_push(vm, &velocity_root);
+    }
+    if (m != NULL) {
+        m_root = lana_value_tensor(m);
+        (void)lana_vm_root_push(vm, &m_root);
+    }
+    if (v != NULL) {
+        v_root = lana_value_tensor(v);
+        (void)lana_vm_root_push(vm, &v_root);
+    }
+    (void)lana_vm_root_push(vm, &steps_root);
+    (void)lana_vm_root_push(vm, &batch_grad_root);
+    (void)lana_vm_root_push(vm, &data_root);
+
+    for (size_t j = step_index + 1u; j < total_steps; ++j) {
+        size_t epoch = j / batches_per_epoch;
+        size_t batch_index = j % batches_per_epoch;
+        size_t batch_start = batch_index * batch;
+        size_t batch_end = batch_start + batch;
+        if (batch_end > dataset_size) batch_end = dataset_size;
+        size_t batch_actual = batch_end - batch_start;
+
+        memset(batch_grad->data, 0, param_count * sizeof(double));
+
+        for (size_t i = batch_start; i < batch_end; ++i) {
+            Value pair;
+            LanaError error;
+            if (data_current->type == VAL_ARRAY) {
+                pair = data_current->as.array->items[i];
+            } else {
+                Value index_value = lana_value_number((double)i);
+                error = run_function(vm, data_current->as.lazy.function, &index_value,
+                                     scratch_register, &pair);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            }
+            if (pair.type != VAL_ARRAY || pair.as.array->count != 2u) {
+                lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+            }
+            const Value *x = &pair.as.array->items[0];
+            const Value *target = &pair.as.array->items[1];
+
+            LanaDerivation *leaf = record_derivation(vm, LANA_DERIVATION_OPERATION,
+                "input", NULL, 0u, "", 0u, LANA_EXACTNESS_EXACT, "autodiff",
+                LANA_DERIVATION_SUCCESS, "none");
+            if (leaf == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            leaf->ad_a = params;
+            Value params_with_deriv = lana_value_tensor(params);
+            params_with_deriv.derivation = leaf;
+
+            vm->ad_recording = true;
+            Value y;
+            error = run_function2(vm, prior->model_function, &params_with_deriv, x,
+                                  scratch_register, &y);
+            if (error == LANA_OK)
+                error = run_function2(vm, prior->loss_function, &y, target,
+                                      scratch_register, &y);
+            vm->ad_recording = false;
+            if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+
+            if (y.type != VAL_NUMBER) { lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE; }
+            if (!isfinite(y.as.number)) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
+
+            LanaTensor *seed = tensor_new(vm, 0, NULL, false);
+            if (seed == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            seed->data[0] = 1.0 / (double)batch_actual;
+            if (y.derivation != NULL) {
+                error = ad_backward(vm, y.derivation, seed);
+                if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+            }
+
+            LanaTensor *grad = leaf->ad_grad;
+            if (grad == NULL) {
+                grad = tensor_new(vm, params->ndim, params->shape, false);
+                if (grad == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            }
+            for (size_t k = 0; k < param_count; ++k) {
+                if (!isfinite(grad->data[k])) { lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS; }
+                batch_grad->data[k] += grad->data[k];
+            }
+        }
+
+        /* Update params. */
+        LanaTensor *new_params = tensor_new(vm, params->ndim, params->shape, false);
+        if (new_params == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+        if (is_adam) {
+            ++adam_t;
+            double bc1 = 1.0 - pow(optimizer->beta1, (double)adam_t);
+            double bc2 = 1.0 - pow(optimizer->beta2, (double)adam_t);
+            for (size_t k = 0; k < param_count; ++k) {
+                double g = batch_grad->data[k];
+                m->data[k] = optimizer->beta1 * m->data[k] + (1.0 - optimizer->beta1) * g;
+                v->data[k] = optimizer->beta2 * v->data[k] + (1.0 - optimizer->beta2) * g * g;
+                double m_hat = m->data[k] / bc1;
+                double v_hat = v->data[k] / bc2;
+                new_params->data[k] = params->data[k] -
+                    optimizer->learning_rate * m_hat / (sqrt(v_hat) + optimizer->epsilon);
+            }
+        } else if (velocity != NULL) {
+            for (size_t k = 0; k < param_count; ++k) {
+                velocity->data[k] = optimizer->momentum * velocity->data[k] -
+                    optimizer->learning_rate * batch_grad->data[k];
+                new_params->data[k] = params->data[k] + velocity->data[k];
+            }
+        } else {
+            for (size_t k = 0; k < param_count; ++k) {
+                new_params->data[k] = params->data[k] -
+                    optimizer->learning_rate * batch_grad->data[k];
+            }
+        }
+
+        /* Non-finite optimizer state after a step → INVALID_PARAMETERS. */
+        if (is_adam) {
+            for (size_t k = 0; k < param_count; ++k) {
+                if (!isfinite(m->data[k]) || !isfinite(v->data[k])) {
+                    lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS;
+                }
+            }
+        } else if (velocity != NULL) {
+            for (size_t k = 0; k < param_count; ++k) {
+                if (!isfinite(velocity->data[k])) {
+                    lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS;
+                }
+            }
+        }
+
+        /* Attach provenance to the post-update params. */
+        Value pre_value = lana_value_tensor(params);
+        pre_value.derivation = params_deriv;
+        LanaTensor *grad_snap = tensor_copy_contiguous(vm, batch_grad);
+        if (grad_snap == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+        Value grad_value = lana_value_tensor(grad_snap);
+        const Value *inputs[2] = { &pre_value, &grad_value };
+        char details[64];
+        (void)snprintf(details, sizeof(details), "epoch=%zu batch=%zu",
+                       epoch, batch_index);
+        LanaDerivation *step_deriv = record_derivation(vm, LANA_DERIVATION_OPERATION,
+            "train_step", inputs, 2u, "", 0u, LANA_EXACTNESS_EXACT, details,
+            LANA_DERIVATION_SUCCESS, "none");
+        if (step_deriv == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+        Value new_params_value = lana_value_tensor(new_params);
+        new_params_value.derivation = step_deriv;
+
+        /* Build the step map. */
+        LanaMap *step_map;
+        LanaError error = lana_map_new(vm, 5u, &step_map);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        if ((error = map_put(vm, step_map, "epoch", lana_value_number((double)epoch))) != LANA_OK ||
+            (error = map_put(vm, step_map, "batch", lana_value_number((double)batch_index))) != LANA_OK ||
+            (error = map_put(vm, step_map, "parameters", new_params_value)) != LANA_OK ||
+            (error = map_put(vm, step_map, "gradient", grad_value)) != LANA_OK) {
+            lana_vm_root_pop(vm, root_base); return error;
+        }
+
+        /* Optimizer state snapshot. */
+        LanaMap *state_map;
+        error = lana_map_new(vm, 3u, &state_map);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        if (is_adam) {
+            LanaTensor *m_snap = tensor_copy_contiguous(vm, m);
+            LanaTensor *v_snap = tensor_copy_contiguous(vm, v);
+            if (m_snap == NULL || v_snap == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            if ((error = map_put(vm, state_map, "m", lana_value_tensor(m_snap))) != LANA_OK ||
+                (error = map_put(vm, state_map, "v", lana_value_tensor(v_snap))) != LANA_OK ||
+                (error = map_put(vm, state_map, "t", lana_value_number((double)adam_t))) != LANA_OK) {
+                lana_vm_root_pop(vm, root_base); return error;
+            }
+        } else if (velocity != NULL) {
+            LanaTensor *vel_snap = tensor_copy_contiguous(vm, velocity);
+            if (vel_snap == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+            if ((error = map_put(vm, state_map, "velocity", lana_value_tensor(vel_snap))) != LANA_OK) {
+                lana_vm_root_pop(vm, root_base); return error;
+            }
+        }
+        if ((error = map_put(vm, step_map, "optimizer_state", lana_value_map(state_map))) != LANA_OK) {
+            lana_vm_root_pop(vm, root_base); return error;
+        }
+
+        steps->items[steps->count++] = lana_value_map(step_map);
+
+        params = new_params;
+        params_root.as.tensor = new_params;
+        params_deriv = step_deriv;
+    }
+
+    lana_vm_root_pop(vm, root_base);
+
+    LanaTrainingResult *result = lana_vm_alloc(vm, sizeof(*result));
+    if (result == NULL) return LANA_ERR_OOM;
+    result->params = params;
+    result->steps = steps;
+    result->model_function = prior->model_function;
+    result->loss_function = prior->loss_function;
+    result->optimizer = prior->optimizer;
+    result->data = prior->data;
+    result->batch_size = prior->batch_size;
+    Value result_value = lana_value_training_result(result);
+
+    /* Record the resumption point as a run-level derivation. */
+    const Value *resume_inputs[1] = { run };
+    char resume_details[64];
+    (void)snprintf(resume_details, sizeof(resume_details), "step=%zu", step_index);
+    LanaError error = attach_derivation(vm, &result_value, LANA_DERIVATION_OPERATION,
+        "resume", resume_inputs, 1u, "", 0u, LANA_EXACTNESS_EXACT, resume_details);
+    if (error != LANA_OK) return error;
+
+    *out = result_value;
+    return LANA_OK;
+}
+
+/* ===== LIP-009 Bayesian inference host calls ===== */
+
+/* A standard-normal draw via the Box-Muller transform, mirroring the cached
+ * append-parameter sampler. Deterministic given the VM RNG. */
+static double gaussian_sample(LanaVM *vm) {
+    for (;;) {
+        double x = uniform_signed(vm);
+        double y = uniform_signed(vm);
+        double radius_squared = x * x + y * y;
+        if (radius_squared <= 0.0 || radius_squared >= 1.0) continue;
+        return x * sqrt(-2.0 * log(radius_squared) / radius_squared);
+    }
+}
+
+/* A uniform draw in [0, 1). */
+static double uniform01(LanaVM *vm) {
+    return (double)lana_vm_random(vm) / 4294967296.0;
+}
+
+/* The Gaussian log-likelihood of `data` under `model(params)` with unit
+ * variance: -0.5 * sum((model(params) - data)^2). The model is an arity-1
+ * function returning a real tensor of the same shape as `data`. */
+static LanaError infer_log_likelihood(LanaVM *vm, uint32_t model_fn,
+                                      const LanaTensor *params, const LanaTensor *data,
+                                      uint32_t scratch, double *out) {
+    Value params_value = lana_value_tensor((LanaTensor *)params);
+    Value pred;
+    LanaError error = run_function(vm, model_fn, &params_value, scratch, &pred);
+    if (error != LANA_OK) return error;
+    if (pred.type != VAL_TENSOR || pred.as.tensor->is_complex) return LANA_ERR_TYPE;
+    const LanaTensor *p = pred.as.tensor;
+    if (!tensor_shape_equal(p, data)) return LANA_ERR_TYPE;
+    size_t count = tensor_element_count(data);
+    double sse = 0.0;
+    for (size_t lin = 0; lin < count; ++lin) {
+        size_t rem = lin, ip = p->offset, id = data->offset;
+        for (size_t d = p->ndim; d-- > 0;) {
+            ip += (p->shape[d] == 0 ? 0 : rem % p->shape[d]) * p->strides[d];
+            id += (data->shape[d] == 0 ? 0 : rem % data->shape[d]) * data->strides[d];
+            rem /= p->shape[d];
+        }
+        double diff = p->data[ip] - data->data[id];
+        sse += diff * diff;
+    }
+    *out = -0.5 * sse;
+    return LANA_OK;
+}
+
+/* Append a step map { step, parameters, log_likelihood } to `steps`. The
+ * `parameters` value carries a derivation node tracing to the prior and the
+ * observed data, mirroring LIP-006's per-step provenance. */
+static LanaError infer_record_step(LanaVM *vm, LanaArray *steps, size_t step,
+                                   const LanaTensor *params, double log_likelihood,
+                                   const LanaTensor *prior, const LanaTensor *data) {
+    LanaMap *map;
+    LanaError error = lana_map_new(vm, 3u, &map);
+    if (error != LANA_OK) return error;
+    LanaTensor *snap = tensor_copy_contiguous(vm, params);
+    if (snap == NULL) return LANA_ERR_OOM;
+    Value prior_value = lana_value_tensor((LanaTensor *)prior);
+    Value data_value = lana_value_tensor((LanaTensor *)data);
+    const Value *inputs[2] = { &prior_value, &data_value };
+    LanaDerivation *step_deriv = record_derivation(vm, LANA_DERIVATION_OPERATION,
+        "infer_step", inputs, 2u, "", 0u, LANA_EXACTNESS_SAMPLE, "infer",
+        LANA_DERIVATION_SUCCESS, "none");
+    Value params_value = lana_value_tensor(snap);
+    if (step_deriv != NULL) params_value.derivation = step_deriv;
+    if ((error = map_put(vm, map, "step", lana_value_number((double)step))) != LANA_OK ||
+        (error = map_put(vm, map, "parameters", params_value)) != LANA_OK ||
+        (error = map_put(vm, map, "log_likelihood", lana_value_number(log_likelihood))) != LANA_OK)
+        return error;
+    steps->items[steps->count++] = lana_value_map(map);
+    return LANA_OK;
+}
+
+/* mcmc(samples, burn_in) -> VAL_INFERENCE_ALGORITHM. */
+static LanaError host_mcmc(LanaVM *vm, const Value *arguments, size_t argc, Value *out) {
+    double samples = 10000.0;
+    double burn_in = 1000.0;
+    if (argc > 2u) return LANA_ERR_TYPE;
+    if (argc >= 1u) {
+        if (arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        samples = arguments[0].as.number;
+    }
+    if (argc >= 2u) {
+        if (arguments[1].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        burn_in = arguments[1].as.number;
+    }
+    if (!isfinite(samples) || samples < 1.0 || floor(samples) != samples ||
+        samples > (double)SIZE_MAX)
+        return LANA_ERR_INVALID_PARAMETERS;
+    if (!isfinite(burn_in) || burn_in < 0.0 || floor(burn_in) != burn_in ||
+        burn_in > (double)SIZE_MAX)
+        return LANA_ERR_INVALID_PARAMETERS;
+    if (burn_in >= samples) return LANA_ERR_INVALID_PARAMETERS;
+    LanaInferenceAlgorithm *algorithm = lana_vm_alloc(vm, sizeof(*algorithm));
+    if (algorithm == NULL) return LANA_ERR_OOM;
+    algorithm->name = derivation_string(vm, "mcmc");
+    if (algorithm->name == NULL) return LANA_ERR_OOM;
+    algorithm->family = NULL;
+    algorithm->samples = samples;
+    algorithm->burn_in = burn_in;
+    algorithm->iterations = 0.0;
+    *out = lana_value_inference_algorithm(algorithm);
+    return LANA_OK;
+}
+
+/* vi(family, iterations) -> VAL_INFERENCE_ALGORITHM. */
+static LanaError host_vi(LanaVM *vm, const Value *arguments, size_t argc, Value *out) {
+    const char *family = "gaussian";
+    double iterations = 1000.0;
+    if (argc > 2u) return LANA_ERR_TYPE;
+    if (argc >= 1u) {
+        if (arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
+        family = arguments[0].as.string;
+    }
+    if (argc >= 2u) {
+        if (arguments[1].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        iterations = arguments[1].as.number;
+    }
+    if (strcmp(family, "gaussian") != 0 && strcmp(family, "mean_field") != 0)
+        return LANA_ERR_INVALID_PARAMETERS;
+    if (!isfinite(iterations) || iterations < 1.0 || floor(iterations) != iterations ||
+        iterations > (double)SIZE_MAX)
+        return LANA_ERR_INVALID_PARAMETERS;
+    LanaInferenceAlgorithm *algorithm = lana_vm_alloc(vm, sizeof(*algorithm));
+    if (algorithm == NULL) return LANA_ERR_OOM;
+    algorithm->name = derivation_string(vm, "vi");
+    if (algorithm->name == NULL) return LANA_ERR_OOM;
+    algorithm->family = derivation_string(vm, family);
+    if (algorithm->family == NULL) return LANA_ERR_OOM;
+    algorithm->samples = 0.0;
+    algorithm->burn_in = 0.0;
+    algorithm->iterations = iterations;
+    *out = lana_value_inference_algorithm(algorithm);
+    return LANA_OK;
+}
+
+/* smc(particles) -> VAL_INFERENCE_ALGORITHM. */
+static LanaError host_smc(LanaVM *vm, const Value *arguments, size_t argc, Value *out) {
+    double particles = 1000.0;
+    if (argc > 1u) return LANA_ERR_TYPE;
+    if (argc >= 1u) {
+        if (arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
+        particles = arguments[0].as.number;
+    }
+    if (!isfinite(particles) || particles < 1.0 || floor(particles) != particles ||
+        particles > (double)SIZE_MAX)
+        return LANA_ERR_INVALID_PARAMETERS;
+    LanaInferenceAlgorithm *algorithm = lana_vm_alloc(vm, sizeof(*algorithm));
+    if (algorithm == NULL) return LANA_ERR_OOM;
+    algorithm->name = derivation_string(vm, "smc");
+    if (algorithm->name == NULL) return LANA_ERR_OOM;
+    algorithm->family = NULL;
+    algorithm->samples = particles;
+    algorithm->burn_in = 0.0;
+    algorithm->iterations = 0.0;
+    *out = lana_value_inference_algorithm(algorithm);
+    return LANA_OK;
+}
+
+/* Metropolis-Hastings random walk. `params` is the current chain state (a
+ * contiguous copy of the prior); `samples`/`burn_in` are the algorithm
+ * hyperparameters. Fills `posterior` with the sample mean, variance, the
+ * sample matrix, and the per-step provenance. */
+static LanaError infer_mcmc(LanaVM *vm, uint32_t model_fn, const LanaTensor *prior,
+                            const LanaTensor *data, size_t samples, size_t burn_in,
+                            uint32_t scratch, LanaPosterior *posterior) {
+    size_t param_count = tensor_element_count(prior);
+    size_t kept = samples - burn_in;
+    LanaTensor *params = tensor_copy_contiguous(vm, prior);
+    if (params == NULL) return LANA_ERR_OOM;
+    size_t sample_shape[2] = { kept, param_count };
+    LanaTensor *sample_matrix = tensor_new(vm, 2, sample_shape, false);
+    if (sample_matrix == NULL) return LANA_ERR_OOM;
+    LanaArray *steps = lana_vm_alloc(vm, sizeof(*steps));
+    if (steps == NULL) return LANA_ERR_OOM;
+    steps->count = 0u;
+    steps->capacity = samples;
+    steps->items = lana_vm_alloc(vm, samples * sizeof(*steps->items));
+    if (steps->items == NULL && samples > 0u) return LANA_ERR_OOM;
+
+    Value params_root = lana_value_tensor(params);
+    size_t root_base = lana_vm_root_push(vm, &params_root);
+    Value sample_root = lana_value_tensor(sample_matrix);
+    (void)lana_vm_root_push(vm, &sample_root);
+    Value steps_root = lana_value_array(steps);
+    (void)lana_vm_root_push(vm, &steps_root);
+
+    double current_ll;
+    LanaError error = infer_log_likelihood(vm, model_fn, params, data, scratch, &current_ll);
+    if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+
+    size_t kept_index = 0u;
+    for (size_t i = 0u; i < samples; ++i) {
+        error = consume_sampling_budget(vm);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        LanaTensor *proposal = tensor_new(vm, prior->ndim, prior->shape, false);
+        if (proposal == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+        for (size_t k = 0u; k < param_count; ++k)
+            proposal->data[k] = params->data[k] + 0.1 * gaussian_sample(vm);
+        double proposal_ll;
+        error = infer_log_likelihood(vm, model_fn, proposal, data, scratch, &proposal_ll);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        double log_alpha = proposal_ll - current_ll;
+        bool accept = log_alpha >= 0.0 || uniform01(vm) < exp(log_alpha);
+        if (accept) {
+            params = proposal;
+            params_root.as.tensor = proposal;
+            current_ll = proposal_ll;
+        }
+        if (i >= burn_in) {
+            for (size_t k = 0u; k < param_count; ++k)
+                sample_matrix->data[kept_index * param_count + k] = params->data[k];
+            ++kept_index;
+        }
+        error = infer_record_step(vm, steps, i, params, current_ll, prior, data);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+    }
+
+    LanaTensor *mean = tensor_new(vm, prior->ndim, prior->shape, false);
+    LanaTensor *variance = tensor_new(vm, prior->ndim, prior->shape, false);
+    if (mean == NULL || variance == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+    for (size_t k = 0u; k < param_count; ++k) {
+        double sum = 0.0;
+        for (size_t s = 0u; s < kept; ++s)
+            sum += sample_matrix->data[s * param_count + k];
+        double m = sum / (double)kept;
+        double var = 0.0;
+        for (size_t s = 0u; s < kept; ++s) {
+            double d = sample_matrix->data[s * param_count + k] - m;
+            var += d * d;
+        }
+        mean->data[k] = m;
+        variance->data[k] = var / (double)kept;
+    }
+
+    lana_vm_root_pop(vm, root_base);
+    posterior->mean = mean;
+    posterior->variance = variance;
+    posterior->samples = sample_matrix;
+    posterior->steps = steps;
+    return LANA_OK;
+}
+
+/* Mean-field Gaussian variational inference via the reparameterization trick
+ * and LIP-011 autodiff. `mu`/`log_sigma` are the variational parameters; the
+ * ELBO is the loss. Fills `posterior` with the variational mean, variance, and
+ * per-iteration provenance (no sample matrix). */
+static LanaError infer_vi(LanaVM *vm, uint32_t model_fn, const LanaTensor *prior,
+                          const LanaTensor *data, size_t iterations,
+                          uint32_t scratch, LanaPosterior *posterior) {
+    size_t param_count = tensor_element_count(prior);
+    const double lr = 0.01;
+    LanaTensor *mu = tensor_copy_contiguous(vm, prior);
+    LanaTensor *log_sigma = tensor_new(vm, prior->ndim, prior->shape, false);
+    LanaTensor *eps = tensor_new(vm, prior->ndim, prior->shape, false);
+    LanaTensor *sigma = tensor_new(vm, prior->ndim, prior->shape, false);
+    LanaTensor *params = tensor_new(vm, prior->ndim, prior->shape, false);
+    if (mu == NULL || log_sigma == NULL || eps == NULL || sigma == NULL || params == NULL)
+        return LANA_ERR_OOM;
+    for (size_t k = 0u; k < param_count; ++k) log_sigma->data[k] = log(0.1);
+    LanaArray *steps = lana_vm_alloc(vm, sizeof(*steps));
+    if (steps == NULL) return LANA_ERR_OOM;
+    steps->count = 0u;
+    steps->capacity = iterations;
+    steps->items = lana_vm_alloc(vm, iterations * sizeof(*steps->items));
+    if (steps->items == NULL && iterations > 0u) return LANA_ERR_OOM;
+
+    Value mu_root = lana_value_tensor(mu);
+    size_t root_base = lana_vm_root_push(vm, &mu_root);
+    Value log_sigma_root = lana_value_tensor(log_sigma);
+    (void)lana_vm_root_push(vm, &log_sigma_root);
+    Value eps_root = lana_value_tensor(eps);
+    (void)lana_vm_root_push(vm, &eps_root);
+    Value sigma_root = lana_value_tensor(sigma);
+    (void)lana_vm_root_push(vm, &sigma_root);
+    Value params_root = lana_value_tensor(params);
+    (void)lana_vm_root_push(vm, &params_root);
+    Value steps_root = lana_value_array(steps);
+    (void)lana_vm_root_push(vm, &steps_root);
+
+    for (size_t i = 0u; i < iterations; ++i) {
+        LanaError error = consume_sampling_budget(vm);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        for (size_t k = 0u; k < param_count; ++k) {
+            eps->data[k] = gaussian_sample(vm);
+            double s = exp(log_sigma->data[k]);
+            sigma->data[k] = s;
+            params->data[k] = mu->data[k] + s * eps->data[k];
+        }
+        Value params_value = lana_value_tensor(params);
+        Value pred;
+        error = run_function(vm, model_fn, &params_value, scratch, &pred);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        if (pred.type != VAL_TENSOR || pred.as.tensor->is_complex) {
+            lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+        }
+        if (!tensor_shape_equal(pred.as.tensor, data)) {
+            lana_vm_root_pop(vm, root_base); return LANA_ERR_TYPE;
+        }
+        Value diff;
+        error = tensor_elementwise(vm, pred.as.tensor, data, 1, &diff);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        size_t diff_root = lana_vm_root_push(vm, &diff);
+        Value model_value = lana_value_function(model_fn);
+        Value grad_value;
+        error = ad_vjp(vm, &model_value, &params_value, &diff, scratch, &grad_value);
+        lana_vm_root_pop(vm, diff_root);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        const LanaTensor *grad = grad_value.as.tensor;
+        for (size_t k = 0u; k < param_count; ++k) {
+            double g = grad->data[grad->offset + k];
+            double d_mu = g + (mu->data[k] - prior->data[prior->offset + k]);
+            double d_log_sigma = g * sigma->data[k] * eps->data[k] +
+                                 (sigma->data[k] * sigma->data[k] - 1.0);
+            mu->data[k] -= lr * d_mu;
+            log_sigma->data[k] -= lr * d_log_sigma;
+        }
+        double ll;
+        error = infer_log_likelihood(vm, model_fn, mu, data, scratch, &ll);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        error = infer_record_step(vm, steps, i, mu, ll, prior, data);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+    }
+
+    LanaTensor *mean = tensor_new(vm, prior->ndim, prior->shape, false);
+    LanaTensor *variance = tensor_new(vm, prior->ndim, prior->shape, false);
+    if (mean == NULL || variance == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+    for (size_t k = 0u; k < param_count; ++k) {
+        mean->data[k] = mu->data[k];
+        variance->data[k] = exp(2.0 * log_sigma->data[k]);
+    }
+
+    lana_vm_root_pop(vm, root_base);
+    posterior->mean = mean;
+    posterior->variance = variance;
+    posterior->samples = NULL;
+    posterior->steps = steps;
+    return LANA_OK;
+}
+
+/* Sequential Monte Carlo (particle filter) over a single observation. `P`
+ * particles propagate with Gaussian noise, are weighted by the likelihood, and
+ * are systematically resampled. Fills `posterior` with the weighted mean,
+ * variance, the particle matrix, and per-step provenance. */
+static LanaError infer_smc(LanaVM *vm, uint32_t model_fn, const LanaTensor *prior,
+                           const LanaTensor *data, size_t particles,
+                           uint32_t scratch, LanaPosterior *posterior) {
+    size_t param_count = tensor_element_count(prior);
+    size_t particle_shape[2] = { particles, param_count };
+    LanaTensor *matrix = tensor_new(vm, 2, particle_shape, false);
+    if (matrix == NULL) return LANA_ERR_OOM;
+    for (size_t p = 0u; p < particles; ++p)
+        for (size_t k = 0u; k < param_count; ++k)
+            matrix->data[p * param_count + k] = prior->data[prior->offset + k];
+    double *weights = lana_vm_alloc(vm, particles * sizeof(*weights));
+    if (weights == NULL) return LANA_ERR_OOM;
+    LanaArray *steps = lana_vm_alloc(vm, sizeof(*steps));
+    if (steps == NULL) return LANA_ERR_OOM;
+    steps->count = 0u;
+    steps->capacity = 1u;
+    steps->items = lana_vm_alloc(vm, sizeof(*steps->items));
+    if (steps->items == NULL) return LANA_ERR_OOM;
+
+    Value matrix_root = lana_value_tensor(matrix);
+    size_t root_base = lana_vm_root_push(vm, &matrix_root);
+    Value steps_root = lana_value_array(steps);
+    (void)lana_vm_root_push(vm, &steps_root);
+
+    LanaError error = consume_sampling_budget(vm);
+    if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+
+    /* Propagate each particle with Gaussian noise. */
+    for (size_t p = 0u; p < particles; ++p)
+        for (size_t k = 0u; k < param_count; ++k)
+            matrix->data[p * param_count + k] += 0.1 * gaussian_sample(vm);
+
+    /* Weight by likelihood. */
+    double weight_sum = 0.0;
+    for (size_t p = 0u; p < particles; ++p) {
+        LanaTensor *particle = tensor_new(vm, prior->ndim, prior->shape, false);
+        if (particle == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+        for (size_t k = 0u; k < param_count; ++k)
+            particle->data[k] = matrix->data[p * param_count + k];
+        double ll;
+        error = infer_log_likelihood(vm, model_fn, particle, data, scratch, &ll);
+        if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+        weights[p] = exp(ll);
+        weight_sum += weights[p];
+    }
+    if (!(weight_sum > 0.0) || !isfinite(weight_sum)) {
+        lana_vm_root_pop(vm, root_base); return LANA_ERR_INVALID_PARAMETERS;
+    }
+    for (size_t p = 0u; p < particles; ++p) weights[p] /= weight_sum;
+
+    /* Systematic resampling. */
+    LanaTensor *resampled = tensor_new(vm, 2, particle_shape, false);
+    if (resampled == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+    double u0 = uniform01(vm) / (double)particles;
+    double cumulative = 0.0;
+    size_t source = 0u;
+    for (size_t p = 0u; p < particles; ++p) {
+        double threshold = u0 + (double)p / (double)particles;
+        while (cumulative < threshold && source < particles) {
+            cumulative += weights[source];
+            ++source;
+        }
+        size_t pick = source == 0u ? 0u : source - 1u;
+        for (size_t k = 0u; k < param_count; ++k)
+            resampled->data[p * param_count + k] = matrix->data[pick * param_count + k];
+    }
+
+    /* Weighted mean and variance over the resampled particles. */
+    LanaTensor *mean = tensor_new(vm, prior->ndim, prior->shape, false);
+    LanaTensor *variance = tensor_new(vm, prior->ndim, prior->shape, false);
+    if (mean == NULL || variance == NULL) { lana_vm_root_pop(vm, root_base); return LANA_ERR_OOM; }
+    for (size_t k = 0u; k < param_count; ++k) {
+        double sum = 0.0;
+        for (size_t p = 0u; p < particles; ++p)
+            sum += resampled->data[p * param_count + k];
+        double m = sum / (double)particles;
+        double var = 0.0;
+        for (size_t p = 0u; p < particles; ++p) {
+            double d = resampled->data[p * param_count + k] - m;
+            var += d * d;
+        }
+        mean->data[k] = m;
+        variance->data[k] = var / (double)particles;
+    }
+
+    /* Record a single provenance step carrying the weighted mean. */
+    error = infer_record_step(vm, steps, 0u, mean, 0.0, prior, data);
+    if (error != LANA_OK) { lana_vm_root_pop(vm, root_base); return error; }
+
+    lana_vm_root_pop(vm, root_base);
+    posterior->mean = mean;
+    posterior->variance = variance;
+    posterior->samples = resampled;
+    posterior->steps = steps;
+    return LANA_OK;
+}
+
+/* infer(prior, model, data, algorithm) -> VAL_POSTERIOR. */
+static LanaError host_infer(LanaVM *vm, const Value *arguments, size_t argc,
+                            uint32_t scratch_register, Value *out) {
+    if (argc != 4u) return LANA_ERR_TYPE;
+    const Value *prior = &arguments[0];
+    const Value *model = &arguments[1];
+    const Value *data = &arguments[2];
+    const Value *algorithm_value = &arguments[3];
+
+    if (model->type != VAL_FUNCTION) return LANA_ERR_TYPE;
+    if (model->as.function >= vm->chunk->function_count) return LANA_ERR_TYPE;
+    if (vm->chunk->functions[model->as.function].arity != 1u) return LANA_ERR_TYPE;
+    if (prior->type != VAL_TENSOR || prior->as.tensor->is_complex) return LANA_ERR_TYPE;
+    if (data->type != VAL_TENSOR || data->as.tensor->is_complex) return LANA_ERR_TYPE;
+    if (algorithm_value->type != VAL_INFERENCE_ALGORITHM ||
+        algorithm_value->as.inference_algorithm == NULL)
+        return LANA_ERR_TYPE;
+    const LanaInferenceAlgorithm *algorithm = algorithm_value->as.inference_algorithm;
+
+    if (tensor_element_count(data->as.tensor) == 0u) return LANA_ERR_INVALID_PARAMETERS;
+
+    if (!vm_has_named_capability(vm, "infer")) return LANA_ERR_CAPABILITY;
+
+    LanaPosterior *posterior = lana_vm_alloc(vm, sizeof(*posterior));
+    if (posterior == NULL) return LANA_ERR_OOM;
+    posterior->mean = NULL;
+    posterior->variance = NULL;
+    posterior->samples = NULL;
+    posterior->steps = NULL;
+    posterior->seed = vm->root_seed;
+
+    LanaError error;
+    if (strcmp(algorithm->name, "mcmc") == 0) {
+        error = infer_mcmc(vm, model->as.function, prior->as.tensor, data->as.tensor,
+                           (size_t)algorithm->samples, (size_t)algorithm->burn_in,
+                           scratch_register, posterior);
+    } else if (strcmp(algorithm->name, "vi") == 0) {
+        error = infer_vi(vm, model->as.function, prior->as.tensor, data->as.tensor,
+                         (size_t)algorithm->iterations, scratch_register, posterior);
+    } else if (strcmp(algorithm->name, "smc") == 0) {
+        error = infer_smc(vm, model->as.function, prior->as.tensor, data->as.tensor,
+                          (size_t)algorithm->samples, scratch_register, posterior);
+    } else {
+        return LANA_ERR_INVALID_PARAMETERS;
+    }
+    if (error != LANA_OK) return error;
+
+    *out = lana_value_posterior(posterior);
     return LANA_OK;
 }
 

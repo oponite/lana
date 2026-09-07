@@ -1,0 +1,48 @@
+// LIP-009: Bayesian inference as a first-class training mode.
+
+fn model(params) { return params; }
+
+let infer_cap = capability("infer");
+let use = grant(infer_cap, "use");
+
+// Constructors produce inference_algorithm values.
+let mcmc_alg = mcmc(100, 10);
+let vi_alg = vi("gaussian", 50);
+let smc_alg = smc(100);
+
+let prior = tensor([0.0]);
+let data = tensor([1.0]);
+
+// MCMC: Metropolis-Hastings random walk toward the observed value.
+let mcmc_post = infer(prior, model, data, mcmc_alg);
+assert(array_length(mcmc_post.history) == 100, "mcmc history length");
+let mcmc_mean = mcmc_post.mean;
+assert(mcmc_mean[0] > 0.0, "mcmc mean positive");
+let mcmc_var = mcmc_post.variance;
+assert(mcmc_var[0] >= 0.0, "mcmc variance non-negative");
+
+// VI: mean-field Gaussian variational inference toward the observed value.
+let vi_post = infer(prior, model, data, vi_alg);
+assert(array_length(vi_post.history) == 50, "vi history length");
+let vi_mean = vi_post.mean;
+assert(vi_mean[0] > 0.0, "vi mean positive");
+let vi_var = vi_post.variance;
+assert(vi_var[0] >= 0.0, "vi variance non-negative");
+
+// SMC: particle filter toward the observed value.
+let smc_post = infer(prior, model, data, smc_alg);
+assert(array_length(smc_post.history) == 1, "smc history length");
+let smc_mean = smc_post.mean;
+assert(smc_mean[0] == smc_mean[0], "smc mean is a number");
+let smc_var = smc_post.variance;
+assert(smc_var[0] >= 0.0, "smc variance non-negative");
+
+// Provenance: each step carries parameters and a log_likelihood.
+let step0 = mcmc_post.history[0];
+assert(step0.step == 0, "step index");
+let step_params = step0.parameters;
+assert(step_params[0] == step_params[0], "step params is a number");
+let step_ll = step0.log_likelihood;
+assert(step_ll <= 0.0, "log likelihood non-positive");
+
+print("LIP009_INFER_PASS");

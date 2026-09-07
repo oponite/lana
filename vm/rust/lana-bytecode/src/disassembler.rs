@@ -165,6 +165,33 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
                 ins.a, ins.imm, ins.c, ins.b
             ));
         }
+        OpCode::Generator => {
+            out.push_str(&format!(
+                "function[{}] R{} argc={} -> R{}",
+                ins.b, ins.c, ins.imm, ins.a
+            ));
+        }
+        OpCode::Yield => {
+            out.push_str(&format!("yield R{} -> R{}", ins.b, ins.a));
+        }
+        OpCode::Next => {
+            out.push_str(&format!("R{} <- next(R{})", ins.b, ins.a));
+        }
+        OpCode::Async => {
+            out.push_str(&format!(
+                "function[{}] R{} argc={} -> R{}",
+                ins.b, ins.c, ins.imm, ins.a
+            ));
+        }
+        OpCode::Await => {
+            out.push_str(&format!("await R{} -> R{}", ins.a, ins.b));
+        }
+        OpCode::RunAsync => {
+            out.push_str(&format!("R{} <- run_async(R{})", ins.b, ins.a));
+        }
+        OpCode::LoadFunction => {
+            out.push_str(&format!("R{} <- function[{}]", ins.a, ins.b));
+        }
         OpCode::SampleStateDist => {
             out.push_str(&format!("R{} -> R{}", ins.a, ins.b));
         }

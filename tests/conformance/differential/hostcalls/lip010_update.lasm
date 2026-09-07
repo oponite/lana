@@ -1,0 +1,112 @@
+.version 3
+.function main 0 64
+# capability("train") -> admin token, then grant "use" -> read token
+LOAD_CONST R0 train
+HOST_CALL shared_information R0 1 R1
+LOAD_CONST R2 use
+HOST_CALL grant R1 2 R3
+# s = sgd(0.1, 0.0)
+LOAD_CONST R4 0.1
+LOAD_CONST R5 0.0
+HOST_CALL sgd R4 2 R6
+# x = tensor([1.0])
+LOAD_CONST R7 0
+HOST_CALL array_new R7 1 R8
+LOAD_CONST R9 1.0
+HOST_CALL array_push R8 2 R8
+HOST_CALL tensor R8 1 R10
+# target = tensor([2.0])
+LOAD_CONST R11 0
+HOST_CALL array_new R11 1 R12
+LOAD_CONST R13 2.0
+HOST_CALL array_push R12 2 R12
+HOST_CALL tensor R12 1 R14
+# pair = [x, target]
+LOAD_CONST R15 0
+HOST_CALL array_new R15 1 R16
+MOVE R17 R10
+HOST_CALL array_push R16 2 R16
+MOVE R17 R14
+HOST_CALL array_push R16 2 R16
+# data = [pair]
+LOAD_CONST R18 0
+HOST_CALL array_new R18 1 R19
+MOVE R20 R16
+HOST_CALL array_push R19 2 R19
+# init = tensor([0.0])
+LOAD_CONST R21 0
+HOST_CALL array_new R21 1 R22
+LOAD_CONST R23 0.0
+HOST_CALL array_push R22 2 R22
+HOST_CALL tensor R22 1 R24
+# r = train(model, data, loss, s, init, 1, 1)
+LOAD_FUNCTION R25 model
+LOAD_FUNCTION R26 loss
+LOAD_CONST R27 1
+LOAD_CONST R28 1
+MOVE R29 R25
+MOVE R30 R19
+MOVE R31 R26
+MOVE R32 R6
+MOVE R33 R24
+MOVE R34 R27
+MOVE R35 R28
+HOST_CALL train R29 7 R36
+# print r.params[0]
+GET_FIELD R36 params R37
+LOAD_CONST R38 0
+HOST_CALL index_get R37 2 R39
+PRINT R39
+# r2 = update(r, data, 1)
+MOVE R40 R36
+MOVE R41 R19
+LOAD_CONST R42 1
+HOST_CALL update R40 3 R43
+# print r2.params[0]
+GET_FIELD R43 params R37
+LOAD_CONST R38 0
+HOST_CALL index_get R37 2 R39
+PRINT R39
+# print r2.steps[1].epoch
+GET_FIELD R43 steps R37
+LOAD_CONST R38 1
+HOST_CALL index_get R37 2 R39
+LOAD_CONST R40 epoch
+HOST_CALL map_get R39 2 R41
+PRINT R41
+# print r2.steps[1].batch
+GET_FIELD R43 steps R37
+LOAD_CONST R38 1
+HOST_CALL index_get R37 2 R39
+LOAD_CONST R40 batch
+HOST_CALL map_get R39 2 R41
+PRINT R41
+# print r2.steps[1].parameters[0]
+GET_FIELD R43 steps R37
+LOAD_CONST R38 1
+HOST_CALL index_get R37 2 R39
+LOAD_CONST R40 parameters
+HOST_CALL map_get R39 2 R41
+LOAD_CONST R42 0
+HOST_CALL index_get R41 2 R44
+PRINT R44
+# print r2.steps[1].gradient[0]
+GET_FIELD R43 steps R37
+LOAD_CONST R38 1
+HOST_CALL index_get R37 2 R39
+LOAD_CONST R40 gradient
+HOST_CALL map_get R39 2 R41
+LOAD_CONST R42 0
+HOST_CALL index_get R41 2 R44
+PRINT R44
+HALT
+.function model 2 4
+BINARY R0 mul R1 R2
+RETURN R2
+.function loss 2 8
+BINARY R0 sub R1 R2
+BINARY R0 sub R1 R3
+BINARY R2 mul R3 R4
+MOVE R5 R4
+HOST_CALL tensor_sum R5 1 R6
+RETURN R6

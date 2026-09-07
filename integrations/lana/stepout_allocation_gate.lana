@@ -1,0 +1,109 @@
+// stepout_allocation_gate.lana -- step-out commission allocation gate.
+//
+// Each trade carries three independently-fed commission components from
+// Virtu: exchange, SIDCO, and ADR/FX. Each is "unknown" until Virtu sends it,
+// "observed" once received and past the spec's validity check (no negative
+// value). Non-finite (NaN/Infinity) values cannot occur here: JSON has no
+// literal for them, so a value that survived json_parse is already finite --
+// this gate does not add a separate finiteness check for that reason.
+//
+// This gate only formalizes the allocate/queue decision; it does not fix
+// Virtu's data timeliness. If Virtu is slow, trades sit in the manual match
+// queue exactly as they do today -- the ceiling on this gate's value is set
+// by Virtu, not by Lana.
+//
+// Every map this script BUILDS uses map_new()/map_set() instead of a {...}
+// literal, working around a confirmed compiler bug in this build's {...}
+// object-literal codegen (see account_hold_gate.lana's header and
+// task_3e124d4a); map_new()/map_set() was verified unaffected.
+//
+// Request:  {"schema":1, "kind":"stepout_allocation_request",
+//            "trades": [{"trade_id",
+//                        "exchange_commission": {"status", "value"},
+//                        "sidco_commission": {"status", "value"},
+//                        "adr_fx_commission": {"status", "value"}}, ...]}
+// Response: {"schema":1, "kind":"stepout_allocation_decision",
+//            "trades": [<per-trade decision>],
+//            "auto_allocated": [trade_id, ...],
+//            "manual_match_queue": [trade_id, ...]}
+// Per-trade decision: {"trade_id", "exchange_commission_status",
+//            "sidco_commission_status", "adr_fx_commission_status",
+//            "missing_components" (names, not a blanket "mismatch"),
+//            "route" ("fis_auto_allocate"|"manual_match_queue")}
+
+import "bridge.lana" as bridge;
+
+fn component_status(component) {
+    if (!map_has(component, "status")) { return "unknown"; }
+    if (component["status"] != "resolved") { return "unknown"; }
+    if (!map_has(component, "value")) { return "unknown"; }
+    if (component["value"] < 0) { return "unknown"; }
+    return "observed";
+}
+
+fn decide_trade(trade) {
+    assert(map_has(trade, "trade_id"), "trade_id is required");
+    assert(map_has(trade, "exchange_commission"), "exchange_commission is required");
+    assert(map_has(trade, "sidco_commission"), "sidco_commission is required");
+    assert(map_has(trade, "adr_fx_commission"), "adr_fx_commission is required");
+
+    let exchange_status = component_status(trade["exchange_commission"]);
+    let sidco_status = component_status(trade["sidco_commission"]);
+    let adr_fx_status = component_status(trade["adr_fx_commission"]);
+
+    let missing = [];
+    if (exchange_status != "observed") { array_push(missing, "exchange_commission"); }
+    if (sidco_status != "observed") { array_push(missing, "sidco_commission"); }
+    if (adr_fx_status != "observed") { array_push(missing, "adr_fx_commission"); }
+
+    let route = "manual_match_queue";
+    if (array_length(missing) == 0) {
+        route = "fis_auto_allocate";
+    }
+
+    let decision = map_new();
+    map_set(decision, "trade_id", trade["trade_id"]);
+    map_set(decision, "exchange_commission_status", exchange_status);
+    map_set(decision, "sidco_commission_status", sidco_status);
+    map_set(decision, "adr_fx_commission_status", adr_fx_status);
+    map_set(decision, "missing_components", missing);
+    map_set(decision, "route", route);
+    return decision;
+}
+
+fn gate_contract(request) {
+    assert(request["schema"] == 1, "unsupported stepout_allocation schema");
+    assert(map_has(request, "kind"), "kind is required");
+    assert(request["kind"] == "stepout_allocation_request", "invalid stepout_allocation kind");
+    assert(map_has(request, "trades"), "trades is required");
+    return true;
+}
+
+fn decide(request) {
+    gate_contract(request);
+    let trades = request["trades"];
+    let decisions = [];
+    let auto_allocated = [];
+    let queued = [];
+    let index = 0;
+    while (index < array_length(trades)) {
+        let decision = decide_trade(trades[index]);
+        array_push(decisions, decision);
+        if (decision["route"] == "fis_auto_allocate") {
+            array_push(auto_allocated, decision["trade_id"]);
+        } else {
+            array_push(queued, decision["trade_id"]);
+        }
+        index = index + 1;
+    }
+    let response = map_new();
+    map_set(response, "schema", 1);
+    map_set(response, "kind", "stepout_allocation_decision");
+    map_set(response, "trades", decisions);
+    map_set(response, "auto_allocated", auto_allocated);
+    map_set(response, "manual_match_queue", queued);
+    return response;
+}
+
+let request = bridge.read_request();
+bridge.write_response(decide(request));

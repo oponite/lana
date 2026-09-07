@@ -1,0 +1,52 @@
+.function main 0 16
+# povm rejects elements that do not sum to the identity: two copies of |0><0|.
+# E0 = [[1, 0], [0, 0]].
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R4
+LOAD_CONST R5 1
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 0
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R6
+LOAD_CONST R7 0
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R7 0
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R8
+MOVE R9 R4
+HOST_CALL array_push R8 2 R8
+MOVE R9 R6
+HOST_CALL array_push R8 2 R8
+HOST_CALL tensor R8 1 R10
+# E1 = [[1, 0], [0, 0]] (same as E0, so Σ E_i = [[2, 0], [0, 0]] != I).
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R4
+LOAD_CONST R5 1
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 0
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R6
+LOAD_CONST R7 0
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R7 0
+HOST_CALL array_push R6 2 R6
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R8
+MOVE R9 R4
+HOST_CALL array_push R8 2 R8
+MOVE R9 R6
+HOST_CALL array_push R8 2 R8
+HOST_CALL tensor R8 1 R11
+# povm([E0, E1]).
+LOAD_CONST R3 0
+HOST_CALL array_new R3 1 R12
+MOVE R13 R10
+HOST_CALL array_push R12 2 R12
+MOVE R13 R11
+HOST_CALL array_push R12 2 R12
+HOST_CALL povm R12 1 R14
+PRINT R14
+RETURN R0

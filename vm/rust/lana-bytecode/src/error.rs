@@ -53,6 +53,7 @@ pub enum LanaError {
     UnauthorizedIssuer,
     Integrity,
     NoMatchingEvent,
+    External,
 }
 
 impl LanaError {
@@ -79,7 +80,7 @@ impl LanaError {
             | Capability | Conflict | NotFound | CompactedHistory | Schema
             | UnsupportedValue | Corruption | InvalidParameters | ClaimMismatch
             | ClaimRevoked | ClaimExpired | UnauthorizedIssuer | Integrity
-            | NoMatchingEvent => "validation",
+            | NoMatchingEvent | External => "validation",
         }
     }
 
@@ -133,6 +134,7 @@ impl LanaError {
             UnauthorizedIssuer => "LANA_ERR_UNAUTHORIZED_ISSUER",
             Integrity => "LANA_ERR_INTEGRITY",
             NoMatchingEvent => "LANA_ERR_NO_MATCHING_EVENT",
+            External => "LANA_ERR_EXTERNAL",
         }
     }
 }

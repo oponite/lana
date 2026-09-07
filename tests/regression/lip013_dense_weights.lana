@@ -1,0 +1,7 @@
+// LIP-013: a Dense whose weights are not [in, out] is a compile error.
+
+type Layer = Dense(in: Shape, out: Shape, weights: Tensor<[in, out]>) | Conv(in: Shape, out: Shape, kernel: Shape) | Relu(shape: Shape);
+
+// Dense([2], [3], ...) requires weights of shape [2, 3], but this is [3, 2].
+let d = Dense([2], [3], tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]));
+print(d);

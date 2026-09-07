@@ -1,0 +1,23 @@
+// LIP-024: determinism. The event loop schedules ready futures FIFO by
+// creation order, so the same async computation run twice yields the same
+// resumption order and the same result.
+async fn work(n) {
+    return n;
+}
+
+async fn main_async() {
+    let f1 = work(1);
+    let f2 = work(2);
+    let f3 = work(3);
+    let a = await f1;
+    let b = await f2;
+    let c = await f3;
+    return a * 100 + b * 10 + c;
+}
+
+let r1 = run_async(main_async());
+let r2 = run_async(main_async());
+assert(r1 == 123, "first run wrong");
+assert(r2 == 123, "second run wrong");
+assert(r1 == r2, "async scheduling is not deterministic");
+print("ASYNC_DETERMINISM_PASS");

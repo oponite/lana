@@ -1,0 +1,5 @@
+let admin = capability("gpu");
+let use = grant(admin, "use");
+revoke(use);
+let deferred = planned_effect("io", use);
+execute_effect(deferred);

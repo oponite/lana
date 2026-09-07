@@ -28,7 +28,25 @@ set(LANA_RUNTIME_SOURCES
     runtime/c/vendor/tweetnacl_random.c
     runtime/c/effects.c
     runtime/c/adapters.c
+    vm/c/backend.c
+    vm/c/metal.m
 )
+
+# Native matmul backend selection (LIP-004 section 5). Every runtime variant
+# must select the same backend on a platform so the C11 VM stays byte-identical
+# between Debug, Release, sanitizer, and fuzz builds.
+if(APPLE)
+    set(LANA_BLAS_LIBS "-framework Accelerate")
+    set(LANA_BLAS_DEFINES LANA_BLAS_ACCELERATE)
+    # Metal backend (LIP-004 section 5): the Objective-C wrapper links the
+    # Metal framework plus Foundation and the Objective-C runtime (NSString,
+    # objc_msgSend). Accelerate stays the CPU binary64 path.
+    set(LANA_METAL_LIBS "-framework Metal" "-framework Foundation" "-lobjc")
+else()
+    set(LANA_BLAS_LIBS "")
+    set(LANA_BLAS_DEFINES "")
+    set(LANA_METAL_LIBS "")
+endif()
 
 include(CheckCCompilerFlag)
 check_c_compiler_flag("-Wno-unterminated-string-initialization" LANA_HAS_UNTERMINATED_STRING_FLAG)
@@ -44,12 +62,13 @@ check_c_compiler_flag("-Wno-format-truncation" LANA_HAS_FORMAT_TRUNCATION_FLAG)
 
 add_library(lanaruntime STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime PUBLIC ${LANA_INCLUDE_DIRS})
-target_link_libraries(lanaruntime PUBLIC Threads::Threads)
+target_link_libraries(lanaruntime PUBLIC Threads::Threads PkgConfig::FFI ${LANA_BLAS_LIBS} ${LANA_METAL_LIBS})
 target_compile_options(lanaruntime PRIVATE -Wall -Wextra -Wpedantic -Werror)
 # Adapter facade locates dlopen plugins in the build directory.
 target_compile_definitions(lanaruntime PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
-    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    ${LANA_BLAS_DEFINES})
 
 if(LANA_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(lanaruntime PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -66,6 +85,7 @@ target_compile_options(lanavm PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_library(lanaruntime_release STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime_release PUBLIC ${LANA_INCLUDE_DIRS})
+target_link_libraries(lanaruntime_release PUBLIC PkgConfig::FFI)
 if(LANA_HAS_FORMAT_TRUNCATION_FLAG)
     target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-format-truncation -O3 -DNDEBUG)
 else()
@@ -73,7 +93,14 @@ else()
 endif()
 target_compile_definitions(lanaruntime_release PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
-    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    ${LANA_BLAS_DEFINES})
+if(LANA_BLAS_LIBS)
+    target_link_libraries(lanaruntime_release PUBLIC ${LANA_BLAS_LIBS})
+endif()
+if(LANA_METAL_LIBS)
+    target_link_libraries(lanaruntime_release PUBLIC ${LANA_METAL_LIBS})
+endif()
 
 add_executable(lanavm_release tools/c/cli.c)
 target_link_libraries(lanavm_release PRIVATE lanaruntime_release m)
@@ -117,6 +144,9 @@ add_dependencies(lana lana_native_compiler)
 install(TARGETS lanaruntime ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(TARGETS lanavm lana RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES "${LANA_NATIVE_COMPILER}" DESTINATION ${CMAKE_INSTALL_BINDIR})
+# Installed standard library (LIP-016): the compiler resolves the reserved
+# `std/` import prefix to `${DATADIR}/lana/stdlib` via LANA_STDLIB_DIR.
+install(DIRECTORY stdlib/ DESTINATION ${CMAKE_INSTALL_DATADIR}/lana/stdlib)
 # Public headers keep the `lana/` install prefix; the three layer include dirs
 # are flattened into a single `${INCLUDEDIR}/lana` namespace.
 install(DIRECTORY vm/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/lana)

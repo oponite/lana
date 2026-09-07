@@ -1,6 +1,6 @@
 fn program(functions, statements, imports, types) { return [0, functions, statements, imports, types]; }
-fn function_node(name, type_params, parameters, body, line, column) { return [1, name, type_params, parameters, body, line, column]; }
-fn let_node(name, value, line, column) { return [2, name, value, line, column]; }
+fn function_node(name, type_params, parameters, body, line, column, is_async) { return [1, name, type_params, parameters, body, line, column, is_async]; }
+fn let_node(name, annotation, value, line, column) { return [2, name, annotation, value, line, column]; }
 fn assign_node(target, value, line, column) { return [3, target, value, line, column]; }
 fn if_node(predicate, then_body, else_body, line, column) { return [4, predicate, then_body, else_body, line, column]; }
 fn while_node(predicate, body, line, column) { return [5, predicate, body, line, column]; }
@@ -12,6 +12,8 @@ fn history_node(target, policy, amount, line, column) { return [10, target, poli
 fn transform_node(target, name, line, column) { return [11, target, name, line, column]; }
 fn taskgroup_node(body, line, column) { return [12, body, line, column]; }
 fn cancel_node(task, line, column) { return [13, task, line, column]; }
+fn yield_node(value, line, column) { return [14, value, line, column]; }
+fn for_node(binding, iterable, body, line, column) { return [15, binding, iterable, body, line, column]; }
 
 fn literal_node(kind, value, line, column) { return [20, kind, value, line, column]; }
 fn name_node(name, line, column) { return [21, name, line, column]; }
@@ -32,10 +34,14 @@ fn fork_node(name, arguments, line, column) { return [35, name, arguments, line,
 fn join_node(operation, task, line, column) { return [36, operation, task, line, column]; }
 fn join_timeout_node(task, timeout, line, column) { return [37, task, timeout, line, column]; }
 fn correlated_node(x, y, d, line, column) { return [38, x, y, d, line, column]; }
+fn slice_node(start, end, line, column) { return [39, start, end, line, column]; }
 fn match_node(value, arms, line, column) { return [40, value, arms, line, column]; }
 fn type_node(name, params, variants, line, column) { return [41, name, params, variants, line, column]; }
 fn variant_node(name, fields, line, column) { return [42, name, fields, line, column]; }
+fn variant_field(name, field_type) { return [name, field_type]; }
 fn unknown_node(line, column) { return [43, line, column]; }
+fn comprehension_node(kind, key_expr, value_expr, key_binding, value_binding, iterable, filter, line, column) { return [44, kind, key_expr, value_expr, key_binding, value_binding, iterable, filter, line, column]; }
+fn await_node(value, line, column) { return [45, value, line, column]; }
 
 fn match_arm(pattern, body) { return [pattern, body]; }
 fn pattern_variant(name, bindings) { return ["variant", name, bindings]; }

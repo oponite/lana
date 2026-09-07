@@ -1,0 +1,9 @@
+// LIP-011: grad over a non-pure function is a compile error.
+fn impure(x) {
+    print(x);
+    return sum(x * x);
+}
+
+let x = tensor([1.0, 2.0, 3.0]);
+let g = grad(impure, x);
+print(g);

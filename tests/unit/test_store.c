@@ -244,6 +244,48 @@ static void test_scan_prefix(void) {
     printf("Pass.\n");
 }
 
+static void test_mvcc_get_at_and_commit_if(void) {
+    char path[] = "/tmp/lana-store-mvcc-XXXXXX";
+    LanaStore *store;
+    LanaVM vm;
+    LanaStoreRevisionInfo info;
+    Value value;
+
+    assert(mkdtemp(path) != NULL);
+    lana_vm_init(&vm, NULL);
+    store = open_store(path);
+
+    /* Rev 1: k = 1. */
+    assert(lana_store_put(store, "k", lana_value_number(1.0)) == LANA_OK);
+    assert(lana_store_commit(store, &info) == LANA_OK);
+    assert(info.revision_id == 1u);
+
+    /* Rev 2: k = 2. */
+    assert(lana_store_put(store, "k", lana_value_number(2.0)) == LANA_OK);
+    assert(lana_store_commit(store, &info) == LANA_OK);
+    assert(info.revision_id == 2u);
+
+    /* Point-in-time read at rev 1 sees the first value. */
+    assert(lana_store_get_at(store, &vm, 1u, "k", &value) == LANA_OK);
+    assert(value.type == VAL_NUMBER && value.as.number == 1.0);
+
+    /* Snapshot reflects the current (rev 2) state. */
+    assert(lana_store_snapshot(store, &vm, &value, &info) == LANA_OK);
+    assert(info.revision_id == 2u);
+    assert(value.type == VAL_MAP);
+
+    /* Optimistic commit against the current base succeeds. */
+    assert(lana_store_put(store, "k", lana_value_number(3.0)) == LANA_OK);
+    assert(lana_store_current_revision(store, &info) == LANA_OK);
+    assert(lana_store_commit(store, &info) == LANA_OK);
+    assert(info.revision_id == 3u);
+
+    assert(lana_store_close(store) == LANA_OK);
+    lana_vm_free(&vm);
+    cleanup_store(path);
+    printf("Pass.\n");
+}
+
 int main(void) {
     test_recovery_and_history();
     test_trailing_partial_revision_is_ignored();
@@ -251,5 +293,6 @@ int main(void) {
     test_corrupt_committed_journal_fails_open();
     test_persistent_state_current_and_history();
     test_scan_prefix();
+    test_mvcc_get_at_and_commit_if();
     return 0;
 }

@@ -1,6 +1,7 @@
 #ifndef LANA_VM_H
 #define LANA_VM_H
 
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -35,12 +36,16 @@ typedef struct {
     size_t return_ip;
     uint32_t return_register;
     uint32_t function;
+    bool is_generator;
+    bool is_async;
 } LanaFrame;
 
 typedef struct LanaVM LanaVM;
 typedef struct LanaScheduler LanaScheduler;
 typedef struct LanaPathExecution LanaPathExecution;
 typedef struct LanaSharedReference LanaSharedReference;
+typedef struct LanaStore LanaStore;
+typedef struct LanaLedger LanaLedger;
 typedef bool (*LanaDebugHook)(LanaVM *vm, size_t instruction,
                              uint32_t source_line, void *context);
 typedef LanaError (*LanaEffectExecutor)(LanaVM *vm, const char *kind,
@@ -113,11 +118,31 @@ struct LanaVM {
     size_t observation_count;
     uint64_t revision;
     uint64_t derivation_sequence;
+    bool ad_recording; /* LIP-011: true while running the differentiated function */
     LanaFrame frames[LANA_MAX_CALL_FRAMES];
     size_t frame_count;
     LanaGC gc;
     LanaErrorInfo error;
     Value result;
+    /* LIP-024 async/await: the single-threaded cooperative event loop's ready
+     * queue. Futures are scheduled FIFO by creation order. */
+    LanaFuture **ready_queue;
+    size_t ready_count;
+    size_t ready_capacity;
+    /* LIP-015 §3 durable pipeline: the single store opened by `store_open`
+     * (NULL until opened) and the ledger layered over it. */
+    LanaStore *store;
+    LanaLedger *ledger;
+    /* LIP-015 §5: the single loaded adapter (NULL until `adapter_load`). */
+    void *adapter;
+    /* LIP-018 two-way FFI: declared signatures (owned strings) and the single
+     * loaded shared library handle (NULL until `ffi_load`). */
+    char **ffi_sigs;
+    size_t ffi_sig_count;
+    void *ffi_lib;
+    /* Crash containment: a sigsetjmp guard around the FFI call. */
+    sigjmp_buf ffi_jmp;
+    volatile bool ffi_faulted;
 };
 
 void lana_vm_init(LanaVM *vm, const LanaChunk *chunk);

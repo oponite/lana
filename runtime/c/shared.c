@@ -318,6 +318,18 @@ LanaError lana_shared_capability_revoke(LanaCapabilityToken *admin,
     return LANA_OK;
 }
 
+LanaError lana_shared_capability_invalidate(LanaCapabilityToken *target) {
+    LanaSharedInformation *shared;
+    if (target == NULL) return LANA_ERR_CAPABILITY;
+    shared = target->shared;
+    (void)pthread_mutex_lock(&shared->mutex);
+    target->revoked = true;
+    ++shared->capability_epoch;
+    (void)pthread_cond_broadcast(&shared->condition);
+    (void)pthread_mutex_unlock(&shared->mutex);
+    return LANA_OK;
+}
+
 bool lana_shared_capability_allows(const LanaCapabilityToken *capability,
                                    uint32_t permissions) {
     LanaSharedInformation *shared;
@@ -333,6 +345,27 @@ bool lana_shared_capability_allows(const LanaCapabilityToken *capability,
 LanaSharedInformation *lana_shared_capability_information(
     const LanaCapabilityToken *capability) {
     return capability == NULL ? NULL : capability->shared;
+}
+
+bool lana_shared_information_allows_named_read(
+    const LanaSharedInformation *shared, const char *name) {
+    LanaCapabilityToken *capability;
+    bool allowed = false;
+    if (shared == NULL || name == NULL) return false;
+    (void)pthread_mutex_lock((pthread_mutex_t *)&shared->mutex);
+    if (shared->base_snapshot.type == VAL_STRING &&
+        strcmp(shared->base_snapshot.as.string, name) == 0) {
+        for (capability = shared->capabilities; capability != NULL;
+             capability = capability->next) {
+            if (capability_allows_locked(shared, capability,
+                                         LANA_CAPABILITY_READ)) {
+                allowed = true;
+                break;
+            }
+        }
+    }
+    (void)pthread_mutex_unlock((pthread_mutex_t *)&shared->mutex);
+    return allowed;
 }
 
 static const Value *current_snapshot_locked(LanaSharedInformation *shared) {

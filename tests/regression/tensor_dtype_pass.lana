@@ -1,0 +1,44 @@
+// LIP-027: mixed-precision tensor dtypes. dtype: is a first-class explicit
+// choice on tensor/zeros/ones/eye; dtype(t) reports the dtype string.
+
+// Default dtype is f64.
+let a = tensor([1.0, 2.0, 3.0]);
+assert(dtype(a) == "f64", "default dtype is f64");
+
+// Explicit dtype: on each constructor.
+let f32t = tensor([1.0, 2.0], dtype: "f32");
+assert(dtype(f32t) == "f32", "tensor dtype f32");
+let f16t = tensor([1.0, 2.0], dtype: "f16");
+assert(dtype(f16t) == "f16", "tensor dtype f16");
+let bf16t = tensor([1.0, 2.0], dtype: "bf16");
+assert(dtype(bf16t) == "bf16", "tensor dtype bf16");
+
+let z = zeros([2, 2], dtype: "f32");
+assert(dtype(z) == "f32", "zeros dtype f32");
+let o = ones([2, 2], dtype: "f16");
+assert(dtype(o) == "f16", "ones dtype f16");
+let e = eye(2, dtype: "bf16");
+assert(dtype(e) == "bf16", "eye dtype bf16");
+
+// dtype: on a complex constructor is rejected at parse time (named arg not
+// allowed for tensor_complex), so complex stays via tensor_complex.
+let c = tensor_complex([1.0, 0.0], [0.0, 1.0]);
+assert(dtype(c) == "complex", "complex dtype");
+
+// f16 rounding: round-to-nearest-even. 0.1 -> 0.099975586 (nearest f16).
+let r16 = tensor([0.1], dtype: "f16");
+assert(sum(r16) == 0.0999755859375, "f16 round 0.1");
+
+// bf16 rounding: 3.14159 -> 3.140625 (mantissa rounded to 7 bits).
+let rbf = tensor([3.14159], dtype: "bf16");
+assert(sum(rbf) == 3.140625, "bf16 round pi");
+
+// f16 overflow to inf is expected (not an error): 65520 > max finite f16 (65504).
+let big = tensor([65520.0], dtype: "f16");
+assert(big[0] > 65504.0, "f16 overflow to inf");
+
+// f32 is a dtype tag: values keep full double precision within float32 range.
+let f32v = tensor([0.1], dtype: "f32");
+assert(sum(f32v) == 0.1, "f32 keeps double 0.1");
+
+print("TENSOR_DTYPE_PASS");

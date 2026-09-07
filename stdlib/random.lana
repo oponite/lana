@@ -1,0 +1,20 @@
+// std/random — seeded pseudo-random numbers over the `random` host call.
+// `random()` returns a Sample<number> in [0, 1); the helpers here unwrap it
+// and map it to the requested range. Every function that draws a value is
+// `stochastic`; `random_seed` reseeds the VM RNG for reproducible sequences.
+
+fn random_seed(seed) {
+    return random_seed(seed);
+}
+
+fn random_float() {
+    return sample_value(random());
+}
+
+fn random_int(lo, hi) {
+    return lo + floor(random_float() * (hi - lo + 1));
+}
+
+fn random_choice(xs) {
+    return xs[floor(random_float() * array_length(xs))];
+}

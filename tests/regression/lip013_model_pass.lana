@@ -1,0 +1,37 @@
+// LIP-013: typed model-graph DSL with compile-time shape checking.
+
+type Layer = Dense(in: Shape, out: Shape, weights: Tensor<[in, out]>) | Conv(in: Shape, out: Shape, kernel: Shape) | Relu(shape: Shape);
+type Model = Sequential(Layer, Layer) | Residual(Layer, Layer) | Branch(Layer, Layer, Layer);
+
+// A Dense layer whose weights match [in, out] = [2, 3].
+let w23 = tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+let d1 = Dense([2], [3], w23);
+
+// A second Dense whose input shape matches d1's output shape.
+let w32 = tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]);
+let d2 = Dense([3], [2], w32);
+
+// Sequential(d1, d2) connects output [3] to input [3]: compiles.
+let m = Sequential(d1, d2);
+
+// The model is a value: it is inspectable and replayable via match.
+let kind = match m {
+    Sequential(a, b) => "sequential"
+    Residual(a, b) => "residual"
+    Branch(a, b, c) => "branch"
+    unknown => "unknown"
+};
+assert(kind == "sequential", "model must be a Sequential value");
+
+// A Relu layer is shape-preserving: input and output shapes are equal.
+let r = Relu([2]);
+let m2 = Sequential(r, d1);
+let kind2 = match m2 {
+    Sequential(a, b) => "sequential"
+    Residual(a, b) => "residual"
+    Branch(a, b, c) => "branch"
+    unknown => "unknown"
+};
+assert(kind2 == "sequential", "Relu-to-Dense model must be a Sequential value");
+
+print("LIP013_MODEL_PASS");

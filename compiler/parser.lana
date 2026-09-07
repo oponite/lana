@@ -33,13 +33,40 @@ fn expect_token(parser, text) {
     return value;
 }
 
-fn parse_arguments(parser) {
+fn parse_call_arguments(parser, name) {
+    let allowed = named_arg_for(name);
     let values = array_new(0); expect_token(parser, "(");
-    if (!matches(parser, ")")) {
-        array_push(values, parse_expression(parser));
-        while (matches(parser, ",")) { take(parser); array_push(values, parse_expression(parser)); }
+    while (!matches(parser, ")")) {
+        let token = current(parser);
+        if (token[0] == "eof") { parse_error(token, "expected argument or closing parenthesis"); }
+        if (parser[0][parser[1] + 1][1] == ":") {
+            if (allowed == null) { parse_error(token, "named arguments are not supported for this call"); }
+            if (token[0] != "identifier") { parse_error(token, string_concat("expected ", string_concat(allowed, string_concat(": for this call")))); }
+            if (token[1] != allowed) { parse_error(token, string_concat("expected ", string_concat(allowed, string_concat(": for this call")))); }
+            if (array_length(values) != 1) { parse_error(token, string_concat(allowed, string_concat(": must be the second and final argument"))); }
+            take(parser); take(parser);
+            array_push(values, parse_expression(parser));
+            if (!matches(parser, ")")) { parse_error(current(parser), string_concat(allowed, string_concat(": must be the final argument"))); }
+        } else { array_push(values, parse_expression(parser)); }
+        if (!matches(parser, ")")) { expect_token(parser, ",");
+            if (matches(parser, ")")) { parse_error(current(parser), "expected argument after comma"); }
+        }
     }
     expect_token(parser, ")"); return values;
+}
+
+fn parse_arguments(parser) { return parse_call_arguments(parser, null); }
+fn is_tensor_reduction(name) {
+    if (name == "sum") { return true; } if (name == "mean") { return true; }
+    if (name == "max") { return true; } return name == "min";
+}
+fn named_arg_for(name) {
+    if (is_tensor_reduction(name)) { return "axis"; }
+    if (name == "tensor") { return "dtype"; }
+    if (name == "zeros") { return "dtype"; }
+    if (name == "ones") { return "dtype"; }
+    if (name == "eye") { return "dtype"; }
+    return null;
 }
 
 fn parse_named_values(parser, closing) {
@@ -143,12 +170,25 @@ fn parse_keyword_primary(parser, text, line, column) {
     if (text == "attenuate") { return parse_attenuate(parser, line, column); }
     if (text == "trace_distance") { return parse_trace_distance(parser, line, column); }
     if (text == "append") { if (!matches(parser, "(")) { return parse_append_relationship(parser, line, column); } }
-    if (text == "measure") { return parse_measure(parser, line, column); }
+    if (text == "measure") { if (!matches(parser, "(")) { return parse_measure(parser, line, column); } }
     if (text == "estimate_measure") { return parse_estimate_measure(parser, line, column); }
     if (text == "joint") { return parse_joint(parser, line, column); }
     if (text == "correlated") { return parse_correlated(parser, line, column); }
     if (text == "fork") { let name = take(parser)[1]; return syntax.fork_node(name, parse_arguments(parser), line, column); }
-    if (is_join_operation(text)) { expect_token(parser, "("); let task = parse_expression(parser); expect_token(parser, ")"); return syntax.join_node(text, task, line, column); }
+    if (is_join_operation(text)) {
+        expect_token(parser, "("); let first = parse_expression(parser);
+        // `join(ds, other, key)` is the dataset equi-join; `join(task)` is the
+        // task join. Disambiguate by whether a second argument follows.
+        if (text == "join") {
+            if (matches(parser, ",")) {
+                take(parser); let second = parse_expression(parser);
+                expect_token(parser, ","); let key = parse_expression(parser);
+                expect_token(parser, ")");
+                return syntax.call_node("join", [first, second, key], line, column);
+            }
+        }
+        expect_token(parser, ")"); return syntax.join_node(text, first, line, column);
+    }
     if (text == "join_timeout") {
         expect_token(parser, "("); let task = parse_expression(parser); expect_token(parser, ","); let timeout = parse_expression(parser); expect_token(parser, ")");
         return syntax.join_timeout_node(task, timeout, line, column);
@@ -157,6 +197,7 @@ fn parse_keyword_primary(parser, text, line, column) {
     if (is_information_operation(text)) {
         if (matches(parser, "(")) { return syntax.information_node(text, parse_arguments(parser), line, column); }
     }
+    if (text == "await") { return syntax.await_node(parse_expression(parser), line, column); }
     return null;
 }
 
@@ -186,13 +227,49 @@ fn parse_match(parser, line, column) {
     expect_token(parser, "}"); return syntax.match_node(value, arms, line, column);
 }
 
+fn parse_shape_dim(parser) {
+    let token = take(parser);
+    if (token[0] == "number") { return token[1]; }
+    return token[1];
+}
+
+fn parse_shape_spec(parser) {
+    if (matches(parser, "Dynamic")) { take(parser); return ["shape_dynamic"]; }
+    if (matches(parser, "[")) {
+        take(parser); let dims = array_new(0);
+        if (!matches(parser, "]")) {
+            array_push(dims, parse_shape_dim(parser));
+            while (matches(parser, ",")) { take(parser); array_push(dims, parse_shape_dim(parser)); }
+        }
+        expect_token(parser, "]"); return ["shape_spec", dims];
+    }
+    let name = take(parser)[1]; return ["shape_var", name];
+}
+
+fn parse_type(parser) {
+    let token = take(parser); let text = token[1];
+    if (text == "Tensor") {
+        expect_token(parser, "<"); let spec = parse_shape_spec(parser); expect_token(parser, ">");
+        return ["tensor", spec];
+    }
+    if (text == "Shape") { return ["shape"]; }
+    if (text == "Dynamic") { return ["dynamic"]; }
+    return ["named", text];
+}
+
 fn parse_variant(parser) {
     let name_token = take(parser); let name = name_token[1]; let fields = array_new(0);
     if (matches(parser, "(")) {
         take(parser);
         if (!matches(parser, ")")) {
-            array_push(fields, take(parser)[1]);
-            while (matches(parser, ",")) { take(parser); array_push(fields, take(parser)[1]); }
+            let field_name = take(parser)[1]; let field_type = null;
+            if (matches(parser, ":")) { take(parser); field_type = parse_type(parser); }
+            array_push(fields, syntax.variant_field(field_name, field_type));
+            while (matches(parser, ",")) {
+                take(parser); let next_name = take(parser)[1]; let next_type = null;
+                if (matches(parser, ":")) { take(parser); next_type = parse_type(parser); }
+                array_push(fields, syntax.variant_field(next_name, next_type));
+            }
         }
         expect_token(parser, ")");
     }
@@ -216,19 +293,68 @@ fn parse_basic_primary(parser, value) {
     let text = value[1]; let line = value[2]; let column = value[3];
     if (text == "(") { let node = parse_expression(parser); expect_token(parser, ")"); return node; }
     if (text == "[") {
-        let items = array_new(0);
-        if (!matches(parser, "]")) {
-            array_push(items, parse_expression(parser));
-            while (matches(parser, ",")) { take(parser); array_push(items, parse_expression(parser)); }
+        if (matches(parser, "]")) { expect_token(parser, "]"); return syntax.array_node(array_new(0), line, column); }
+        let first = parse_expression(parser);
+        if (matches(parser, "for")) {
+            take(parser); let binding = take(parser)[1]; expect_token(parser, "in"); let iterable = parse_expression(parser);
+            let filter = null; if (matches(parser, "if")) { take(parser); filter = parse_expression(parser); }
+            expect_token(parser, "]"); return syntax.comprehension_node("list", first, null, binding, null, iterable, filter, line, column);
         }
+        let items = array_new(0);
+        array_push(items, first);
+        while (matches(parser, ",")) { take(parser); array_push(items, parse_expression(parser)); }
         expect_token(parser, "]"); return syntax.array_node(items, line, column);
     }
-    if (text == "{") { let entries = parse_named_values(parser, "}"); expect_token(parser, "}"); return syntax.map_node(entries, line, column); }
+    if (text == "{") {
+        if (matches(parser, "}")) { expect_token(parser, "}"); return syntax.map_node(array_new(0), line, column); }
+        let first = parse_expression(parser);
+        if (matches(parser, "for")) {
+            take(parser); let binding = take(parser)[1]; expect_token(parser, "in"); let iterable = parse_expression(parser);
+            let filter = null; if (matches(parser, "if")) { take(parser); filter = parse_expression(parser); }
+            expect_token(parser, "}"); return syntax.comprehension_node("set", first, null, binding, null, iterable, filter, line, column);
+        }
+        if (matches(parser, ":")) {
+            take(parser); let map_value = parse_expression(parser);
+            if (matches(parser, "for")) {
+                take(parser); let key_binding = take(parser)[1]; expect_token(parser, ","); let value_binding = take(parser)[1];
+                expect_token(parser, "in"); let iterable = parse_expression(parser);
+                let filter = null; if (matches(parser, "if")) { take(parser); filter = parse_expression(parser); }
+                expect_token(parser, "}"); return syntax.comprehension_node("map", first, map_value, key_binding, value_binding, iterable, filter, line, column);
+            }
+            let entries = array_new(0);
+            // A string-literal key parses to a literal node [20, "string", value, ...];
+            // use its value, not its kind. Identifier keys are name nodes [21, name, ...].
+            let first_key = first[1];
+            if (first[0] == 20) { first_key = first[2]; }
+            array_push(entries, [first_key, map_value]);
+            while (matches(parser, ",")) { take(parser); let name = take(parser); expect_token(parser, ":"); array_push(entries, [name[1], parse_expression(parser)]); }
+            expect_token(parser, "}"); return syntax.map_node(entries, line, column);
+        }
+        parse_error(current(parser), "expected ':' or 'for' in map or set literal");
+    }
     if (value[0] != "identifier") {
         parse_error(value, string_concat("expected expression, got ", string_concat(value[0], string_concat(" ", value[1]))));
     }
-    if (matches(parser, "(")) { return syntax.call_node(text, parse_arguments(parser), line, column); }
+    if (matches(parser, "(")) { return syntax.call_node(text, parse_call_arguments(parser, text), line, column); }
     return syntax.name_node(text, line, column);
+}
+
+// Parse the comma-separated positions inside brackets: each position is an
+// * expression, optionally `start : end` for a slice. The brackets themselves
+// * are consumed by the caller.
+fn parse_index_positions(parser) {
+    let positions = array_new(0);
+    if (matches(parser, "]")) { parse_error(current(parser), "expected index position"); }
+    let done = false;
+    while (!done) {
+        let start = parse_expression(parser);
+        if (matches(parser, ":")) {
+            let colon = take(parser);
+            array_push(positions, syntax.slice_node(start, parse_expression(parser), colon[2], colon[3]));
+        } else { array_push(positions, start); }
+        if (!matches(parser, ",")) { done = true; } else { take(parser); }
+    }
+    return positions;
 }
 
 fn parse_primary(parser) {
@@ -246,7 +372,7 @@ fn parse_primary(parser) {
     let postfix = true;
     while (postfix) {
         if (matches(parser, "[")) {
-            take(parser); let index = parse_expression(parser); expect_token(parser, "]"); node = syntax.index_node(node, index, line, column);
+            take(parser); let positions = parse_index_positions(parser); expect_token(parser, "]"); node = syntax.index_node(node, positions, line, column);
         } else {
             if (matches(parser, ".")) {
                 take(parser); let field = take(parser)[1];
@@ -305,6 +431,8 @@ fn parse_block(parser) {
 }
 
 fn parse_function(parser) {
+    let is_async = false;
+    if (matches(parser, "async")) { take(parser); is_async = true; }
     expect_token(parser, "fn"); let name_token = take(parser); let name = name_token[1]; let type_params = array_new(0);
     if (matches(parser, "<")) {
         take(parser); array_push(type_params, take(parser)[1]);
@@ -317,7 +445,7 @@ fn parse_function(parser) {
         array_push(parameters, take(parser)[1]);
         while (matches(parser, ",")) { take(parser); array_push(parameters, take(parser)[1]); }
     }
-    expect_token(parser, ")"); return syntax.function_node(name, type_params, parameters, parse_block(parser), name_token[2], name_token[3]);
+    expect_token(parser, ")"); return syntax.function_node(name, type_params, parameters, parse_block(parser), name_token[2], name_token[3], is_async);
 }
 
 fn parse_state_statement(parser, line, column) {
@@ -350,12 +478,14 @@ fn parse_statement(parser) {
     let line = current_line(parser); let column = current_column(parser);
     if (matches(parser, "state")) { return parse_state_statement(parser, line, column); }
     if (matches(parser, "history")) { take(parser); let target = take(parser)[1]; let policy = take(parser)[1]; let amount = parse_expression(parser); expect_token(parser, ";"); return syntax.history_node(target, policy, amount, line, column); }
-    if (matches(parser, "let")) { take(parser); let name_token = take(parser); let name = name_token[1]; expect_token(parser, "="); let value = parse_expression(parser); expect_token(parser, ";"); return syntax.let_node(name, value, name_token[2], name_token[3]); }
+    if (matches(parser, "let")) { take(parser); let name_token = take(parser); let name = name_token[1]; let annotation = null; if (matches(parser, ":")) { take(parser); annotation = parse_type(parser); } expect_token(parser, "="); let value = parse_expression(parser); expect_token(parser, ";"); return syntax.let_node(name, annotation, value, name_token[2], name_token[3]); }
     if (matches(parser, "if")) { return parse_if_statement(parser, line, column); }
     if (matches(parser, "while")) { take(parser); expect_token(parser, "("); let predicate = parse_expression(parser); expect_token(parser, ")"); return syntax.while_node(predicate, parse_block(parser), line, column); }
+    if (matches(parser, "for")) { take(parser); let binding = take(parser)[1]; expect_token(parser, "in"); let iterable = parse_expression(parser); return syntax.for_node(binding, iterable, parse_block(parser), line, column); }
     if (matches(parser, "transform")) { return parse_transform_statement(parser, line, column); }
     if (matches(parser, "taskgroup")) { take(parser); return syntax.taskgroup_node(parse_block(parser), line, column); }
     if (matches(parser, "cancel")) { take(parser); expect_token(parser, "("); let task = parse_expression(parser); expect_token(parser, ")"); expect_token(parser, ";"); return syntax.cancel_node(task, line, column); }
+    if (matches(parser, "yield")) { take(parser); let value = parse_expression(parser); expect_token(parser, ";"); return syntax.yield_node(value, line, column); }
     if (matches(parser, "return")) { take(parser); let value = parse_expression(parser); expect_token(parser, ";"); return syntax.return_node(value, line, column); }
     if (matches(parser, "print")) { take(parser); expect_token(parser, "("); let value = parse_expression(parser); expect_token(parser, ")"); expect_token(parser, ";"); return syntax.print_node(value, line, column); }
     if (matches(parser, "match")) { take(parser); return syntax.expression_node(parse_match(parser, line, column), line, column); }
@@ -373,8 +503,9 @@ fn parse(source) {
     while (!matches(parser, "<eof>")) {
         assert(!matches(parser, "import"), "imports must precede functions and statements");
         if (matches(parser, "fn")) { array_push(functions, parse_function(parser)); }
+        else { if (matches(parser, "async")) { array_push(functions, parse_function(parser)); }
         else { if (matches(parser, "type")) { array_push(types, parse_type_declaration(parser, current_line(parser), current_column(parser))); }
-        else { array_push(statements, parse_statement(parser)); } }
+        else { array_push(statements, parse_statement(parser)); } } }
     }
     return syntax.program(functions, statements, imports, types);
 }

@@ -1,0 +1,98 @@
+.version 3
+.function main 0 64
+# capability("train") -> admin token, then grant "use" -> read token
+LOAD_CONST R0 train
+HOST_CALL shared_information R0 1 R1
+LOAD_CONST R2 use
+HOST_CALL grant R1 2 R3
+# s = sgd(0.1, 0.0)
+LOAD_CONST R4 0.1
+LOAD_CONST R5 0.0
+HOST_CALL sgd R4 2 R6
+# x = tensor([1.0])
+LOAD_CONST R7 0
+HOST_CALL array_new R7 1 R8
+LOAD_CONST R9 1.0
+HOST_CALL array_push R8 2 R8
+HOST_CALL tensor R8 1 R10
+# target = tensor([2.0])
+LOAD_CONST R11 0
+HOST_CALL array_new R11 1 R12
+LOAD_CONST R13 2.0
+HOST_CALL array_push R12 2 R12
+HOST_CALL tensor R12 1 R14
+# pair = [x, target]
+LOAD_CONST R15 0
+HOST_CALL array_new R15 1 R16
+MOVE R17 R10
+HOST_CALL array_push R16 2 R16
+MOVE R17 R14
+HOST_CALL array_push R16 2 R16
+# data = [pair]
+LOAD_CONST R18 0
+HOST_CALL array_new R18 1 R19
+MOVE R20 R16
+HOST_CALL array_push R19 2 R19
+# data_root = information(data)
+HOST_CALL information_new R19 1 R21
+# init = tensor([0.0])
+LOAD_CONST R22 0
+HOST_CALL array_new R22 1 R23
+LOAD_CONST R24 0.0
+HOST_CALL array_push R23 2 R23
+HOST_CALL tensor R23 1 R25
+# r = train(model, data_root, loss, s, init, 1, 1)
+LOAD_FUNCTION R26 model
+LOAD_FUNCTION R27 loss
+LOAD_CONST R28 1
+LOAD_CONST R29 1
+MOVE R30 R26
+MOVE R31 R21
+MOVE R32 R27
+MOVE R33 R6
+MOVE R34 R25
+MOVE R35 R28
+MOVE R36 R29
+HOST_CALL train R30 7 R37
+# print r.params[0]
+GET_FIELD R37 params R38
+LOAD_CONST R39 0
+HOST_CALL index_get R38 2 R40
+PRINT R40
+# x2 = tensor([1.0])
+LOAD_CONST R41 0
+HOST_CALL array_new R41 1 R42
+LOAD_CONST R43 1.0
+HOST_CALL array_push R42 2 R42
+HOST_CALL tensor R42 1 R44
+# target2 = tensor([3.0])
+LOAD_CONST R45 0
+HOST_CALL array_new R45 1 R46
+LOAD_CONST R47 3.0
+HOST_CALL array_push R46 2 R46
+HOST_CALL tensor R46 1 R48
+# new_point = [x2, target2]
+LOAD_CONST R49 0
+HOST_CALL array_new R49 1 R50
+MOVE R51 R44
+HOST_CALL array_push R50 2 R50
+MOVE R51 R48
+HOST_CALL array_push R50 2 R50
+# observe(data_root, new_point) -> one incremental optimizer step
+OBSERVE R21 R52 x R50
+# print r.params[0] again (reactive parameters resolve to the updated value)
+GET_FIELD R37 params R38
+LOAD_CONST R39 0
+HOST_CALL index_get R38 2 R40
+PRINT R40
+HALT
+.function model 2 4
+BINARY R0 mul R1 R2
+RETURN R2
+.function loss 2 8
+BINARY R0 sub R1 R2
+BINARY R0 sub R1 R3
+BINARY R2 mul R3 R4
+MOVE R5 R4
+HOST_CALL tensor_sum R5 1 R6
+RETURN R6

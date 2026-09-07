@@ -1,0 +1,13 @@
+// LIP-021 §1/§4: Unicode code points and simple case mapping.
+assert(char_length("hello") == 5, "char_length ascii");
+assert(char_length("héllo") == 5, "char_length multibyte");
+assert(char_length("😀") == 1, "char_length 4-byte");
+assert(string_codepoint_slice("héllo", 0, 2) == "hé", "codepoint slice");
+assert(to_upper("hello") == "HELLO", "to_upper ascii");
+assert(to_lower("HELLO") == "hello", "to_lower ascii");
+assert(to_upper("Straße") == "STRAßE", "to_upper sharp s unchanged");
+assert(to_lower("İ") == "i", "to_lower dotted I");
+assert(to_upper("ı") == "I", "to_upper dotless i");
+assert(to_upper("ς") == "Σ", "to_upper final sigma");
+assert(to_lower("ẞ") == "ß", "to_lower capital sharp s");
+print("M21_UNICODE_PASS");

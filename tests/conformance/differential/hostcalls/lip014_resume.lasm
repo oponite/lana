@@ -1,0 +1,136 @@
+.version 3
+.function main 0 64
+# capability("train") -> admin token, then grant "use" -> read token
+LOAD_CONST R0 train
+HOST_CALL shared_information R0 1 R1
+LOAD_CONST R2 use
+HOST_CALL grant R1 2 R3
+# s = sgd(0.1, 0.0)
+LOAD_CONST R4 0.1
+LOAD_CONST R5 0.0
+HOST_CALL sgd R4 2 R6
+# x1 = tensor([1.0])
+LOAD_CONST R7 0
+HOST_CALL array_new R7 1 R8
+LOAD_CONST R9 1.0
+HOST_CALL array_push R8 2 R8
+HOST_CALL tensor R8 1 R10
+# t1 = tensor([2.0])
+LOAD_CONST R11 0
+HOST_CALL array_new R11 1 R12
+LOAD_CONST R13 2.0
+HOST_CALL array_push R12 2 R12
+HOST_CALL tensor R12 1 R14
+# pair1 = [x1, t1]
+LOAD_CONST R15 0
+HOST_CALL array_new R15 1 R16
+MOVE R17 R10
+HOST_CALL array_push R16 2 R16
+MOVE R17 R14
+HOST_CALL array_push R16 2 R16
+# x2 = tensor([3.0])
+LOAD_CONST R18 0
+HOST_CALL array_new R18 1 R19
+LOAD_CONST R20 3.0
+HOST_CALL array_push R19 2 R19
+HOST_CALL tensor R19 1 R21
+# t2 = tensor([6.0])
+LOAD_CONST R22 0
+HOST_CALL array_new R22 1 R23
+LOAD_CONST R24 6.0
+HOST_CALL array_push R23 2 R23
+HOST_CALL tensor R23 1 R25
+# pair2 = [x2, t2]
+LOAD_CONST R26 0
+HOST_CALL array_new R26 1 R27
+MOVE R28 R21
+HOST_CALL array_push R27 2 R27
+MOVE R28 R25
+HOST_CALL array_push R27 2 R27
+# data = [pair1, pair2]
+LOAD_CONST R29 0
+HOST_CALL array_new R29 1 R30
+MOVE R31 R16
+HOST_CALL array_push R30 2 R30
+MOVE R31 R27
+HOST_CALL array_push R30 2 R30
+# init = tensor([0.0])
+LOAD_CONST R32 0
+HOST_CALL array_new R32 1 R33
+LOAD_CONST R34 0.0
+HOST_CALL array_push R33 2 R33
+HOST_CALL tensor R33 1 R35
+# r = train(model, data, loss, s, init, 2, 1)
+LOAD_FUNCTION R36 model
+LOAD_FUNCTION R37 loss
+LOAD_CONST R38 2
+LOAD_CONST R39 1
+MOVE R40 R36
+MOVE R41 R30
+MOVE R42 R37
+MOVE R43 R6
+MOVE R44 R35
+MOVE R45 R38
+MOVE R46 R39
+HOST_CALL train R40 7 R47
+# print r.params[0]
+GET_FIELD R47 params R48
+LOAD_CONST R49 0
+HOST_CALL index_get R48 2 R50
+PRINT R50
+# resumed = resume(r, 1)
+MOVE R51 R47
+LOAD_CONST R52 1
+HOST_CALL resume R51 2 R53
+# print resumed.params[0]
+GET_FIELD R53 params R48
+LOAD_CONST R49 0
+HOST_CALL index_get R48 2 R50
+PRINT R50
+# print resumed.steps[2].parameters[0]
+GET_FIELD R53 steps R48
+LOAD_CONST R49 2
+HOST_CALL index_get R48 2 R50
+LOAD_CONST R51 parameters
+HOST_CALL map_get R50 2 R55
+LOAD_CONST R56 0
+HOST_CALL index_get R55 2 R57
+PRINT R57
+# print resumed.steps[3].parameters[0]
+GET_FIELD R53 steps R48
+LOAD_CONST R49 3
+HOST_CALL index_get R48 2 R50
+LOAD_CONST R51 parameters
+HOST_CALL map_get R50 2 R55
+LOAD_CONST R56 0
+HOST_CALL index_get R55 2 R57
+PRINT R57
+# print r.steps[2].parameters[0] (original, for byte-identity comparison)
+GET_FIELD R47 steps R48
+LOAD_CONST R49 2
+HOST_CALL index_get R48 2 R50
+LOAD_CONST R51 parameters
+HOST_CALL map_get R50 2 R55
+LOAD_CONST R56 0
+HOST_CALL index_get R55 2 R57
+PRINT R57
+# print r.steps[3].parameters[0] (original, for byte-identity comparison)
+GET_FIELD R47 steps R48
+LOAD_CONST R49 3
+HOST_CALL index_get R48 2 R50
+LOAD_CONST R51 parameters
+HOST_CALL map_get R50 2 R55
+LOAD_CONST R56 0
+HOST_CALL index_get R55 2 R57
+PRINT R57
+HALT
+.function model 2 4
+BINARY R0 mul R1 R2
+RETURN R2
+.function loss 2 8
+BINARY R0 sub R1 R2
+BINARY R0 sub R1 R3
+BINARY R2 mul R3 R4
+MOVE R5 R4
+HOST_CALL tensor_sum R5 1 R6
+RETURN R6

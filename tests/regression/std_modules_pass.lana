@@ -1,0 +1,28 @@
+import "std/random" as random;
+import "std/iterators" as iterators;
+import "std/datetime" as datetime;
+import "std/testing" as testing;
+
+random.random_seed(42);
+let f = random.random_float();
+assert(f >= 0.0, "random_float >= 0");
+assert(f < 1.0, "random_float < 1");
+let i = random.random_int(1, 6);
+assert(i >= 1, "random_int >= 1");
+assert(i <= 6, "random_int <= 6");
+let c = random.random_choice(["a", "b", "c"]);
+if (c != "a") { if (c != "b") { assert(c == "c", "random_choice in set"); } }
+
+let total = 0;
+for x in iterators.iter([1, 2, 3]) { total = total + x; }
+assert(total == 6, "iter sum");
+
+let t = datetime.now();
+assert(t > 0, "now positive");
+assert(datetime.add_duration(t, 10) == t + 10, "add_duration");
+
+testing.assert_eq(1, 1);
+testing.assert_true(true);
+testing.assert_false(false);
+
+print("STD_MODULES_PASS");

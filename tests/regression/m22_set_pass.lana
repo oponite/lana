@@ -1,0 +1,25 @@
+import "../../stdlib/collections.lana" as collections;
+
+let s = collections.set_new();
+s = collections.set_add(s, "a");
+s = collections.set_add(s, "b");
+s = collections.set_add(s, "a");
+assert(collections.set_contains(s, "a") == true, "set contains a");
+assert(collections.set_contains(s, "b") == true, "set contains b");
+assert(collections.set_contains(s, "z") == false, "set not contains z");
+
+let t = collections.set_add(collections.set_new(), "b");
+t = collections.set_add(t, "c");
+let u = collections.set_union(s, t);
+assert(collections.set_contains(u, "a") == true, "union a");
+assert(collections.set_contains(u, "c") == true, "union c");
+
+let i = collections.set_intersect(s, t);
+assert(collections.set_contains(i, "b") == true, "intersect b");
+assert(collections.set_contains(i, "a") == false, "intersect no a");
+
+let d = collections.set_difference(s, t);
+assert(collections.set_contains(d, "a") == true, "diff a");
+assert(collections.set_contains(d, "b") == false, "diff no b");
+
+print("M22_SET_PASS");

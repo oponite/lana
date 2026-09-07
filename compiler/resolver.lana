@@ -9,6 +9,15 @@ fn type_task_handle(result_type, capabilities) { return ["task_handle", result_t
 fn type_capability(name) { return ["capability", name]; }
 fn type_shared_capability(value_type, permission) { return ["shared_capability", value_type, permission]; }
 fn type_result(ok_type, error_type) { return ["result", ok_type, error_type]; }
+fn type_generator(element_type) { return ["generator", element_type]; }
+fn type_future(element_type) { return ["future", element_type]; }
+fn type_set(element_type) { return ["set", element_type]; }
+fn type_tensor(shape) { return ["tensor", shape]; }
+fn type_uncertain(value_type) { return ["uncertain", value_type]; }
+fn type_layer(in_shape, out_shape) { return ["layer", in_shape, out_shape]; }
+fn shape_literal(dims) { return ["shape", dims]; }
+fn shape_var(name) { return ["shape_var", name]; }
+fn shape_dynamic() { return ["shape_dynamic"]; }
 fn type_unknown() { return type_ordinary("unknown"); }
 fn type_tag(value_type) { return value_type[0]; }
 fn shared_permission_valid(permission) {
@@ -28,9 +37,16 @@ fn type_compatible(left, right) {
             if (right[1] == "unknown") { return true; }
             return left[1] == right[1];
         }
+        if (left[1] == "tensor") { if (type_tag(right) == "tensor") { return true; } }
+        if (left[1] == "Layer") { if (type_tag(right) == "layer") { return true; } }
         return false;
     }
-    if (type_tag(right) == "ordinary") { if (right[1] == "unknown") { return true; } return false; }
+    if (type_tag(right) == "ordinary") {
+        if (right[1] == "unknown") { return true; }
+        if (right[1] == "tensor") { if (type_tag(left) == "tensor") { return true; } }
+        if (right[1] == "Layer") { if (type_tag(left) == "layer") { return true; } }
+        return false;
+    }
     if (type_tag(left) != type_tag(right)) { return false; }
     if (type_tag(left) == "information") { return type_compatible(left[1], right[1]); }
     if (type_tag(left) == "claim") { return type_compatible(left[1], right[1]); }
@@ -46,8 +62,171 @@ fn type_compatible(left, right) {
         if (!type_compatible(left[1], right[1])) { return false; }
         return type_compatible(left[2], right[2]);
     }
+    if (type_tag(left) == "generator") { return type_compatible(left[1], right[1]); }
+    if (type_tag(left) == "future") { return type_compatible(left[1], right[1]); }
+    if (type_tag(left) == "set") { return type_compatible(left[1], right[1]); }
+    if (type_tag(left) == "tensor") { return shape_compatible(left[1], right[1]); }
+    if (type_tag(left) == "uncertain") { return type_compatible(left[1], right[1]); }
+    if (type_tag(left) == "layer") {
+        if (!shape_compatible(left[1], right[1])) { return false; }
+        return shape_compatible(left[2], right[2]);
+    }
     return false;
 }
+
+fn shape_compatible(left, right) {
+    if (left[0] == "shape_dynamic") { return true; }
+    if (right[0] == "shape_dynamic") { return true; }
+    if (left[0] == "shape_var") { return true; }
+    if (right[0] == "shape_var") { return true; }
+    if (left[0] == "shape") { if (right[0] == "shape") { return shape_dims_equal(left[1], right[1]); } }
+    return false;
+}
+
+fn shape_dims_equal(left, right) {
+    if (array_length(left) != array_length(right)) { return false; }
+    let index = 0;
+    while (index < array_length(left)) {
+        if (left[index] != right[index]) { return false; }
+        index = index + 1;
+    }
+    return true;
+}
+
+fn shape_concat(left, right) {
+    if (left[0] != "shape") { return shape_dynamic(); }
+    if (right[0] != "shape") { return shape_dynamic(); }
+    let dims = array_new(0); let index = 0;
+    while (index < array_length(left[1])) { array_push(dims, left[1][index]); index = index + 1; }
+    index = 0;
+    while (index < array_length(right[1])) { array_push(dims, right[1][index]); index = index + 1; }
+    return shape_literal(dims);
+}
+
+fn shape_of_expression(resolved) {
+    let node = resolved[3];
+    if (node[0] == 25) {
+        let dims = array_new(0); let index = 0;
+        while (index < array_length(node[1])) {
+            let item = node[1][index];
+            if (item[0] == 20) { if (item[1] == "number") { array_push(dims, item[2]); index = index + 1; } else { return shape_dynamic(); } }
+            else { return shape_dynamic(); }
+        }
+        return shape_literal(dims);
+    }
+    if (node[0] == 21) { return shape_var(node[1]); }
+    return shape_dynamic();
+}
+
+fn tensor_shape_of_type(value_type) {
+    if (type_tag(value_type) == "tensor") { return value_type[1]; }
+    if (type_tag(value_type) == "uncertain") { return tensor_shape_of_type(value_type[1]); }
+    if (type_tag(value_type) == "ordinary") { if (value_type[1] == "tensor") { return shape_dynamic(); } }
+    return shape_dynamic();
+}
+
+fn tensor_shape_of(resolved) { return tensor_shape_of_type(resolved[1]); }
+
+fn array_literal_shape(node) {
+    if (node[0] == 25) {
+        let items = node[1];
+        if (array_length(items) == 0) { return shape_dynamic(); }
+        let inner = array_literal_shape(items[0]);
+        if (inner[0] != "shape") { return shape_dynamic(); }
+        let dims = array_new(0); array_push(dims, number_to_string(array_length(items)));
+        let index = 0;
+        while (index < array_length(inner[1])) { array_push(dims, inner[1][index]); index = index + 1; }
+        return shape_literal(dims);
+    }
+    if (node[0] == 20) { if (node[1] == "number") { return shape_literal(array_new(0)); } }
+    return shape_dynamic();
+}
+
+fn matmul_shape(left, right) {
+    if (left[0] != "shape") { return shape_dynamic(); }
+    if (right[0] != "shape") { return shape_dynamic(); }
+    let a = left[1]; let b = right[1];
+    let la = array_length(a); let lb = array_length(b);
+    if (la == 2) { if (lb == 2) {
+        if (a[1] == b[0]) { return shape_literal([a[0], b[1]]); }
+        return shape_dynamic();
+    } }
+    if (la == 1) { if (lb == 2) {
+        if (a[0] == b[0]) { return shape_literal([b[1]]); }
+        return shape_dynamic();
+    } }
+    if (la == 2) { if (lb == 1) {
+        if (a[1] == b[0]) { return shape_literal([a[0]]); }
+        return shape_dynamic();
+    } }
+    if (la == 1) { if (lb == 1) {
+        if (a[0] == b[0]) { return shape_literal(array_new(0)); }
+        return shape_dynamic();
+    } }
+    return shape_dynamic();
+}
+
+fn elementwise_shape(left, right) {
+    if (left[0] != "shape") { return shape_dynamic(); }
+    if (right[0] != "shape") { return shape_dynamic(); }
+    if (shape_dims_equal(left[1], right[1])) { return left; }
+    return shape_dynamic();
+}
+
+fn is_tensor_type(value_type) {
+    if (type_tag(value_type) == "tensor") { return true; }
+    if (type_tag(value_type) == "ordinary") { if (value_type[1] == "tensor") { return true; } }
+    return false;
+}
+
+fn is_state_value_type(value_type) {
+    if (type_tag(value_type) == "information") { return true; }
+    if (type_tag(value_type) == "ordinary") {
+        if (value_type[1] == "state") { return true; }
+        if (value_type[1] == "nqubit_state") { return true; }
+    }
+    return false;
+}
+
+fn is_uncertain_type(value_type) { return type_tag(value_type) == "uncertain"; }
+
+fn is_uncertain_tensor_type(value_type) {
+    if (type_tag(value_type) != "uncertain") { return false; }
+    return is_tensor_type(value_type[1]);
+}
+
+fn uncertain_inner_type(value_type) { return value_type[1]; }
+
+fn require_certain_tensor(value_type, operation, node) {
+    if (is_uncertain_tensor_type(value_type)) {
+        type_error(node, string_concat(operation, " requires a certain Tensor (extract .prediction first)"));
+    }
+    return value_type;
+}
+
+fn shape_to_string(shape) {
+    if (shape[0] == "shape_dynamic") { return "Dynamic"; }
+    if (shape[0] == "shape_var") { return shape[1]; }
+    if (shape[0] == "shape") { return string_concat("[", string_concat(string_join(shape[1], ", "), "]")); }
+    return "unknown";
+}
+
+fn resolve_shape_spec(spec) {
+    if (spec[0] == "shape_dynamic") { return shape_dynamic(); }
+    if (spec[0] == "shape_var") { return shape_var(spec[1]); }
+    if (spec[0] == "shape_spec") { return shape_literal(spec[1]); }
+    return shape_dynamic();
+}
+
+fn resolve_type_annotation(annotation, environment) {
+    if (annotation[0] == "tensor") { return type_tensor(resolve_shape_spec(annotation[1])); }
+    if (annotation[0] == "shape") { return type_ordinary("Shape"); }
+    if (annotation[0] == "dynamic") { return type_ordinary("Dynamic"); }
+    if (annotation[0] == "named") { return type_ordinary(annotation[1]); }
+    return type_unknown();
+}
+
+fn layer_variants() { return ["Dense", "Conv", "Relu"]; }
 
 fn effect_kind_valid(kind) {
     if (kind == "pure") { return true; }
@@ -100,6 +279,16 @@ fn effects_external(value) {
     return effects_contains(value, "observation");
 }
 
+fn effects_is_pure(value) {
+    if (effects_contains(value, "observation")) { return false; }
+    if (effects_contains(value, "stochastic")) { return false; }
+    if (effects_contains(value, "io")) { return false; }
+    if (effects_contains(value, "mutation")) { return false; }
+    if (effects_contains(value, "task")) { return false; }
+    if (effects_contains(value, "external_call")) { return false; }
+    return true;
+}
+
 fn typed(node, value_type, effect_value) { return [node[0], value_type, effect_value, node]; }
 
 fn host_is_pure(name) {
@@ -119,6 +308,38 @@ fn host_is_pure(name) {
     if (name == "string_unescape") { return true; }
     if (name == "lazy_bound") { return true; }
     if (name == "surprisal") { return true; }
+    if (name == "tensor") { return true; } if (name == "tensor_complex") { return true; }
+    if (name == "zeros") { return true; } if (name == "ones") { return true; }
+    if (name == "eye") { return true; } if (name == "shape") { return true; }
+    if (name == "ndim") { return true; } if (name == "dtype") { return true; }
+    if (name == "matmul") { return true; } if (name == "sum") { return true; }
+    if (name == "mean") { return true; } if (name == "max") { return true; }
+    if (name == "min") { return true; }
+    if (name == "set_new") { return true; } if (name == "set_add") { return true; }
+    if (name == "set_contains") { return true; } if (name == "set_union") { return true; }
+    if (name == "set_intersect") { return true; } if (name == "set_difference") { return true; }
+    if (name == "format") { return true; } if (name == "format_number") { return true; }
+    if (name == "char_length") { return true; } if (name == "string_codepoint_slice") { return true; }
+    if (name == "to_upper") { return true; } if (name == "to_lower") { return true; }
+    if (name == "regex_compile") { return true; } if (name == "regex_match") { return true; }
+    if (name == "regex_search") { return true; } if (name == "regex_replace") { return true; }
+    if (name == "gpu_matmul") { return true; }
+    if (name == "density_operator") { return true; } if (name == "povm") { return true; }
+    if (name == "channel") { return true; } if (name == "observable") { return true; }
+    if (name == "tensor_product") { return true; } if (name == "partial_trace") { return true; }
+    if (name == "measure_with") { return true; } if (name == "apply_to") { return true; }
+    if (name == "expect") { return true; } if (name == "mix") { return true; }
+    if (name == "trace_distance") { return true; } if (name == "is_separable") { return true; }
+    if (name == "to_state") { return true; }
+    if (name == "grad") { return true; } if (name == "vjp") { return true; }
+    if (name == "sgd") { return true; } if (name == "adam") { return true; }
+    if (name == "train") { return true; }
+    if (name == "update") { return true; }
+    if (name == "resume") { return true; }
+    if (name == "mcmc") { return true; } if (name == "vi") { return true; }
+    if (name == "smc") { return true; }
+    if (name == "state_tensor") { return true; } if (name == "append") { return true; }
+    if (name == "measure") { return true; } if (name == "transform") { return true; }
     return false;
 }
 
@@ -145,17 +366,28 @@ fn host_effect(name) {
     if (name == "csv_read") { return effects("io"); }
     if (name == "csv_write") { return effects("io"); }
     if (name == "args") { return effects("external_call"); }
+    if (name == "getenv") { return effects("external_call"); }
     if (name == "now") { return effects("external_call"); }
     if (name == "random") { return effects("stochastic"); }
+    if (name == "random_seed") { return effects("stochastic"); }
+    if (name == "infer") { return effects("stochastic"); }
+    if (name == "floor") { return effects("pure"); }
+    if (name == "string_to_number") { return effects("pure"); }
+    if (name == "type_of") { return effects("pure"); }
     if (name == "assert") { return effects("external_call"); }
     if (name == "index_set") { return effects("mutation"); }
     if (name == "array_push") { return effects("mutation"); }
+    if (name == "run_async") { return effects("io"); }
+    if (name == "future_all") { return effects("io"); }
+    if (name == "future_race") { return effects("io"); }
+    if (name == "sleep") { return effects("io"); }
     if (host_is_pure(name)) { return effects("pure"); }
     return effects("external_call");
 }
 
 fn host_type(name) {
     if (name == "args") { return type_ordinary("array"); }
+    if (name == "getenv") { return type_ordinary("string"); }
     if (name == "read_text") { return type_ordinary("string"); }
     if (name == "write_text") { return type_ordinary("null"); }
     if (name == "directory_list") { return type_ordinary("array"); }
@@ -176,8 +408,14 @@ fn host_type(name) {
     if (name == "ledger_query") { return type_ordinary("array"); }
     if (name == "now") { return type_ordinary("number"); }
     if (name == "random") { return type_sample(type_ordinary("number"), "host:random", "random"); }
+    if (name == "random_seed") { return type_ordinary("null"); }
+    if (name == "floor") { return type_ordinary("number"); }
+    if (name == "string_to_number") { return type_result(type_ordinary("number"), type_ordinary("string")); }
+    if (name == "format_timestamp") { return type_ordinary("string"); }
+    if (name == "parse_timestamp") { return type_result(type_ordinary("number"), type_ordinary("string")); }
+    if (name == "type_of") { return type_ordinary("string"); }
     if (name == "assert") { return type_ordinary("null"); }
-    if (name == "json_parse") { return type_unknown(); }
+    if (name == "json_parse") { return type_result(type_information(type_unknown()), type_ordinary("string")); }
     if (name == "json_stringify") { return type_ordinary("string"); }
     if (name == "csv_read") { return type_ordinary("array"); }
     if (name == "csv_write") { return type_ordinary("null"); }
@@ -186,6 +424,64 @@ fn host_type(name) {
     if (name == "number_to_string") { return type_ordinary("string"); }
     if (name == "lazy_bound") { return type_ordinary("number"); }
     if (name == "surprisal") { return type_ordinary("number"); }
+    if (name == "tensor") { return type_ordinary("tensor"); }
+    if (name == "tensor_complex") { return type_ordinary("tensor"); }
+    if (name == "zeros") { return type_ordinary("tensor"); }
+    if (name == "ones") { return type_ordinary("tensor"); }
+    if (name == "eye") { return type_ordinary("tensor"); }
+    if (name == "dtype") { return type_ordinary("string"); }
+    if (name == "shape") { return type_ordinary("array"); }
+    if (name == "ndim") { return type_ordinary("number"); }
+    if (name == "matmul") { return type_ordinary("tensor"); }
+    if (name == "gpu_matmul") { return type_ordinary("tensor"); }
+    if (name == "density_operator") { return type_ordinary("nqubit_state"); }
+    if (name == "povm") { return type_ordinary("povm"); }
+    if (name == "channel") { return type_ordinary("channel"); }
+    if (name == "observable") { return type_ordinary("observable"); }
+    if (name == "tensor_product") { return type_ordinary("nqubit_state"); }
+    if (name == "partial_trace") { return type_ordinary("nqubit_state"); }
+    if (name == "measure_with") { return type_ordinary("array"); }
+    if (name == "apply_to") { return type_ordinary("nqubit_state"); }
+    if (name == "expect") { return type_ordinary("number"); }
+    if (name == "mix") { return type_ordinary("nqubit_state"); }
+    if (name == "trace_distance") { return type_ordinary("number"); }
+    if (name == "is_separable") { return type_ordinary("string"); }
+    if (name == "to_state") { return type_ordinary("state"); }
+    if (name == "grad") { return type_ordinary("tensor"); }
+    if (name == "vjp") { return type_ordinary("tensor"); }
+    if (name == "sgd") { return type_ordinary("optimizer"); }
+    if (name == "adam") { return type_ordinary("optimizer"); }
+    if (name == "train") { return type_ordinary("training_result"); }
+    if (name == "update") { return type_ordinary("training_result"); }
+    if (name == "resume") { return type_ordinary("training_result"); }
+    if (name == "mcmc") { return type_ordinary("inference_algorithm"); }
+    if (name == "vi") { return type_ordinary("inference_algorithm"); }
+    if (name == "smc") { return type_ordinary("inference_algorithm"); }
+    if (name == "infer") { return type_ordinary("posterior"); }
+    if (name == "state_tensor") { return type_ordinary("tensor"); }
+    if (name == "append") { return type_ordinary("tensor"); }
+    if (name == "measure") { return type_ordinary("tensor"); }
+    if (name == "transform") { return type_ordinary("tensor"); }
+    if (name == "sum") { return type_unknown(); }
+    if (name == "mean") { return type_unknown(); }
+    if (name == "max") { return type_ordinary("number"); }
+    if (name == "min") { return type_ordinary("number"); }
+    if (name == "set_new") { return type_set(type_unknown()); }
+    if (name == "set_add") { return type_set(type_unknown()); }
+    if (name == "set_contains") { return type_ordinary("bool"); }
+    if (name == "set_union") { return type_set(type_unknown()); }
+    if (name == "set_intersect") { return type_set(type_unknown()); }
+    if (name == "set_difference") { return type_set(type_unknown()); }
+    if (name == "format") { return type_ordinary("string"); }
+    if (name == "format_number") { return type_ordinary("string"); }
+    if (name == "char_length") { return type_ordinary("number"); }
+    if (name == "string_codepoint_slice") { return type_ordinary("string"); }
+    if (name == "to_upper") { return type_ordinary("string"); }
+    if (name == "to_lower") { return type_ordinary("string"); }
+    if (name == "regex_compile") { return type_result(type_ordinary("regex"), type_ordinary("string")); }
+    if (name == "regex_match") { return type_result(type_ordinary("map"), type_ordinary("string")); }
+    if (name == "regex_search") { return type_result(type_ordinary("map"), type_ordinary("string")); }
+    if (name == "regex_replace") { return type_ordinary("string"); }
     return type_unknown();
 }
 
@@ -265,18 +561,24 @@ fn symbol_add_reference(environment, name, line, column) {
 // field count] and types maps a type name to its ordered variant names. It is
 // carried inside the environment under a reserved key so it flows through the
 // existing environment threading without changing signatures.
-fn type_registry_new() { return [map_new(), map_new()]; }
+fn type_registry_new() { return [map_new(), map_new(), map_new()]; }
 
 fn type_registry_of(environment) {
     if (!map_has(environment, "__types__")) { return null; }
     return map_get(environment, "__types__");
 }
 
-fn type_registry_add(registry, type_name, variant_name, index, field_count) {
+fn type_registry_add(registry, type_name, variant_name, index, field_count, field_types) {
     map_set(registry[0], variant_name, [type_name, index, field_count]);
     if (!map_has(registry[1], type_name)) { map_set(registry[1], type_name, array_new(0)); }
     array_push(map_get(registry[1], type_name), variant_name);
+    map_set(registry[2], variant_name, field_types);
     return null;
+}
+
+fn type_registry_field_types(registry, variant_name) {
+    if (!map_has(registry[2], variant_name)) { return null; }
+    return map_get(registry[2], variant_name);
 }
 
 fn type_registry_lookup_variant(registry, name) {
@@ -300,6 +602,11 @@ fn type_to_string(value_type) {
     if (tag == "capability") { return string_concat("Capability<", string_concat(value_type[1], ">")); }
     if (tag == "shared_capability") { return string_concat("SharedCapability<", string_concat(type_to_string(value_type[1]), string_concat(", ", string_concat(value_type[2], ">")))); }
     if (tag == "result") { return string_concat("Result<", string_concat(type_to_string(value_type[1]), string_concat(", ", string_concat(type_to_string(value_type[2]), ">")))); }
+    if (tag == "generator") { return string_concat("Generator<", string_concat(type_to_string(value_type[1]), ">")); }
+    if (tag == "future") { return string_concat("Future<", string_concat(type_to_string(value_type[1]), ">")); }
+    if (tag == "set") { return string_concat("Set<", string_concat(type_to_string(value_type[1]), ">")); }
+    if (tag == "tensor") { return string_concat("Tensor<", string_concat(shape_to_string(value_type[1]), ">")); }
+    if (tag == "layer") { return string_concat("Layer<", string_concat(shape_to_string(value_type[1]), string_concat(", ", string_concat(shape_to_string(value_type[2]), ">")))); }
     return "unknown";
 }
 
@@ -439,7 +746,7 @@ fn builtin_effect_type(node, resolved) {
         require_argument_count(name, resolved, 1);
         if (node[2][0][0] != 20) { type_error(node, "capability name must be a string literal"); }
         if (node[2][0][1] != "string") { type_error(node, "capability name must be a string literal"); }
-        return type_capability(node[2][0][2]);
+        return type_shared_capability("string", "admin");
     }
     return null;
 }
@@ -533,6 +840,19 @@ fn builtin_shared_admin_type(node, resolved) {
         if (type_tag(resolved[1][1]) != "shared_capability") { type_error(node, "shared_revoke requires admin and target shared capabilities"); }
         return type_ordinary("null");
     }
+    if (name == "grant") {
+        require_argument_count(name, resolved, 2); value_type = require_shared_permission(node, resolved, "admin", "grant requires an admin capability");
+        if (node[2][1][0] != 20) { type_error(node, "grant permission must be a string literal"); }
+        if (node[2][1][1] != "string") { type_error(node, "grant permission must be a string literal"); }
+        if (node[2][1][2] != "use") { if (node[2][1][2] != "admin") { type_error(node, "grant permission must be use or admin"); } }
+        if (node[2][1][2] == "use") { return type_shared_capability(value_type, "read"); }
+        return type_shared_capability(value_type, "admin");
+    }
+    if (name == "revoke") {
+        require_argument_count(name, resolved, 1);
+        if (type_tag(resolved[0][1]) != "shared_capability") { type_error(node, "revoke requires a shared capability"); }
+        return type_ordinary("null");
+    }
     return null;
 }
 
@@ -553,6 +873,139 @@ fn builtin_shared_metadata_type(node, resolved) {
     let name = node[1];
     if (name == "shared_revision") { require_argument_count(name, resolved, 1); if (type_tag(resolved[0][1]) != "shared_capability") { type_error(node, "shared metadata requires a shared capability"); } return type_ordinary("number"); }
     if (name == "shared_identity") { require_argument_count(name, resolved, 1); if (type_tag(resolved[0][1]) != "shared_capability") { type_error(node, "shared metadata requires a shared capability"); } return type_ordinary("number"); }
+    return null;
+}
+
+fn builtin_generator_type(node, resolved) {
+    let name = node[1];
+    if (name == "next") {
+        require_argument_count(name, resolved, 1);
+        let arg_type = resolved[0][1];
+        if (type_tag(arg_type) == "generator") { return type_result(arg_type[1], type_unknown()); }
+        if (type_tag(arg_type) == "ordinary") { if (arg_type[1] == "unknown") { return type_result(type_unknown(), type_unknown()); } }
+        type_error(node, "next requires a Generator");
+    }
+    return null;
+}
+
+fn builtin_async_type(node, resolved) {
+    let name = node[1];
+    if (name == "run_async") {
+        require_argument_count(name, resolved, 1);
+        if (type_tag(resolved[0][1]) == "future") { return resolved[0][1][1]; }
+        return type_unknown();
+    }
+    if (name == "future_all") {
+        require_argument_count(name, resolved, 1);
+        return type_future(type_ordinary("array"));
+    }
+    if (name == "future_race") {
+        require_argument_count(name, resolved, 1);
+        return type_future(type_unknown());
+    }
+    if (name == "sleep") {
+        require_argument_count(name, resolved, 1);
+        return type_future(type_ordinary("null"));
+    }
+    return null;
+}
+
+fn builtin_set_type(node, resolved) {
+    let name = node[1];
+    if (name == "set_new") { require_argument_count(name, resolved, 0); return type_set(type_unknown()); }
+    if (name == "set_add") { require_argument_count(name, resolved, 2); return type_set(type_unknown()); }
+    if (name == "set_contains") { require_argument_count(name, resolved, 2); return type_ordinary("bool"); }
+    if (name == "set_union") { require_argument_count(name, resolved, 2); return type_set(type_unknown()); }
+    if (name == "set_intersect") { require_argument_count(name, resolved, 2); return type_set(type_unknown()); }
+    if (name == "set_difference") { require_argument_count(name, resolved, 2); return type_set(type_unknown()); }
+    return null;
+}
+
+fn name_suffix(name) {
+    let i = string_length(name) - 1;
+    while (i >= 0) {
+        if (string_byte_at(name, i) == 46) { return string_slice(name, i + 1, string_length(name)); }
+        i = i - 1;
+    }
+    return name;
+}
+
+fn is_function_name(environment, name) {
+    let box = symbol_box_of(environment);
+    if (box == null) { return false; }
+    let definitions = box[0];
+    let index = 0;
+    while (index < array_length(definitions)) {
+        if (definitions[index][0] == name) {
+            if (definitions[index][1] == "function") { return true; }
+        }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn builtin_iterator_type(node, resolved) {
+    let name = node[1];
+    let suffix = name_suffix(name);
+    if (suffix == "iter") { require_argument_count(name, resolved, 1); return type_generator(type_unknown()); }
+    if (suffix == "enumerate") { require_argument_count(name, resolved, 1); return type_generator(type_ordinary("array")); }
+    if (suffix == "zip") { require_argument_count(name, resolved, 2); return type_generator(type_ordinary("array")); }
+    return null;
+}
+
+fn builtin_iterator_call_type(node, resolved, effect_value, environment) {
+    let name = node[1];
+    if (name == "map") {
+        // The iterator map takes a function name first and an iterable second;
+        // the state-transform map (builtin_state_type) takes a distribution first
+        // and a transform name second. Distinguish by whether the first argument
+        // is a defined function: a function name means the iterator map.
+        if (array_length(node[2]) > 0) {
+            if (node[2][0][0] == 21) {
+                if (is_function_name(environment, node[2][0][1])) {
+                    require_argument_count(name, resolved, 2);
+                    let is_generator = false;
+                    if (array_length(resolved) >= 2) { is_generator = type_tag(resolved[1][1]) == "generator"; }
+                    array_push(node, is_generator);
+                    return typed(node, type_ordinary("array"), effect_value);
+                }
+            }
+        }
+        return null;
+    }
+    if (name == "filter") {
+        if (array_length(node[2]) > 0) {
+            if (node[2][0][0] == 21) {
+                if (is_function_name(environment, node[2][0][1])) {
+                    require_argument_count(name, resolved, 2);
+                    let is_generator = false;
+                    if (array_length(resolved) >= 2) { is_generator = type_tag(resolved[1][1]) == "generator"; }
+                    array_push(node, is_generator);
+                    return typed(node, type_ordinary("array"), effect_value);
+                }
+            }
+        }
+        // A Dataset first argument is the dataset filter, handled by
+        // builtin_dataset_type; defer rather than erroring here.
+        if (array_length(resolved) >= 1) {
+            if (is_dataset_type(resolved[0][1])) { return null; }
+        }
+        type_error(node, "filter requires a function name as its first argument");
+    }
+    if (name == "reduce") {
+        if (array_length(node[2]) > 0) {
+            if (node[2][0][0] == 21) {
+                if (is_function_name(environment, node[2][0][1])) {
+                    require_argument_count(name, resolved, 3);
+                    let is_generator = false;
+                    if (array_length(resolved) >= 2) { is_generator = type_tag(resolved[1][1]) == "generator"; }
+                    array_push(node, is_generator);
+                    return typed(node, type_unknown(), effect_value);
+                }
+            }
+        }
+        type_error(node, "reduce requires a function name as its first argument");
+    }
     return null;
 }
 
@@ -582,7 +1035,262 @@ fn builtin_result_type(node, resolved) {
     return null;
 }
 
+fn string_to_int(text) {
+    let result = 0; let index = 0;
+    while (index < string_length(text)) {
+        let byte = string_byte_at(text, index);
+        if (byte < 48) { return -1; }
+        if (byte > 57) { return -1; }
+        result = result * 10 + (byte - 48);
+        index = index + 1;
+    }
+    return result;
+}
+
+fn reduce_shape(shape, axis_resolved) {
+    if (shape[0] != "shape") { return shape_dynamic(); }
+    let axis_node = axis_resolved[3];
+    if (axis_node[0] != 20) { return shape_dynamic(); }
+    if (axis_node[1] != "number") { return shape_dynamic(); }
+    let axis = string_to_int(axis_node[2]);
+    if (axis < 0) { return shape_dynamic(); }
+    let dims = shape[1];
+    if (axis >= array_length(dims)) { return shape_dynamic(); }
+    let result = array_new(0); let index = 0;
+    while (index < array_length(dims)) {
+        if (index != axis) { array_push(result, dims[index]); }
+        index = index + 1;
+    }
+    return shape_literal(result);
+}
+
+fn check_optional_dtype(node, resolved) {
+    let count = array_length(resolved);
+    if (count == 1) { return null; }
+    if (count == 2) {
+        let dtype_node = resolved[1][3];
+        if (dtype_node[0] != 20) { type_error(node, "dtype: must be a string literal"); }
+        if (dtype_node[1] != "string") { type_error(node, "dtype: must be a string literal"); }
+        return null;
+    }
+    type_error(node, "tensor constructor expects a shape and optional dtype");
+    return null;
+}
+
+fn builtin_tensor_type(node, resolved) {
+    let name = node[1];
+    if (name == "zeros") { check_optional_dtype(node, resolved); return type_tensor(shape_of_expression(resolved[0])); }
+    if (name == "ones") { check_optional_dtype(node, resolved); return type_tensor(shape_of_expression(resolved[0])); }
+    if (name == "eye") {
+        check_optional_dtype(node, resolved);
+        let arg = resolved[0][3];
+        if (arg[0] == 20) { if (arg[1] == "number") { return type_tensor(shape_literal([arg[2], arg[2]])); } }
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "tensor") { check_optional_dtype(node, resolved); return type_tensor(array_literal_shape(resolved[0][3])); }
+    if (name == "tensor_complex") { require_argument_count(name, resolved, 2); return type_tensor(array_literal_shape(resolved[0][3])); }
+    if (name == "matmul") {
+        require_argument_count(name, resolved, 2);
+        let shape = matmul_shape(tensor_shape_of(resolved[0]), tensor_shape_of(resolved[1]));
+        if (is_uncertain_tensor_type(resolved[0][1])) { return type_uncertain(type_tensor(shape)); }
+        if (is_uncertain_tensor_type(resolved[1][1])) { return type_uncertain(type_tensor(shape)); }
+        return type_tensor(shape);
+    }
+    if (name == "shape") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], "shape", node);
+        return type_ordinary("array");
+    }
+    if (name == "dtype") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], "dtype", node);
+        return type_ordinary("string");
+    }
+    if (name == "ndim") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], "ndim", node);
+        return type_ordinary("number");
+    }
+    return null;
+}
+
+fn layer_input_shape(resolved) {
+    let value_type = resolved[1];
+    if (type_tag(value_type) == "layer") { return value_type[1]; }
+    return shape_dynamic();
+}
+
+fn layer_output_shape(resolved) {
+    let value_type = resolved[1];
+    if (type_tag(value_type) == "layer") { return value_type[2]; }
+    return shape_dynamic();
+}
+
+fn check_connection(node, feeding, fed) {
+    let output = layer_output_shape(feeding);
+    let input = layer_input_shape(fed);
+    if (!shape_compatible(output, input)) {
+        type_error(node, string_concat("connection shape mismatch: output ", string_concat(shape_to_string(output), string_concat(" does not match input ", shape_to_string(input)))));
+    }
+    return null;
+}
+
+fn resolve_layer_variant(node, resolved, effect_value) {
+    let name = node[1];
+    if (name == "Dense") {
+        if (array_length(resolved) == 3) {
+            let in_shape = shape_of_expression(resolved[0]);
+            let out_shape = shape_of_expression(resolved[1]);
+            let weights_shape = tensor_shape_of(resolved[2]);
+            let expected = shape_concat(in_shape, out_shape);
+            if (!shape_compatible(weights_shape, expected)) {
+                type_error(node, string_concat("Dense weights shape ", string_concat(shape_to_string(weights_shape), string_concat(" does not match [in, out] = ", shape_to_string(expected)))));
+            }
+            return typed(node, type_layer(in_shape, out_shape), effect_value);
+        }
+    }
+    if (name == "Conv") {
+        if (array_length(resolved) == 3) {
+            let in_shape = shape_of_expression(resolved[0]);
+            let out_shape = shape_of_expression(resolved[1]);
+            return typed(node, type_layer(in_shape, out_shape), effect_value);
+        }
+    }
+    if (name == "Relu") {
+        if (array_length(resolved) == 1) {
+            let shape = shape_of_expression(resolved[0]);
+            return typed(node, type_layer(shape, shape), effect_value);
+        }
+    }
+    return typed(node, type_ordinary("Layer"), effect_value);
+}
+
+fn resolve_model_variant(node, resolved, effect_value) {
+    let name = node[1];
+    if (name == "Sequential") {
+        if (array_length(resolved) == 2) { check_connection(node, resolved[0], resolved[1]); }
+    }
+    if (name == "Residual") {
+        if (array_length(resolved) == 2) { check_connection(node, resolved[0], resolved[1]); }
+    }
+    if (name == "Branch") {
+        if (array_length(resolved) == 3) { check_connection(node, resolved[0], resolved[1]); check_connection(node, resolved[0], resolved[2]); }
+    }
+    return typed(node, type_ordinary("Model"), effect_value);
+}
+
+fn resolve_variant_construction(node, resolved, variant, effect_value) {
+    let type_name = variant[0];
+    if (type_name == "Layer") { return resolve_layer_variant(node, resolved, effect_value); }
+    if (type_name == "Model") { return resolve_model_variant(node, resolved, effect_value); }
+    return typed(node, type_ordinary(type_name), effect_value);
+}
+
+fn is_dataset_type(value_type) {
+    if (type_tag(value_type) == "uncertain") { return is_dataset_type(value_type[1]); }
+    if (type_tag(value_type) == "ordinary") { return value_type[1] == "dataset"; }
+    return false;
+}
+
+fn require_dataset(node, resolved, index) {
+    if (!is_dataset_type(resolved[index][1])) { type_error(node, "dataset operation requires a Dataset"); }
+}
+
+fn builtin_dataset_type(node, resolved) {
+    let name = node[1];
+    if (name == "dataset") {
+        require_argument_count(name, resolved, 1);
+        return type_ordinary("dataset");
+    }
+    if (name == "filter") {
+        if (array_length(resolved) < 1) { return null; }
+        if (!is_dataset_type(resolved[0][1])) { return null; }
+        require_argument_count(name, resolved, 2);
+        if (node[2][1][0] != 21) { type_error(node, "filter predicate must be a function name"); }
+        node[1] = "dataset_filter";
+        return type_ordinary("dataset");
+    }
+    if (name == "map") {
+        if (array_length(resolved) < 1) { return null; }
+        if (!is_dataset_type(resolved[0][1])) { return null; }
+        require_argument_count(name, resolved, 2);
+        if (node[2][1][0] != 21) { type_error(node, "map transform must be a function name"); }
+        node[1] = "dataset_map";
+        return type_ordinary("dataset");
+    }
+    if (name == "select") {
+        require_argument_count(name, resolved, 2);
+        require_dataset(node, resolved, 0);
+        return type_ordinary("dataset");
+    }
+    if (name == "limit") {
+        require_argument_count(name, resolved, 2);
+        require_dataset(node, resolved, 0);
+        return type_ordinary("dataset");
+    }
+    if (name == "sort") {
+        require_argument_count(name, resolved, 2);
+        require_dataset(node, resolved, 0);
+        return type_ordinary("dataset");
+    }
+    if (name == "group_by") {
+        require_argument_count(name, resolved, 2);
+        require_dataset(node, resolved, 0);
+        return type_ordinary("dataset");
+    }
+    if (name == "aggregate") {
+        require_argument_count(name, resolved, 2);
+        require_dataset(node, resolved, 0);
+        return type_ordinary("dataset");
+    }
+    if (name == "join") {
+        require_argument_count(name, resolved, 3);
+        require_dataset(node, resolved, 0);
+        require_dataset(node, resolved, 1);
+        return type_ordinary("dataset");
+    }
+    if (name == "materialize") {
+        require_argument_count(name, resolved, 1);
+        require_dataset(node, resolved, 0);
+        return type_ordinary("array");
+    }
+    if (name == "explain") {
+        require_argument_count(name, resolved, 1);
+        require_dataset(node, resolved, 0);
+        node[1] = "dataset_explain";
+        return type_ordinary("map");
+    }
+    return null;
+}
+
 fn builtin_call_type(node, resolved) {
+    let name = node[1];
+    let dataset_type = builtin_dataset_type(node, resolved);
+    if (dataset_type != null) { return dataset_type; }
+    let reduction = false;
+    if (name == "sum") { reduction = true; } if (name == "mean") { reduction = true; }
+    if (name == "max") { reduction = true; } if (name == "min") { reduction = true; }
+    if (reduction) {
+        let count = array_length(resolved);
+        if (count != 1) { if (count != 2) { type_error(node, "tensor reduction expects a tensor and optional axis"); } }
+        exact_type(resolved[0][1], "tensor reduction", node);
+        let uncertain = is_uncertain_tensor_type(resolved[0][1]);
+        if (uncertain) {
+            if (name == "max") { type_error(node, "max requires a certain Tensor (extract .prediction first)"); }
+            if (name == "min") { type_error(node, "min requires a certain Tensor (extract .prediction first)"); }
+        }
+        if (count == 2) {
+            exact_type(resolved[1][1], "tensor reduction axis", node);
+            let result = type_tensor(reduce_shape(tensor_shape_of(resolved[0]), resolved[1]));
+            if (uncertain) { return type_uncertain(result); }
+            return result;
+        }
+        if (name == "max") { return type_ordinary("number"); }
+        if (name == "min") { return type_ordinary("number"); }
+        // Element dtype is dynamic: full sum/mean may return a complex tensor.
+        if (uncertain) { return type_uncertain(type_unknown()); }
+        return type_unknown();
+    }
     let value_type = builtin_uncertainty_type(node, resolved);
     if (value_type != null) { return value_type; }
     value_type = builtin_effect_type(node, resolved);
@@ -599,6 +1307,16 @@ fn builtin_call_type(node, resolved) {
     if (value_type != null) { return value_type; }
     value_type = builtin_shared_metadata_type(node, resolved);
     if (value_type != null) { return value_type; }
+    value_type = builtin_generator_type(node, resolved);
+    if (value_type != null) { return value_type; }
+    value_type = builtin_async_type(node, resolved);
+    if (value_type != null) { return value_type; }
+    value_type = builtin_set_type(node, resolved);
+    if (value_type != null) { return value_type; }
+    value_type = builtin_iterator_type(node, resolved);
+    if (value_type != null) { return value_type; }
+    value_type = builtin_tensor_type(node, resolved);
+    if (value_type != null) { return value_type; }
     return builtin_result_type(node, resolved);
 }
 
@@ -606,6 +1324,30 @@ fn resolve_call(node, environment) {
     symbol_add_reference(environment, node[1], node[3], node[4]);
     let resolved = resolve_arguments(node[2], environment);
     let effect_value = arguments_effect(resolved);
+    let is_ad = false;
+    if (node[1] == "grad") { is_ad = true; }
+    if (node[1] == "vjp") { is_ad = true; }
+    if (is_ad) {
+        if (map_has(environment, "__uses_ad__")) { map_set(map_get(environment, "__uses_ad__"), "yes", true); }
+        let expected = 2; if (node[1] == "vjp") { expected = 3; }
+        require_argument_count(node[1], resolved, expected);
+        if (node[2][0][0] != 21) { type_error(node, string_concat(node[1], " function must be a function name")); }
+        let fname = node[2][0][1];
+        let feffect = effects("external_call");
+        if (map_has(environment, "__function_effects__")) {
+            if (map_has(map_get(environment, "__function_effects__"), fname)) {
+                feffect = map_get(map_get(environment, "__function_effects__"), fname);
+            }
+        }
+        if (!effects_is_pure(feffect)) {
+            type_error(node, string_concat(node[1], " requires a pure function"));
+        }
+        if (map_has(environment, "__function_ops__")) {
+            if (map_has(map_get(environment, "__function_ops__"), fname)) {
+                type_error(node, string_concat(node[1], " requires a differentiable function (max, min, and gpu_matmul are not differentiable)"));
+            }
+        }
+    }
     let registry = type_registry_of(environment);
     if (registry != null) {
         let variant = type_registry_lookup_variant(registry, node[1]);
@@ -617,16 +1359,36 @@ fn resolve_call(node, environment) {
                 message = string_concat(message, " fields");
                 type_error(node, message);
             }
-            return typed(node, type_ordinary(variant[0]), effect_value);
+            return resolve_variant_construction(node, resolved, variant, effect_value);
         }
     }
+    if (map_has(environment, "__generators__")) {
+        if (map_has(map_get(environment, "__generators__"), node[1])) {
+            return typed(node, type_generator(type_unknown()), effect_value);
+        }
+    }
+    if (map_has(environment, "__asyncs__")) {
+        if (map_has(map_get(environment, "__asyncs__"), node[1])) {
+            return typed(node, type_future(type_unknown()), effects_combine(effect_value, effects("io")));
+        }
+    }
+    let iterator_type = builtin_iterator_call_type(node, resolved, effect_value, environment);
+    if (iterator_type != null) { return iterator_type; }
     let builtin_type = builtin_call_type(node, resolved);
     if (builtin_type != null) {
         if (node[1] == "execute_effect") { effect_value = effects_combine(effect_value, effects(resolved[0][1][2])); }
         if (node[1] == "shared_observe") { effect_value = effects_combine(effect_value, effects("observation")); }
         if (node[1] == "shared_grant") { effect_value = effects_combine(effect_value, effects("observation")); }
         if (node[1] == "shared_revoke") { effect_value = effects_combine(effect_value, effects("observation")); }
+        if (node[1] == "grant") { effect_value = effects_combine(effect_value, effects("observation")); }
+        if (node[1] == "revoke") { effect_value = effects_combine(effect_value, effects("observation")); }
         return typed(node, builtin_type, effect_value);
+    }
+    if (map_has(environment, "__function_effects__")) {
+        if (map_has(map_get(environment, "__function_effects__"), node[1])) {
+            effect_value = effects_combine(effect_value, map_get(map_get(environment, "__function_effects__"), node[1]));
+            return typed(node, host_type(node[1]), effect_value);
+        }
     }
     effect_value = effects_combine(effect_value, host_effect(node[1]));
     return typed(node, host_type(node[1]), effect_value);
@@ -638,6 +1400,7 @@ fn resolve_match(node, environment) {
     let declared = null;
     if (registry != null) {
         if (type_tag(scrutinee[1]) == "ordinary") { declared = type_registry_variants_of(registry, scrutinee[1][1]); }
+        if (type_tag(scrutinee[1]) == "layer") { declared = layer_variants(); }
     }
     let covered = map_new(); let has_wildcard = false; let has_unknown = false; let index = 0;
     while (index < array_length(node[2])) {
@@ -689,13 +1452,41 @@ fn resolve_match(node, environment) {
 fn resolve_structure_expression(node, environment) {
     if (node[0] == 27) {
         let source = resolve_expression_with_environment(node[1], environment);
+        let field = node[2];
+        if (is_uncertain_tensor_type(source[1])) {
+            if (field == "prediction") { return typed(node, uncertain_inner_type(source[1]), source[2]); }
+            if (field == "uncertainty") { return typed(node, uncertain_inner_type(source[1]), source[2]); }
+        }
+        if (is_tensor_type(source[1])) {
+            if (field == "uncertainty") { type_error(node, "uncertainty on a certain Tensor requires an Uncertain<Tensor>"); }
+        }
         return typed(node, type_unknown(), source[2]);
     }
     if (node[0] == 28) {
         let effect_value = effects("pure"); let index = 0;
+        let resolved_values = array_new(0);
         while (index < array_length(node[1])) {
             let item = resolve_expression_with_environment(node[1][index][1], environment);
+            array_push(resolved_values, item);
             effect_value = effects_combine(effect_value, item[2]); index = index + 1;
+        }
+        // LIP-008 test seam: { prediction: t, uncertainty: u } is Uncertain<Tensor>.
+        if (array_length(node[1]) == 2) {
+            let key0 = node[1][0][0]; let key1 = node[1][1][0];
+            let pred_index = -1; let unc_index = -1;
+            if (key0 == "prediction") { pred_index = 0; }
+            if (key1 == "prediction") { pred_index = 1; }
+            if (key0 == "uncertainty") { unc_index = 0; }
+            if (key1 == "uncertainty") { unc_index = 1; }
+            if (pred_index >= 0) {
+                if (unc_index >= 0) {
+                    if (is_tensor_type(resolved_values[pred_index][1])) {
+                        if (is_tensor_type(resolved_values[unc_index][1])) {
+                            return typed(node, type_uncertain(resolved_values[pred_index][1]), effect_value);
+                        }
+                    }
+                }
+            }
         }
         return typed(node, type_ordinary("map"), effect_value);
     }
@@ -739,7 +1530,34 @@ fn resolve_information_operation(node, environment) {
             return typed(node, type_unknown(), effect_value);
         }
         if (node[1] == "derivation") { return typed(node, type_ordinary("map"), effect_value); }
-        if (node[1] == "explain") { return typed(node, type_ordinary("string"), effect_value); }
+        if (node[1] == "explain") {
+            // `explain(ds)` on a Dataset is the LIP-015 optimizer inspector, not
+            // the provenance explain. Rewrite to a dataset host call in place.
+            if (array_length(resolved) > 0) {
+                if (is_dataset_type(resolved[0][1])) {
+                    node[0] = 24; node[1] = "dataset_explain";
+                    return typed(node, type_ordinary("map"), effect_value);
+                }
+            }
+            return typed(node, type_ordinary("string"), effect_value);
+        }
+        if (node[1] == "append") {
+            // LIP-007: append of STATE tensors is a differentiable tensor op
+            // (HOST_CALL append). LIP-005: append of state values is a
+            // state_dist relationship (APPEND opcode). Distinguish by argument
+            // type: state values (state/nqubit_state/information) select the
+            // LIP-005 relationship; everything else (tensors, and function
+            // parameters typed unknown) selects the differentiable tensor op,
+            // so rewrite the information node to a call node in place.
+            if (array_length(resolved) == 2) {
+                if (!is_state_value_type(resolved[0][1])) {
+                    if (!is_state_value_type(resolved[1][1])) {
+                        node[0] = 24;
+                        return typed(node, type_ordinary("tensor"), effect_value);
+                    }
+                }
+            }
+        }
         return typed(node, type_information(type_unknown()), effect_value);
     }
     return null;
@@ -810,6 +1628,21 @@ fn resolve_core_expression(node, environment) {
         if (type_tag(right[1]) == "information") { uncertain = true; }
         exact_type(information_value_type(left[1]), "binary operation", node); exact_type(information_value_type(right[1]), "binary operation", node);
         let result_type = type_ordinary("number");
+        let left_tensor = is_tensor_type(left[1]);
+        if (is_uncertain_tensor_type(left[1])) { left_tensor = true; }
+        let right_tensor = is_tensor_type(right[1]);
+        if (is_uncertain_tensor_type(right[1])) { right_tensor = true; }
+        if (left_tensor) {
+            if (right_tensor) {
+                if (node[1] == "+") { result_type = type_tensor(elementwise_shape(tensor_shape_of(left), tensor_shape_of(right))); }
+                if (node[1] == "-") { result_type = type_tensor(elementwise_shape(tensor_shape_of(left), tensor_shape_of(right))); }
+                if (node[1] == "*") { result_type = type_tensor(elementwise_shape(tensor_shape_of(left), tensor_shape_of(right))); }
+                if (node[1] == "/") { result_type = type_tensor(elementwise_shape(tensor_shape_of(left), tensor_shape_of(right))); }
+                let uncertain_operand = is_uncertain_tensor_type(left[1]);
+                if (is_uncertain_tensor_type(right[1])) { uncertain_operand = true; }
+                if (uncertain_operand) { result_type = type_uncertain(result_type); }
+            }
+        }
         if (node[1] == "==") { result_type = type_ordinary("bool"); }
         if (node[1] == "!=") { result_type = type_ordinary("bool"); }
         if (node[1] == "<") { result_type = type_ordinary("bool"); }
@@ -827,6 +1660,19 @@ fn resolve_core_expression(node, environment) {
         return typed(node, result_type, value[2]);
     }
     if (node[0] == 24) { return resolve_call(node, environment); }
+    if (node[0] == 45) {
+        if (!map_has(environment, "__in_async__")) { type_error(node, "await outside an async function"); }
+        if (!map_get(environment, "__in_async__")) { type_error(node, "await outside an async function"); }
+        let value = resolve_expression_with_environment(node[1], environment);
+        let result_type = type_unknown();
+        if (type_tag(value[1]) == "future") { result_type = value[1][1]; }
+        else {
+            if (type_tag(value[1]) == "ordinary") {
+                if (value[1][1] != "unknown") { type_error(node, "await requires a Future"); }
+            } else { type_error(node, "await requires a Future"); }
+        }
+        return typed(node, result_type, value[2]);
+    }
     return null;
 }
 
@@ -843,10 +1689,70 @@ fn resolve_collection_expression(node, environment) {
     }
     if (node[0] == 26) {
         let source = resolve_expression_with_environment(node[1], environment);
-        let index_value = resolve_expression_with_environment(node[2], environment);
-        exact_type(index_value[1], "index", node); let result_type = type_unknown();
-        if (type_tag(source[1]) == "array") { result_type = source[1][1]; }
-        return typed(node, result_type, effects_combine(source[2], index_value[2]));
+        let effect_value = source[2]; let result_type = type_unknown();
+        let positions = node[2]; let index = 0;
+        while (index < array_length(positions)) {
+            let position = positions[index];
+            if (position[0] == 39) {
+                let start = resolve_expression_with_environment(position[1], environment);
+                let end = resolve_expression_with_environment(position[2], environment);
+                exact_type(start[1], "slice start", position);
+                exact_type(end[1], "slice end", position);
+                effect_value = effects_combine(effect_value, start[2]);
+                effect_value = effects_combine(effect_value, end[2]);
+            } else {
+                let index_value = resolve_expression_with_environment(position, environment);
+                exact_type(index_value[1], "index", position);
+                effect_value = effects_combine(effect_value, index_value[2]);
+            }
+            index = index + 1;
+        }
+        if (type_tag(source[1]) == "array") {
+            // Arrays take exactly one non-slice position (SPEC indexing
+// * boundaries); maps and tensors have their own runtime rules.
+            if (array_length(positions) != 1) { type_error(node, "array indexing accepts one position"); }
+            if (positions[0][0] == 39) { type_error(node, "arrays cannot be sliced"); }
+            result_type = source[1][1];
+        }
+        return typed(node, result_type, effect_value);
+    }
+    if (node[0] == 44) {
+        let iterable = resolve_expression_with_environment(node[6], environment);
+        let is_generator = type_tag(iterable[1]) == "generator";
+        if (!is_generator) {
+            if (type_tag(iterable[1]) == "ordinary") {
+                if (iterable[1][1] != "array") { if (iterable[1][1] != "unknown") { type_error(node, "comprehension iterable must be an array or generator"); } }
+            } else { type_error(node, "comprehension iterable must be an array or generator"); }
+        }
+        let element_type = type_unknown();
+        if (is_generator) { element_type = iterable[1][1]; }
+        if (type_tag(iterable[1]) == "array") { element_type = iterable[1][1]; }
+        let body_env = environment_clone(environment);
+        let binding_type = element_type;
+        if (node[1] == "map") { binding_type = type_unknown(); }
+        environment_set(body_env, node[4], binding_type);
+        symbol_add_definition(body_env, node[4], "variable", binding_type, node[8], node[9]);
+        if (node[5] != null) {
+            environment_set(body_env, node[5], binding_type);
+            symbol_add_definition(body_env, node[5], "variable", binding_type, node[8], node[9]);
+        }
+        let effect_value = iterable[2];
+        let element = resolve_expression_with_environment(node[2], body_env);
+        effect_value = effects_combine(effect_value, element[2]);
+        if (node[3] != null) {
+            let value_expr = resolve_expression_with_environment(node[3], body_env);
+            effect_value = effects_combine(effect_value, value_expr[2]);
+        }
+        if (node[7] != null) {
+            let filter = resolve_expression_with_environment(node[7], body_env);
+            effect_value = effects_combine(effect_value, filter[2]);
+        }
+        let result_type = type_unknown();
+        if (node[1] == "list") { result_type = ["array", element[1]]; }
+        if (node[1] == "set") { result_type = type_set(element[1]); }
+        if (node[1] == "map") { result_type = type_ordinary("map"); }
+        array_push(node, is_generator);
+        return typed(node, result_type, effect_value);
     }
     return null;
 }
@@ -869,9 +1775,11 @@ fn statements_effect(statements) {
 
 fn resolve_binding_statement(node, environment) {
     if (node[0] == 2) {
-        let value = resolve_expression_with_environment(node[2], environment);
-        environment_set(environment, node[1], value[1]);
-        symbol_add_definition(environment, node[1], "variable", value[1], node[3], node[4]);
+        let value = resolve_expression_with_environment(node[3], environment);
+        let value_type = value[1];
+        if (node[2] != null) { value_type = resolve_type_annotation(node[2], environment); }
+        environment_set(environment, node[1], value_type);
+        symbol_add_definition(environment, node[1], "variable", value_type, node[4], node[5]);
         return [2, type_ordinary("statement"), value[2], node];
     }
     if (node[0] == 3) {
@@ -905,6 +1813,22 @@ fn resolve_control_statement(node, environment) {
         let body = resolve_list_with_environment(node[2], environment_clone(environment));
         return [5, type_ordinary("statement"), effects_combine(predicate[2], statements_effect(body)), node];
     }
+    if (node[0] == 15) {
+        let iterable = resolve_expression_with_environment(node[2], environment);
+        let is_generator = type_tag(iterable[1]) == "generator";
+        if (!is_generator) {
+            if (type_tag(iterable[1]) == "ordinary") {
+                if (iterable[1][1] != "array") { if (iterable[1][1] != "unknown") { type_error(node, "for iterable must be an array or generator"); } }
+            } else { type_error(node, "for iterable must be an array or generator"); }
+        }
+        let element_type = type_unknown();
+        if (is_generator) { element_type = iterable[1][1]; }
+        let body_env = environment_clone(environment);
+        environment_set(body_env, node[1], element_type);
+        symbol_add_definition(body_env, node[1], "variable", element_type, node[4], node[5]);
+        let body = resolve_list_with_environment(node[3], body_env);
+        return [15, type_ordinary("statement"), effects_combine(iterable[2], statements_effect(body)), [15, node[1], node[2], node[3], is_generator, node[4], node[5]]];
+    }
     return null;
 }
 
@@ -924,11 +1848,21 @@ fn resolve_value_statement(node, environment) {
         exact_type(value[1], "print", node);
         return [8, type_ordinary("statement"), effects_combine(value[2], effects("io")), node];
     }
+    if (node[0] == 14) {
+        if (!map_has(environment, "__in_generator__")) { type_error(node, "yield outside a generator function"); }
+        if (!map_get(environment, "__in_generator__")) { type_error(node, "yield outside a generator function"); }
+        let value = resolve_expression_with_environment(node[1], environment);
+        return [14, type_ordinary("statement"), value[2], node];
+    }
     return null;
 }
 
 fn resolve_task_statement(node, environment) {
-    if (node[0] == 9) { return [9, type_ordinary("statement"), effects("mutation"), node]; }
+    if (node[0] == 9) {
+        environment_set(environment, node[1], type_ordinary("state"));
+        symbol_add_definition(environment, node[1], "variable", type_ordinary("state"), node[3], node[4]);
+        return [9, type_ordinary("statement"), effects("mutation"), node];
+    }
     if (node[0] == 10) { return [10, type_ordinary("statement"), effects("mutation"), node]; }
     if (node[0] == 11) { return [11, type_ordinary("statement"), effects("mutation"), node]; }
     if (node[0] == 12) {
@@ -963,19 +1897,197 @@ fn resolve_list_with_environment(nodes, environment) {
     return result;
 }
 
-fn resolve_list(nodes) { return resolve_list_with_environment(nodes, environment_new()); }
+fn resolve_list(nodes, in_generator, in_async) {
+    let environment = environment_new();
+    map_set(environment, "__in_generator__", in_generator);
+    map_set(environment, "__in_async__", in_async);
+    return resolve_list_with_environment(nodes, environment);
+}
 
-fn resolve_function(node, box, registry) {
+fn resolve_list_with_binding(nodes, name, value_type, in_generator, in_async) {
+    let environment = environment_new();
+    map_set(environment, "__in_generator__", in_generator);
+    map_set(environment, "__in_async__", in_async);
+    environment_set(environment, name, value_type);
+    return resolve_list_with_environment(nodes, environment);
+}
+
+fn statement_contains_yield(node) {
+    if (node[0] == 14) { return true; }
+    if (node[0] == 4) { if (list_contains_yield(node[2])) { return true; } return list_contains_yield(node[3]); }
+    if (node[0] == 5) { return list_contains_yield(node[2]); }
+    if (node[0] == 15) { return list_contains_yield(node[3]); }
+    if (node[0] == 12) { return list_contains_yield(node[1]); }
+    return false;
+}
+
+fn list_contains_yield(nodes) {
+    let index = 0;
+    while (index < array_length(nodes)) {
+        if (statement_contains_yield(nodes[index])) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn entries_contain_await(entries) {
+    let index = 0;
+    while (index < array_length(entries)) {
+        if (node_contains_await(entries[index][1])) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn arms_contain_await(arms) {
+    let index = 0;
+    while (index < array_length(arms)) {
+        if (node_contains_await(arms[index][1])) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn list_contains_await(nodes) {
+    let index = 0;
+    while (index < array_length(nodes)) {
+        if (node_contains_await(nodes[index])) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn node_contains_await(node) {
+    if (node[0] == 45) { return true; }
+    if (node[0] == 24) { return list_contains_await(node[2]); }
+    if (node[0] == 2) { return node_contains_await(node[3]); }
+    if (node[0] == 3) { if (node_contains_await(node[1])) { return true; } return node_contains_await(node[2]); }
+    if (node[0] == 4) { if (node_contains_await(node[1])) { return true; } if (list_contains_await(node[2])) { return true; } return list_contains_await(node[3]); }
+    if (node[0] == 5) { if (node_contains_await(node[1])) { return true; } return list_contains_await(node[2]); }
+    if (node[0] == 6) { return node_contains_await(node[1]); }
+    if (node[0] == 7) { return node_contains_await(node[1]); }
+    if (node[0] == 8) { return node_contains_await(node[1]); }
+    if (node[0] == 9) { return entries_contain_await(node[2]); }
+    if (node[0] == 10) { return node_contains_await(node[3]); }
+    if (node[0] == 12) { return list_contains_await(node[1]); }
+    if (node[0] == 13) { return node_contains_await(node[1]); }
+    if (node[0] == 14) { return node_contains_await(node[1]); }
+    if (node[0] == 15) { if (node_contains_await(node[2])) { return true; } return list_contains_await(node[3]); }
+    if (node[0] == 22) { if (node_contains_await(node[2])) { return true; } return node_contains_await(node[3]); }
+    if (node[0] == 23) { return node_contains_await(node[2]); }
+    if (node[0] == 25) { return list_contains_await(node[1]); }
+    if (node[0] == 26) { if (node_contains_await(node[1])) { return true; } return list_contains_await(node[2]); }
+    if (node[0] == 27) { return node_contains_await(node[1]); }
+    if (node[0] == 28) { return entries_contain_await(node[1]); }
+    if (node[0] == 29) { return list_contains_await(node[3]); }
+    if (node[0] == 30) { return node_contains_await(node[2]); }
+    if (node[0] == 31) { return list_contains_await(node[2]); }
+    if (node[0] == 35) { return list_contains_await(node[2]); }
+    if (node[0] == 36) { return node_contains_await(node[2]); }
+    if (node[0] == 37) { if (node_contains_await(node[1])) { return true; } return node_contains_await(node[2]); }
+    if (node[0] == 38) { if (node_contains_await(node[1])) { return true; } if (node_contains_await(node[2])) { return true; } return node_contains_await(node[3]); }
+    if (node[0] == 39) { if (node_contains_await(node[1])) { return true; } return node_contains_await(node[2]); }
+    if (node[0] == 40) { if (node_contains_await(node[1])) { return true; } return arms_contain_await(node[2]); }
+    if (node[0] == 44) { if (node_contains_await(node[2])) { return true; } if (node[3] != null) { if (node_contains_await(node[3])) { return true; } } if (node_contains_await(node[6])) { return true; } if (node[7] != null) { return node_contains_await(node[7]); } return false; }
+    return false;
+}
+
+fn entries_use_op(entries, op_name) {
+    let index = 0;
+    while (index < array_length(entries)) {
+        if (node_uses_op(entries[index][1], op_name)) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn arms_use_op(arms, op_name) {
+    let index = 0;
+    while (index < array_length(arms)) {
+        if (node_uses_op(arms[index][1], op_name)) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn list_uses_op(nodes, op_name) {
+    let index = 0;
+    while (index < array_length(nodes)) {
+        if (node_uses_op(nodes[index], op_name)) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn node_uses_op(node, op_name) {
+    if (node[0] == 24) {
+        if (node[1] == op_name) { return true; }
+        return list_uses_op(node[2], op_name);
+    }
+    if (node[0] == 2) { return node_uses_op(node[3], op_name); }
+    if (node[0] == 3) { if (node_uses_op(node[1], op_name)) { return true; } return node_uses_op(node[2], op_name); }
+    if (node[0] == 4) { if (node_uses_op(node[1], op_name)) { return true; } if (list_uses_op(node[2], op_name)) { return true; } return list_uses_op(node[3], op_name); }
+    if (node[0] == 5) { if (node_uses_op(node[1], op_name)) { return true; } return list_uses_op(node[2], op_name); }
+    if (node[0] == 6) { return node_uses_op(node[1], op_name); }
+    if (node[0] == 7) { return node_uses_op(node[1], op_name); }
+    if (node[0] == 8) { return node_uses_op(node[1], op_name); }
+    if (node[0] == 9) { return entries_use_op(node[2], op_name); }
+    if (node[0] == 10) { return node_uses_op(node[3], op_name); }
+    if (node[0] == 12) { return list_uses_op(node[1], op_name); }
+    if (node[0] == 13) { return node_uses_op(node[1], op_name); }
+    if (node[0] == 14) { return node_uses_op(node[1], op_name); }
+    if (node[0] == 15) { if (node_uses_op(node[2], op_name)) { return true; } return list_uses_op(node[3], op_name); }
+    if (node[0] == 22) { if (node_uses_op(node[2], op_name)) { return true; } return node_uses_op(node[3], op_name); }
+    if (node[0] == 23) { return node_uses_op(node[2], op_name); }
+    if (node[0] == 25) { return list_uses_op(node[1], op_name); }
+    if (node[0] == 26) { if (node_uses_op(node[1], op_name)) { return true; } return list_uses_op(node[2], op_name); }
+    if (node[0] == 27) { return node_uses_op(node[1], op_name); }
+    if (node[0] == 28) { return entries_use_op(node[1], op_name); }
+    if (node[0] == 29) { return list_uses_op(node[3], op_name); }
+    if (node[0] == 30) { return node_uses_op(node[2], op_name); }
+    if (node[0] == 31) { return list_uses_op(node[2], op_name); }
+    if (node[0] == 35) { return list_uses_op(node[2], op_name); }
+    if (node[0] == 36) { return node_uses_op(node[2], op_name); }
+    if (node[0] == 37) { if (node_uses_op(node[1], op_name)) { return true; } return node_uses_op(node[2], op_name); }
+    if (node[0] == 38) { if (node_uses_op(node[1], op_name)) { return true; } if (node_uses_op(node[2], op_name)) { return true; } return node_uses_op(node[3], op_name); }
+    if (node[0] == 39) { if (node_uses_op(node[1], op_name)) { return true; } return node_uses_op(node[2], op_name); }
+    if (node[0] == 40) { if (node_uses_op(node[1], op_name)) { return true; } return arms_use_op(node[2], op_name); }
+    if (node[0] == 44) { if (node_uses_op(node[2], op_name)) { return true; } if (node_uses_op(node[3], op_name)) { return true; } if (node_uses_op(node[6], op_name)) { return true; } if (node[7] != null) { return node_uses_op(node[7], op_name); } return false; }
+    return false;
+}
+
+fn list_uses_non_diff_op(nodes) {
+    if (list_uses_op(nodes, "max")) { return true; }
+    if (list_uses_op(nodes, "min")) { return true; }
+    return list_uses_op(nodes, "gpu_matmul");
+}
+
+fn resolve_function(node, box, registry, generators, asyncs, function_effects, uses_ad, function_ops) {
     let environment = environment_new(); let index = 0;
     map_set(environment, "__symbols__", box);
     map_set(environment, "__types__", registry);
+    map_set(environment, "__generators__", generators);
+    map_set(environment, "__asyncs__", asyncs);
+    map_set(environment, "__function_effects__", function_effects);
+    map_set(environment, "__uses_ad__", uses_ad);
+    map_set(environment, "__function_ops__", function_ops);
+    let is_generator = map_has(generators, node[1]);
+    let is_async = map_has(asyncs, node[1]);
+    if (is_generator) { if (is_async) { assert(false, "a function cannot be both a generator and async"); } }
+    map_set(environment, "__in_generator__", is_generator);
+    map_set(environment, "__in_async__", is_async);
     symbol_add_definition(environment, node[1], "function", type_ordinary("function"), node[5], node[6]);
     while (index < array_length(node[3])) {
         environment_set(environment, node[3][index], type_unknown());
         symbol_add_definition(environment, node[3][index], "parameter", type_unknown(), node[5], node[6]);
         index = index + 1;
     }
-    return [1, node[1], node[2], node[3], resolve_list_with_environment(node[4], environment), node[5]];
+    let body = resolve_list_with_environment(node[4], environment);
+    let feffect = statements_effect(body);
+    if (is_async) { feffect = effects_add(feffect, "io"); }
+    map_set(function_effects, node[1], feffect);
+    if (list_uses_non_diff_op(node[4])) { map_set(function_ops, node[1], true); }
+    return [1, node[1], node[2], node[3], body, node[5], is_generator, is_async];
 }
 
 fn resolve_type_declaration(node, environment) {
@@ -983,7 +2095,9 @@ fn resolve_type_declaration(node, environment) {
     let name = node[1]; let variants = node[3]; let index = 0;
     while (index < array_length(variants)) {
         let variant = variants[index];
-        type_registry_add(registry, name, variant[1], index, array_length(variant[2]));
+        let field_types = array_new(0); let field_index = 0;
+        while (field_index < array_length(variant[2])) { array_push(field_types, variant[2][field_index][1]); field_index = field_index + 1; }
+        type_registry_add(registry, name, variant[1], index, array_length(variant[2]), field_types);
         index = index + 1;
     }
     symbol_add_definition(environment, name, "type", type_ordinary(name), node[4], node[5]);
@@ -993,16 +2107,33 @@ fn resolve_type_declaration(node, environment) {
 fn resolve_program(program) {
     let box = symbol_box_new();
     let registry = type_registry_new();
+    let generators = map_new();
+    let asyncs = map_new();
+    let function_effects = map_new();
+    let uses_ad = map_new();
+    let function_ops = map_new();
     let top_environment = environment_new();
     map_set(top_environment, "__symbols__", box);
     map_set(top_environment, "__types__", registry);
+    map_set(top_environment, "__generators__", generators);
+    map_set(top_environment, "__asyncs__", asyncs);
+    map_set(top_environment, "__function_effects__", function_effects);
+    map_set(top_environment, "__uses_ad__", uses_ad);
+    map_set(top_environment, "__function_ops__", function_ops);
     let index = 0;
     while (index < array_length(program[4])) {
         resolve_type_declaration(program[4][index], top_environment); index = index + 1;
     }
+    index = 0;
+    while (index < array_length(program[1])) {
+        if (list_contains_yield(program[1][index][4])) { map_set(generators, program[1][index][1], true); }
+        if (program[1][index][7]) { map_set(asyncs, program[1][index][1], true); }
+        index = index + 1;
+    }
     let functions = array_new(0); index = 0;
     while (index < array_length(program[1])) {
-        array_push(functions, resolve_function(program[1][index], box, registry)); index = index + 1;
+        array_push(functions, resolve_function(program[1][index], box, registry, generators, asyncs, function_effects, uses_ad, function_ops)); index = index + 1;
     }
-    return [100, functions, resolve_list_with_environment(program[2], top_environment), program[3], box, registry];
+    let statements = resolve_list_with_environment(program[2], top_environment);
+    return [100, functions, statements, program[3], box, registry, map_has(uses_ad, "yes")];
 }

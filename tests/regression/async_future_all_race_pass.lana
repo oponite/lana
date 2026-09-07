@@ -1,0 +1,25 @@
+// LIP-024: future_all / future_race semantics. future_all yields an array of
+// results in input order; future_race yields the first input to complete.
+async fn work(n) {
+    return n;
+}
+
+async fn main_async() {
+    let f1 = work(1);
+    let f2 = work(2);
+    let f3 = work(3);
+    let all = future_all([f1, f2, f3]);
+    let results = await all;
+    let g1 = work(10);
+    let g2 = work(20);
+    let race = future_race([g1, g2]);
+    let winner = await race;
+    return [results, winner];
+}
+
+let r = run_async(main_async());
+assert(r[0][0] == 1, "future_all[0] wrong");
+assert(r[0][1] == 2, "future_all[1] wrong");
+assert(r[0][2] == 3, "future_all[2] wrong");
+assert(r[1] == 10, "future_race wrong");
+print("ASYNC_FUTURE_ALL_RACE_PASS");
