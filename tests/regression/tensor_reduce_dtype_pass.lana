@@ -1,0 +1,54 @@
+// LIP-027 B17: reductions preserve dtype. A full reduction returns a number
+// (binary64) regardless of input dtype; an axis reduction returns a tensor
+// and preserves the input dtype. sum/mean accumulate in fp32 for f16/bf16.
+
+// Axis reduction preserves dtype for f64 (default).
+let m = tensor([[1.0, 2.0], [3.0, 4.0]]);
+let col = sum(m, axis: 0);
+assert(dtype(col) == "f64", "f64 axis sum keeps f64");
+assert(col[0] == 4.0, "col[0]");
+assert(col[1] == 6.0, "col[1]");
+
+// f32 axis reduction -> f32 tensor.
+let m32 = tensor([[1.0, 2.0], [3.0, 4.0]], dtype: "f32");
+let col32 = sum(m32, axis: 0);
+assert(dtype(col32) == "f32", "f32 axis sum keeps f32");
+assert(col32[0] == 4.0, "col32[0]");
+assert(col32[1] == 6.0, "col32[1]");
+
+// f16 axis reduction -> f16 tensor.
+let m16 = tensor([[1.0, 2.0], [3.0, 4.0]], dtype: "f16");
+let col16 = sum(m16, axis: 0);
+assert(dtype(col16) == "f16", "f16 axis sum keeps f16");
+assert(col16[0] == 4.0, "col16[0]");
+assert(col16[1] == 6.0, "col16[1]");
+
+// bf16 axis reduction -> bf16 tensor.
+let mbf = tensor([[1.0, 2.0], [3.0, 4.0]], dtype: "bf16");
+let colbf = sum(mbf, axis: 0);
+assert(dtype(colbf) == "bf16", "bf16 axis sum keeps bf16");
+assert(colbf[0] == 4.0, "colbf[0]");
+assert(colbf[1] == 6.0, "colbf[1]");
+
+// mean/max/min axis reductions also preserve dtype.
+let mean32 = mean(m32, axis: 1);
+assert(dtype(mean32) == "f32", "f32 axis mean keeps f32");
+assert(mean32[0] == 1.5, "mean32[0]");
+let max16 = max(m16, axis: 0);
+assert(dtype(max16) == "f16", "f16 axis max keeps f16");
+assert(max16[1] == 4.0, "max16[1]");
+let minbf = min(mbf, axis: 1);
+assert(dtype(minbf) == "bf16", "bf16 axis min keeps bf16");
+assert(minbf[0] == 1.0, "minbf[0]");
+
+// Full reductions return a number (binary64) regardless of input dtype.
+let s32 = sum(m32);
+assert(s32 == 10.0, "f32 full sum is a number");
+let s16 = sum(m16);
+assert(s16 == 10.0, "f16 full sum is a number");
+let sbf = sum(mbf);
+assert(sbf == 10.0, "bf16 full sum is a number");
+let mean16 = mean(m16);
+assert(mean16 == 2.5, "f16 full mean is a number");
+
+print("TENSOR_REDUCE_DTYPE_PASS");

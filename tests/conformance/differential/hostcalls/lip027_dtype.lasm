@@ -1,0 +1,83 @@
+.version 3
+.function main 0 24
+# LIP-027: dtype construction, cast, matmul mixed dtype + out_dtype, and
+# reductions. Both VMs must print byte-identical dtype strings and values.
+
+# --- build [[1,2],[3,4]] as f64 ---
+LOAD_CONST R0 0
+HOST_CALL array_new R0 1 R1
+LOAD_CONST R2 1
+HOST_CALL array_push R1 2 R1
+LOAD_CONST R2 2
+HOST_CALL array_push R1 2 R1
+HOST_CALL array_new R0 1 R4
+LOAD_CONST R5 3
+HOST_CALL array_push R4 2 R4
+LOAD_CONST R5 4
+HOST_CALL array_push R4 2 R4
+HOST_CALL array_new R0 1 R7
+MOVE R8 R1
+HOST_CALL array_push R7 2 R7
+MOVE R8 R4
+HOST_CALL array_push R7 2 R7
+HOST_CALL tensor R7 1 R9
+# R9 = f64 [[1,2],[3,4]]
+
+# --- cast to f16, print dtype + tensor ---
+LOAD_CONST R10 f16
+HOST_CALL tensor_cast R9 2 R11
+HOST_CALL tensor_dtype R11 1 R12
+PRINT R12
+PRINT R11
+
+# --- cast to f32 ---
+LOAD_CONST R10 f32
+HOST_CALL tensor_cast R9 2 R11
+HOST_CALL tensor_dtype R11 1 R12
+PRINT R12
+PRINT R11
+
+# --- cast to bf16 ---
+LOAD_CONST R10 bf16
+HOST_CALL tensor_cast R9 2 R11
+HOST_CALL tensor_dtype R11 1 R12
+PRINT R12
+PRINT R11
+
+# --- matmul f32 x f32 -> f32 (fp32 accumulation) ---
+LOAD_CONST R10 f32
+HOST_CALL tensor_cast R9 2 R11
+MOVE R12 R11
+HOST_CALL tensor_matmul R11 2 R13
+HOST_CALL tensor_dtype R13 1 R14
+PRINT R14
+PRINT R13
+
+# --- matmul f64 x f32 -> f64 (higher precision wins) ---
+MOVE R12 R9
+HOST_CALL tensor_matmul R11 2 R13
+HOST_CALL tensor_dtype R13 1 R14
+PRINT R14
+
+# --- matmul f16 x f16 with out_dtype f32 ---
+LOAD_CONST R16 f16
+HOST_CALL tensor_cast R9 2 R15
+MOVE R16 R15
+LOAD_CONST R17 f32
+HOST_CALL tensor_matmul R15 3 R18
+HOST_CALL tensor_dtype R18 1 R14
+PRINT R14
+PRINT R18
+
+# --- full sum of f16 -> number (binary64) ---
+HOST_CALL tensor_sum R15 1 R19
+PRINT R19
+
+# --- axis sum of f32 -> f32 tensor (dtype preserved) ---
+LOAD_CONST R12 0
+HOST_CALL tensor_sum R11 2 R20
+HOST_CALL tensor_dtype R20 1 R14
+PRINT R14
+PRINT R20
+
+RETURN R0

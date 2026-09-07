@@ -37,8 +37,24 @@ assert(sum(rbf) == 3.140625, "bf16 round pi");
 let big = tensor([65520.0], dtype: "f16");
 assert(big[0] > 65504.0, "f16 overflow to inf");
 
-// f32 is a dtype tag: values keep full double precision within float32 range.
+// f32 stores the actual float32 value (compact storage), not a rounded double.
+// 0.1 in float32 is 0.10000000149011612 (the nearest binary32).
 let f32v = tensor([0.1], dtype: "f32");
-assert(sum(f32v) == 0.1, "f32 keeps double 0.1");
+assert(sum(f32v) == 0.10000000149011612, "f32 stores float32 0.1");
+
+// B14: element-wise requires the same dtype; a scalar literal adopts the
+// tensor's dtype (no silent promotion).
+let s16 = tensor([1.0, 2.0, 3.0], dtype: "f16") + 1.0;
+assert(dtype(s16) == "f16", "scalar add keeps f16 dtype");
+assert(s16[0] == 2.0, "scalar add s16[0]");
+assert(s16[1] == 3.0, "scalar add s16[1]");
+assert(s16[2] == 4.0, "scalar add s16[2]");
+let smul = 2.0 * tensor([1.0, 2.0], dtype: "bf16");
+assert(dtype(smul) == "bf16", "scalar mul keeps bf16 dtype");
+assert(smul[0] == 2.0, "scalar mul smul[0]");
+assert(smul[1] == 4.0, "scalar mul smul[1]");
+let sf64 = tensor([1.0, 2.0]) + 0.5;
+assert(dtype(sf64) == "f64", "scalar add keeps f64 dtype");
+assert(sf64[0] == 1.5, "scalar add f64 value");
 
 print("TENSOR_DTYPE_PASS");

@@ -281,7 +281,8 @@ static int host_call_id(const char *name) {
         "adapter_load", "adapter_fetch",
         "ffi_declare", "ffi_load", "ffi_call",
         "http_get", "http_post", "socket_connect", "socket_send",
-        "socket_recv", "socket_close"
+        "socket_recv", "socket_close",
+        "tensor_cast"
     };
     size_t index;
     for (index = 0; index < sizeof(names) / sizeof(names[0]); ++index)

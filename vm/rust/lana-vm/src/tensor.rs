@@ -24,11 +24,17 @@ pub fn tensor_dimension(n: f64) -> Result<usize, LanaError> {
     Ok(n as usize)
 }
 
-/// LIP-027: round a double to binary16 (f16) precision, round-to-nearest-even,
-/// stored back as a double. Mirrors `round_f16` in `vm/c/vm.c`.
-pub fn round_f16(x: f64) -> f64 {
-    if !x.is_finite() || x == 0.0 {
-        return x;
+/// LIP-027: convert a double to a binary16 (f16) bit pattern,
+/// round-to-nearest-even. Mirrors `f64_to_f16_bits` in `vm/c/vm.c`.
+pub fn f64_to_f16_bits(x: f64) -> u16 {
+    if x.is_nan() {
+        return 0x7E00;
+    }
+    if x.is_infinite() {
+        return if x < 0.0 { 0xFC00 } else { 0x7C00 };
+    }
+    if x == 0.0 {
+        return if x.is_sign_negative() { 0x8000 } else { 0x0000 };
     }
     let bits = x.to_bits();
     let sign = (bits >> 63) as u32;
@@ -52,16 +58,15 @@ pub fn round_f16(x: f64) -> f64 {
     let mant10 = sig11 & 0x3FF;
 
     if exp > 15 {
-        return if sign != 0 { f64::NEG_INFINITY } else { f64::INFINITY };
+        return ((sign << 15) | 0x7C00) as u16; // overflow to inf
     }
     if exp >= -14 {
-        let h = ((sign << 15) | (((exp + 15) as u32) << 10) | mant10 as u32) as u16;
-        return f16_to_double(h);
+        return ((sign << 15) | (((exp + 15) as u32) << 10) | mant10 as u32) as u16;
     }
     // Subnormal: value = sig11 * 2^exp, exp < -14.
     let shift = -14 - exp;
     if shift >= 11 {
-        return if sign != 0 { -0.0 } else { 0.0 };
+        return (sign << 15) as u16; // rounds to zero (even)
     }
     let mut sub_mant = sig11 >> shift;
     let dropped = sig11 & ((1u64 << shift) - 1);
@@ -70,14 +75,14 @@ pub fn round_f16(x: f64) -> f64 {
         sub_mant += 1;
     }
     if sub_mant == (1u64 << 10) {
-        let h = ((sign << 15) | (1u32 << 10)) as u16;
-        return f16_to_double(h);
+        return ((sign << 15) | (1u32 << 10)) as u16; // min normal 2^-14
     }
-    let h = ((sign << 15) | sub_mant as u32) as u16;
-    f16_to_double(h)
+    ((sign << 15) | sub_mant as u32) as u16
 }
 
-fn f16_to_double(h: u16) -> f64 {
+/// LIP-027: convert a binary16 (f16) bit pattern to a double. Mirrors
+/// `f16_to_double` in `vm/c/vm.c`.
+pub fn f16_bits_to_f64(h: u16) -> f64 {
     let sign = (h >> 15) & 1;
     let exp = (h >> 10) & 0x1F;
     let mant = h & 0x3FF;
@@ -91,16 +96,28 @@ fn f16_to_double(h: u16) -> f64 {
     if sign != 0 { -value } else { value }
 }
 
-/// LIP-027: round a double to bfloat16 (bf16) precision, round-to-nearest-even,
-/// stored back as a double. Mirrors `round_bf16` in `vm/c/vm.c`.
-pub fn round_bf16(x: f64) -> f64 {
-    if !x.is_finite() || x == 0.0 {
-        return x;
+/// LIP-027: round a double to binary16 (f16) precision, round-to-nearest-even,
+/// stored back as a double. Mirrors `round_f16` in `vm/c/vm.c`.
+pub fn round_f16(x: f64) -> f64 {
+    f16_bits_to_f64(f64_to_f16_bits(x))
+}
+
+/// LIP-027: convert a double to a bfloat16 (bf16) bit pattern,
+/// round-to-nearest-even. Mirrors `f64_to_bf16_bits` in `vm/c/vm.c`.
+pub fn f64_to_bf16_bits(x: f64) -> u16 {
+    if x.is_nan() {
+        return 0x7FC0;
+    }
+    if x.is_infinite() {
+        return if x < 0.0 { 0xFF80 } else { 0x7F80 };
+    }
+    if x == 0.0 {
+        return if x.is_sign_negative() { 0x8000 } else { 0x0000 };
     }
     let mut bits = x.to_bits();
     let exp = ((bits >> 52) & 0x7FF) as i32 - 1023;
     if exp > 127 {
-        return if x < 0.0 { f64::NEG_INFINITY } else { f64::INFINITY };
+        return if x < 0.0 { 0xFF80 } else { 0x7F80 }; // overflow beyond fp32 range
     }
     // Round the 52-bit mantissa to 7 bits (drop 45), round-to-nearest-even.
     let low = bits & 0x1FFFFFFFFFFF;
@@ -110,17 +127,127 @@ pub fn round_bf16(x: f64) -> f64 {
         bits += 1u64 << 45;
     }
     bits &= !0x1FFFFFFFFFFF;
-    f64::from_bits(bits)
+    // The rounded f64 has 8 significant mantissa bits, so it converts to f32
+    // exactly; bf16 is the top 16 bits of that f32 representation.
+    let f = f64::from_bits(bits) as f32;
+    (f.to_bits() >> 16) as u16
 }
 
-/// Allocate a zero-initialized tensor with the given shape, mirroring
-/// `tensor_new`. Returns `LanaError::Oom` on allocation failure or shape
+/// LIP-027: convert a bfloat16 (bf16) bit pattern to a double. bf16 is the top
+/// 16 bits of an f32, so widen the f32 to f64. Mirrors `bf16_to_double` in
+/// `vm/c/vm.c`.
+pub fn bf16_bits_to_f64(h: u16) -> f64 {
+    let f32_bits = (h as u32) << 16;
+    f32::from_bits(f32_bits) as f64
+}
+
+/// LIP-027: round a double to bfloat16 (bf16) precision, round-to-nearest-even,
+/// stored back as a double. Mirrors `round_bf16` in `vm/c/vm.c`.
+pub fn round_bf16(x: f64) -> f64 {
+    bf16_bits_to_f64(f64_to_bf16_bits(x))
+}
+
+/// LIP-027: element width in bytes for a tensor's dtype.
+pub fn tensor_elem_bytes(t: &Tensor) -> usize {
+    match t.dtype {
+        TensorDtype::F32 => 4,
+        TensorDtype::F16 | TensorDtype::Bf16 => 2,
+        TensorDtype::Complex => 16,
+        TensorDtype::F64 => 8,
+    }
+}
+
+/// LIP-027: read the real part of element `i` (absolute element index, already
+/// including `offset`), converting from the storage dtype to f64. Mirrors
+/// `tensor_get_real` in `vm/c/vm.c`.
+pub fn tensor_get_real(t: &Tensor, i: usize) -> f64 {
+    match t.dtype {
+        TensorDtype::F32 => {
+            let mut b = [0u8; 4];
+            b.copy_from_slice(&t.data[i * 4..i * 4 + 4]);
+            f32::from_ne_bytes(b) as f64
+        }
+        TensorDtype::F16 => {
+            let mut b = [0u8; 2];
+            b.copy_from_slice(&t.data[i * 2..i * 2 + 2]);
+            f16_bits_to_f64(u16::from_ne_bytes(b))
+        }
+        TensorDtype::Bf16 => {
+            let mut b = [0u8; 2];
+            b.copy_from_slice(&t.data[i * 2..i * 2 + 2]);
+            bf16_bits_to_f64(u16::from_ne_bytes(b))
+        }
+        TensorDtype::Complex => {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&t.data[i * 16..i * 16 + 8]);
+            f64::from_ne_bytes(b)
+        }
+        TensorDtype::F64 => {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(&t.data[i * 8..i * 8 + 8]);
+            f64::from_ne_bytes(b)
+        }
+    }
+}
+
+/// LIP-027: read the imaginary part of element `i` (0.0 for a real dtype).
+/// Mirrors `tensor_get_imag` in `vm/c/vm.c`.
+pub fn tensor_get_imag(t: &Tensor, i: usize) -> f64 {
+    if t.dtype != TensorDtype::Complex {
+        return 0.0;
+    }
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&t.data[i * 16 + 8..i * 16 + 16]);
+    f64::from_ne_bytes(b)
+}
+
+/// LIP-027: write the real part of element `i`, converting from f64 to the
+/// storage dtype (round-to-nearest-even for f16/bf16). Mirrors
+/// `tensor_set_real` in `vm/c/vm.c`. Panics if the buffer is shared (a view);
+/// callers write only to freshly-created tensors, matching the existing
+/// `Arc::get_mut` usage.
+pub fn tensor_set_real(t: &mut Tensor, i: usize, v: f64) {
+    let data = Arc::get_mut(&mut t.data).expect("tensor_set_real on a shared buffer");
+    match t.dtype {
+        TensorDtype::F32 => {
+            let f = v as f32;
+            data[i * 4..i * 4 + 4].copy_from_slice(&f.to_ne_bytes());
+        }
+        TensorDtype::F16 => {
+            let h = f64_to_f16_bits(v);
+            data[i * 2..i * 2 + 2].copy_from_slice(&h.to_ne_bytes());
+        }
+        TensorDtype::Bf16 => {
+            let h = f64_to_bf16_bits(v);
+            data[i * 2..i * 2 + 2].copy_from_slice(&h.to_ne_bytes());
+        }
+        TensorDtype::Complex => {
+            data[i * 16..i * 16 + 8].copy_from_slice(&v.to_ne_bytes());
+        }
+        TensorDtype::F64 => {
+            data[i * 8..i * 8 + 8].copy_from_slice(&v.to_ne_bytes());
+        }
+    }
+}
+
+/// LIP-027: write the imaginary part of element `i` (no-op for a real dtype).
+/// Mirrors `tensor_set_imag` in `vm/c/vm.c`.
+pub fn tensor_set_imag(t: &mut Tensor, i: usize, v: f64) {
+    if t.dtype != TensorDtype::Complex {
+        return;
+    }
+    let data = Arc::get_mut(&mut t.data).expect("tensor_set_imag on a shared buffer");
+    data[i * 16 + 8..i * 16 + 16].copy_from_slice(&v.to_ne_bytes());
+}
+
+/// Allocate a zero-initialized tensor with the given shape and dtype, mirroring
+/// `tensor_new_dtype`. Returns `LanaError::Oom` on allocation failure or shape
 /// overflow.
-pub fn tensor_new(
+pub fn tensor_new_dtype(
     alloc: &mut dyn FnMut(usize) -> LanaError,
     ndim: usize,
     shape: &[usize],
-    is_complex: bool,
+    dtype: TensorDtype,
 ) -> Result<Tensor, LanaError> {
     if ndim > TENSOR_MAX_RANK || ndim != shape.len() {
         return Err(LanaError::InvalidParameters);
@@ -128,6 +255,7 @@ pub fn tensor_new(
     if alloc(std::mem::size_of::<Tensor>()) != LanaError::Ok {
         return Err(LanaError::Oom);
     }
+    let is_complex = dtype == TensorDtype::Complex;
     let mut strides = vec![0usize; ndim];
     if ndim > 0 {
         if alloc(ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
@@ -159,26 +287,84 @@ pub fn tensor_new(
     let elem_count = total
         .checked_mul(if is_complex { 2 } else { 1 })
         .ok_or(LanaError::Oom)?;
+    // `elem_count` already counts the two components of a complex tensor, so
+    // the per-component width here is 8 (one f64) for complex, giving
+    // `total * 16` bytes total.
+    let width = match dtype {
+        TensorDtype::F32 => 4,
+        TensorDtype::F16 | TensorDtype::Bf16 => 2,
+        TensorDtype::Complex => 8,
+        TensorDtype::F64 => 8,
+    };
     let mut data = Vec::new();
     if elem_count > 0 {
         let data_bytes = elem_count
-            .checked_mul(std::mem::size_of::<f64>())
+            .checked_mul(width)
             .ok_or(LanaError::Oom)?;
         if alloc(data_bytes) != LanaError::Ok {
             return Err(LanaError::Oom);
         }
-        data = vec![0.0; elem_count];
+        data = vec![0u8; elem_count * width];
     }
     Ok(Tensor {
         ndim,
         shape: shape.to_vec(),
         strides,
         is_complex,
-        dtype: if is_complex { TensorDtype::Complex } else { TensorDtype::F64 },
+        dtype,
         data: Arc::new(data),
         offset: 0,
         is_state: false,
     })
+}
+
+/// Allocate a zero-initialized tensor with the given shape, defaulting to F64
+/// (or COMPLEX when `is_complex`). Kept for the common case; dtype-specific
+/// callers use `tensor_new_dtype`.
+pub fn tensor_new(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    ndim: usize,
+    shape: &[usize],
+    is_complex: bool,
+) -> Result<Tensor, LanaError> {
+    tensor_new_dtype(
+        alloc,
+        ndim,
+        shape,
+        if is_complex { TensorDtype::Complex } else { TensorDtype::F64 },
+    )
+}
+
+/// LIP-027: cast a tensor to another real dtype. Same-dtype is a no-op
+/// (returns the same tensor). Cast to/from complex is out of scope (`Type`).
+/// The result is a fresh base tensor; a view is never mutated.
+pub fn tensor_cast(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    t: &Tensor,
+    dtype: TensorDtype,
+) -> Result<Tensor, LanaError> {
+    if t.dtype == TensorDtype::Complex || dtype == TensorDtype::Complex {
+        return Err(LanaError::Type);
+    }
+    if t.dtype == dtype {
+        return Ok(t.clone());
+    }
+    let mut r = tensor_new_dtype(alloc, t.ndim, &t.shape, dtype)?;
+    let total: usize = t.shape.iter().product();
+    let mut idx = vec![0usize; t.ndim];
+    for lin in 0..total {
+        let mut rem = lin;
+        for i in (0..t.ndim).rev() {
+            idx[i] = if t.shape[i] == 0 { 0 } else { rem % t.shape[i] };
+            rem /= t.shape[i];
+        }
+        let mut src = 0usize;
+        for i in 0..t.ndim {
+            src += idx[i] * t.strides[i];
+        }
+        tensor_set_real(&mut r, lin, tensor_get_real(t, t.offset + src));
+    }
+    Ok(r)
 }
 
 /// Extract a shape from a `VAL_ARRAY` of numbers, mirroring
@@ -237,7 +423,8 @@ pub fn tensor_elementwise(
     b: &Tensor,
     op: u32,
 ) -> Result<Tensor, LanaError> {
-    if a.is_complex != b.is_complex {
+    // LIP-027: element-wise requires the same dtype; no silent promotion.
+    if a.dtype != b.dtype {
         return Err(LanaError::Type);
     }
     let out_ndim = a.ndim.max(b.ndim);
@@ -268,7 +455,7 @@ pub fn tensor_elementwise(
             return Err(LanaError::InvalidParameters);
         }
     }
-    let mut r = tensor_new(alloc, out_ndim, &out_shape, a.is_complex)?;
+    let mut r = tensor_new_dtype(alloc, out_ndim, &out_shape, a.dtype)?;
     if out_ndim > 0
         && alloc(out_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
     {
@@ -294,7 +481,6 @@ pub fn tensor_elementwise(
     }
     let mut idx = vec![0usize; out_ndim];
     let complex = a.is_complex;
-    let out = Arc::get_mut(&mut r.data).unwrap();
     for lin in 0..total {
         let mut rem = lin;
         for i in (0..out_ndim).rev() {
@@ -308,10 +494,10 @@ pub fn tensor_elementwise(
             bi += idx[i] * b_strides[i];
         }
         if complex {
-            let ar = a.data[a.offset + 2 * ai];
-            let aim = a.data[a.offset + 2 * ai + 1];
-            let br = b.data[b.offset + 2 * bi];
-            let bim = b.data[b.offset + 2 * bi + 1];
+            let ar = tensor_get_real(&a, a.offset + ai);
+            let aim = tensor_get_imag(&a, a.offset + ai);
+            let br = tensor_get_real(&b, b.offset + bi);
+            let bim = tensor_get_imag(&b, b.offset + bi);
             let (rr, ri) = match op {
                 0 => (ar + br, aim + bim),
                 1 => (ar - br, aim - bim),
@@ -324,12 +510,12 @@ pub fn tensor_elementwise(
                     ((ar * br + aim * bim) / den, (aim * br - ar * bim) / den)
                 }
             };
-            out[2 * lin] = rr;
-            out[2 * lin + 1] = ri;
+            tensor_set_real(&mut r, lin, rr);
+            tensor_set_imag(&mut r, lin, ri);
         } else {
-            let av = a.data[a.offset + ai];
-            let bv = b.data[b.offset + bi];
-            out[lin] = match op {
+            let av = tensor_get_real(&a, a.offset + ai);
+            let bv = tensor_get_real(&b, b.offset + bi);
+            tensor_set_real(&mut r, lin, match op {
                 0 => av + bv,
                 1 => av - bv,
                 2 => av * bv,
@@ -339,17 +525,112 @@ pub fn tensor_elementwise(
                     }
                     av / bv
                 }
+            });
+        }
+    }
+    Ok(r)
+}
+
+/// LIP-027: element-wise between a tensor and a scalar number. The scalar
+/// adopts the tensor's dtype (cast to it), so `f16_tensor + 1.0` is "f16".
+pub fn tensor_elementwise_scalar(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    t: &Tensor,
+    s: f64,
+    op: u32,
+) -> Result<Tensor, LanaError> {
+    let mut r = tensor_new_dtype(alloc, t.ndim, &t.shape, t.dtype)?;
+    let total: usize = t.shape.iter().product();
+    let mut idx = vec![0usize; t.ndim];
+    for lin in 0..total {
+        let mut rem = lin;
+        for i in (0..t.ndim).rev() {
+            idx[i] = if t.shape[i] == 0 { 0 } else { rem % t.shape[i] };
+            rem /= t.shape[i];
+        }
+        let mut src = 0usize;
+        for i in 0..t.ndim {
+            src += idx[i] * t.strides[i];
+        }
+        if t.is_complex {
+            let ar = tensor_get_real(t, t.offset + src);
+            let aim = tensor_get_imag(t, t.offset + src);
+            let (rr, ri) = match op {
+                0 => (ar + s, aim),
+                1 => (ar - s, aim),
+                2 => (ar * s, aim * s),
+                _ => {
+                    if s == 0.0 {
+                        return Err(LanaError::InvalidParameters);
+                    }
+                    (ar / s, aim / s)
+                }
             };
+            tensor_set_real(&mut r, lin, rr);
+            tensor_set_imag(&mut r, lin, ri);
+        } else {
+            let v = tensor_get_real(t, t.offset + src);
+            tensor_set_real(&mut r, lin, match op {
+                0 => v + s,
+                1 => v - s,
+                2 => v * s,
+                _ => {
+                    if s == 0.0 {
+                        return Err(LanaError::InvalidParameters);
+                    }
+                    v / s
+                }
+            });
         }
     }
     Ok(r)
 }
 
 /// General matmul following NumPy semantics, mirroring `tensor_matmul`.
+/// LIP-027: relative precision rank used to pick the default matmul output
+/// dtype for a mixed-dtype pair. Higher rank wins on a tie; f16 and bf16 are
+/// equal (both 16-bit). Complex is handled separately by the caller.
+fn dtype_rank(d: TensorDtype) -> i32 {
+    match d {
+        TensorDtype::F64 => 3,
+        TensorDtype::F32 => 2,
+        TensorDtype::F16 | TensorDtype::Bf16 => 1,
+        TensorDtype::Complex => 0,
+    }
+}
+
+/// LIP-027: default matmul output dtype. Same dtype -> that dtype; otherwise
+/// the higher-precision operand (f64/f32 mix -> f64, f32/f16 -> f32).
+pub fn matmul_default_dtype(a: &Tensor, b: &Tensor) -> TensorDtype {
+    if a.dtype == b.dtype {
+        a.dtype
+    } else if dtype_rank(a.dtype) >= dtype_rank(b.dtype) {
+        a.dtype
+    } else {
+        b.dtype
+    }
+}
+
+/// LIP-027: whether matmul accumulates in binary32. f16/bf16 inputs always
+/// accumulate in fp32 regardless of the output dtype; f32 x f32 also uses fp32.
+/// A binary64 (or complex) input forces fp64 accumulation so it is never
+/// silently downcast.
+pub fn matmul_accumulation_fp32(a: &Tensor, b: &Tensor) -> bool {
+    if a.dtype == TensorDtype::F16
+        || a.dtype == TensorDtype::Bf16
+        || b.dtype == TensorDtype::F16
+        || b.dtype == TensorDtype::Bf16
+    {
+        return true;
+    }
+    a.dtype == TensorDtype::F32 && b.dtype == TensorDtype::F32
+}
+
 pub fn tensor_matmul(
     alloc: &mut dyn FnMut(usize) -> LanaError,
     a: &Tensor,
     b: &Tensor,
+    out_dtype: TensorDtype,
 ) -> Result<Tensor, LanaError> {
     if a.is_complex != b.is_complex {
         return Err(LanaError::Type);
@@ -358,6 +639,11 @@ pub fn tensor_matmul(
         return Err(LanaError::InvalidParameters);
     }
     let complex = a.is_complex;
+    // LIP-027: the output dtype must agree with the complexness of the inputs:
+    // complex inputs require a complex output, real inputs a real output.
+    if complex != (out_dtype == TensorDtype::Complex) {
+        return Err(LanaError::Type);
+    }
     let a_ndim = a.ndim;
     let b_ndim = b.ndim;
     let a_rows = if a_ndim == 1 { 1 } else { a.shape[a_ndim - 2] };
@@ -418,7 +704,7 @@ pub fn tensor_matmul(
     if !b_vec {
         out_shape[pos] = b_cols;
     }
-    let mut r = tensor_new(alloc, out_ndim, &out_shape, complex)?;
+    let mut r = tensor_new_dtype(alloc, out_ndim, &out_shape, out_dtype)?;
     if batch_ndim > 0
         && alloc(batch_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
     {
@@ -478,8 +764,14 @@ pub fn tensor_matmul(
     // when its one live stride is 1; a matrix operand when its column stride
     // is 1. Anything else is gathered into accounted scratch per batch
     // element (LIP-004 section 5).
-    let pack_a = a_col_stride != 1;
-    let pack_b = b_col_stride != 1;
+    // LIP-027: a non-f64 real dtype stores compact bytes (2/4 per element), so
+    // the direct `*const f64` fast path is invalid; gather it into a double
+    // scratch buffer via tensor_get_real. Complex (interleaved doubles) and
+    // f64 read directly.
+    let pack_a = a_col_stride != 1
+        || (a.dtype != TensorDtype::F64 && a.dtype != TensorDtype::Complex);
+    let pack_b = b_col_stride != 1
+        || (b.dtype != TensorDtype::F64 && b.dtype != TensorDtype::Complex);
     // Leading dimensions for direct (non-packed) operands: the true row
     // stride of the view, which BLAS accepts instead of a copy. A promoted
     // vector has one row (lda = K) or one column (ldb = its row stride).
@@ -501,7 +793,17 @@ pub fn tensor_matmul(
         }
         b_packed = vec![0.0; b_core];
     }
-    let out = Arc::get_mut(&mut r.data).unwrap();
+    // LIP-027: the backend gemm accumulates in binary64. When the output dtype
+    // is narrower than f64 (f32/f16/bf16), the result is staged in a scratch
+    // buffer and converted element-wise into the compact output buffer.
+    let c_core = m * n * mult;
+    let mut c_scratch: Vec<f64> = Vec::new();
+    if c_core > 0 {
+        if alloc(c_core * std::mem::size_of::<f64>()) != LanaError::Ok {
+            return Err(LanaError::Oom);
+        }
+        c_scratch = vec![0.0; c_core];
+    }
     for batch in 0..batch_total {
         let mut rem = batch;
         let mut a_off = 0usize;
@@ -512,15 +814,16 @@ pub fn tensor_matmul(
             a_off += bi * a_batch_strides[i];
             b_off += bi * b_batch_strides[i];
         }
-        let mut a_ptr = unsafe { a.data.as_ptr().add((a.offset + a_off) * mult) };
-        let mut b_ptr = unsafe { b.data.as_ptr().add((b.offset + b_off) * mult) };
+        let mut a_ptr = unsafe { (a.data.as_ptr() as *const f64).add((a.offset + a_off) * mult) };
+        let mut b_ptr = unsafe { (b.data.as_ptr() as *const f64).add((b.offset + b_off) * mult) };
         if pack_a && a_core > 0 {
             for i in 0..m {
                 for kk in 0..k {
-                    let src = (a.offset + a_off + i * a_row_stride + kk * a_col_stride) * mult;
+                    let elem = a.offset + a_off + i * a_row_stride + kk * a_col_stride;
                     let dst = (i * k + kk) * mult;
-                    for w in 0..mult {
-                        a_packed[dst + w] = a.data[src + w];
+                    a_packed[dst] = tensor_get_real(&a, elem);
+                    if mult == 2 {
+                        a_packed[dst + 1] = tensor_get_imag(&a, elem);
                     }
                 }
             }
@@ -529,17 +832,33 @@ pub fn tensor_matmul(
         if pack_b && b_core > 0 {
             for kk in 0..k {
                 for j in 0..n {
-                    let src = (b.offset + b_off + kk * b_row_stride + j * b_col_stride) * mult;
+                    let elem = b.offset + b_off + kk * b_row_stride + j * b_col_stride;
                     let dst = (kk * n + j) * mult;
-                    for w in 0..mult {
-                        b_packed[dst + w] = b.data[src + w];
+                    b_packed[dst] = tensor_get_real(&b, elem);
+                    if mult == 2 {
+                        b_packed[dst + 1] = tensor_get_imag(&b, elem);
                     }
                 }
             }
             b_ptr = b_packed.as_ptr();
         }
-        let c_ptr = unsafe { out.as_mut_ptr().add(batch * m * n * mult) };
-        backend::backend_gemm(m, k, n, complex, a_ptr, a_ld, b_ptr, b_ld, c_ptr);
+        let c_ptr = c_scratch.as_mut_ptr();
+        backend::backend_gemm(
+            m, k, n, complex, matmul_accumulation_fp32(a, b), a_ptr, a_ld, b_ptr, b_ld, c_ptr,
+        );
+        // Stage the binary64 result into the compact output buffer.
+        for i in 0..c_core {
+            let elem = batch * m * n + i / mult;
+            if mult == 2 {
+                if i % 2 == 0 {
+                    tensor_set_real(&mut r, elem, c_scratch[i]);
+                } else {
+                    tensor_set_imag(&mut r, elem, c_scratch[i]);
+                }
+            } else {
+                tensor_set_real(&mut r, elem, c_scratch[i]);
+            }
+        }
     }
     Ok(r)
 }
@@ -694,7 +1013,6 @@ pub fn tensor_gpu_matmul(
     let mut a_float = vec![0.0f32; a_core];
     let mut b_float = vec![0.0f32; b_core];
     let mut c_float = vec![0.0f32; c_core];
-    let out = Arc::get_mut(&mut r.data).unwrap();
     for batch in 0..batch_total {
         let mut rem = batch;
         let mut a_off = 0usize;
@@ -708,20 +1026,20 @@ pub fn tensor_gpu_matmul(
         for i in 0..m {
             for kk in 0..k {
                 a_float[i * k + kk] =
-                    a.data[a.offset + a_off + i * a_row_stride + kk * a_col_stride] as f32;
+                    tensor_get_real(&a, a.offset + a_off + i * a_row_stride + kk * a_col_stride) as f32;
             }
         }
         for kk in 0..k {
             for j in 0..n {
                 b_float[kk * n + j] =
-                    b.data[b.offset + b_off + kk * b_row_stride + j * b_col_stride] as f32;
+                    tensor_get_real(&b, b.offset + b_off + kk * b_row_stride + j * b_col_stride) as f32;
             }
         }
         if !metal::metal_sgemm(m, k, n, a_float.as_ptr(), b_float.as_ptr(), c_float.as_mut_ptr()) {
             return Err(LanaError::UnsupportedOperation);
         }
         for i in 0..c_core {
-            out[batch * c_core + i] = c_float[i] as f64;
+            tensor_set_real(&mut r, batch * c_core + i, c_float[i] as f64);
         }
     }
     Ok(r)
@@ -730,25 +1048,34 @@ pub fn tensor_gpu_matmul(
 /// Reduce one strided fiber. `op`: 0=sum 1=mean 2=max 3=min. `offset` is
 /// relative to the tensor's first element; the tensor's own view offset is
 /// folded in here so every caller is automatically view-correct.
+/// LIP-027: sum/mean accumulate in binary32 for f16/bf16 inputs.
+fn reduction_accumulation_fp32(t: &Tensor) -> bool {
+    t.dtype == TensorDtype::F16 || t.dtype == TensorDtype::Bf16
+}
+
 fn tensor_reduce_fiber(
-    t: &Tensor, offset: usize, count: usize, stride: usize, op: u32,
+    t: &Tensor, offset: usize, count: usize, stride: usize, op: u32, fp32: bool,
 ) -> Result<(f64, f64), LanaError> {
     if t.is_complex && op >= 2 { return Err(LanaError::Type); }
     if count == 0 && op != 0 { return Err(LanaError::InvalidParameters); }
     let mut re = if op == 2 { f64::NEG_INFINITY } else if op == 3 { f64::INFINITY } else { 0.0 };
+    let mut re32 = 0.0f32;
     let mut im = 0.0;
     for i in 0..count {
         let index = t.offset + offset + i * stride;
-        let v = t.data[index * if t.is_complex { 2 } else { 1 }];
+        let v = tensor_get_real(&t, index);
         if !v.is_finite() { return Err(LanaError::InvalidParameters); }
-        if op < 2 { re += v; }
+        if op < 2 {
+            if fp32 { re32 += v as f32; } else { re += v; }
+        }
         else if if op == 2 { v > re } else { v < re } { re = v; }
         if t.is_complex {
-            let component = t.data[2 * index + 1];
+            let component = tensor_get_imag(&t, index);
             if !component.is_finite() { return Err(LanaError::InvalidParameters); }
             im += component;
         }
     }
+    if fp32 && op < 2 { re = re32 as f64; }
     if op == 1 { re /= count as f64; im /= count as f64; }
     if !re.is_finite() || !im.is_finite() { return Err(LanaError::InvalidParameters); }
     Ok((re, im))
@@ -763,7 +1090,9 @@ pub fn tensor_reduce(
     if t.is_complex && op >= 2 { return Err(LanaError::Type); }
     let total: usize = t.shape.iter().product();
     if total == 0 && op != 0 { return Err(LanaError::InvalidParameters); }
+    let fp32 = reduction_accumulation_fp32(t);
     let mut re = if op == 2 { f64::NEG_INFINITY } else if op == 3 { f64::INFINITY } else { 0.0 };
+    let mut re32 = 0.0f32;
     let mut im = 0.0;
     for lin in 0..total {
         let mut rem = lin;
@@ -772,22 +1101,25 @@ pub fn tensor_reduce(
             index += if t.shape[d] == 0 { 0 } else { rem % t.shape[d] } * t.strides[d];
             rem /= t.shape[d];
         }
-        let v = t.data[index * if t.is_complex { 2 } else { 1 }];
+        let v = tensor_get_real(&t, index);
         if !v.is_finite() { return Err(LanaError::InvalidParameters); }
-        if op < 2 { re += v; }
+        if op < 2 {
+            if fp32 { re32 += v as f32; } else { re += v; }
+        }
         else if if op == 2 { v > re } else { v < re } { re = v; }
         if t.is_complex {
-            let component = t.data[2 * index + 1];
+            let component = tensor_get_imag(&t, index);
             if !component.is_finite() { return Err(LanaError::InvalidParameters); }
             im += component;
         }
     }
+    if fp32 && op < 2 { re = re32 as f64; }
     if op == 1 { re /= total as f64; im /= total as f64; }
     if !re.is_finite() || !im.is_finite() { return Err(LanaError::InvalidParameters); }
     if !t.is_complex { return Ok(Value::number(re)); }
     let mut r = tensor_new(alloc, 0, &[], true)?;
-    Arc::get_mut(&mut r.data).unwrap()[0] = re;
-    Arc::get_mut(&mut r.data).unwrap()[1] = im;
+    tensor_set_real(&mut r, 0, re);
+    tensor_set_imag(&mut r, 0, im);
     Ok(Value::tensor(Arc::new(r)))
 }
 
@@ -808,8 +1140,9 @@ pub fn tensor_reduce_axis(
     for (i, &dim) in t.shape.iter().enumerate() {
         if i != axis { shape[j] = dim; j += 1; }
     }
-    let mut r = tensor_new(alloc, t.ndim - 1, &shape[..j], t.is_complex)?;
+    let mut r = tensor_new_dtype(alloc, t.ndim - 1, &shape[..j], t.dtype)?;
     let total = r.shape.iter().product();
+    let fp32 = reduction_accumulation_fp32(t);
     for i in 0..total {
         let mut offset = 0;
         let mut remaining = i;
@@ -818,10 +1151,9 @@ pub fn tensor_reduce_axis(
             offset += (remaining % t.shape[d]) * t.strides[d];
             remaining /= t.shape[d];
         }
-        let (re, im) = tensor_reduce_fiber(t, offset, count, t.strides[axis], op)?;
-        let data = Arc::get_mut(&mut r.data).unwrap();
-        data[i * if t.is_complex { 2 } else { 1 }] = re;
-        if t.is_complex { data[2 * i + 1] = im; }
+        let (re, im) = tensor_reduce_fiber(t, offset, count, t.strides[axis], op, fp32)?;
+        tensor_set_real(&mut r, i, re);
+        if t.is_complex { tensor_set_imag(&mut r, i, im); }
     }
     Ok(Value::tensor(Arc::new(r)))
 }
@@ -906,7 +1238,7 @@ pub fn tensor_all_finite(t: &Tensor) -> bool {
     let total: usize = t.shape.iter().product();
     let mult = if t.is_complex { 2 } else { 1 };
     for i in 0..total * mult {
-        if !t.data[t.offset + i].is_finite() {
+        if !tensor_get_real(&t, t.offset + i).is_finite() {
             return false;
         }
     }
@@ -962,11 +1294,11 @@ pub fn tensor_matmul_uncertain(
     if a_pred.is_complex || b_pred.is_complex || a_var.is_complex || b_var.is_complex {
         return Err(LanaError::Type);
     }
-    let pred = tensor_matmul(alloc, a_pred, b_pred)?;
+    let pred = tensor_matmul(alloc, a_pred, b_pred, matmul_default_dtype(a_pred, b_pred))?;
     let b_sq = tensor_elementwise(alloc, b_pred, b_pred, 2)?;
     let a_sq = tensor_elementwise(alloc, a_pred, a_pred, 2)?;
-    let t1 = tensor_matmul(alloc, a_var, &b_sq)?;
-    let t2 = tensor_matmul(alloc, &a_sq, b_var)?;
+    let t1 = tensor_matmul(alloc, a_var, &b_sq, matmul_default_dtype(a_var, &b_sq))?;
+    let t2 = tensor_matmul(alloc, &a_sq, b_var, matmul_default_dtype(&a_sq, b_var))?;
     let var = tensor_elementwise(alloc, &t1, &t2, 0)?;
     if !tensor_all_finite(&var) {
         return Err(LanaError::InvalidParameters);
@@ -990,7 +1322,7 @@ pub fn tensor_reduce_tensor(
         ValueKind::Tensor(t) => Ok(t),
         ValueKind::Number(n) => {
             let mut r = tensor_new(alloc, 0, &[], false)?;
-            Arc::get_mut(&mut r.data).unwrap()[0] = n;
+            tensor_set_real(&mut r, 0, n);
             Ok(Arc::new(r))
         }
         _ => Err(LanaError::Type),
@@ -1006,10 +1338,9 @@ pub fn tensor_scale(
 ) -> Result<Tensor, LanaError> {
     let mut r = tensor_new(alloc, t.ndim, &t.shape, t.is_complex)?;
     let total: usize = t.shape.iter().product();
-    let mult = if t.is_complex { 2 } else { 1 };
-    let data = Arc::get_mut(&mut r.data).unwrap();
-    for i in 0..total * mult {
-        data[i] = t.data[t.offset + i] * factor;
+    for e in 0..total {
+        tensor_set_real(&mut r, e, tensor_get_real(&t, t.offset + e) * factor);
+        tensor_set_imag(&mut r, e, tensor_get_imag(&t, t.offset + e) * factor);
     }
     Ok(r)
 }
@@ -1081,11 +1412,14 @@ pub fn tensor_outer(
     let n = v.shape[0];
     let shape = [k, n];
     let mut r = tensor_new(alloc, 2, &shape, false)?;
-    let data = Arc::get_mut(&mut r.data).unwrap();
     for i in 0..k {
         for j in 0..n {
-            data[i * n + j] =
-                u.data[u.offset + i * u.strides[0]] * v.data[v.offset + j * v.strides[0]];
+            tensor_set_real(
+                &mut r,
+                i * n + j,
+                tensor_get_real(&u, u.offset + i * u.strides[0])
+                    * tensor_get_real(&v, v.offset + j * v.strides[0]),
+            );
         }
     }
     Ok(r)
@@ -1102,7 +1436,6 @@ pub fn tensor_negate(
     if t.ndim > 0 && alloc(t.ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
         return Err(LanaError::Oom);
     }
-    let data = Arc::get_mut(&mut r.data).unwrap();
     for lin in 0..total {
         let mut rem = lin;
         let mut index = t.offset;
@@ -1110,7 +1443,7 @@ pub fn tensor_negate(
             index += (if t.shape[d] == 0 { 0 } else { rem % t.shape[d] }) * t.strides[d];
             rem /= t.shape[d];
         }
-        data[lin] = -t.data[index];
+        tensor_set_real(&mut r, lin, -tensor_get_real(&t, index));
     }
     Ok(r)
 }
@@ -1131,7 +1464,6 @@ pub fn tensor_unbroadcast(
     }
     let mut idx = vec![0usize; g.ndim];
     let offset = g.ndim - out_ndim;
-    let data = Arc::get_mut(&mut r.data).unwrap();
     for lin in 0..total {
         let mut rem = lin;
         for i in (0..g.ndim).rev() {
@@ -1144,7 +1476,8 @@ pub fn tensor_unbroadcast(
             let coord = if target.shape[i] == 1 { 0 } else { idx[gi] };
             ti = ti * target.shape[i] + coord;
         }
-        data[ti] += g.data[g.offset + lin];
+        let cur = tensor_get_real(&r, ti);
+        tensor_set_real(&mut r, ti, cur + tensor_get_real(&g, g.offset + lin));
     }
     Ok(r)
 }
@@ -1171,7 +1504,6 @@ pub fn tensor_broadcast_reduce(
         g_strides[i] = stride;
         stride *= g.shape[i];
     }
-    let data = Arc::get_mut(&mut r.data).unwrap();
     for lin in 0..total {
         let mut rem = lin;
         for i in (0..input.ndim).rev() {
@@ -1191,7 +1523,7 @@ pub fn tensor_broadcast_reduce(
                 gd += 1;
             }
         }
-        data[lin] = g.data[g.offset + gi] * scale;
+        tensor_set_real(&mut r, lin, tensor_get_real(&g, g.offset + gi) * scale);
     }
     Ok(r)
 }
@@ -1251,18 +1583,19 @@ fn tensor_infer_shape_at(
 }
 
 /// Recursively fill a tensor's data buffer in row-major order from a nested
-/// array of numbers, mirroring `tensor_fill_data`.
-pub fn tensor_fill_data(v: &Value, data: &mut [f64], offset: &mut usize) -> Result<(), LanaError> {
+/// array of numbers, mirroring `tensor_fill_data`. Writes through
+/// `tensor_set_real`, which converts to the storage dtype (rounding f16/bf16).
+pub fn tensor_fill_data(v: &Value, t: &mut Tensor, offset: &mut usize) -> Result<(), LanaError> {
     match &v.kind {
         ValueKind::Number(n) => {
-            data[*offset] = *n;
+            tensor_set_real(t, *offset, *n);
             *offset += 1;
             Ok(())
         }
         ValueKind::Array(array) => {
             let array = array.lock().unwrap();
             for item in &array.items {
-                tensor_fill_data(item, data, offset)?;
+                tensor_fill_data(item, t, offset)?;
             }
             Ok(())
         }
@@ -1276,13 +1609,13 @@ pub fn tensor_fill_data(v: &Value, data: &mut [f64], offset: &mut usize) -> Resu
 pub fn tensor_fill_complex(
     re: &Value,
     im: &Value,
-    data: &mut [f64],
+    t: &mut Tensor,
     offset: &mut usize,
 ) -> Result<(), LanaError> {
     match (&re.kind, &im.kind) {
         (ValueKind::Number(re_n), ValueKind::Number(im_n)) => {
-            data[2 * *offset] = *re_n;
-            data[2 * *offset + 1] = *im_n;
+            tensor_set_real(t, *offset, *re_n);
+            tensor_set_imag(t, *offset, *im_n);
             *offset += 1;
             Ok(())
         }
@@ -1296,7 +1629,7 @@ pub fn tensor_fill_complex(
             for i in 0..len {
                 let re = ra.lock().unwrap().items[i].clone();
                 let im = ia.lock().unwrap().items[i].clone();
-                tensor_fill_complex(&re, &im, data, offset)?;
+                tensor_fill_complex(&re, &im, t, offset)?;
             }
             Ok(())
         }
@@ -1407,12 +1740,11 @@ pub fn tensor_index(
         // A full set of integer positions selects one element: a number, or
         // the established rank-zero complex tensor for complex tensors.
         if !t.is_complex {
-            return Ok(Value::number(t.data[view_offset]));
+            return Ok(Value::number(tensor_get_real(&t, view_offset)));
         }
         let mut r = tensor_new(alloc, 0, &[], true)?;
-        let data = Arc::get_mut(&mut r.data).unwrap();
-        data[0] = t.data[2 * view_offset];
-        data[1] = t.data[2 * view_offset + 1];
+        tensor_set_real(&mut r, 0, tensor_get_real(&t, view_offset));
+        tensor_set_imag(&mut r, 0, tensor_get_imag(&t, view_offset));
         return Ok(Value::tensor(Arc::new(r)));
     }
 
@@ -1452,6 +1784,33 @@ mod tests {
     }
 
     #[test]
+    fn memory_accounting_uses_element_width() {
+        // LIP-027 B18: a tensor's buffer accounts the actual element width, so
+        // an f16 buffer is a quarter of an f64 buffer. The data-buffer
+        // allocation dominates the struct/shape overhead.
+        let mut f16_bytes = 0usize;
+        let mut alloc_f16 = |bytes: usize| {
+            f16_bytes = f16_bytes.max(bytes);
+            LanaError::Ok
+        };
+        let t16 = tensor_new_dtype(&mut alloc_f16, 1, &[100000], TensorDtype::F16).unwrap();
+        assert_eq!(t16.dtype, TensorDtype::F16);
+
+        let mut f64_bytes = 0usize;
+        let mut alloc_f64 = |bytes: usize| {
+            f64_bytes = f64_bytes.max(bytes);
+            LanaError::Ok
+        };
+        let t64 = tensor_new_dtype(&mut alloc_f64, 1, &[100000], TensorDtype::F64).unwrap();
+        assert_eq!(t64.dtype, TensorDtype::F64);
+
+        // f16 = 100000 * 2 = 200000 bytes; f64 = 100000 * 8 = 800000 bytes.
+        assert!(f16_bytes >= 200000, "f16 buffer too small: {f16_bytes}");
+        assert!(f64_bytes >= 800000, "f64 buffer too small: {f64_bytes}");
+        assert!(f64_bytes >= f16_bytes * 3, "f64 not ~4x f16: {f64_bytes} vs {f16_bytes}");
+    }
+
+    #[test]
     fn indexing_selects_positions_slices_and_views() {
         let t = tensor(&[2, 3], &[1., 2., 3., 4., 5., 6.]);
 
@@ -1459,7 +1818,7 @@ mod tests {
         let row = tensor_index(&mut ok_alloc, &t, &Value::number(1.)).unwrap();
         let ValueKind::Tensor(r) = &row.kind else { panic!("expected tensor") };
         assert_eq!(r.shape, [3]); assert_eq!(r.strides, [1]); assert_eq!(r.offset, 3);
-        assert_eq!(*r.data, [1., 2., 3., 4., 5., 6.]); // whole shared buffer
+        assert_eq!(tensor_f64(r), [1., 2., 3.]); // logical elements of the row view
         assert!(Arc::ptr_eq(&r.data, &t.data));
         let neg = tensor_index(&mut ok_alloc, &t, &Value::number(-1.)).unwrap();
         let ValueKind::Tensor(r) = &neg.kind else { panic!("expected tensor") };
@@ -1515,7 +1874,7 @@ mod tests {
         // Strided traversal: arithmetic and full reduction over the view
         // follow its strides rather than assuming a contiguous fiber.
         let doubled = tensor_elementwise(&mut ok_alloc, col, col, 0).unwrap();
-        assert_eq!(*doubled.data, [4.0, 10.0]);
+        assert_eq!(tensor_f64(&doubled), [4.0, 10.0]);
         assert!(matches!(tensor_reduce(&mut ok_alloc, col, 0).unwrap().kind,
                          ValueKind::Number(7.0)));
 
@@ -1556,16 +1915,16 @@ mod tests {
 
         // A complex element selection yields the rank-zero complex form.
         let mut c = tensor_new(&mut ok_alloc, 1, &[1], true).unwrap();
-        Arc::get_mut(&mut c.data).unwrap()[..2].copy_from_slice(&[3., 4.]);
+        set_f64(&mut c, &[3., 4.]);
         let picked = tensor_index(&mut ok_alloc, &c, &Value::number(0.)).unwrap();
         let ValueKind::Tensor(r) = &picked.kind else { panic!("expected tensor") };
-        assert_eq!(r.ndim, 0); assert!(r.is_complex); assert_eq!(*r.data, [3., 4.]);
+        assert_eq!(r.ndim, 0); assert!(r.is_complex); assert_eq!(tensor_f64(r), [3., 4.]);
     }
 
     #[test]
     fn axis_reductions_cover_shapes_values_and_errors() {
         let mut t = tensor_new(&mut ok_alloc, 2, &[2, 3], false).unwrap();
-        t.data = Arc::new(vec![1., 2., 3., 4., 5., 6.]);
+        set_f64(&mut t, &[1., 2., 3., 4., 5., 6.]);
         for (op, axis, shape, data) in [
             (0, 0., vec![3], vec![5., 7., 9.]),
             (1, 0., vec![3], vec![2.5, 3.5, 4.5]),
@@ -1574,7 +1933,7 @@ mod tests {
         ] {
             let result = tensor_reduce_axis(&mut ok_alloc, &t, op, &Value::number(axis)).unwrap();
             let ValueKind::Tensor(r) = result.kind else { panic!("expected tensor"); };
-            assert_eq!(r.shape, shape); assert_eq!(*r.data, data);
+            assert_eq!(r.shape, shape); assert_eq!(tensor_f64(&r), data);
         }
         for axis in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.5, -3., 2., 1e100] {
             assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &t, 0, &Value::number(axis)), Err(LanaError::InvalidParameters)));
@@ -1583,7 +1942,7 @@ mod tests {
         let empty = tensor_new(&mut ok_alloc, 2, &[0, 3], false).unwrap();
         let result = tensor_reduce_axis(&mut ok_alloc, &empty, 0, &Value::number(0.)).unwrap();
         let ValueKind::Tensor(r) = result.kind else { panic!("expected tensor"); };
-        assert_eq!(r.shape, [3]); assert_eq!(*r.data, [0., 0., 0.]);
+        assert_eq!(r.shape, [3]); assert_eq!(tensor_f64(&r), [0., 0., 0.]);
         for op in 1..4 {
             assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &empty, op, &Value::number(0.)), Err(LanaError::InvalidParameters)));
             let result = tensor_reduce_axis(&mut ok_alloc, &empty, op, &Value::number(1.)).unwrap();
@@ -1593,14 +1952,14 @@ mod tests {
         let scalar = tensor_new(&mut ok_alloc, 0, &[], false).unwrap();
         assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &scalar, 0, &Value::number(0.)), Err(LanaError::InvalidParameters)));
         let mut complex = tensor_new(&mut ok_alloc, 1, &[2], true).unwrap();
-        complex.data = Arc::new(vec![1., 2., 3., 4.]);
+        set_f64(&mut complex, &[1., 2., 3., 4.]);
         for (op, data) in [(0, vec![4., 6.]), (1, vec![2., 3.])] {
             let result = tensor_reduce_axis(&mut ok_alloc, &complex, op, &Value::number(-1.)).unwrap();
             let ValueKind::Tensor(r) = result.kind else { panic!("expected tensor"); };
-            assert_eq!(r.ndim, 0); assert!(r.is_complex); assert_eq!(*r.data, data);
+            assert_eq!(r.ndim, 0); assert!(r.is_complex); assert_eq!(tensor_f64(&r), data);
         }
         assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &complex, 2, &Value::number(0.)), Err(LanaError::Type)));
-        Arc::get_mut(&mut complex.data).unwrap()[1] = f64::INFINITY;
+        tensor_set_imag(&mut complex, 0, f64::INFINITY);
         assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &complex, 0, &Value::number(0.)), Err(LanaError::InvalidParameters)));
     }
 
@@ -1637,9 +1996,12 @@ mod tests {
     #[test]
     fn complex_components_may_share_arrays() {
         let a = array(vec![array(vec![Value::number(1.0), Value::number(2.0)])]);
-        let mut data = [0.0; 4];
-        tensor_fill_complex(&a, &a, &mut data, &mut 0).unwrap();
-        assert_eq!(data, [1.0, 1.0, 2.0, 2.0]);
+        let mut t = tensor_new(&mut ok_alloc, 1, &[2], true).unwrap();
+        tensor_fill_complex(&a, &a, &mut t, &mut 0).unwrap();
+        assert_eq!(tensor_get_real(&t, 0), 1.0);
+        assert_eq!(tensor_get_imag(&t, 0), 1.0);
+        assert_eq!(tensor_get_real(&t, 1), 2.0);
+        assert_eq!(tensor_get_imag(&t, 1), 2.0);
     }
 
     #[test]
@@ -1655,17 +2017,48 @@ mod tests {
         assert!(matches!(tensor_reduce(&mut ok_alloc, &overflow, 0),
                          Err(LanaError::InvalidParameters)));
         let mut complex = tensor_new(&mut ok_alloc, 1, &[2], true).unwrap();
-        complex.data = Arc::new(vec![1.0, f64::INFINITY, 2.0, 0.0]);
+        set_f64(&mut complex, &[1.0, f64::INFINITY, 2.0, 0.0]);
         assert!(matches!(tensor_reduce(&mut ok_alloc, &complex, 0),
                          Err(LanaError::InvalidParameters)));
-        complex.data = Arc::new(vec![f64::MAX, 0.0, f64::MAX, 0.0]);
+        set_f64(&mut complex, &[f64::MAX, 0.0, f64::MAX, 0.0]);
         assert!(matches!(tensor_reduce(&mut ok_alloc, &complex, 0),
                          Err(LanaError::InvalidParameters)));
     }
 
+    /// Read a tensor's elements back as f64s: the real parts for a real tensor,
+    /// or the interleaved [re, im] pairs for a complex tensor.
+    fn tensor_f64(t: &Tensor) -> Vec<f64> {
+        let count = tensor_element_count(t);
+        if t.is_complex {
+            let mut out = Vec::with_capacity(count * 2);
+            for i in 0..count {
+                out.push(tensor_get_real(t, i));
+                out.push(tensor_get_imag(t, i));
+            }
+            out
+        } else {
+            (0..count).map(|i| tensor_get_real(t, i)).collect()
+        }
+    }
+
+    /// Write f64s into a tensor: the real parts for a real tensor, or the
+    /// interleaved [re, im] pairs for a complex tensor.
+    fn set_f64(t: &mut Tensor, data: &[f64]) {
+        if t.is_complex {
+            for (i, pair) in data.chunks(2).enumerate() {
+                tensor_set_real(t, i, pair[0]);
+                tensor_set_imag(t, i, pair[1]);
+            }
+        } else {
+            for (i, v) in data.iter().enumerate() {
+                tensor_set_real(t, i, *v);
+            }
+        }
+    }
+
     fn tensor(shape: &[usize], data: &[f64]) -> Tensor {
         let mut t = tensor_new(&mut ok_alloc, shape.len(), shape, false).unwrap();
-        Arc::get_mut(&mut t.data).unwrap().copy_from_slice(data);
+        set_f64(&mut t, data);
         t
     }
 
@@ -1675,7 +2068,7 @@ mod tests {
         assert_eq!(t.ndim, 2);
         assert_eq!(t.shape, vec![2, 3]);
         assert_eq!(t.strides, vec![3, 1]);
-        assert_eq!(t.data.len(), 6);
+        assert_eq!(t.data.len(), 48);
         assert!(!t.is_complex);
     }
 
@@ -1683,7 +2076,7 @@ mod tests {
     fn new_zero_dim_is_scalar() {
         let t = tensor_new(&mut ok_alloc, 0, &[], false).unwrap();
         assert_eq!(t.ndim, 0);
-        assert_eq!(t.data.len(), 1);
+        assert_eq!(t.data.len(), 8);
     }
 
     #[test]
@@ -1692,7 +2085,7 @@ mod tests {
         let b = tensor(&[1, 3], &[10.0, 20.0, 30.0]);
         let r = tensor_elementwise(&mut ok_alloc, &a, &b, 0).unwrap();
         assert_eq!(r.shape, vec![2, 3]);
-        assert_eq!(*r.data, vec![11.0, 21.0, 31.0, 12.0, 22.0, 32.0]);
+        assert_eq!(tensor_f64(&r), vec![11.0, 21.0, 31.0, 12.0, 22.0, 32.0]);
     }
 
     #[test]
@@ -1710,6 +2103,7 @@ mod tests {
         let a = tensor(&[1], &[1.0]);
         let mut b = tensor(&[1], &[1.0]);
         b.is_complex = true;
+        b.dtype = TensorDtype::Complex;
         assert!(matches!(
             tensor_elementwise(&mut ok_alloc, &a, &b, 0),
             Err(LanaError::Type)
@@ -1720,18 +2114,18 @@ mod tests {
     fn matmul_1d_dot_product() {
         let a = tensor(&[3], &[1.0, 2.0, 3.0]);
         let b = tensor(&[3], &[4.0, 5.0, 6.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b).unwrap();
+        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.ndim, 0);
-        assert_eq!(*r.data, vec![32.0]);
+        assert_eq!(tensor_f64(&r), vec![32.0]);
     }
 
     #[test]
     fn matmul_2d() {
         let a = tensor(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
         let b = tensor(&[2, 2], &[5.0, 6.0, 7.0, 8.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b).unwrap();
+        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 2]);
-        assert_eq!(*r.data, vec![19.0, 22.0, 43.0, 50.0]);
+        assert_eq!(tensor_f64(&r), vec![19.0, 22.0, 43.0, 50.0]);
     }
 
     #[test]
@@ -1739,7 +2133,7 @@ mod tests {
         let a = tensor(&[2, 3], &[1.0; 6]);
         let b = tensor(&[2, 2], &[1.0; 4]);
         assert!(matches!(
-            tensor_matmul(&mut ok_alloc, &a, &b),
+            tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64),
             Err(LanaError::InvalidParameters)
         ));
     }
@@ -1763,15 +2157,15 @@ mod tests {
         // 1d x 2d promotes the vector to a row: [1,2,3] . [[1,2],[3,4],[5,6]].
         let a = tensor(&[3], &[1.0, 2.0, 3.0]);
         let b = tensor(&[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b).unwrap();
+        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2]);
-        assert_eq!(*r.data, vec![22.0, 28.0]);
+        assert_eq!(tensor_f64(&r), vec![22.0, 28.0]);
 
         // 2d x 1d promotes the vector to a column: [[1,2,3],[4,5,6]] . [1,2,3].
         let m = tensor(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let r = tensor_matmul(&mut ok_alloc, &m, &a).unwrap();
+        let r = tensor_matmul(&mut ok_alloc, &m, &a, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2]);
-        assert_eq!(*r.data, vec![14.0, 32.0]);
+        assert_eq!(tensor_f64(&r), vec![14.0, 32.0]);
     }
 
     #[test]
@@ -1779,23 +2173,21 @@ mod tests {
         // a[2,2,2] . b[1,2,2] -> [2,2,2]; b's batch dim 1 broadcasts to 2.
         let a = tensor(&[2, 2, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let b = tensor(&[1, 2, 2], &[1.0, 0.0, 0.0, 1.0]); // identity
-        let r = tensor_matmul(&mut ok_alloc, &a, &b).unwrap();
+        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 2, 2]);
-        assert_eq!(*r.data, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(tensor_f64(&r), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     }
 
     #[test]
     fn matmul_complex_zgemm() {
         // (iI) . (iI) = -I, interleaved [re, im] per element.
         let mut a = tensor_new(&mut ok_alloc, 2, &[2, 2], true).unwrap();
-        Arc::get_mut(&mut a.data).unwrap()
-            .copy_from_slice(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        set_f64(&mut a, &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
         let mut b = tensor_new(&mut ok_alloc, 2, &[2, 2], true).unwrap();
-        Arc::get_mut(&mut b.data).unwrap()
-            .copy_from_slice(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b).unwrap();
+        set_f64(&mut b, &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::Complex).unwrap();
         assert!(r.is_complex);
-        assert_eq!(*r.data, vec![-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0]);
+        assert_eq!(tensor_f64(&r), vec![-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0]);
     }
 
     #[test]
@@ -1805,9 +2197,9 @@ mod tests {
         let base = tensor(&[2, 4], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let a = view(&base, &[2, 3], &[4, 1], 0);
         let b = tensor(&[3, 2], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b).unwrap();
+        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 2]);
-        assert_eq!(*r.data, vec![4.0, 5.0, 12.0, 13.0]);
+        assert_eq!(tensor_f64(&r), vec![4.0, 5.0, 12.0, 13.0]);
     }
 
     #[test]
@@ -1817,9 +2209,9 @@ mod tests {
         let base = tensor(&[2, 4], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let a = view(&base, &[2, 2], &[4, 2], 0);
         let b = tensor(&[2, 2], &[1.0, 1.0, 0.0, 1.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b).unwrap();
+        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 2]);
-        assert_eq!(*r.data, vec![1.0, 4.0, 5.0, 12.0]);
+        assert_eq!(tensor_f64(&r), vec![1.0, 4.0, 5.0, 12.0]);
     }
 
     #[test]
@@ -1827,18 +2219,18 @@ mod tests {
         // [2,0] . [0,3] -> [2,3] of zeros (the sum over an empty contraction).
         let a = tensor(&[2, 0], &[]);
         let b = tensor(&[0, 3], &[]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b).unwrap();
+        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 3]);
-        assert_eq!(*r.data, vec![0.0; 6]);
+        assert_eq!(tensor_f64(&r), vec![0.0; 6]);
     }
 
     #[test]
     fn matmul_mismatched_complex_is_type_error() {
         let mut a = tensor_new(&mut ok_alloc, 2, &[2, 2], true).unwrap();
-        Arc::get_mut(&mut a.data).unwrap().copy_from_slice(&[0.0; 8]);
+        set_f64(&mut a, &[0.0; 8]);
         let b = tensor(&[2, 2], &[1.0; 4]);
         assert!(matches!(
-            tensor_matmul(&mut ok_alloc, &a, &b),
+            tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64),
             Err(LanaError::Type)
         ));
     }
@@ -1848,7 +2240,7 @@ mod tests {
         let a = tensor(&[], &[1.0]);
         let b = tensor(&[2, 2], &[1.0; 4]);
         assert!(matches!(
-            tensor_matmul(&mut ok_alloc, &a, &b),
+            tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64),
             Err(LanaError::InvalidParameters)
         ));
     }
@@ -1858,7 +2250,7 @@ mod tests {
         let a = tensor(&[3, 2, 2], &[1.0; 12]);
         let b = tensor(&[2, 2, 2], &[1.0; 8]);
         assert!(matches!(
-            tensor_matmul(&mut ok_alloc, &a, &b),
+            tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64),
             Err(LanaError::InvalidParameters)
         ));
     }
@@ -1947,7 +2339,7 @@ mod tests {
         };
         assert_eq!(r.shape, vec![2, 2]);
         let expected = [19.0, 22.0, 43.0, 50.0];
-        for (got, want) in r.data.iter().zip(expected.iter()) {
+        for (got, want) in tensor_f64(&r).iter().zip(expected.iter()) {
             assert!((got - want).abs() < 1e-5 * (1.0 + want.abs()));
         }
     }
@@ -1985,13 +2377,13 @@ mod tests {
 
         let (pred, var) = unpack_uncertain(
             &tensor_elementwise_uncertain(&mut ok_alloc, &a, &va, &b, &vb, 0).unwrap());
-        assert_eq!(*pred.data, [4.0, 6.0]);
-        assert_eq!(*var.data, [0.625, 0.3125]);
+        assert_eq!(tensor_f64(&pred), [4.0, 6.0]);
+        assert_eq!(tensor_f64(&var), [0.625, 0.3125]);
 
         let (pred, var) = unpack_uncertain(
             &tensor_elementwise_uncertain(&mut ok_alloc, &a, &va, &b, &vb, 1).unwrap());
-        assert_eq!(*pred.data, [-2.0, -2.0]);
-        assert_eq!(*var.data, [0.625, 0.3125]);
+        assert_eq!(tensor_f64(&pred), [-2.0, -2.0]);
+        assert_eq!(tensor_f64(&var), [0.625, 0.3125]);
     }
 
     #[test]
@@ -2003,8 +2395,8 @@ mod tests {
 
         let (pred, var) = unpack_uncertain(
             &tensor_elementwise_uncertain(&mut ok_alloc, &a, &va, &b, &vb, 2).unwrap());
-        assert_eq!(*pred.data, [3.0, 8.0]);
-        assert_eq!(*var.data, [4.625, 4.25]);
+        assert_eq!(tensor_f64(&pred), [3.0, 8.0]);
+        assert_eq!(tensor_f64(&var), [4.625, 4.25]);
 
         let d = tensor(&[2], &[1.0, 1.0]);
         let vd = tensor(&[2], &[1.0, 1.0]);
@@ -2012,8 +2404,8 @@ mod tests {
         let ve = tensor(&[2], &[1.0, 1.0]);
         let (pred, var) = unpack_uncertain(
             &tensor_elementwise_uncertain(&mut ok_alloc, &d, &vd, &e, &ve, 3).unwrap());
-        assert_eq!(*pred.data, [0.5, 0.5]);
-        assert_eq!(*var.data, [0.3125, 0.3125]);
+        assert_eq!(tensor_f64(&pred), [0.5, 0.5]);
+        assert_eq!(tensor_f64(&var), [0.3125, 0.3125]);
     }
 
     #[test]
@@ -2024,8 +2416,8 @@ mod tests {
         let vb = tensor(&[2], &[0.125, 0.0625]);
         let (pred, var) = unpack_uncertain(
             &tensor_matmul_uncertain(&mut ok_alloc, &a, &va, &b, &vb).unwrap());
-        assert_eq!(*pred.data, [11.0]);
-        assert_eq!(*var.data, [8.875]);
+        assert_eq!(tensor_f64(&pred), [11.0]);
+        assert_eq!(tensor_f64(&var), [8.875]);
     }
 
     #[test]
@@ -2035,13 +2427,13 @@ mod tests {
 
         let (pred, var) = unpack_uncertain(
             &tensor_reduce_uncertain(&mut ok_alloc, &s, &vs, 0, None).unwrap());
-        assert_eq!(*pred.data, [10.0]);
-        assert_eq!(*var.data, [0.9375]);
+        assert_eq!(tensor_f64(&pred), [10.0]);
+        assert_eq!(tensor_f64(&var), [0.9375]);
 
         let (pred, var) = unpack_uncertain(
             &tensor_reduce_uncertain(&mut ok_alloc, &s, &vs, 1, None).unwrap());
-        assert_eq!(*pred.data, [2.5]);
-        assert_eq!(*var.data, [0.05859375]);
+        assert_eq!(tensor_f64(&pred), [2.5]);
+        assert_eq!(tensor_f64(&var), [0.05859375]);
 
         // Axis reduction over a 2x2 tensor.
         let m = tensor(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
@@ -2049,13 +2441,13 @@ mod tests {
         let axis = Value::number(0.0);
         let (pred, var) = unpack_uncertain(
             &tensor_reduce_uncertain(&mut ok_alloc, &m, &vm, 0, Some(&axis)).unwrap());
-        assert_eq!(*pred.data, [4.0, 6.0]);
-        assert_eq!(*var.data, [0.625, 0.3125]);
+        assert_eq!(tensor_f64(&pred), [4.0, 6.0]);
+        assert_eq!(tensor_f64(&var), [0.625, 0.3125]);
 
         let (pred, var) = unpack_uncertain(
             &tensor_reduce_uncertain(&mut ok_alloc, &m, &vm, 1, Some(&axis)).unwrap());
-        assert_eq!(*pred.data, [2.0, 3.0]);
-        assert_eq!(*var.data, [0.15625, 0.078125]);
+        assert_eq!(tensor_f64(&pred), [2.0, 3.0]);
+        assert_eq!(tensor_f64(&var), [0.15625, 0.078125]);
     }
 
     #[test]
@@ -2114,7 +2506,7 @@ mod tests {
         let (pred, var, unc) = tensor_uncertainty_unpack(&Value::tensor(Arc::new(a.clone()))).unwrap();
         assert!(!unc);
         assert!(var.is_none());
-        assert_eq!(*pred.data, [1.0, 2.0]);
+        assert_eq!(tensor_f64(&pred), [1.0, 2.0]);
     }
 
     #[test]

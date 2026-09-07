@@ -69,3 +69,26 @@ task:
 
 The shipped 2.0.1 changes keep GC timing semantics intact and target most of
 this ceiling without the naive throttle.
+
+## 6. fp16/bf16 matmul
+
+LIP-027 B16 native fp32-accumulation loops for f16/bf16 inputs, measured on a
+representative training workload: 1000 iterations of a 128x128 matmul (a small
+linear-layer forward pass, iterated), `ones` inputs, C11 VM (`build/lana run`).
+Wall-clock, best-of-5 median, no cache flush, single machine (macOS, Apple
+Silicon). Cross-checked on the Rust VM.
+
+| dtype | median time (s) | vs f64 |
+|---|---:|---:|
+| f64 | 0.09 | 1.0x |
+| f16 | 5.10 | 0.018x (56.7x slower) |
+| bf16 | 5.09 | 0.018x (56.6x slower) |
+
+The fp16/bf16 native loops are ~57x slower than the f64 path, not faster. The
+expected memory-bound speedup (half the bytes of f64) did not materialize; the
+f16/bf16 path is dominated by per-element software conversion between the
+low-precision storage type and the fp32 accumulator, which is far more
+expensive than the native f64 multiply-add loop. The regression is consistent
+across both VMs (Rust VM at n=200: f64 0.09s vs f16 3.81s, ~42x slower). The
+fp16/bf16 native path should not be relied on for speed until this is
+addressed.

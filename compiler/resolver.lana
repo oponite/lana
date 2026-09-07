@@ -430,6 +430,7 @@ fn host_type(name) {
     if (name == "ones") { return type_ordinary("tensor"); }
     if (name == "eye") { return type_ordinary("tensor"); }
     if (name == "dtype") { return type_ordinary("string"); }
+    if (name == "cast") { return type_ordinary("tensor"); }
     if (name == "shape") { return type_ordinary("array"); }
     if (name == "ndim") { return type_ordinary("number"); }
     if (name == "matmul") { return type_ordinary("tensor"); }
@@ -1090,7 +1091,13 @@ fn builtin_tensor_type(node, resolved) {
     if (name == "tensor") { check_optional_dtype(node, resolved); return type_tensor(array_literal_shape(resolved[0][3])); }
     if (name == "tensor_complex") { require_argument_count(name, resolved, 2); return type_tensor(array_literal_shape(resolved[0][3])); }
     if (name == "matmul") {
-        require_argument_count(name, resolved, 2);
+        let count = array_length(resolved);
+        if (count != 2) { if (count != 3) { type_error(node, "matmul expects two tensors and an optional out_dtype"); } }
+        if (count == 3) {
+            let dtype_node = resolved[2][3];
+            if (dtype_node[0] != 20) { type_error(node, "out_dtype: must be a string literal"); }
+            if (dtype_node[1] != "string") { type_error(node, "out_dtype: must be a string literal"); }
+        }
         let shape = matmul_shape(tensor_shape_of(resolved[0]), tensor_shape_of(resolved[1]));
         if (is_uncertain_tensor_type(resolved[0][1])) { return type_uncertain(type_tensor(shape)); }
         if (is_uncertain_tensor_type(resolved[1][1])) { return type_uncertain(type_tensor(shape)); }
@@ -1110,6 +1117,14 @@ fn builtin_tensor_type(node, resolved) {
         require_argument_count(name, resolved, 1);
         require_certain_tensor(resolved[0][1], "ndim", node);
         return type_ordinary("number");
+    }
+    if (name == "cast") {
+        require_argument_count(name, resolved, 2);
+        require_certain_tensor(resolved[0][1], "cast", node);
+        let dtype_node = resolved[1][3];
+        if (dtype_node[0] != 20) { type_error(node, "cast: dtype must be a string literal"); }
+        if (dtype_node[1] != "string") { type_error(node, "cast: dtype must be a string literal"); }
+        return type_tensor(tensor_shape_of(resolved[0]));
     }
     return null;
 }

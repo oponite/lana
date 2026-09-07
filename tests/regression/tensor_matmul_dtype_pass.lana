@@ -1,0 +1,52 @@
+// LIP-027 B15: matmul mixed dtype + out_dtype. matmul accepts mixed dtypes;
+// the output dtype defaults to the input dtype when both match, and to the
+// higher precision for a f64/f32 mix. An optional out_dtype: named parameter
+// overrides the output dtype explicitly.
+
+// Same-dtype: output keeps the input dtype.
+let a = tensor([[1.0, 2.0], [3.0, 4.0]], dtype: "f32");
+let b = tensor([[1.0, 0.0], [0.0, 1.0]], dtype: "f32");
+let r = matmul(a, b);
+assert(dtype(r) == "f32", "f32 x f32 -> f32");
+assert(r[0][0] == 1.0, "r[0][0]");
+assert(r[0][1] == 2.0, "r[0][1]");
+assert(r[1][0] == 3.0, "r[1][0]");
+assert(r[1][1] == 4.0, "r[1][1]");
+
+// f64 x f32 -> f64 (higher precision wins).
+let a64 = tensor([[1.0, 2.0], [3.0, 4.0]]);
+let r2 = matmul(a64, b);
+assert(dtype(r2) == "f64", "f64 x f32 -> f64");
+assert(r2[1][1] == 4.0, "r2[1][1]");
+
+// f32 x f64 -> f64 (higher precision wins regardless of operand order).
+let r2b = matmul(b, a64);
+assert(dtype(r2b) == "f64", "f32 x f64 -> f64");
+
+// out_dtype: overrides the output dtype.
+let r3 = matmul(a, b, out_dtype: "f16");
+assert(dtype(r3) == "f16", "out_dtype f16");
+assert(r3[0][0] == 1.0, "r3[0][0]");
+assert(r3[1][1] == 4.0, "r3[1][1]");
+
+// f16 x f16 -> f16.
+let a16 = tensor([[1.0, 2.0], [3.0, 4.0]], dtype: "f16");
+let b16 = tensor([[1.0, 0.0], [0.0, 1.0]], dtype: "f16");
+let r4 = matmul(a16, b16);
+assert(dtype(r4) == "f16", "f16 x f16 -> f16");
+assert(r4[0][0] == 1.0, "r4[0][0]");
+assert(r4[1][1] == 4.0, "r4[1][1]");
+
+// bf16 x bf16 -> bf16.
+let abf = tensor([[1.0, 2.0], [3.0, 4.0]], dtype: "bf16");
+let bbf = tensor([[1.0, 0.0], [0.0, 1.0]], dtype: "bf16");
+let r5 = matmul(abf, bbf);
+assert(dtype(r5) == "bf16", "bf16 x bf16 -> bf16");
+assert(r5[0][0] == 1.0, "r5[0][0]");
+assert(r5[1][1] == 4.0, "r5[1][1]");
+
+// out_dtype: f32 on f16 inputs.
+let r6 = matmul(a16, b16, out_dtype: "f32");
+assert(dtype(r6) == "f32", "out_dtype f32 on f16 inputs");
+
+print("TENSOR_MATMUL_DTYPE_PASS");

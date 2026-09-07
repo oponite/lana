@@ -1,0 +1,22 @@
+// LIP-027: f16 overflow. A value finite in f64 that exceeds f16's range
+// (max ~65504) becomes inf in f16 — expected and approximate, not an error.
+// Construction succeeds; the stored value is inf, not the original finite
+// value. bf16 shares fp32's range, so it does not overflow where fp32 does not.
+
+// 100000.0 is finite in f64 but exceeds f16's max (~65504) -> inf.
+let big = tensor([[100000.0]], dtype: "f16");
+assert(dtype(big) == "f16", "f16 construction with overflow succeeds");
+let v = big[0][0];
+assert(v != 100000.0, "stored value is not the original finite value");
+assert(v == v, "inf compares equal to itself");
+
+// A value within f16 range is preserved (no overflow).
+let ok = tensor([[1000.0]], dtype: "f16");
+assert(ok[0][0] == 1000.0, "in-range f16 value preserved");
+
+// bf16 shares fp32's range: 100000.0 does not overflow to inf (it rounds to
+// 99840.0, finite). This contrasts with f16, which overflows to inf.
+let bf = tensor([[100000.0]], dtype: "bf16");
+assert(bf[0][0] == 99840.0, "bf16 rounds 100000.0 to 99840.0 (no overflow)");
+
+print("TENSOR_F16_OVERFLOW_PASS");

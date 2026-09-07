@@ -115,6 +115,7 @@ fn is_host_call(name) {
     if (name == "zeros") { return true; } if (name == "ones") { return true; }
     if (name == "eye") { return true; } if (name == "shape") { return true; }
     if (name == "ndim") { return true; } if (name == "dtype") { return true; }
+    if (name == "cast") { return true; }
     if (name == "matmul") { return true; } if (name == "sum") { return true; }
     if (name == "mean") { return true; } if (name == "max") { return true; }
     if (name == "min") { return true; }
@@ -163,6 +164,7 @@ fn host_call_name(name) {
     if (name == "shape") { return "tensor_shape"; }
     if (name == "ndim") { return "tensor_ndim"; }
     if (name == "dtype") { return "tensor_dtype"; }
+    if (name == "cast") { return "tensor_cast"; }
     if (name == "matmul") { return "tensor_matmul"; }
     if (name == "gpu_matmul") { return "gpu_matmul"; }
     if (name == "sum") { return "tensor_sum"; }

@@ -238,9 +238,9 @@ static void tensor_print_rec(const LanaTensor *t, size_t dim, size_t offset) {
     size_t i;
     if (dim == t->ndim) {
         if (t->is_complex)
-            (void)printf("[%.12g, %.12g]", t->data[offset * 2], t->data[offset * 2 + 1]);
+            (void)printf("[%.12g, %.12g]", tensor_get_real(t, offset), tensor_get_imag(t, offset));
         else
-            (void)printf("%.12g", t->data[offset]);
+            (void)printf("%.12g", tensor_get_real(t, offset));
         return;
     }
     (void)printf("[");

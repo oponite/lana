@@ -765,8 +765,19 @@ and 023 are implemented and conformance-tested (differential fixtures exist for
 8. **Release qualification** — all exact-candidate gates (C/Rust, full
    sanitizers, fuzzing, universal install, integrations, hardware GPU, WASM,
    archives).
+9. **LIP-027 matmul backend speedup (B16 follow-up)** — the fp32-accumulation
+   path (f32/f16/bf16) uses a naive scalar loop, ~33x slower than the f64
+   `cblas_dgemm` path (measured 2026-09-07: 128x128x200, f64 0.03s vs f32/f16/
+   bf16 ~1.0s, C11 VM; consistent on Rust VM). Root cause: f64 lowers to
+   Accelerate BLAS, the low-precision dtypes to a scalar loop. Fix: lower f32
+   to `cblas_sgemm` on macOS (naive loop elsewhere) and pack f16/bf16 to
+   `float` scratch before `cblas_sgemm` (PyTorch-style), preserving fp32
+   accumulation and C/Rust byte-identity (both VMs select the same backend per
+   platform). Recorded in `PERFORMANCE.md` §6; the fp16/bf16 path should not be
+   relied on for speed until this lands.
 
-Items 4–6 are unbuilt; 2, 3, 7 are partial; 1 and 8 are small/qualification.
+Items 4–6 are unbuilt; 2, 3, 7 are partial; 1 and 8 are small/qualification;
+9 is a performance regression on a shipped LIP-027 path.
 
 ## Re-planned batches (2026-09-07)
 
@@ -786,14 +797,14 @@ next. Ordered by dependency.
 | B9 | LIP-020: persistent REPL + multiline input + error recovery + replayable export | Pending |
 | B10 | LIP-025: browser/WASI execution + host-capability acceptance | Pending |
 | B11 | Release qualification: all exact-candidate gates | Pending |
-| B12 | LIP-027 S1: `dtype` field + `dtype:` on constructors + `dtype(t)` + element-width allocation | Pending |
-| B13 | LIP-027 S2: `cast(t, dtype)` host call | Pending |
-| B14 | LIP-027 S3: element-wise same-dtype rule (mismatch → `LANA_ERR_TYPE`) | Pending |
-| B15 | LIP-027 S4: matmul mixed dtype + `out_dtype:` + fp32 accumulation | Pending |
-| B16 | LIP-027 S5: backend `sgemm` (f32) + f16/bf16 native loops, both VMs | Pending |
-| B17 | LIP-027 S6: reductions preserve dtype + fp32 accumulation | Pending |
-| B18 | LIP-027 S7: element-width accounting + provenance dtype + replay | Pending |
-| B19 | LIP-027 S8: tests + differential fixtures + `PERFORMANCE.md` measurement | Pending |
+| B12 | LIP-027 S1: `dtype` field + `dtype:` on constructors + `dtype(t)` + element-width allocation | ✅ Done 2026-09-07; `LANA_HOST_TENSOR_DTYPE`, `tensor_new_dtype`, element-width buffers, CTest 140/140 |
+| B13 | LIP-027 S2: `cast(t, dtype)` host call | ✅ Done 2026-09-07; `LANA_HOST_TENSOR_CAST`, same-dtype no-op, complex out of scope, CTest 140/140 |
+| B14 | LIP-027 S3: element-wise same-dtype rule (mismatch → `LANA_ERR_TYPE`) | ✅ Done 2026-09-07; `a->dtype != b->dtype → LANA_ERR_TYPE` (vm.c tensor_elementwise, tensor.rs:427), CTest 140/140 |
+| B15 | LIP-027 S4: matmul mixed dtype + `out_dtype:` + fp32 accumulation | ✅ Done 2026-09-07; `tensor_matmul_dtype_pass`, `tensor_matmul_fp32_accum_pass`, CTest 140/140 |
+| B16 | LIP-027 S5: backend `sgemm` (f32) + f16/bf16 native loops, both VMs | ✅ Done 2026-09-07; CTest 140/140, C+Rust byte-identical. ⚠️ fp32 path is a naive loop, ~33x slower than f64 BLAS — see item 9 |
+| B17 | LIP-027 S6: reductions preserve dtype + fp32 accumulation | ✅ Done 2026-09-07; axis reductions preserve dtype (incl. complex axis reduce), full reductions return a number, fp32 accum for f16/bf16, CTest 140/140 |
+| B18 | LIP-027 S7: element-width accounting + provenance dtype + replay | ✅ Done 2026-09-07; `memory_accounting` (f16 quarter-width), provenance dtype, replay per dtype, CTest 140/140 |
+| B19 | LIP-027 S8: tests + differential fixtures + `PERFORMANCE.md` measurement | ✅ Done 2026-09-07; CTest 140/140, hostcalls 61/61, `PERFORMANCE.md` §6 records the fp16/bf16 regression |
 
 B2 is small (unblocked by B1). B3–B10 are the real remaining features. B11 is
 the release gate. B12–B19 (LIP-027) are independent of B5–B10 and can run in

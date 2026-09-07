@@ -16,6 +16,7 @@ use lana_bytecode::{LanaError, ValueType};
 
 use crate::derivation::{Derivation, DerivationExactness};
 use crate::state::StateValue;
+use crate::tensor::{tensor_get_imag, tensor_get_real};
 
 /// A runtime failure, mirroring the fields `lana_vm_run` records before
 /// returning an error code. Defined here (rather than in `vm`) so the shared
@@ -446,7 +447,10 @@ pub struct Tensor {
     pub is_complex: bool,
     /// LIP-027: numeric dtype (F64 default).
     pub dtype: TensorDtype,
-    pub data: Arc<Vec<f64>>,
+    /// LIP-027: compact byte buffer, `prod(shape) * element_width` bytes.
+    /// Element access goes through the `tensor_get_*`/`tensor_set_*` helpers
+    /// in `tensor.rs`, which convert between the storage dtype and f64.
+    pub data: Arc<Vec<u8>>,
     pub offset: usize,
     /// LIP-007: a STATE tensor (each element is a density matrix).
     pub is_state: bool,
@@ -1226,11 +1230,11 @@ fn tensor_print_rec(tensor: &Tensor, dim: usize, offset: usize, out: &mut String
             let _ = write!(
                 out,
                 "[{}, {}]",
-                lana_bytecode::format_g(tensor.data[offset * 2]),
-                lana_bytecode::format_g(tensor.data[offset * 2 + 1])
+                lana_bytecode::format_g(tensor_get_real(&tensor, offset)),
+                lana_bytecode::format_g(tensor_get_imag(&tensor, offset))
             );
         } else {
-            out.push_str(&lana_bytecode::format_g(tensor.data[offset]));
+            out.push_str(&lana_bytecode::format_g(tensor_get_real(&tensor, offset)));
         }
         return;
     }

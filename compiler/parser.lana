@@ -43,7 +43,11 @@ fn parse_call_arguments(parser, name) {
             if (allowed == null) { parse_error(token, "named arguments are not supported for this call"); }
             if (token[0] != "identifier") { parse_error(token, string_concat("expected ", string_concat(allowed, string_concat(": for this call")))); }
             if (token[1] != allowed) { parse_error(token, string_concat("expected ", string_concat(allowed, string_concat(": for this call")))); }
-            if (array_length(values) != 1) { parse_error(token, string_concat(allowed, string_concat(": must be the second and final argument"))); }
+            if (array_length(values) != named_arg_position(name)) {
+                let ordinal = "second";
+                if (named_arg_position(name) == 2) { ordinal = "third"; }
+                parse_error(token, string_concat(allowed, string_concat(": must be the ", string_concat(ordinal, string_concat(" and final argument")))));
+            }
             take(parser); take(parser);
             array_push(values, parse_expression(parser));
             if (!matches(parser, ")")) { parse_error(current(parser), string_concat(allowed, string_concat(": must be the final argument"))); }
@@ -66,7 +70,15 @@ fn named_arg_for(name) {
     if (name == "zeros") { return "dtype"; }
     if (name == "ones") { return "dtype"; }
     if (name == "eye") { return "dtype"; }
+    if (name == "matmul") { return "out_dtype"; }
     return null;
+}
+
+// Number of positional arguments that must precede the named argument. Most
+// named-arg calls take one positional (the value); matmul takes two (a, b).
+fn named_arg_position(name) {
+    if (name == "matmul") { return 2; }
+    return 1;
 }
 
 fn parse_named_values(parser, closing) {

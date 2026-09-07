@@ -23,6 +23,28 @@ void lana_backend_gemm(const LanaGemmCall *call) {
     if (call->m == 0u || call->n == 0u) {
         return;
     }
+    /* LIP-027: binary32 accumulation for f32/f16/bf16 inputs. Each input
+     * element is downcast to float and the dot product accumulates in float;
+     * the result is upcast to double for the caller to store in the output
+     * dtype. Complex never takes this path (it stays binary64). The loop is
+     * operation-for-operation the same as the Rust backend's so both VMs stay
+     * byte-identical. */
+    if (call->fp32) {
+        size_t lda = call->lda != 0u ? call->lda : 1u;
+        size_t ldb = call->ldb != 0u ? call->ldb : 1u;
+        for (size_t i = 0; i < call->m; ++i) {
+            for (size_t j = 0; j < call->n; ++j) {
+                float acc = 0.0f;
+                for (size_t p = 0; p < call->k; ++p) {
+                    float av = (float)call->a[i * lda + p];
+                    float bv = (float)call->b[p * ldb + j];
+                    acc += av * bv;
+                }
+                call->c[i * call->n + j] = (double)acc;
+            }
+        }
+        return;
+    }
     /* Leading dimensions are at least 1 so a zero inner dimension cannot
      * trip BLAS parameter validation (nothing is read when k is 0). */
     size_t lda = call->lda != 0u ? call->lda : 1u;

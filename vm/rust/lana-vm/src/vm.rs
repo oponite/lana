@@ -26,6 +26,7 @@ use crate::sha256::{hex_digest, sha256};
 use crate::state::{self, Indexes, State, StateValue};
 use crate::state_dist::{self, DistEvalFrame, EvalAction, LANA_STATE_DIST_DEPTH_LIMIT};
 use crate::tensor;
+use crate::tensor::{tensor_get_imag, tensor_get_real, tensor_set_imag, tensor_set_real};
 use crate::value::{
     Adt, Array, CapabilityToken, Claim, Dataset, DatasetOp, DistOperand, EffectReceipt, InferenceAlgorithm, JointKind, JointRow,
     JointState, Map, MapEntry, Optimizer, PathAlternative, PathSet, PlannedEffect, PlannedEffectState, Possibility, Posterior, Reactive,
@@ -35,6 +36,20 @@ use crate::value::{
     LANA_JOINT_CAN_CONDITION, LANA_JOINT_CAN_PROJECT, LANA_JOINT_CAN_RESOLVE,
     LANA_JOINT_CAN_SAMPLE,
 };
+
+/// Reinterpret a state tensor's byte buffer as `&[f64]`. State tensors are
+/// always complex (16 bytes/element = 2 f64s), so the buffer length is a
+/// multiple of 8.
+fn state_f64(t: &Tensor) -> &[f64] {
+    unsafe { std::slice::from_raw_parts(t.data.as_ptr() as *const f64, t.data.len() / 8) }
+}
+
+/// Reinterpret a state tensor's byte buffer as `&mut [f64]`. Panics if the
+/// buffer is shared (a view); callers write only to freshly-created tensors.
+fn state_f64_mut(t: &mut Tensor) -> &mut [f64] {
+    let data = Arc::get_mut(&mut t.data).expect("state_f64_mut on a shared buffer");
+    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f64, data.len() / 8) }
+}
 
 /// LIP-027: parse an optional trailing dtype string argument (the last of
 /// `argc` arguments). Returns `None` for an invalid dtype string; callers must
@@ -523,6 +538,8 @@ pub const LANA_HOST_SOCKET_CONNECT: u32 = 162;
 pub const LANA_HOST_SOCKET_SEND: u32 = 163;
 pub const LANA_HOST_SOCKET_RECV: u32 = 164;
 pub const LANA_HOST_SOCKET_CLOSE: u32 = 165;
+// LIP-027: cast a tensor to another real dtype.
+pub const LANA_HOST_TENSOR_CAST: u32 = 166;
 
 // LIP-024 async/await. Present in both the C11 VM and the Rust VM at ids
 // 126-129 (matching the C11 assembler's host-call table and the
@@ -2108,7 +2125,6 @@ impl<'a> Vm<'a> {
     /// derivations in left-then-right order.
     fn ad_backward(&mut self, node: &Arc<Derivation>, seed: &Tensor) -> LanaError {
         let count = tensor::tensor_element_count(seed);
-        let components = if seed.is_complex { 2 } else { 1 };
         {
             let mut guard = node.ad_grad.lock().unwrap();
             if guard.is_none() {
@@ -2120,9 +2136,11 @@ impl<'a> Vm<'a> {
                 *guard = Some(t);
             }
             let grad = guard.as_mut().unwrap();
-            let data = Arc::get_mut(&mut grad.data).unwrap();
-            for i in 0..count * components {
-                data[i] += seed.data[seed.offset * components + i];
+            for e in 0..count {
+                let cur = tensor_get_real(grad, e) + tensor_get_real(seed, seed.offset + e);
+                tensor_set_real(grad, e, cur);
+                let curi = tensor_get_imag(grad, e) + tensor_get_imag(seed, seed.offset + e);
+                tensor_set_imag(grad, e, curi);
             }
         }
         if node.ad_op < 0 {
@@ -2224,7 +2242,9 @@ impl<'a> Vm<'a> {
                         (ga, gb)
                     } else if a_ndim == 1 {
                         let bt = tensor::tensor_transpose_last_two(b);
-                        let ga = match tensor::tensor_matmul(&mut alloc, seed, &bt) {
+                        let ga = match tensor::tensor_matmul(
+                            &mut alloc, seed, &bt, tensor::matmul_default_dtype(seed, &bt),
+                        ) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
@@ -2239,7 +2259,9 @@ impl<'a> Vm<'a> {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
-                        let gb = match tensor::tensor_matmul(&mut alloc, &at, seed) {
+                        let gb = match tensor::tensor_matmul(
+                            &mut alloc, &at, seed, tensor::matmul_default_dtype(&at, seed),
+                        ) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
@@ -2247,11 +2269,15 @@ impl<'a> Vm<'a> {
                     } else {
                         let bt = tensor::tensor_transpose_last_two(b);
                         let at = tensor::tensor_transpose_last_two(a);
-                        let ga_raw = match tensor::tensor_matmul(&mut alloc, seed, &bt) {
+                        let ga_raw = match tensor::tensor_matmul(
+                            &mut alloc, seed, &bt, tensor::matmul_default_dtype(seed, &bt),
+                        ) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
-                        let gb_raw = match tensor::tensor_matmul(&mut alloc, &at, seed) {
+                        let gb_raw = match tensor::tensor_matmul(
+                            &mut alloc, &at, seed, tensor::matmul_default_dtype(&at, seed),
+                        ) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
@@ -2322,12 +2348,12 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 {
-                    let ga_data = Arc::get_mut(&mut ga.data).unwrap();
-                    let gb_data = Arc::get_mut(&mut gb.data).unwrap();
+                    let ga_data = state_f64_mut(&mut ga);
+                    let gb_data = state_f64_mut(&mut gb);
                     for bi in 0..batch {
-                        let da = &a.data[bi * d * d * 2..];
-                        let db = &b.data[bi * d * d * 2..];
-                        let dg = &seed.data[(seed.offset + bi * d * d) * 2..];
+                        let da = &state_f64(a)[bi * d * d * 2..];
+                        let db = &state_f64(b)[bi * d * d * 2..];
+                        let dg = &state_f64(seed)[(seed.offset + bi * d * d) * 2..];
                         let p_a = da[0];
                         let c_a_re = da[2];
                         let c_a_im = da[3];
@@ -2427,14 +2453,14 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 {
-                    let gs_data = Arc::get_mut(&mut gs.data).unwrap();
+                    let gs_data = state_f64_mut(&mut gs);
                     for bi in 0..batch {
                         for r in 0..d {
                             for c in 0..d {
                                 let mut re = 0.0;
                                 let mut im = 0.0;
                                 for m in 0..k {
-                                    let seed_val = seed.data[seed.offset + bi * k + m];
+                                    let seed_val = tensor_get_real(seed, seed.offset + bi * k + m);
                                     let (e_re, e_im) = linalg_get3(povm, m, c, r);
                                     re += seed_val * e_re;
                                     im += seed_val * (-e_im);
@@ -2469,9 +2495,9 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 {
-                    let gs_data = Arc::get_mut(&mut gs.data).unwrap();
+                    let gs_data = state_f64_mut(&mut gs);
                     for bi in 0..batch {
-                        let dg = &seed.data[(seed.offset + bi * d * d) * 2..];
+                        let dg = &state_f64(seed)[(seed.offset + bi * d * d) * 2..];
                         for m in 0..d {
                             for n in 0..d {
                                 let mut re = 0.0;
@@ -2590,8 +2616,8 @@ impl<'a> Vm<'a> {
         };
         let count = tensor::tensor_element_count(&grad);
         let components = if grad.is_complex { 2 } else { 1 };
-        for i in 0..count * components {
-            if !grad.data[i].is_finite() {
+        for e in 0..count {
+            if !tensor_get_real(&grad, e).is_finite() || !tensor_get_imag(&grad, e).is_finite() {
                 return LanaError::InvalidParameters;
             }
         }
@@ -2604,7 +2630,7 @@ impl<'a> Vm<'a> {
         };
         {
             let data = Arc::get_mut(&mut result_tensor.data).unwrap();
-            data.copy_from_slice(&grad.data[..count * components]);
+            data.copy_from_slice(&grad.data[..count * components * 8]);
         }
         let mut leaf_value = Value::tensor(leaf.ad_a.as_ref().unwrap().clone());
         leaf_value.derivation = Some(leaf.clone());
@@ -2664,7 +2690,7 @@ impl<'a> Vm<'a> {
                 Err(error) => return error,
             }
         };
-        Arc::get_mut(&mut seed.data).unwrap()[0] = 1.0;
+        tensor_set_real(&mut seed, 0, 1.0);
         if let Some(derivation) = &result.derivation {
             let error = self.ad_backward(derivation, &seed);
             if error != LanaError::Ok {
@@ -2718,7 +2744,6 @@ impl<'a> Vm<'a> {
             }
         }
         {
-            let data = Arc::get_mut(&mut seed.data).unwrap();
             for lin in 0..count {
                 let mut rem = lin;
                 let mut index = v_tensor.offset;
@@ -2727,7 +2752,7 @@ impl<'a> Vm<'a> {
                         * v_tensor.strides[d];
                     rem /= v_tensor.shape[d];
                 }
-                data[lin] = v_tensor.data[index];
+                tensor_set_real(&mut seed, lin, tensor_get_real(v_tensor, index));
             }
         }
         if let Some(derivation) = &result.derivation {
@@ -2751,7 +2776,6 @@ impl<'a> Vm<'a> {
                 return Err(LanaError::Oom);
             }
         }
-        let data = Arc::get_mut(&mut copy.data).unwrap();
         for lin in 0..count {
             let mut rem = lin;
             let mut index = t.offset;
@@ -2760,10 +2784,10 @@ impl<'a> Vm<'a> {
                 rem /= t.shape[d];
             }
             if t.is_complex {
-                data[2 * lin] = t.data[2 * index];
-                data[2 * lin + 1] = t.data[2 * index + 1];
+                tensor_set_real(&mut copy, lin, tensor_get_real(t, index));
+                tensor_set_imag(&mut copy, lin, tensor_get_imag(t, index));
             } else {
-                data[lin] = t.data[index];
+                tensor_set_real(&mut copy, lin, tensor_get_real(t, index));
             }
         }
         Ok(Arc::new(copy))
@@ -3040,9 +3064,8 @@ impl<'a> Vm<'a> {
 
                 {
                     let bg = Arc::get_mut(&mut batch_grad).unwrap();
-                    let data = Arc::get_mut(&mut bg.data).unwrap();
                     for k in 0..param_count * param_components {
-                        data[k] = 0.0;
+                        tensor_set_real(bg, k, 0.0);
                     }
                 }
 
@@ -3122,7 +3145,7 @@ impl<'a> Vm<'a> {
                         let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
                         tensor::tensor_new(&mut alloc, 0, &[], false)?
                     };
-                    Arc::get_mut(&mut seed.data).unwrap()[0] = 1.0 / batch_actual as f64;
+                    tensor_set_real(&mut seed, 0, 1.0 / batch_actual as f64);
                     if let Some(derivation) = &y.derivation {
                         let error = self.ad_backward(derivation, &seed);
                         if error != LanaError::Ok {
@@ -3141,12 +3164,12 @@ impl<'a> Vm<'a> {
                     };
                     {
                         let bg = Arc::get_mut(&mut batch_grad).unwrap();
-                        let data = Arc::get_mut(&mut bg.data).unwrap();
                         for k in 0..param_count * param_components {
-                            if !grad.data[k].is_finite() {
+                            if !tensor_get_real(&grad, k).is_finite() {
                                 return Err(LanaError::InvalidParameters);
                             }
-                            data[k] += grad.data[k];
+                            let cur = tensor_get_real(bg, k);
+                            tensor_set_real(bg, k, cur + tensor_get_real(&grad, k));
                         }
                     }
 
@@ -3166,38 +3189,35 @@ impl<'a> Vm<'a> {
                     let v_tensor = Arc::get_mut(v.as_mut().unwrap()).unwrap();
                     let bg_tensor = Arc::get_mut(&mut batch_grad).unwrap();
                     let np_tensor = Arc::get_mut(&mut new_params).unwrap();
-                    let m_data = Arc::get_mut(&mut m_tensor.data).unwrap();
-                    let v_data = Arc::get_mut(&mut v_tensor.data).unwrap();
-                    let bg_data = Arc::get_mut(&mut bg_tensor.data).unwrap();
-                    let np_data = Arc::get_mut(&mut np_tensor.data).unwrap();
                     for k in 0..param_count * param_components {
-                        let g = bg_data[k];
-                        m_data[k] = optimizer.beta1 * m_data[k] + (1.0 - optimizer.beta1) * g;
-                        v_data[k] = optimizer.beta2 * v_data[k] + (1.0 - optimizer.beta2) * g * g;
-                        let m_hat = m_data[k] / bc1;
-                        let v_hat = v_data[k] / bc2;
-                        np_data[k] = params.data[k]
-                            - optimizer.learning_rate * m_hat / (v_hat.sqrt() + optimizer.epsilon);
+                        let g = tensor_get_real(bg_tensor, k);
+                        let m_cur = tensor_get_real(m_tensor, k);
+                        tensor_set_real(m_tensor, k, optimizer.beta1 * m_cur + (1.0 - optimizer.beta1) * g);
+                        let v_cur = tensor_get_real(v_tensor, k);
+                        tensor_set_real(v_tensor, k, optimizer.beta2 * v_cur + (1.0 - optimizer.beta2) * g * g);
+                        let m_hat = tensor_get_real(m_tensor, k) / bc1;
+                        let v_hat = tensor_get_real(v_tensor, k) / bc2;
+                        tensor_set_real(np_tensor, k, tensor_get_real(&params, k)
+                            - optimizer.learning_rate * m_hat / (v_hat.sqrt() + optimizer.epsilon));
                     }
                 } else if let Some(vel) = velocity.as_mut() {
                     let vel_tensor = Arc::get_mut(vel).unwrap();
                     let bg_tensor = Arc::get_mut(&mut batch_grad).unwrap();
                     let np_tensor = Arc::get_mut(&mut new_params).unwrap();
-                    let vel_data = Arc::get_mut(&mut vel_tensor.data).unwrap();
-                    let bg_data = Arc::get_mut(&mut bg_tensor.data).unwrap();
-                    let np_data = Arc::get_mut(&mut np_tensor.data).unwrap();
                     for k in 0..param_count * param_components {
-                        vel_data[k] = optimizer.momentum * vel_data[k]
-                            - optimizer.learning_rate * bg_data[k];
-                        np_data[k] = params.data[k] + vel_data[k];
+                        let vel_cur = tensor_get_real(vel_tensor, k);
+                        let bg_cur = tensor_get_real(bg_tensor, k);
+                        tensor_set_real(vel_tensor, k, optimizer.momentum * vel_cur
+                            - optimizer.learning_rate * bg_cur);
+                        let vel_new = tensor_get_real(vel_tensor, k);
+                        tensor_set_real(np_tensor, k, tensor_get_real(&params, k) + vel_new);
                     }
                 } else {
                     let bg_tensor = Arc::get_mut(&mut batch_grad).unwrap();
                     let np_tensor = Arc::get_mut(&mut new_params).unwrap();
-                    let bg_data = Arc::get_mut(&mut bg_tensor.data).unwrap();
-                    let np_data = Arc::get_mut(&mut np_tensor.data).unwrap();
                     for k in 0..param_count * param_components {
-                        np_data[k] = params.data[k] - optimizer.learning_rate * bg_data[k];
+                        let bg_cur = tensor_get_real(bg_tensor, k);
+                        tensor_set_real(np_tensor, k, tensor_get_real(&params, k) - optimizer.learning_rate * bg_cur);
                     }
                 }
 
@@ -3446,9 +3466,8 @@ impl<'a> Vm<'a> {
         for step in 0..step_count {
             {
                 let bg = Arc::get_mut(&mut batch_grad).unwrap();
-                let data = Arc::get_mut(&mut bg.data).unwrap();
                 for k in 0..param_count {
-                    data[k] = 0.0;
+                    tensor_set_real(bg, k, 0.0);
                 }
             }
 
@@ -3527,7 +3546,7 @@ impl<'a> Vm<'a> {
                     let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
                     tensor::tensor_new(&mut alloc, 0, &[], false)?
                 };
-                Arc::get_mut(&mut seed.data).unwrap()[0] = 1.0 / dataset_size as f64;
+                tensor_set_real(&mut seed, 0, 1.0 / dataset_size as f64);
                 if let Some(derivation) = &y.derivation {
                     let error = self.ad_backward(derivation, &seed);
                     if error != LanaError::Ok {
@@ -3546,12 +3565,12 @@ impl<'a> Vm<'a> {
                 };
                 {
                     let bg = Arc::get_mut(&mut batch_grad).unwrap();
-                    let data = Arc::get_mut(&mut bg.data).unwrap();
                     for k in 0..param_count {
-                        if !grad.data[k].is_finite() {
+                        if !tensor_get_real(&grad, k).is_finite() {
                             return Err(LanaError::InvalidParameters);
                         }
-                        data[k] += grad.data[k];
+                        let cur = tensor_get_real(bg, k);
+                        tensor_set_real(bg, k, cur + tensor_get_real(&grad, k));
                     }
                 }
 
@@ -3570,38 +3589,35 @@ impl<'a> Vm<'a> {
                 let v_tensor = Arc::get_mut(v.as_mut().unwrap()).unwrap();
                 let bg_tensor = Arc::get_mut(&mut batch_grad).unwrap();
                 let np_tensor = Arc::get_mut(&mut new_params).unwrap();
-                let m_data = Arc::get_mut(&mut m_tensor.data).unwrap();
-                let v_data = Arc::get_mut(&mut v_tensor.data).unwrap();
-                let bg_data = Arc::get_mut(&mut bg_tensor.data).unwrap();
-                let np_data = Arc::get_mut(&mut np_tensor.data).unwrap();
                 for k in 0..param_count {
-                    let g = bg_data[k];
-                    m_data[k] = optimizer.beta1 * m_data[k] + (1.0 - optimizer.beta1) * g;
-                    v_data[k] = optimizer.beta2 * v_data[k] + (1.0 - optimizer.beta2) * g * g;
-                    let m_hat = m_data[k] / bc1;
-                    let v_hat = v_data[k] / bc2;
-                    np_data[k] = params.data[k]
-                        - optimizer.learning_rate * m_hat / (v_hat.sqrt() + optimizer.epsilon);
+                    let g = tensor_get_real(bg_tensor, k);
+                    let m_cur = tensor_get_real(m_tensor, k);
+                    tensor_set_real(m_tensor, k, optimizer.beta1 * m_cur + (1.0 - optimizer.beta1) * g);
+                    let v_cur = tensor_get_real(v_tensor, k);
+                    tensor_set_real(v_tensor, k, optimizer.beta2 * v_cur + (1.0 - optimizer.beta2) * g * g);
+                    let m_hat = tensor_get_real(m_tensor, k) / bc1;
+                    let v_hat = tensor_get_real(v_tensor, k) / bc2;
+                    tensor_set_real(np_tensor, k, tensor_get_real(&params, k)
+                        - optimizer.learning_rate * m_hat / (v_hat.sqrt() + optimizer.epsilon));
                 }
             } else if let Some(vel) = velocity.as_mut() {
                 let vel_tensor = Arc::get_mut(vel).unwrap();
                 let bg_tensor = Arc::get_mut(&mut batch_grad).unwrap();
                 let np_tensor = Arc::get_mut(&mut new_params).unwrap();
-                let vel_data = Arc::get_mut(&mut vel_tensor.data).unwrap();
-                let bg_data = Arc::get_mut(&mut bg_tensor.data).unwrap();
-                let np_data = Arc::get_mut(&mut np_tensor.data).unwrap();
                 for k in 0..param_count {
-                    vel_data[k] = optimizer.momentum * vel_data[k]
-                        - optimizer.learning_rate * bg_data[k];
-                    np_data[k] = params.data[k] + vel_data[k];
+                    let vel_cur = tensor_get_real(vel_tensor, k);
+                    let bg_cur = tensor_get_real(bg_tensor, k);
+                    tensor_set_real(vel_tensor, k, optimizer.momentum * vel_cur
+                        - optimizer.learning_rate * bg_cur);
+                    let vel_new = tensor_get_real(vel_tensor, k);
+                    tensor_set_real(np_tensor, k, tensor_get_real(&params, k) + vel_new);
                 }
             } else {
                 let bg_tensor = Arc::get_mut(&mut batch_grad).unwrap();
                 let np_tensor = Arc::get_mut(&mut new_params).unwrap();
-                let bg_data = Arc::get_mut(&mut bg_tensor.data).unwrap();
-                let np_data = Arc::get_mut(&mut np_tensor.data).unwrap();
                 for k in 0..param_count {
-                    np_data[k] = params.data[k] - optimizer.learning_rate * bg_data[k];
+                    let bg_cur = tensor_get_real(bg_tensor, k);
+                    tensor_set_real(np_tensor, k, tensor_get_real(&params, k) - optimizer.learning_rate * bg_cur);
                 }
             }
 
@@ -3936,9 +3952,8 @@ impl<'a> Vm<'a> {
 
             {
                 let bg = Arc::get_mut(&mut batch_grad).unwrap();
-                let data = Arc::get_mut(&mut bg.data).unwrap();
                 for k in 0..param_count {
-                    data[k] = 0.0;
+                    tensor_set_real(bg, k, 0.0);
                 }
             }
 
@@ -4017,7 +4032,7 @@ impl<'a> Vm<'a> {
                     let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
                     tensor::tensor_new(&mut alloc, 0, &[], false)?
                 };
-                Arc::get_mut(&mut seed.data).unwrap()[0] = 1.0 / batch_actual as f64;
+                tensor_set_real(&mut seed, 0, 1.0 / batch_actual as f64);
                 if let Some(derivation) = &y.derivation {
                     let error = self.ad_backward(derivation, &seed);
                     if error != LanaError::Ok {
@@ -4036,12 +4051,12 @@ impl<'a> Vm<'a> {
                 };
                 {
                     let bg = Arc::get_mut(&mut batch_grad).unwrap();
-                    let data = Arc::get_mut(&mut bg.data).unwrap();
                     for k in 0..param_count {
-                        if !grad.data[k].is_finite() {
+                        if !tensor_get_real(&grad, k).is_finite() {
                             return Err(LanaError::InvalidParameters);
                         }
-                        data[k] += grad.data[k];
+                        let cur = tensor_get_real(bg, k);
+                        tensor_set_real(bg, k, cur + tensor_get_real(&grad, k));
                     }
                 }
 
@@ -4060,38 +4075,35 @@ impl<'a> Vm<'a> {
                 let v_tensor = Arc::get_mut(v.as_mut().unwrap()).unwrap();
                 let bg_tensor = Arc::get_mut(&mut batch_grad).unwrap();
                 let np_tensor = Arc::get_mut(&mut new_params).unwrap();
-                let m_data = Arc::get_mut(&mut m_tensor.data).unwrap();
-                let v_data = Arc::get_mut(&mut v_tensor.data).unwrap();
-                let bg_data = Arc::get_mut(&mut bg_tensor.data).unwrap();
-                let np_data = Arc::get_mut(&mut np_tensor.data).unwrap();
                 for k in 0..param_count {
-                    let g = bg_data[k];
-                    m_data[k] = optimizer.beta1 * m_data[k] + (1.0 - optimizer.beta1) * g;
-                    v_data[k] = optimizer.beta2 * v_data[k] + (1.0 - optimizer.beta2) * g * g;
-                    let m_hat = m_data[k] / bc1;
-                    let v_hat = v_data[k] / bc2;
-                    np_data[k] = params.data[k]
-                        - optimizer.learning_rate * m_hat / (v_hat.sqrt() + optimizer.epsilon);
+                    let g = tensor_get_real(bg_tensor, k);
+                    let m_cur = tensor_get_real(m_tensor, k);
+                    tensor_set_real(m_tensor, k, optimizer.beta1 * m_cur + (1.0 - optimizer.beta1) * g);
+                    let v_cur = tensor_get_real(v_tensor, k);
+                    tensor_set_real(v_tensor, k, optimizer.beta2 * v_cur + (1.0 - optimizer.beta2) * g * g);
+                    let m_hat = tensor_get_real(m_tensor, k) / bc1;
+                    let v_hat = tensor_get_real(v_tensor, k) / bc2;
+                    tensor_set_real(np_tensor, k, tensor_get_real(&params, k)
+                        - optimizer.learning_rate * m_hat / (v_hat.sqrt() + optimizer.epsilon));
                 }
             } else if let Some(vel) = velocity.as_mut() {
                 let vel_tensor = Arc::get_mut(vel).unwrap();
                 let bg_tensor = Arc::get_mut(&mut batch_grad).unwrap();
                 let np_tensor = Arc::get_mut(&mut new_params).unwrap();
-                let vel_data = Arc::get_mut(&mut vel_tensor.data).unwrap();
-                let bg_data = Arc::get_mut(&mut bg_tensor.data).unwrap();
-                let np_data = Arc::get_mut(&mut np_tensor.data).unwrap();
                 for k in 0..param_count {
-                    vel_data[k] = optimizer.momentum * vel_data[k]
-                        - optimizer.learning_rate * bg_data[k];
-                    np_data[k] = params.data[k] + vel_data[k];
+                    let vel_cur = tensor_get_real(vel_tensor, k);
+                    let bg_cur = tensor_get_real(bg_tensor, k);
+                    tensor_set_real(vel_tensor, k, optimizer.momentum * vel_cur
+                        - optimizer.learning_rate * bg_cur);
+                    let vel_new = tensor_get_real(vel_tensor, k);
+                    tensor_set_real(np_tensor, k, tensor_get_real(&params, k) + vel_new);
                 }
             } else {
                 let bg_tensor = Arc::get_mut(&mut batch_grad).unwrap();
                 let np_tensor = Arc::get_mut(&mut new_params).unwrap();
-                let bg_data = Arc::get_mut(&mut bg_tensor.data).unwrap();
-                let np_data = Arc::get_mut(&mut np_tensor.data).unwrap();
                 for k in 0..param_count {
-                    np_data[k] = params.data[k] - optimizer.learning_rate * bg_data[k];
+                    let bg_cur = tensor_get_real(bg_tensor, k);
+                    tensor_set_real(np_tensor, k, tensor_get_real(&params, k) - optimizer.learning_rate * bg_cur);
                 }
             }
 
@@ -4100,13 +4112,13 @@ impl<'a> Vm<'a> {
                 let m_tensor = m.as_ref().unwrap();
                 let v_tensor = v.as_ref().unwrap();
                 for k in 0..param_count {
-                    if !m_tensor.data[k].is_finite() || !v_tensor.data[k].is_finite() {
+                    if !tensor_get_real(m_tensor, k).is_finite() || !tensor_get_real(v_tensor, k).is_finite() {
                         return Err(LanaError::InvalidParameters);
                     }
                 }
             } else if let Some(vel) = velocity.as_ref() {
                 for k in 0..param_count {
-                    if !vel.data[k].is_finite() {
+                    if !tensor_get_real(vel, k).is_finite() {
                         return Err(LanaError::InvalidParameters);
                     }
                 }
@@ -4258,7 +4270,7 @@ impl<'a> Vm<'a> {
                 id += (if data.shape[d] == 0 { 0 } else { rem % data.shape[d] }) * data.strides[d];
                 rem /= p.shape[d];
             }
-            let diff = p.data[ip] - data.data[id];
+            let diff = tensor_get_real(p, ip) - tensor_get_real(data, id);
             sse += diff * diff;
         }
         Ok(-0.5 * sse)
@@ -4466,9 +4478,8 @@ impl<'a> Vm<'a> {
             };
             {
                 let proposal_tensor = Arc::get_mut(&mut proposal).unwrap();
-                let pdata = Arc::get_mut(&mut proposal_tensor.data).unwrap();
                 for k in 0..param_count {
-                    pdata[k] = params.data[k] + 0.1 * self.gaussian_sample();
+                    tensor_set_real(proposal_tensor, k, tensor_get_real(&params, k) + 0.1 * self.gaussian_sample());
                 }
             }
             let proposal_ll = self.infer_log_likelihood(model_fn, &proposal, data, scratch)?;
@@ -4480,9 +4491,8 @@ impl<'a> Vm<'a> {
             }
             if i >= burn_in {
                 let sm = Arc::get_mut(&mut sample_matrix).unwrap();
-                let smdata = Arc::get_mut(&mut sm.data).unwrap();
                 for k in 0..param_count {
-                    smdata[kept_index * param_count + k] = params.data[k];
+                    tensor_set_real(sm, kept_index * param_count + k, tensor_get_real(&params, k));
                 }
                 kept_index += 1;
             }
@@ -4499,24 +4509,21 @@ impl<'a> Vm<'a> {
         };
         {
             let mean_tensor = Arc::get_mut(&mut mean).unwrap();
-            let mdata = Arc::get_mut(&mut mean_tensor.data).unwrap();
             let variance_tensor = Arc::get_mut(&mut variance).unwrap();
-            let vdata = Arc::get_mut(&mut variance_tensor.data).unwrap();
             let sm = Arc::get_mut(&mut sample_matrix).unwrap();
-            let smdata = Arc::get_mut(&mut sm.data).unwrap();
             for k in 0..param_count {
                 let mut sum = 0.0;
                 for s in 0..kept {
-                    sum += smdata[s * param_count + k];
+                    sum += tensor_get_real(sm, s * param_count + k);
                 }
                 let m = sum / kept as f64;
                 let mut var = 0.0;
                 for s in 0..kept {
-                    let d = smdata[s * param_count + k] - m;
+                    let d = tensor_get_real(sm, s * param_count + k) - m;
                     var += d * d;
                 }
-                mdata[k] = m;
-                vdata[k] = var / kept as f64;
+                tensor_set_real(mean_tensor, k, m);
+                tensor_set_real(variance_tensor, k, var / kept as f64);
             }
         }
 
@@ -4560,9 +4567,8 @@ impl<'a> Vm<'a> {
         };
         {
             let log_sigma_tensor = Arc::get_mut(&mut log_sigma).unwrap();
-            let ls = Arc::get_mut(&mut log_sigma_tensor.data).unwrap();
             for k in 0..param_count {
-                ls[k] = 0.1f64.ln();
+                tensor_set_real(log_sigma_tensor, k, 0.1f64.ln());
             }
         }
         if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
@@ -4577,20 +4583,16 @@ impl<'a> Vm<'a> {
             }
             {
                 let eps_tensor = Arc::get_mut(&mut eps).unwrap();
-                let eps_data = Arc::get_mut(&mut eps_tensor.data).unwrap();
                 let sigma_tensor = Arc::get_mut(&mut sigma).unwrap();
-                let sigma_data = Arc::get_mut(&mut sigma_tensor.data).unwrap();
                 let params_tensor = Arc::get_mut(&mut params).unwrap();
-                let params_data = Arc::get_mut(&mut params_tensor.data).unwrap();
                 let log_sigma_tensor = Arc::get_mut(&mut log_sigma).unwrap();
-                let log_sigma_data = Arc::get_mut(&mut log_sigma_tensor.data).unwrap();
                 let mu_tensor = Arc::get_mut(&mut mu).unwrap();
-                let mu_data = Arc::get_mut(&mut mu_tensor.data).unwrap();
                 for k in 0..param_count {
-                    eps_data[k] = self.gaussian_sample();
-                    let s = log_sigma_data[k].exp();
-                    sigma_data[k] = s;
-                    params_data[k] = mu_data[k] + s * eps_data[k];
+                    let e = self.gaussian_sample();
+                    tensor_set_real(eps_tensor, k, e);
+                    let s = tensor_get_real(log_sigma_tensor, k).exp();
+                    tensor_set_real(sigma_tensor, k, s);
+                    tensor_set_real(params_tensor, k, tensor_get_real(mu_tensor, k) + s * e);
                 }
             }
             let params_value = Value::tensor(params.clone());
@@ -4624,20 +4626,16 @@ impl<'a> Vm<'a> {
             };
             {
                 let mu_tensor = Arc::get_mut(&mut mu).unwrap();
-                let mu_data = Arc::get_mut(&mut mu_tensor.data).unwrap();
                 let log_sigma_tensor = Arc::get_mut(&mut log_sigma).unwrap();
-                let log_sigma_data = Arc::get_mut(&mut log_sigma_tensor.data).unwrap();
                 let sigma_tensor = Arc::get_mut(&mut sigma).unwrap();
-                let sigma_data = Arc::get_mut(&mut sigma_tensor.data).unwrap();
                 let eps_tensor = Arc::get_mut(&mut eps).unwrap();
-                let eps_data = Arc::get_mut(&mut eps_tensor.data).unwrap();
                 for k in 0..param_count {
-                    let g = grad.data[grad.offset + k];
-                    let d_mu = g + (mu_data[k] - prior.data[prior.offset + k]);
-                    let d_log_sigma = g * sigma_data[k] * eps_data[k]
-                        + (sigma_data[k] * sigma_data[k] - 1.0);
-                    mu_data[k] -= LR * d_mu;
-                    log_sigma_data[k] -= LR * d_log_sigma;
+                    let g = tensor_get_real(grad, grad.offset + k);
+                    let d_mu = g + (tensor_get_real(mu_tensor, k) - tensor_get_real(prior, prior.offset + k));
+                    let d_log_sigma = g * tensor_get_real(sigma_tensor, k) * tensor_get_real(eps_tensor, k)
+                        + (tensor_get_real(sigma_tensor, k) * tensor_get_real(sigma_tensor, k) - 1.0);
+                    tensor_set_real(mu_tensor, k, tensor_get_real(mu_tensor, k) - LR * d_mu);
+                    tensor_set_real(log_sigma_tensor, k, tensor_get_real(log_sigma_tensor, k) - LR * d_log_sigma);
                 }
             }
             let ll = self.infer_log_likelihood(model_fn, &mu, data, scratch)?;
@@ -4655,16 +4653,12 @@ impl<'a> Vm<'a> {
         };
         {
             let mean_tensor = Arc::get_mut(&mut mean).unwrap();
-            let mdata = Arc::get_mut(&mut mean_tensor.data).unwrap();
             let variance_tensor = Arc::get_mut(&mut variance).unwrap();
-            let vdata = Arc::get_mut(&mut variance_tensor.data).unwrap();
             let mu_tensor = Arc::get_mut(&mut mu).unwrap();
-            let mu_data = Arc::get_mut(&mut mu_tensor.data).unwrap();
             let log_sigma_tensor = Arc::get_mut(&mut log_sigma).unwrap();
-            let log_sigma_data = Arc::get_mut(&mut log_sigma_tensor.data).unwrap();
             for k in 0..param_count {
-                mdata[k] = mu_data[k];
-                vdata[k] = (2.0 * log_sigma_data[k]).exp();
+                tensor_set_real(mean_tensor, k, tensor_get_real(mu_tensor, k));
+                tensor_set_real(variance_tensor, k, (2.0 * tensor_get_real(log_sigma_tensor, k)).exp());
             }
         }
 
@@ -4695,10 +4689,9 @@ impl<'a> Vm<'a> {
         };
         {
             let matrix_tensor = Arc::get_mut(&mut matrix).unwrap();
-            let mdata = Arc::get_mut(&mut matrix_tensor.data).unwrap();
             for p in 0..particles {
                 for k in 0..param_count {
-                    mdata[p * param_count + k] = prior.data[prior.offset + k];
+                    tensor_set_real(matrix_tensor, p * param_count + k, tensor_get_real(&prior, prior.offset + k));
                 }
             }
         }
@@ -4718,10 +4711,10 @@ impl<'a> Vm<'a> {
 
         {
             let matrix_tensor = Arc::get_mut(&mut matrix).unwrap();
-            let mdata = Arc::get_mut(&mut matrix_tensor.data).unwrap();
             for p in 0..particles {
                 for k in 0..param_count {
-                    mdata[p * param_count + k] += 0.1 * self.gaussian_sample();
+                    let cur = tensor_get_real(matrix_tensor, p * param_count + k);
+                    tensor_set_real(matrix_tensor, p * param_count + k, cur + 0.1 * self.gaussian_sample());
                 }
             }
         }
@@ -4734,9 +4727,8 @@ impl<'a> Vm<'a> {
             };
             {
                 let particle_tensor = Arc::get_mut(&mut particle).unwrap();
-                let pdata = Arc::get_mut(&mut particle_tensor.data).unwrap();
                 for k in 0..param_count {
-                    pdata[k] = matrix.data[p * param_count + k];
+                    tensor_set_real(particle_tensor, k, tensor_get_real(&matrix, p * param_count + k));
                 }
             }
             let ll = self.infer_log_likelihood(model_fn, &particle, data, scratch)?;
@@ -4759,7 +4751,6 @@ impl<'a> Vm<'a> {
             let mut cumulative = 0.0;
             let mut source = 0usize;
             let resampled_tensor = Arc::get_mut(&mut resampled).unwrap();
-            let rdata = Arc::get_mut(&mut resampled_tensor.data).unwrap();
             for p in 0..particles {
                 let threshold = u0 + p as f64 / particles as f64;
                 while cumulative < threshold && source < particles {
@@ -4768,7 +4759,7 @@ impl<'a> Vm<'a> {
                 }
                 let pick = if source == 0 { 0 } else { source - 1 };
                 for k in 0..param_count {
-                    rdata[p * param_count + k] = matrix.data[pick * param_count + k];
+                    tensor_set_real(resampled_tensor, p * param_count + k, tensor_get_real(&matrix, pick * param_count + k));
                 }
             }
         }
@@ -4783,24 +4774,20 @@ impl<'a> Vm<'a> {
         };
         {
             let mean_tensor = Arc::get_mut(&mut mean).unwrap();
-            let mdata = Arc::get_mut(&mut mean_tensor.data).unwrap();
             let variance_tensor = Arc::get_mut(&mut variance).unwrap();
-            let vdata = Arc::get_mut(&mut variance_tensor.data).unwrap();
-            let resampled_tensor = Arc::get_mut(&mut resampled).unwrap();
-            let rdata = Arc::get_mut(&mut resampled_tensor.data).unwrap();
             for k in 0..param_count {
                 let mut sum = 0.0;
                 for p in 0..particles {
-                    sum += rdata[p * param_count + k];
+                    sum += tensor_get_real(&resampled, p * param_count + k);
                 }
                 let m = sum / particles as f64;
                 let mut var = 0.0;
                 for p in 0..particles {
-                    let d = rdata[p * param_count + k] - m;
+                    let d = tensor_get_real(&resampled, p * param_count + k) - m;
                     var += d * d;
                 }
-                mdata[k] = m;
-                vdata[k] = var / particles as f64;
+                tensor_set_real(mean_tensor, k, m);
+                tensor_set_real(variance_tensor, k, var / particles as f64);
             }
         }
 
@@ -8050,6 +8037,29 @@ impl<'a> Vm<'a> {
             if kind != PureKind::Binary {
                 return LanaError::Type;
             }
+            // LIP-027: a scalar operand adopts the tensor's dtype.
+            if matches!(left.kind, ValueKind::Tensor(_)) && matches!(right.kind, ValueKind::Number(_)) {
+                let ValueKind::Tensor(t) = &left.kind else { unreachable!() };
+                let ValueKind::Number(s) = &right.kind else { unreachable!() };
+                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                let t = match tensor::tensor_elementwise_scalar(&mut alloc, t, *s, operation) {
+                    Ok(t) => t,
+                    Err(error) => return error,
+                };
+                *out = Value::tensor(Arc::new(t));
+                return LanaError::Ok;
+            }
+            if matches!(left.kind, ValueKind::Number(_)) && matches!(right.kind, ValueKind::Tensor(_)) {
+                let ValueKind::Number(s) = &left.kind else { unreachable!() };
+                let ValueKind::Tensor(t) = &right.kind else { unreachable!() };
+                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                let t = match tensor::tensor_elementwise_scalar(&mut alloc, t, *s, operation) {
+                    Ok(t) => t,
+                    Err(error) => return error,
+                };
+                *out = Value::tensor(Arc::new(t));
+                return LanaError::Ok;
+            }
             let (a_pred, a_var, a_unc) = match tensor::tensor_uncertainty_unpack(left) {
                 Ok(v) => v,
                 Err(error) => return error,
@@ -9082,9 +9092,8 @@ impl<'a> Vm<'a> {
                 for i in 0..t.ndim {
                     total *= t.shape[i];
                 }
-                let data = Arc::get_mut(&mut t.data).unwrap();
                 for i in 0..total {
-                    data[i] = 1.0;
+                    tensor_set_real(&mut t, i, 1.0);
                 }
                 *out = Value::tensor(Arc::new(t));
                 LanaError::Ok
@@ -9111,9 +9120,8 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 t.dtype = dtype;
-                let data = Arc::get_mut(&mut t.data).unwrap();
                 for i in 0..n {
-                    data[i * n + i] = 1.0;
+                    tensor_set_real(&mut t, i * n + i, 1.0);
                 }
                 *out = Value::tensor(Arc::new(t));
                 LanaError::Ok
@@ -9127,6 +9135,28 @@ impl<'a> Vm<'a> {
                 };
                 *out = Value::string(Arc::from(t.dtype.as_str()));
                 LanaError::Ok
+            }
+            LANA_HOST_TENSOR_CAST => {
+                if argc != 2 {
+                    return LanaError::Type;
+                }
+                let ValueKind::Tensor(t) = &arguments[0].kind else {
+                    return LanaError::Type;
+                };
+                let ValueKind::String(s) = &arguments[1].kind else {
+                    return LanaError::Type;
+                };
+                let Some(dtype) = TensorDtype::from_str(s) else {
+                    return LanaError::InvalidParameters;
+                };
+                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                match tensor::tensor_cast(&mut alloc, t, dtype) {
+                    Ok(t) => {
+                        *out = Value::tensor(Arc::new(t));
+                        LanaError::Ok
+                    }
+                    Err(error) => error,
+                }
             }
             LANA_HOST_TENSOR_SHAPE => {
                 if argc != 1 {
@@ -9202,7 +9232,10 @@ impl<'a> Vm<'a> {
                 LanaError::Ok
             }
             LANA_HOST_TENSOR_MATMUL => {
-                if argc != 2 {
+                if argc != 2 && argc != 3 {
+                    return LanaError::Type;
+                }
+                if argc == 3 && !matches!(arguments[2].kind, ValueKind::String(_)) {
                     return LanaError::Type;
                 }
                 let (a_pred, a_var, a_unc) = match tensor::tensor_uncertainty_unpack(&arguments[0]) {
@@ -9239,7 +9272,20 @@ impl<'a> Vm<'a> {
                         Err(error) => error,
                     };
                 }
-                let t = match tensor::tensor_matmul(&mut alloc, &a_pred, &b_pred) {
+                // LIP-027: optional out_dtype: named parameter. Defaults to the
+                // input dtype when both match, else the higher-precision operand.
+                let out_dtype = if argc == 3 {
+                    let ValueKind::String(s) = &arguments[2].kind else {
+                        return LanaError::Type;
+                    };
+                    match TensorDtype::from_str(s) {
+                        Some(d) => d,
+                        None => return LanaError::InvalidParameters,
+                    }
+                } else {
+                    tensor::matmul_default_dtype(&a_pred, &b_pred)
+                };
+                let t = match tensor::tensor_matmul(&mut alloc, &a_pred, &b_pred, out_dtype) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9338,15 +9384,8 @@ impl<'a> Vm<'a> {
                 };
                 t.dtype = dtype;
                 let mut offset = 0usize;
-                if let Err(error) = tensor::tensor_fill_data(&arguments[0], Arc::get_mut(&mut t.data).unwrap(), &mut offset) {
+                if let Err(error) = tensor::tensor_fill_data(&arguments[0], &mut t, &mut offset) {
                     return error;
-                }
-                // LIP-027: round to the target precision at construction.
-                if dtype == TensorDtype::F16 || dtype == TensorDtype::Bf16 {
-                    let data = Arc::get_mut(&mut t.data).unwrap();
-                    for v in data.iter_mut() {
-                        *v = if dtype == TensorDtype::F16 { tensor::round_f16(*v) } else { tensor::round_bf16(*v) };
-                    }
                 }
                 *out = Value::tensor(Arc::new(t));
                 LanaError::Ok
@@ -9366,7 +9405,7 @@ impl<'a> Vm<'a> {
                 };
                 let mut offset = 0usize;
                 if let Err(error) =
-                    tensor::tensor_fill_complex(&arguments[0], &arguments[1], Arc::get_mut(&mut t.data).unwrap(), &mut offset)
+                    tensor::tensor_fill_complex(&arguments[0], &arguments[1], &mut t, &mut offset)
                 {
                     return error;
                 }
@@ -14336,9 +14375,9 @@ fn pure_scalar_binary(left: &Value, right: &Value, kind: PureKind, operation: u3
 fn linalg_get2(t: &Tensor, i: usize, j: usize) -> (f64, f64) {
     let lin = t.offset + i * t.strides[0] + j * t.strides[1];
     if t.is_complex {
-        (t.data[lin * 2], t.data[lin * 2 + 1])
+        (tensor_get_real(t, lin), tensor_get_imag(t, lin))
     } else {
-        (t.data[lin], 0.0)
+        (tensor_get_real(t, lin), 0.0)
     }
 }
 
@@ -14346,9 +14385,9 @@ fn linalg_get2(t: &Tensor, i: usize, j: usize) -> (f64, f64) {
 fn linalg_get3(t: &Tensor, k: usize, i: usize, j: usize) -> (f64, f64) {
     let lin = t.offset + k * t.strides[0] + i * t.strides[1] + j * t.strides[2];
     if t.is_complex {
-        (t.data[lin * 2], t.data[lin * 2 + 1])
+        (tensor_get_real(t, lin), tensor_get_imag(t, lin))
     } else {
-        (t.data[lin], 0.0)
+        (tensor_get_real(t, lin), 0.0)
     }
 }
 
@@ -14359,13 +14398,12 @@ fn linalg_copy_complex2(
 ) -> Result<Tensor, LanaError> {
     let shape = [t.shape[0], t.shape[1]];
     let mut r = tensor::tensor_new(alloc, 2, &shape, true)?;
-    let data = Arc::get_mut(&mut r.data).unwrap();
     for i in 0..t.shape[0] {
         for j in 0..t.shape[1] {
             let (re, im) = linalg_get2(t, i, j);
             let lin = i * t.shape[1] + j;
-            data[lin * 2] = re;
-            data[lin * 2 + 1] = im;
+            tensor_set_real(&mut r, lin, re);
+            tensor_set_imag(&mut r, lin, im);
         }
     }
     Ok(r)
@@ -14528,15 +14566,14 @@ fn linalg_density_from_state(
     let mut c_re = 0.0;
     let mut c_im = 0.0;
     state::reconstruct_c(state, &mut c_re, &mut c_im);
-    let data = Arc::get_mut(&mut r.data).unwrap();
-    data[0] = state.p;
-    data[1] = 0.0;
-    data[2] = c_re;
-    data[3] = c_im;
-    data[4] = c_re;
-    data[5] = if c_im == 0.0 { 0.0 } else { -c_im }; // normalize -0.0
-    data[6] = 1.0 - state.p;
-    data[7] = 0.0;
+    tensor_set_real(&mut r, 0, state.p);
+    tensor_set_imag(&mut r, 0, 0.0);
+    tensor_set_real(&mut r, 1, c_re);
+    tensor_set_imag(&mut r, 1, c_im);
+    tensor_set_real(&mut r, 2, c_re);
+    tensor_set_imag(&mut r, 2, if c_im == 0.0 { 0.0 } else { -c_im }); // normalize -0.0
+    tensor_set_real(&mut r, 3, 1.0 - state.p);
+    tensor_set_imag(&mut r, 3, 0.0);
     Ok(Value::nqubit_state(Arc::new(r)))
 }
 
@@ -14602,13 +14639,12 @@ fn linalg_povm(
         if !linalg_is_psd(alloc, e)? {
             return Err(LanaError::InvalidParameters);
         }
-        let data = Arc::get_mut(&mut stack.data).unwrap();
         for r in 0..d {
             for c in 0..d {
                 let (re, im) = linalg_get2(e, r, c);
                 let lin = i * d * d + r * d + c;
-                data[lin * 2] = re;
-                data[lin * 2 + 1] = im;
+                tensor_set_real(&mut stack, lin, re);
+                tensor_set_imag(&mut stack, lin, im);
             }
         }
     }
@@ -14618,8 +14654,8 @@ fn linalg_povm(
             let mut im = 0.0;
             for i in 0..k {
                 let lin = i * d * d + r * d + c;
-                re += stack.data[lin * 2];
-                im += stack.data[lin * 2 + 1];
+                re += tensor_get_real(&stack, lin);
+                im += tensor_get_imag(&stack, lin);
             }
             let want_re = if r == c { 1.0 } else { 0.0 };
             if (re - want_re).abs() > 1e-9 || im.abs() > 1e-9 {
@@ -14659,13 +14695,12 @@ fn linalg_channel(
         if e.ndim != 2 || e.shape[0] != d || e.shape[1] != d {
             return Err(LanaError::InvalidParameters);
         }
-        let data = Arc::get_mut(&mut stack.data).unwrap();
         for r in 0..d {
             for c in 0..d {
                 let (re, im) = linalg_get2(e, r, c);
                 let lin = i * d * d + r * d + c;
-                data[lin * 2] = re;
-                data[lin * 2 + 1] = im;
+                tensor_set_real(&mut stack, lin, re);
+                tensor_set_imag(&mut stack, lin, im);
             }
         }
     }
@@ -14719,7 +14754,6 @@ fn linalg_tensor_product(
     let db = b.shape[0];
     let shape = [da * db, da * db];
     let mut r = tensor::tensor_new(alloc, 2, &shape, true)?;
-    let data = Arc::get_mut(&mut r.data).unwrap();
     for i1 in 0..da {
         for i2 in 0..da {
             for j1 in 0..db {
@@ -14727,8 +14761,8 @@ fn linalg_tensor_product(
                     let (a_re, a_im) = linalg_get2(a, i1, i2);
                     let (b_re, b_im) = linalg_get2(b, j1, j2);
                     let lin = (i1 * db + j1) * (da * db) + (i2 * db + j2);
-                    data[lin * 2] = a_re * b_re - a_im * b_im;
-                    data[lin * 2 + 1] = a_re * b_im + a_im * b_re;
+                    tensor_set_real(&mut r, lin, a_re * b_re - a_im * b_im);
+                    tensor_set_imag(&mut r, lin, a_re * b_im + a_im * b_re);
                 }
             }
         }
@@ -14757,7 +14791,6 @@ fn linalg_partial_trace(
     let db = d / da;
     let shape = [da, da];
     let mut r = tensor::tensor_new(alloc, 2, &shape, true)?;
-    let data = Arc::get_mut(&mut r.data).unwrap();
     for i in 0..da {
         for j in 0..da {
             let mut re = 0.0;
@@ -14768,8 +14801,8 @@ fn linalg_partial_trace(
                 im += e_im;
             }
             let lin = i * da + j;
-            data[lin * 2] = re;
-            data[lin * 2 + 1] = im;
+            tensor_set_real(&mut r, lin, re);
+            tensor_set_imag(&mut r, lin, im);
         }
     }
     Ok(Value::nqubit_state(Arc::new(r)))
@@ -14828,10 +14861,11 @@ fn linalg_apply_to(
                         im += t_im * kd_re - t_re * kd_im;
                     }
                 }
-                let data = Arc::get_mut(&mut r.data).unwrap();
                 let lin = i * d + j;
-                data[lin * 2] += re;
-                data[lin * 2 + 1] += im;
+                let cur_re = tensor_get_real(&r, lin);
+                let cur_im = tensor_get_imag(&r, lin);
+                tensor_set_real(&mut r, lin, cur_re + re);
+                tensor_set_imag(&mut r, lin, cur_im + im);
             }
         }
     }
@@ -14862,14 +14896,13 @@ fn linalg_mix(
     let d = a.shape[0];
     let shape = [d, d];
     let mut r = tensor::tensor_new(alloc, 2, &shape, true)?;
-    let data = Arc::get_mut(&mut r.data).unwrap();
     for i in 0..d {
         for j in 0..d {
             let (a_re, a_im) = linalg_get2(a, i, j);
             let (b_re, b_im) = linalg_get2(b, i, j);
             let lin = i * d + j;
-            data[lin * 2] = w * a_re + (1.0 - w) * b_re;
-            data[lin * 2 + 1] = w * a_im + (1.0 - w) * b_im;
+            tensor_set_real(&mut r, lin, w * a_re + (1.0 - w) * b_re);
+            tensor_set_imag(&mut r, lin, w * a_im + (1.0 - w) * b_im);
         }
     }
     Ok(Value::nqubit_state(Arc::new(r)))
@@ -15092,7 +15125,7 @@ fn linalg_state_tensor(
     let mut t = tensor::tensor_new(alloc, ndim, &shape, true)?;
     t.is_state = true;
     {
-        let data = Arc::get_mut(&mut t.data).unwrap();
+        let data = state_f64_mut(&mut t);
         let mut offset = 0usize;
         tensor_fill_state(arg, data, &mut offset)?;
     }
@@ -15101,7 +15134,7 @@ fn linalg_state_tensor(
         batch *= shape[i];
     }
     for i in 0..batch {
-        linalg_validate_density_data(alloc, &t.data[i * d * d * 2..], d)?;
+        linalg_validate_density_data(alloc, &state_f64(&t)[i * d * d * 2..], d)?;
     }
     Ok(Value::tensor(Arc::new(t)))
 }
@@ -15135,10 +15168,10 @@ fn linalg_state_append(
         batch *= a.shape[i];
     }
     {
-        let dr = Arc::get_mut(&mut res.data).unwrap();
+        let dr = state_f64_mut(&mut res);
         for i in 0..batch {
-            let da = &a.data[i * d * d * 2..];
-            let db = &b.data[i * d * d * 2..];
+            let da = &state_f64(&a)[i * d * d * 2..];
+            let db = &state_f64(&b)[i * d * d * 2..];
             let p_a = da[0];
             let c_a_re = da[2];
             let c_a_im = da[3];
@@ -15195,9 +15228,9 @@ fn linalg_state_measure(
     out_shape.push(k);
     let mut res = tensor::tensor_new(alloc, out_ndim, &out_shape, false)?;
     {
-        let dr = Arc::get_mut(&mut res.data).unwrap();
+        let dr = state_f64_mut(&mut res);
         for i in 0..batch {
-            let ds = &s.data[i * d * d * 2..];
+            let ds = &state_f64(&s)[i * d * d * 2..];
             for m in 0..k {
                 let mut re = 0.0;
                 for r in 0..d {
@@ -15233,9 +15266,9 @@ fn linalg_state_transform(
     let mut res = tensor::tensor_new(alloc, s.ndim, &s.shape, true)?;
     res.is_state = true;
     {
-        let dr = Arc::get_mut(&mut res.data).unwrap();
+        let dr = state_f64_mut(&mut res);
         for i in 0..batch {
-            let ds = &s.data[i * d * d * 2..];
+            let ds = &state_f64(&s)[i * d * d * 2..];
             for r in 0..d {
                 for c in 0..d {
                     let mut re = 0.0;
