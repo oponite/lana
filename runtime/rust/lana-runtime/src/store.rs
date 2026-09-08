@@ -166,7 +166,9 @@ fn revision_digest(revision: u64, previous: u64, count: u32, payload: &[u8]) -> 
 fn parse_payload(data: &[u8], count: u32) -> Result<Vec<Mutation>, LanaError> {
     let mut cursor = 0usize;
     let end = data.len();
-    let mut mutations = Vec::with_capacity(count as usize);
+    if count as usize > end / 6 { return Err(LanaError::Corruption); }
+    let mut mutations = Vec::new();
+    mutations.try_reserve_exact(count as usize).map_err(|_| LanaError::Oom)?;
     for _ in 0..count {
         if cursor == end || (data[cursor] != b'P' && data[cursor] != b'D') {
             return Err(LanaError::Corruption);
@@ -183,6 +185,7 @@ fn parse_payload(data: &[u8], count: u32) -> Result<Vec<Mutation>, LanaError> {
         }
         let key = String::from_utf8(data[cursor..cursor + key_length].to_vec())
             .map_err(|_| LanaError::Corruption)?;
+        if key.contains('\0') { return Err(LanaError::Corruption); }
         cursor += key_length;
         let mut mutation = Mutation { key, deleted, data: Vec::new() };
         if !deleted {
@@ -196,7 +199,9 @@ fn parse_payload(data: &[u8], count: u32) -> Result<Vec<Mutation>, LanaError> {
             }
             let value_length = u64::from_be_bytes(data[cursor..cursor + 8].try_into().unwrap()) as usize;
             cursor += 8;
-            if value_length > STORE_LIMIT || value_length > end - cursor {
+            if value_length > STORE_LIMIT || value_length > end - cursor
+                || data[cursor..cursor + value_length].contains(&0)
+            {
                 return Err(LanaError::Corruption);
             }
             let actual = sha256::sha256(&data[cursor..cursor + value_length]);
@@ -299,7 +304,7 @@ fn load_snapshot(store: &mut Store) -> Result<(), LanaError> {
         _ => return Err(LanaError::Corruption),
     };
     let map = map.lock().unwrap();
-    for entry in &map.entries {
+    for entry in map.entries() {
         let encoded = codec::encode_value(&entry.value)?;
         store.index.insert(entry.key.to_string(), encoded.into_bytes());
     }
@@ -369,7 +374,7 @@ fn replay(store: &mut Store) -> Result<(), LanaError> {
         }
         offset += 8 + 32;
         if journal_revision == 0 && store.snapshot_rev != 0
-            && revision == store.snapshot_rev + 1 && previous == store.snapshot_rev
+            && Some(revision) == store.snapshot_rev.checked_add(1) && previous == store.snapshot_rev
         {
             journal_revision = store.snapshot_rev;
         }
@@ -377,7 +382,7 @@ fn replay(store: &mut Store) -> Result<(), LanaError> {
         if &magic != b"LCMT"
             || commit_revision != revision
             || previous != journal_revision
-            || revision != previous + 1
+            || Some(revision) != previous.checked_add(1)
             || digest != commit_digest
         {
             return Err(LanaError::Corruption);
@@ -644,7 +649,8 @@ pub fn store_scan(store: &Store, prefix: &str) -> Result<Vec<ScanRecord>, LanaEr
 
 pub fn store_snapshot(store: &mut Store) -> Result<(Value, StoreRevisionInfo), LanaError> {
     store.ensure_open()?;
-    let mut map = Map::new(store.index.len());
+    let heap = lana_vm::heap::Heap::new(256 * 1024 * 1024);
+    let mut map = Map::new(&heap, store.index.len())?;
     for (key, data) in &store.index {
         let value = decode_bytes(data)?;
         map.set(Arc::from(key.as_str()), value, true).map_err(|_| LanaError::Key)?;
@@ -689,7 +695,7 @@ pub fn store_compact(store: &mut Store, retention: u64) -> Result<StoreRevisionI
         store_snapshot(store)?;
     }
     let boundary = if retention >= store.current_rev { 0 } else { store.current_rev - retention };
-    store.retention_boundary = boundary;
+    store.retention_boundary = store.retention_boundary.max(boundary);
     write_manifest(store)?;
     if retention == 0 {
         store.journal.as_mut().ok_or(LanaError::InvalidState)?.set_len(0).map_err(|_| LanaError::Io)?;
@@ -711,6 +717,28 @@ pub fn store_compact(store: &mut Store, retention: u64) -> Result<StoreRevisionI
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_cannot_restore_deleted_history() {
+        let path = temp_store("compact_history");
+        let options = StoreOptions { schema_version: 1, path: path.clone(), timeout_ms: 20 };
+        let mut store = store_open(&options).unwrap();
+        for n in 1..=2 {
+            store_put(&mut store, "key", &Value::number(n as f64)).unwrap();
+            store_commit(&mut store).unwrap();
+        }
+        store_compact(&mut store, 0).unwrap();
+        store_compact(&mut store, 100).unwrap();
+        assert_eq!(store_get_at(&store, 1, "key").unwrap_err(), LanaError::CompactedHistory);
+        store_put(&mut store, "key", &Value::number(3.0)).unwrap();
+        assert_eq!(store_commit(&mut store).unwrap().revision_id, 3);
+        drop(store);
+        let store = store_open(&options).unwrap();
+        assert_eq!(store_get(&store, "key").unwrap().as_number(), 3.0);
+        assert_eq!(store_get_at(&store, 1, "key").unwrap_err(), LanaError::CompactedHistory);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn recovery_allows_a_new_commit_at_every_torn_record_boundary() {

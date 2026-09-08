@@ -1,11 +1,15 @@
 #include "ledger.h"
 
 #include "data.h"
+#include "codec.h"
 #include "store.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <errno.h>
+#include <limits.h>
 
 struct LanaLedger {
     LanaStore *store;
@@ -16,13 +20,25 @@ static bool text_ok(const char *text) { return text != NULL && text[0] != '\0'; 
 
 static LanaError map_text(const LanaMap *map, const char *key, const char **out) {
     Value value;
-    if (lana_map_get(map, key, &value) != LANA_OK || value.type != VAL_STRING || !text_ok(value.as.string)) return LANA_ERR_CORRUPTION;
+    if (lana_map_get(map, key, &value) != LANA_OK || value.type != VAL_STRING || value.as.string == NULL) return LANA_ERR_CORRUPTION;
     *out = value.as.string; return LANA_OK;
 }
 
 static LanaError map_number(const LanaMap *map, const char *key, uint64_t *out) {
     Value value;
-    if (lana_map_get(map, key, &value) != LANA_OK || value.type != VAL_NUMBER) return LANA_ERR_CORRUPTION;
+    if (lana_map_get(map, key, &value) != LANA_OK) return LANA_ERR_CORRUPTION;
+    if (value.type == VAL_STRING && text_ok(value.as.string)) {
+        const char *s = value.as.string;
+        char *end;
+        unsigned long long number;
+        if (strspn(s, "0123456789") != strlen(s)) return LANA_ERR_CORRUPTION;
+        errno = 0;
+        number = strtoull(s, &end, 10);
+        if (errno == ERANGE || *end != '\0' || number > UINT64_MAX) return LANA_ERR_CORRUPTION;
+        *out = (uint64_t)number; return LANA_OK;
+    }
+    if (value.type != VAL_NUMBER || !isfinite(value.as.number) || value.as.number < 0.0 ||
+        value.as.number >= 18446744073709551616.0 || floor(value.as.number) != value.as.number) return LANA_ERR_CORRUPTION;
     *out = (uint64_t)value.as.number; return LANA_OK;
 }
 
@@ -57,25 +73,35 @@ LanaError lana_ledger_close(LanaLedger *ledger) {
 }
 
 LanaError lana_ledger_append(LanaLedger *ledger, const LanaEventInput *input, LanaEvent *out_event) {
-    LanaStoreRevisionInfo revision; char key[64], json[2048]; Value value; LanaError error;
+    LanaStoreRevisionInfo revision; char key[64], *json = NULL; Value value; LanaError error;
+    LanaBuffer quoted[4] = {{0}};
+    size_t capacity = 256u;
     if (ledger == NULL || input == NULL || input->struct_size < sizeof(*input) || input->schema_version != 1u ||
         !text_ok(input->entity) || !text_ok(input->actor) || !text_ok(input->action)) return LANA_ERR_SCHEMA;
-    if (input->reason != NULL && strchr(input->reason, '"') != NULL) return LANA_ERR_SCHEMA;
     if (lana_store_current_revision(ledger->store, &revision) != LANA_OK || revision.revision_id == UINT64_MAX) return LANA_ERR_IO;
     (void)snprintf(key, sizeof(key), "event/%llu", (unsigned long long)(revision.revision_id + 1u));
-    (void)snprintf(json, sizeof(json), "{\"action\":\"%s\",\"actor\":\"%s\",\"correction_of\":%llu,\"entity\":\"%s\",\"reason\":\"%s\",\"timestamp\":%llu}",
-                   input->action, input->actor, (unsigned long long)input->correction_of, input->entity,
-                   input->reason == NULL ? "" : input->reason, (unsigned long long)input->timestamp);
-    if (strlen(json) >= sizeof(json) - 1u) return LANA_ERR_LIMIT;
+    const char *fields[] = {input->action, input->actor, input->entity, input->reason == NULL ? "" : input->reason};
+    for (size_t i = 0u; i < 4u; ++i) {
+        error = lana_codec_encode_value(&quoted[i], lana_value_string(fields[i]));
+        if (error != LANA_OK) goto done;
+        if (quoted[i].length > INT_MAX || quoted[i].length > SIZE_MAX - capacity) { error = LANA_ERR_LIMIT; goto done; }
+        capacity += quoted[i].length;
+    }
+    json = malloc(capacity);
+    if (json == NULL) { error = LANA_ERR_OOM; goto done; }
+    (void)snprintf(json, capacity, "{\"action\":%.*s,\"actor\":%.*s,\"correction_of\":%llu,\"entity\":%.*s,\"reason\":%.*s,\"timestamp\":%llu}",
+                   (int)quoted[0].length, quoted[0].data, (int)quoted[1].length, quoted[1].data,
+                   (unsigned long long)input->correction_of, (int)quoted[2].length, quoted[2].data,
+                   (int)quoted[3].length, quoted[3].data, (unsigned long long)input->timestamp);
 
     /* Write to separate append-only journal first. */
     if (ledger->journal != NULL) {
-        if (fprintf(ledger->journal, "%s\n", json) < 0 || fflush(ledger->journal) != 0) return LANA_ERR_IO;
+        if (fprintf(ledger->journal, "%s\n", json) < 0 || fflush(ledger->journal) != 0) { error = LANA_ERR_IO; goto done; }
     }
 
     value = lana_value_string(json);
-    if ((error = lana_store_put(ledger->store, key, value)) != LANA_OK) return error;
-    if ((error = lana_store_commit(ledger->store, &revision)) != LANA_OK) return error;
+    if ((error = lana_store_put(ledger->store, key, value)) != LANA_OK) goto done;
+    if ((error = lana_store_commit(ledger->store, &revision)) != LANA_OK) goto done;
     if (out_event != NULL) {
         memset(out_event, 0, sizeof(*out_event)); out_event->struct_size = sizeof(*out_event); out_event->schema_version = 1u;
         out_event->event_id = revision.revision_id; out_event->revision = revision.revision_id;
@@ -83,7 +109,10 @@ LanaError lana_ledger_append(LanaLedger *ledger, const LanaEventInput *input, La
         out_event->reason = input->reason == NULL ? "" : input->reason; out_event->timestamp = input->timestamp;
         out_event->correction_of = input->correction_of;
     }
-    return LANA_OK;
+done:
+    free(json);
+    for (size_t i = 0u; i < 4u; ++i) free(quoted[i].data);
+    return error;
 }
 
 /* Scan the event journal, applying filters. Returns LANA_OK with count possibly
@@ -110,6 +139,7 @@ static LanaError scan_events(LanaLedger *ledger, LanaVM *vm,
         if (map_text(parsed.as.map, "action", &text) != LANA_OK) { free(events); return LANA_ERR_CORRUPTION; } event.action = text;
         if (map_text(parsed.as.map, "reason", &text) != LANA_OK) { free(events); return LANA_ERR_CORRUPTION; } event.reason = text;
         if (map_number(parsed.as.map, "timestamp", &event.timestamp) != LANA_OK) { free(events); return LANA_ERR_CORRUPTION; }
+        if (map_number(parsed.as.map, "correction_of", &event.correction_of) != LANA_OK) { free(events); return LANA_ERR_CORRUPTION; }
         if (entity != NULL && strcmp(entity, event.entity) != 0) continue;
         if (actor != NULL && strcmp(actor, event.actor) != 0) continue;
         if (action != NULL && strcmp(action, event.action) != 0) continue;
@@ -145,10 +175,10 @@ LanaError lana_ledger_query_coverage(LanaLedger *ledger, LanaVM *vm,
     if (entries == NULL) return LANA_ERR_OOM;
     for (index = 0u; index < query->target_count; ++index) {
         LanaEvent *events = NULL; size_t count = 0u; LanaError error;
-        if (query->target_entities[index] == NULL) { free(entries); return LANA_ERR_SCHEMA; }
+        if (!text_ok(query->target_entities[index])) { lana_ledger_coverage_free(entries, index); return LANA_ERR_SCHEMA; }
         error = scan_events(ledger, vm, query->target_entities[index], query->actor, query->action,
                             query->start_timestamp, query->end_timestamp, &events, &count);
-        if (error != LANA_OK) { free(events); free(entries); return error; }
+        if (error != LANA_OK) { free(events); lana_ledger_coverage_free(entries, index); return error; }
         entries[index].struct_size = sizeof(entries[index]); entries[index].schema_version = 1u;
         entries[index].entity = query->target_entities[index];
         entries[index].matched = count != 0u;
@@ -191,6 +221,17 @@ static uint64_t key_tail_id(const char *key) {
     return (uint64_t)strtoull(slash + 1, NULL, 10);
 }
 
+static bool evidence_contains(const char *ids, const char *id) {
+    size_t length = strlen(id);
+    while (*ids != '\0') {
+        size_t token_length = strcspn(ids, ",");
+        if (length == token_length && memcmp(ids, id, length) == 0) return true;
+        ids += token_length;
+        if (*ids == ',') ++ids;
+    }
+    return false;
+}
+
 /* Stored records are JSON text (VAL_STRING); decode to a map. */
 static LanaError scan_value_map(LanaVM *vm, const Value *value, Value *out) {
     if (value->type == VAL_MAP) { *out = *value; return LANA_OK; }
@@ -208,19 +249,20 @@ LanaError lana_ledger_traverse(LanaLedger *ledger, LanaVM *vm,
     size_t decision_count = 0u, event_count = 0u, attempt_count = 0u;
     LanaTraversalRecord *records = NULL; size_t count = 0u, capacity = 0u;
     size_t decision_index, event_index;
+    LanaTraversalRecord record = {0};
     LanaError error;
     if (ledger == NULL || vm == NULL || query == NULL || query->struct_size < sizeof(*query) || query->schema_version != 1u ||
-        query->evidence_id == NULL || out_records == NULL || out_count == NULL) return LANA_ERR_INVALID_STATE;
+        !text_ok(query->evidence_id) || strchr(query->evidence_id, ',') != NULL || out_records == NULL || out_count == NULL) return LANA_ERR_INVALID_STATE;
     error = lana_store_scan(ledger->store, vm, "decision/", &decisions, &decision_count);
     if (error != LANA_OK) return error;
     error = lana_store_scan(ledger->store, vm, "event/", &events, &event_count);
     if (error != LANA_OK) goto done;
     for (decision_index = 0u; decision_index < decision_count; ++decision_index) {
         Value parsed; const char *text; uint64_t decision_id, outcome_value;
-        LanaTraversalRecord record; char decision_text[32];
+        char decision_text[32];
         if (scan_value_map(vm, &decisions[decision_index].value, &parsed) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
         if (map_text(parsed.as.map, "evidence_ids", &text) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
-        if (strstr(text, query->evidence_id) == NULL) continue;
+        if (!evidence_contains(text, query->evidence_id)) continue;
         memset(&record, 0, sizeof(record)); record.struct_size = sizeof(record); record.schema_version = 1u;
         if (map_number(parsed.as.map, "decision_id", &decision_id) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
         record.decision_id = decision_id;
@@ -230,6 +272,7 @@ LanaError lana_ledger_traverse(LanaLedger *ledger, LanaVM *vm,
         if (map_text(parsed.as.map, "policy_version", &text) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
         if (hex_decode(text, record.policy_version) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
         if (map_number(parsed.as.map, "outcome", &outcome_value) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
+        if (outcome_value > 2u) { error = LANA_ERR_CORRUPTION; goto done; }
         record.outcome = (PolicyOutcome)(unsigned)outcome_value;
         if (map_text(parsed.as.map, "effect", &text) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
         record.effect = strdup(text);
@@ -243,20 +286,28 @@ LanaError lana_ledger_traverse(LanaLedger *ledger, LanaVM *vm,
             if (error != LANA_OK) goto done;
             if (attempt_count != 0u) {
                 Value attempt_parsed; uint64_t status_value;
-                if (scan_value_map(vm, &attempts[0].value, &attempt_parsed) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
+                size_t first = 0u;
+                for (size_t i = 1u; i < attempt_count; ++i) {
+                    if (key_tail_id(attempts[i].key) < key_tail_id(attempts[first].key)) first = i;
+                }
+                if (scan_value_map(vm, &attempts[first].value, &attempt_parsed) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
                 if (map_number(attempt_parsed.as.map, "status", &status_value) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
-                record.attempt_id = key_tail_id(attempts[0].key);
+                record.attempt_id = key_tail_id(attempts[first].key);
+                if (status_value > 3u) { error = LANA_ERR_CORRUPTION; goto done; }
                 record.attempt_status = (EffectStatus)(unsigned)status_value;
             }
             lana_store_scan_free(attempts, attempt_count); attempts = NULL; attempt_count = 0u;
         }
         /* Link the event referencing this decision. */
-        (void)snprintf(decision_text, sizeof(decision_text), "%llu", (unsigned long long)decision_id);
+        (void)snprintf(decision_text, sizeof(decision_text), "decision %llu", (unsigned long long)decision_id);
         for (event_index = 0u; event_index < event_count; ++event_index) {
             Value event_parsed; const char *reason;
             if (scan_value_map(vm, &events[event_index].value, &event_parsed) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
             if (map_text(event_parsed.as.map, "reason", &reason) != LANA_OK) { error = LANA_ERR_CORRUPTION; goto done; }
-            if (strstr(reason, decision_text) != NULL) { record.event_id = key_tail_id(events[event_index].key); break; }
+            if (strcmp(reason, decision_text) == 0) {
+                uint64_t id = key_tail_id(events[event_index].key);
+                if (record.event_id == 0u || id < record.event_id) record.event_id = id;
+            }
         }
         if (count == capacity) {
             size_t new_capacity = capacity == 0u ? 4u : capacity * 2u;
@@ -265,9 +316,12 @@ LanaError lana_ledger_traverse(LanaLedger *ledger, LanaVM *vm,
             records = grown; capacity = new_capacity;
         }
         records[count++] = record;
+        memset(&record, 0, sizeof(record));
     }
     if (count == 0u) error = LANA_ERR_NO_MATCHING_EVENT;
 done:
+    free((void *)record.policy_id);
+    free((void *)record.effect);
     lana_store_scan_free(decisions, decision_count);
     lana_store_scan_free(events, event_count);
     lana_store_scan_free(attempts, attempt_count);

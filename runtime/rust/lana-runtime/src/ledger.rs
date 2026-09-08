@@ -97,14 +97,17 @@ fn text_ok(text: &str) -> bool {
 
 fn map_text(map: &Map, key: &str) -> Result<Arc<str>, LanaError> {
     match map.get(key) {
-        Some(Value { kind: ValueKind::String(s), .. }) if !s.is_empty() => Ok(s.clone()),
+        Some(Value { kind: ValueKind::String(s), .. }) => Ok(s.clone()),
         _ => Err(LanaError::Corruption),
     }
 }
 
 fn map_number(map: &Map, key: &str) -> Result<u64, LanaError> {
     match map.get(key) {
-        Some(Value { kind: ValueKind::Number(n), .. }) => Ok(*n as u64),
+        Some(Value { kind: ValueKind::Number(n), .. })
+            if n.is_finite() && *n >= 0.0 && *n < 18446744073709551616.0 && n.fract() == 0.0 => Ok(*n as u64),
+        Some(Value { kind: ValueKind::String(s), .. })
+            if !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) => s.parse().map_err(|_| LanaError::Corruption),
         _ => Err(LanaError::Corruption),
     }
 }
@@ -179,27 +182,23 @@ pub fn ledger_append(ledger: &mut Ledger<'_>, input: &EventInput) -> Result<Even
     {
         return Err(LanaError::Schema);
     }
-    if input.reason.as_deref().map_or(false, |r| r.contains('"')) {
-        return Err(LanaError::Schema);
-    }
+    let journal = ledger.journal.as_mut().ok_or(LanaError::InvalidState)?;
     let revision = store_current_revision(ledger.store)?;
     if revision.revision_id == u64::MAX {
         return Err(LanaError::Io);
     }
     let key = format!("event/{}", revision.revision_id + 1);
     let json = format!(
-        "{{\"action\":\"{}\",\"actor\":\"{}\",\"correction_of\":{},\"entity\":\"{}\",\"reason\":\"{}\",\"timestamp\":{}}}",
-        input.action,
-        input.actor,
+        "{{\"action\":{},\"actor\":{},\"correction_of\":{},\"entity\":{},\"reason\":{},\"timestamp\":{}}}",
+        crate::codec::encode_value(&Value::string(input.action.clone()))?,
+        crate::codec::encode_value(&Value::string(input.actor.clone()))?,
         input.correction_of,
-        input.entity,
-        input.reason.as_deref().unwrap_or(""),
+        crate::codec::encode_value(&Value::string(input.entity.clone()))?,
+        crate::codec::encode_value(&Value::string(input.reason.clone().unwrap_or_else(|| Arc::from(""))))?,
         input.timestamp
     );
-    if let Some(journal) = ledger.journal.as_mut() {
-        writeln!(journal, "{}", json).map_err(|_| LanaError::Io)?;
-        journal.flush().map_err(|_| LanaError::Io)?;
-    }
+    writeln!(journal, "{}", json).map_err(|_| LanaError::Io)?;
+    journal.flush().map_err(|_| LanaError::Io)?;
     store_put(ledger.store, &key, &Value::string(Arc::from(json.as_str())))?;
     let committed = store_commit(ledger.store)?;
     Ok(Event {
@@ -272,7 +271,7 @@ fn scan_events(
             reason: event_reason,
             timestamp,
             revision: index,
-            correction_of: 0,
+            correction_of: map_number(&map, "correction_of")?,
         });
     }
     Ok(events)
@@ -335,7 +334,7 @@ pub fn ledger_traverse(
     ledger: &Ledger<'_>,
     query: &TraversalQuery,
 ) -> Result<Vec<TraversalRecord>, LanaError> {
-    if query.schema_version != 1 || query.evidence_id.is_empty() {
+    if query.schema_version != 1 || query.evidence_id.is_empty() || query.evidence_id.contains(',') {
         return Err(LanaError::InvalidState);
     }
     let decisions: Vec<ScanRecord> = store_scan(ledger.store, "decision/")?;
@@ -345,7 +344,7 @@ pub fn ledger_traverse(
         let parsed = scan_value_map(&decision.value)?;
         let parsed = parsed.lock().unwrap();
         let evidence_ids = map_text(&parsed, "evidence_ids")?;
-        if !evidence_ids.contains(&*query.evidence_id) {
+        if !evidence_ids.split(',').any(|id| id == &*query.evidence_id) {
             continue;
         }
         let decision_id = map_number(&parsed, "decision_id")?;
@@ -360,7 +359,7 @@ pub fn ledger_traverse(
         let attempts: Vec<ScanRecord> = store_scan(ledger.store, &attempt_prefix)?;
         let mut attempt_id = 0u64;
         let mut attempt_status = EffectStatus::Pending;
-        if let Some(first) = attempts.first() {
+        if let Some(first) = attempts.iter().min_by_key(|record| key_tail_id(&record.key)) {
             let attempt_parsed = scan_value_map(&first.value)?;
             let attempt_parsed = attempt_parsed.lock().unwrap();
             let status_value = map_number(&attempt_parsed, "status")?;
@@ -374,15 +373,17 @@ pub fn ledger_traverse(
             };
         }
 
-        let decision_text = decision_id.to_string();
+        let decision_text = format!("decision {}", decision_id);
         let mut event_id = 0u64;
         for event in &events {
             let event_parsed = scan_value_map(&event.value)?;
             let event_parsed = event_parsed.lock().unwrap();
             let reason = map_text(&event_parsed, "reason")?;
-            if reason.contains(&decision_text) {
-                event_id = key_tail_id(&event.key);
-                break;
+            if &*reason == decision_text {
+                let id = key_tail_id(&event.key);
+                if event_id == 0 || id < event_id {
+                    event_id = id;
+                }
             }
         }
 
@@ -413,6 +414,41 @@ pub fn ledger_traverse(
 mod tests {
     use super::*;
 
+    #[test]
+    fn traversal_matches_whole_ids_and_numeric_attempt_order() {
+        let path = temp_store("exact_links");
+        let mut store = crate::store::store_open(&crate::store::StoreOptions {
+            schema_version: 1, path: path.clone(), timeout_ms: 20,
+        }).unwrap();
+        let decision = format!(r#"{{"decision_id":7,"policy_id":"policy","policy_version":"{}","evidence_ids":"first,evidence-10,last","outcome":0,"effect":"notify"}}"#, "00".repeat(32));
+        for (key, json) in [
+            ("decision/7", decision.as_str()),
+            ("event/1", r#"{"reason":"decision 17"}"#),
+            ("effect-attempt/7/10", r#"{"status":2}"#),
+            ("effect-attempt/7/2", r#"{"status":1}"#),
+        ] {
+            store_put(&mut store, key, &Value::string(Arc::from(json))).unwrap();
+        }
+        store_commit(&mut store).unwrap();
+        let ledger = ledger_open(&mut store).unwrap();
+        for id in ["evidence-1", "evidence", "missing"] {
+            assert!(matches!(ledger_traverse(&ledger, &TraversalQuery {
+                schema_version: 1, evidence_id: Arc::from(id),
+            }), Err(LanaError::NoMatchingEvent)));
+        }
+        for id in ["first", "evidence-10", "last"] {
+            let rows = ledger_traverse(&ledger, &TraversalQuery {
+                schema_version: 1, evidence_id: Arc::from(id),
+            }).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].event_id, 0);
+            assert_eq!(rows[0].attempt_id, 2);
+        }
+        drop(ledger);
+        drop(store);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
     fn temp_store(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("lana_ledger_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -433,12 +469,12 @@ mod tests {
             &mut ledger,
             &EventInput {
                 schema_version: 1,
-                entity: Arc::from("e1"),
+                entity: Arc::from("e\"1\\\n"),
                 actor: Arc::from("a1"),
                 action: Arc::from("grant"),
-                reason: Some(Arc::from("approved")),
-                timestamp: 100,
-                correction_of: 0,
+                reason: None,
+                timestamp: u64::MAX,
+                correction_of: u64::MAX - 1,
             },
         )
         .unwrap();
@@ -447,7 +483,7 @@ mod tests {
             &ledger,
             &LedgerQuery {
                 schema_version: 1,
-                entity: Some(Arc::from("e1")),
+                entity: Some(Arc::from("e\"1\\\n")),
                 actor: None,
                 action: None,
                 start_timestamp: 0,
@@ -457,6 +493,9 @@ mod tests {
         .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].action, Arc::from("grant"));
+        assert_eq!(&*events[0].reason, "");
+        assert_eq!(events[0].timestamp, u64::MAX);
+        assert_eq!(events[0].correction_of, u64::MAX - 1);
         ledger_close(&mut ledger).unwrap();
         let _ = std::fs::remove_dir_all(&path);
     }

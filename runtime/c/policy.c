@@ -6,6 +6,7 @@
 #include "store.h"
 
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,15 +32,16 @@ static LanaError validate_policy(const LanaPolicy *policy) {
         return LANA_ERR_SCHEMA;
     if ((policy->rule.kind == LANA_POLICY_PROBABILITY_AT_LEAST ||
          policy->rule.kind == LANA_POLICY_ORDER_LESS_THAN) &&
-        (policy->rule.threshold < 0.0 || policy->rule.threshold > 1.0)) return LANA_ERR_INVALID_PROBABILITY;
+        (!isfinite(policy->rule.threshold) || policy->rule.threshold < 0.0 || policy->rule.threshold > 1.0)) return LANA_ERR_INVALID_PROBABILITY;
     if ((policy->rule.kind == LANA_POLICY_EQUALS && !text_ok(policy->rule.expected)) ||
-        policy->rule.kind > LANA_POLICY_PRESENT) return LANA_ERR_SCHEMA;
+        (unsigned)policy->rule.kind > LANA_POLICY_PRESENT) return LANA_ERR_SCHEMA;
     return LANA_OK;
 }
 
 LanaError lana_policy_version(const LanaPolicy *policy, unsigned char out_version[32]) {
     LanaBuffer canonical = {0}; LanaError error;
     if (out_version == NULL) return LANA_ERR_INVALID_STATE;
+    memset(out_version, 0, 32u);
     error = validate_policy(policy); if (error != LANA_OK) return error;
     error = lana_codec_encode_value(&canonical, lana_value_string((char *)policy->policy_id));
     if (error == LANA_OK) error = lana_codec_encode_value(&canonical, lana_value_string((char *)policy->rule.field));
@@ -84,10 +86,11 @@ static bool condition_matches(const LanaPolicyRule *rule, const Value *input) {
 LanaError lana_policy_evaluate(const LanaPolicy *policy, const Value *input,
                                const LanaPolicyEvaluation *evaluation, LanaDecision *out) {
     LanaError error; bool matches;
+    if (out != NULL) memset(out, 0, sizeof(*out));
     if (out == NULL || evaluation == NULL || evaluation->struct_size < sizeof(*evaluation) || evaluation->schema_version != 1u ||
         !text_ok(evaluation->target) || !text_ok(evaluation->scope) || !text_ok(evaluation->reason)) return LANA_ERR_SCHEMA;
     error = validate_policy(policy); if (error != LANA_OK) return error;
-    memset(out, 0, sizeof(*out)); out->struct_size = sizeof(*out); out->schema_version = 1u;
+    out->struct_size = sizeof(*out); out->schema_version = 1u;
     out->decision_id = evaluation->decision_id; out->policy_id = policy->policy_id;
     out->target = evaluation->target; out->scope = evaluation->scope; out->input_revision = evaluation->input_revision;
     out->evidence_ids = evaluation->evidence_ids; out->derivation_ids = evaluation->derivation_ids;

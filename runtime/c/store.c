@@ -243,15 +243,18 @@ static void revision_digest(uint64_t revision, uint64_t previous, uint32_t count
 static LanaError parse_payload(const unsigned char *data, size_t length,
                                uint32_t count, StoreMutation **out) {
     const unsigned char *cursor = data, *end = data + length;
-    StoreMutation *mutations = calloc(count, sizeof(*mutations));
+    StoreMutation *mutations;
     uint32_t index;
+    /* Even a delete needs an opcode, key length, and one non-NUL key byte. */
+    if ((size_t)count > length / 6u) return LANA_ERR_CORRUPTION;
+    mutations = calloc(count, sizeof(*mutations));
     if (count != 0u && mutations == NULL) return LANA_ERR_OOM;
     for (index = 0u; index < count; ++index) {
         uint32_t key_length;
         if (cursor == end || (*cursor != 'P' && *cursor != 'D')) goto corrupt;
         mutations[index].deleted = *cursor++ == 'D';
         if (!read_u32(&cursor, end, &key_length) || key_length == 0u ||
-            (size_t)(end - cursor) < key_length) goto corrupt;
+            (size_t)(end - cursor) < key_length || memchr(cursor, '\0', key_length) != NULL) goto corrupt;
         mutations[index].key = malloc((size_t)key_length + 1u);
         if (mutations[index].key == NULL) goto oom;
         memcpy(mutations[index].key, cursor, key_length);
@@ -262,7 +265,7 @@ static LanaError parse_payload(const unsigned char *data, size_t length,
             if ((size_t)(end - cursor) < 32u) goto corrupt;
             const unsigned char *expected = cursor; cursor += 32u;
             if (!read_u64(&cursor, end, &value_length) || value_length > STORE_LIMIT ||
-                value_length > (uint64_t)(end - cursor)) goto corrupt;
+                value_length > (uint64_t)(end - cursor) || memchr(cursor, '\0', (size_t)value_length) != NULL) goto corrupt;
             lana_sha256(cursor, (size_t)value_length, actual);
             if (memcmp(actual, expected, 32u) != 0) goto corrupt;
             mutations[index].data = malloc((size_t)value_length + 1u);
@@ -361,7 +364,7 @@ static LanaError replay(LanaStore *store) {
             return (!saw_record && store->snapshot_rev != 0u) ||
                    journal_revision >= store->snapshot_rev ? LANA_OK : LANA_ERR_CORRUPTION;
         }
-        if (read != 4u) { clearerr(store->journal); (void)fseek(store->journal, start, SEEK_SET); return LANA_OK; }
+        if (read != 4u) goto partial;
         if (memcmp(magic, "LREV", 4u) != 0) return LANA_ERR_CORRUPTION;
         unsigned char header[28];
         if (fread(header, 1u, sizeof(header), store->journal) != sizeof(header) ||
@@ -383,7 +386,7 @@ static LanaError replay(LanaStore *store) {
             journal_revision = store->snapshot_rev;
         if (memcmp(magic, "LCMT", 4u) != 0 || !read_u64(&cursor, end, &commit_revision) ||
             commit_revision != revision || previous != journal_revision ||
-            revision != previous + 1u || memcmp(digest, commit_digest, 32u) != 0) {
+            previous == UINT64_MAX || revision != previous + 1u || memcmp(digest, commit_digest, 32u) != 0) {
             free(payload); return LANA_ERR_CORRUPTION;
         }
         payload_view = (Bytes){payload, (size_t)payload_length, (size_t)payload_length};
@@ -404,8 +407,9 @@ static LanaError replay(LanaStore *store) {
         store->journal_offset = ftell(store->journal);
     }
 partial:
+        if (ferror(store->journal)) return LANA_ERR_IO;
         clearerr(store->journal);
-        (void)fseek(store->journal, start, SEEK_SET);
+        if (fseek(store->journal, start, SEEK_SET) != 0) return LANA_ERR_IO;
         return LANA_OK;
 }
 
@@ -879,7 +883,7 @@ LanaError lana_store_compact(LanaStore *store, uint64_t retention,
         if (error != LANA_OK) { pthread_mutex_unlock(&store->lock); return error; }
     }
     boundary = retention >= store->current_rev ? 0u : store->current_rev - retention;
-    store->retention_boundary = boundary;
+    if (boundary > store->retention_boundary) store->retention_boundary = boundary;
     error = write_manifest(store);
     if (error != LANA_OK) { pthread_mutex_unlock(&store->lock); return error; }
     if (retention == 0u) {

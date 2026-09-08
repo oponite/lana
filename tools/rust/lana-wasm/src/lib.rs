@@ -247,7 +247,7 @@ fn run_chunk(chunk: Chunk, input: &str, capabilities: &str) -> String {
     if !input.is_empty() {
         vm.set_program_args(&[input.to_string()]);
     }
-    let mut store_host = lana_runtime::host_calls::StoreHost::new();
+    let mut store_host = lana_runtime::host_calls::StoreHost::with_heap(vm.heap());
     vm.set_host_call_extension(Box::new(move |host_id, args, out| {
         store_host.dispatch(host_id, args, out)
     }));

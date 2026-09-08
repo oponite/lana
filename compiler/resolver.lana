@@ -1,4 +1,7 @@
-fn type_ordinary(name) { return ["ordinary", name]; }
+fn type_ordinary(name) {
+    if (name == "array") { return ["array", ["ordinary", "unknown"]]; }
+    return ["ordinary", name];
+}
 fn type_information(value_type) { return ["information", value_type]; }
 fn type_claim(value_type, proposition) { return ["claim", value_type, proposition]; }
 fn type_sample(value_type, dependency, operation) {
@@ -48,6 +51,7 @@ fn type_compatible(left, right) {
         return false;
     }
     if (type_tag(left) != type_tag(right)) { return false; }
+    if (type_tag(left) == "array") { return type_compatible(left[1], right[1]); }
     if (type_tag(left) == "information") { return type_compatible(left[1], right[1]); }
     if (type_tag(left) == "claim") { return type_compatible(left[1], right[1]); }
     if (type_tag(left) == "sample") { return type_compatible(left[1], right[1]); }
@@ -239,7 +243,7 @@ fn effect_kind_valid(kind) {
 }
 
 fn effects(kind) {
-    assert(effect_kind_valid(kind), string_concat("unknown effect kind ", kind));
+    if (!effect_kind_valid(kind)) { assert(false, string_concat("unknown effect kind ", kind)); }
     return ["effects", [kind]];
 }
 
@@ -253,7 +257,9 @@ fn effects_contains(value, kind) {
 }
 
 fn effects_add(value, kind) {
-    assert(effect_kind_valid(kind), string_concat("unknown effect kind ", kind));
+    if (!effect_kind_valid(kind)) { assert(false, string_concat("unknown effect kind ", kind)); }
+    if (kind == "pure") { return value; }
+    if (effects_contains(value, kind)) { return value; }
     let kinds = array_new(0); let index = 0;
     while (index < array_length(value[1])) {
         if (kind == "pure") { array_push(kinds, value[1][index]); }
@@ -266,6 +272,8 @@ fn effects_add(value, kind) {
 }
 
 fn effects_combine(left, right) {
+    if (array_length(right[1]) == 1) { if (right[1][0] == "pure") { return left; } }
+    if (array_length(left[1]) == 1) { if (left[1][0] == "pure") { return right; } }
     let result = left; let index = 0;
     while (index < array_length(right[1])) { result = effects_add(result, right[1][index]); index = index + 1; }
     return result;
@@ -406,6 +414,7 @@ fn host_effect(name) {
 }
 
 fn host_type(name) {
+    if (name == "array_new") { return type_ordinary("array"); }
     if (name == "args") { return type_ordinary("array"); }
     if (name == "getenv") { return type_ordinary("string"); }
     if (name == "read_text") { return type_ordinary("string"); }
@@ -1497,7 +1506,9 @@ fn resolve_call(node, environment) {
         }
         if (map_has(environment, "__function_ops__")) {
             if (map_has(map_get(environment, "__function_ops__"), fname)) {
-                type_error(node, string_concat(node[1], " requires a differentiable function (max, min, and gpu_matmul are not differentiable)"));
+                if (list_uses_non_diff_op(map_get(map_get(environment, "__function_ops__"), fname))) {
+                    type_error(node, string_concat(node[1], " requires a differentiable function (max, min, and gpu_matmul are not differentiable)"));
+                }
             }
         }
     }
@@ -1872,7 +1883,9 @@ fn resolve_collection_expression(node, environment) {
     if (node[0] == 44) {
         let iterable = resolve_expression_with_environment(node[6], environment);
         let is_generator = type_tag(iterable[1]) == "generator";
-        if (!is_generator) {
+        let is_sequence = is_generator;
+        if (type_tag(iterable[1]) == "array") { is_sequence = true; }
+        if (!is_sequence) {
             if (type_tag(iterable[1]) == "ordinary") {
                 if (iterable[1][1] != "array") { if (iterable[1][1] != "unknown") { type_error(node, "comprehension iterable must be an array or generator"); } }
             } else { type_error(node, "comprehension iterable must be an array or generator"); }
@@ -1933,7 +1946,7 @@ fn resolve_binding_statement(node, environment) {
         if (node[2] != null) { value_type = resolve_type_annotation(node[2], environment); }
         environment_set(environment, node[1], value_type);
         symbol_add_definition(environment, node[1], "variable", value_type, node[4], node[5]);
-        return [2, type_ordinary("statement"), value[2], node];
+        return [2, value_type, value[2], node];
     }
     if (node[0] == 3) {
         let value = resolve_expression_with_environment(node[2], environment);
@@ -1941,6 +1954,8 @@ fn resolve_binding_statement(node, environment) {
             let target_type = environment_get(environment, node[1][1]);
             assert(type_compatible(target_type, value[1]), "assignment type mismatch");
             environment_set(environment, node[1][1], value[1]);
+            if (map_has(environment, "__branch_writes__")) { map_set(map_get(environment, "__branch_writes__"), node[1][1], true); }
+            return [3, value[1], value[2], node];
         }
         return [3, type_ordinary("statement"), effects_combine(value[2], effects("mutation")), node];
     }
@@ -1952,24 +1967,51 @@ fn resolve_control_statement(node, environment) {
         let predicate = resolve_expression_with_environment(node[1], environment);
         if (type_tag(predicate[1]) == "sample") { type_error(node, "if predicate requires explicit sample_value(...)"); }
         if (type_tag(predicate[1]) == "claim") { type_error(node, "if predicate requires explicit claim_value(...)"); }
-        let then_resolved = resolve_list_with_environment(node[2], environment_clone(environment));
-        let else_resolved = resolve_list_with_environment(node[3], environment_clone(environment));
+        let then_env = environment_clone(environment);
+        let else_env = environment_clone(environment);
+        let writes = map_new();
+        map_set(then_env, "__branch_writes__", writes);
+        map_set(else_env, "__branch_writes__", writes);
+        let then_resolved = resolve_list_with_environment(node[2], then_env);
+        let else_resolved = resolve_list_with_environment(node[3], else_env);
         let branch_effect = effects_combine(statements_effect(then_resolved), statements_effect(else_resolved));
         if (type_tag(predicate[1]) == "information") {
             if (effects_external(branch_effect)) { type_error(node, "unresolved Information branches cannot perform effects"); }
         }
-        return [4, type_ordinary("statement"), effects_combine(predicate[2], branch_effect), node];
+        let keys = map_keys(writes); let index = 0; let joined_types = map_new();
+        while (index < array_length(keys)) {
+            let name = keys[index];
+            if (map_has(environment, name)) {
+                let left = environment_get(then_env, name);
+                let right = environment_get(else_env, name);
+                let joined = left;
+                if (!type_compatible(left, right)) { joined = type_unknown(); }
+                let uncertain = type_tag(predicate[1]) == "information";
+                if (type_tag(left) == "information") { uncertain = true; }
+                if (type_tag(right) == "information") { uncertain = true; }
+                if (uncertain) { joined = type_information(information_value_type(joined)); }
+                environment_set(environment, name, joined);
+                map_set(joined_types, name, joined);
+                if (map_has(environment, "__branch_writes__")) { map_set(map_get(environment, "__branch_writes__"), name, true); }
+            }
+            index = index + 1;
+        }
+        return [4, type_ordinary("statement"), effects_combine(predicate[2], branch_effect),
+                [4, node[1], then_resolved, else_resolved, type_tag(predicate[1]) == "information", joined_types, node[4], node[5]]];
     }
     if (node[0] == 5) {
         let predicate = resolve_expression_with_environment(node[1], environment);
         exact_type(predicate[1], "while predicate", node);
         let body = resolve_list_with_environment(node[2], environment_clone(environment));
-        return [5, type_ordinary("statement"), effects_combine(predicate[2], statements_effect(body)), node];
+        return [5, type_ordinary("statement"), effects_combine(predicate[2], statements_effect(body)),
+                [5, node[1], body, node[3], node[4]]];
     }
     if (node[0] == 15) {
         let iterable = resolve_expression_with_environment(node[2], environment);
         let is_generator = type_tag(iterable[1]) == "generator";
-        if (!is_generator) {
+        let is_sequence = is_generator;
+        if (type_tag(iterable[1]) == "array") { is_sequence = true; }
+        if (!is_sequence) {
             if (type_tag(iterable[1]) == "ordinary") {
                 if (iterable[1][1] != "array") { if (iterable[1][1] != "unknown") { type_error(node, "for iterable must be an array or generator"); } }
             } else { type_error(node, "for iterable must be an array or generator"); }
@@ -1977,10 +2019,11 @@ fn resolve_control_statement(node, environment) {
         let element_type = type_unknown();
         if (is_generator) { element_type = iterable[1][1]; }
         let body_env = environment_clone(environment);
+        if (type_tag(iterable[1]) == "array") { element_type = iterable[1][1]; }
         environment_set(body_env, node[1], element_type);
         symbol_add_definition(body_env, node[1], "variable", element_type, node[4], node[5]);
         let body = resolve_list_with_environment(node[3], body_env);
-        return [15, type_ordinary("statement"), effects_combine(iterable[2], statements_effect(body)), [15, node[1], node[2], node[3], is_generator, node[4], node[5]]];
+        return [15, type_ordinary("statement"), effects_combine(iterable[2], statements_effect(body)), [15, node[1], node[2], body, is_generator, node[4], node[5]]];
     }
     return null;
 }
@@ -2020,7 +2063,8 @@ fn resolve_task_statement(node, environment) {
     if (node[0] == 11) { return [11, type_ordinary("statement"), effects("mutation"), node]; }
     if (node[0] == 12) {
         let body = resolve_list_with_environment(node[1], environment_clone(environment));
-        return [12, type_ordinary("statement"), effects_combine(statements_effect(body), effects("task")), node];
+        return [12, type_ordinary("statement"), effects_combine(statements_effect(body), effects("task")),
+                [12, body, node[2], node[3]]];
     }
     if (node[0] == 13) {
         let task = resolve_expression_with_environment(node[1], environment);
@@ -2239,7 +2283,6 @@ fn resolve_function(node, box, registry, generators, asyncs, function_effects, u
     let feffect = statements_effect(body);
     if (is_async) { feffect = effects_add(feffect, "io"); }
     map_set(function_effects, node[1], feffect);
-    if (list_uses_non_diff_op(node[4])) { map_set(function_ops, node[1], true); }
     return [1, node[1], node[2], node[3], body, node[5], is_generator, is_async];
 }
 
@@ -2279,6 +2322,7 @@ fn resolve_program(program) {
     }
     index = 0;
     while (index < array_length(program[1])) {
+        map_set(function_ops, program[1][index][1], program[1][index][4]);
         if (list_contains_yield(program[1][index][4])) { map_set(generators, program[1][index][1], true); }
         if (program[1][index][7]) { map_set(asyncs, program[1][index][1], true); }
         index = index + 1;

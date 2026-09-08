@@ -1,19 +1,24 @@
 import "./lexer.lana" as lexer;
 import "./syntax.lana" as syntax;
 
-fn parser_new(source) { return [lexer.lex(source), 0]; }
-fn current(parser) { return parser[0][parser[1]]; }
+fn parser_new(source) {
+    let tokens = lexer.lex(source);
+    return [tokens, 0, tokens[0]];
+}
+fn current(parser) { return parser[2]; }
 fn current_text(parser) { return current(parser)[1]; }
 fn current_line(parser) { return current(parser)[2]; }
 fn current_column(parser) { return current(parser)[3]; }
 fn matches(parser, text) {
-    if (current(parser)[0] == "string") { return false; }
-    return current_text(parser) == text;
+    let value = current(parser);
+    if (value[0] == "string") { return false; }
+    return value[1] == text;
 }
 
 fn take(parser) {
     let value = current(parser);
     parser[1] = parser[1] + 1;
+    if (parser[1] < array_length(parser[0])) { parser[2] = parser[0][parser[1]]; }
     return value;
 }
 

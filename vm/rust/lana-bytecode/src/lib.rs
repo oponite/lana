@@ -119,8 +119,9 @@ mod tests {
 
     #[test]
     fn loader_rejects_trailing_bytes() {
-        // A minimal valid chunk: no constants, functions, or instructions.
-        let valid = header_bytes(0, 0, 0);
+        let mut valid = header_bytes(0, 0, 1);
+        valid.push(OpCode::Halt as u8);
+        valid.extend_from_slice(&[0; 20]);
         assert!(loader::load(&valid).is_ok());
 
         // The C11 loader rejects any byte after the last instruction.
@@ -128,6 +129,23 @@ mod tests {
         trailing.push(0x00);
         let error = loader::load(&trailing).unwrap_err();
         assert_eq!(error.code, LanaError::Format);
+    }
+
+    #[test]
+    fn loader_verifies_unknown_opcodes_and_preserves_error_order() {
+        let mut bytes = header_bytes(0, 0, 1);
+        bytes.push(0x9e);
+        bytes.extend_from_slice(&[0; 20]);
+        let error = loader::load(&bytes).unwrap_err();
+        assert_eq!((error.code, error.ip, error.opcode), (LanaError::Opcode, 0, 0x9e));
+        assert_eq!(error.message, "unknown opcode 158");
+
+        bytes[20] = 1; // Invalid entry is checked before the opcode.
+        assert_eq!(loader::load(&bytes).unwrap_err().code, LanaError::Format);
+        bytes[20] = 0;
+        bytes.pop(); // Incomplete decoding is also a format error.
+        assert_eq!(loader::load(&bytes).unwrap_err().code, LanaError::Format);
+        assert_eq!(loader::load(&header_bytes(0, 0, 0)).unwrap_err().code, LanaError::Format);
     }
 
     #[test]

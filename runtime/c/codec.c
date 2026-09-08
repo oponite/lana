@@ -1,4 +1,5 @@
 #include "codec.h"
+#include "data.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -162,32 +163,7 @@ static bool take(Parser *parser, unsigned char expected) {
 static LanaError parse_value(Parser *parser, Value *out);
 
 static LanaError parse_string(Parser *parser, char **out) {
-    LanaBuffer buffer = {0};
-    if (!take(parser, '"')) return LANA_ERR_PARSE;
-    while (parser->offset < parser->length) {
-        unsigned char character = parser->data[parser->offset++];
-        if (character == '"') {
-            if (append_bytes(&buffer, "", 1u) != LANA_OK) { free(buffer.data); return LANA_ERR_OOM; }
-            *out = (char *)buffer.data;
-            if (!valid_utf8(buffer.data, buffer.length - 1u)) { free(buffer.data); return LANA_ERR_SCHEMA; }
-            return LANA_OK;
-        }
-        if (character < 0x20u) { free(buffer.data); return LANA_ERR_PARSE; }
-        if (character == '\\') {
-            if (parser->offset >= parser->length) { free(buffer.data); return LANA_ERR_PARSE; }
-            character = parser->data[parser->offset++];
-            switch (character) {
-                case '"': case '\\': case '/': break;
-                case 'b': character = '\b'; break; case 'f': character = '\f'; break;
-                case 'n': character = '\n'; break; case 'r': character = '\r'; break;
-                case 't': character = '\t'; break;
-                default: free(buffer.data); return LANA_ERR_PARSE;
-            }
-        }
-        if (append_bytes(&buffer, &character, 1u) != LANA_OK) { free(buffer.data); return LANA_ERR_OOM; }
-    }
-    free(buffer.data);
-    return LANA_ERR_PARSE;
+    return lana_json_decode_string(parser->data, parser->length, &parser->offset, out);
 }
 
 static LanaError parse_value(Parser *parser, Value *out) {

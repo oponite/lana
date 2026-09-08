@@ -40,7 +40,12 @@ static char *vm_string(LanaVM *vm, const char *text, size_t length) {
 }
 
 LanaError lana_map_new(LanaVM *vm, size_t capacity, LanaMap **out) {
-    LanaMap *map = lana_vm_alloc(vm, sizeof(*map));
+    LanaMap *map;
+    if (out == NULL) return LANA_ERR_INVALID_STATE;
+    *out = NULL;
+    if (vm == NULL) return LANA_ERR_INVALID_STATE;
+    if (capacity > SIZE_MAX / sizeof(*map->entries)) return LANA_ERR_OOM;
+    map = lana_vm_alloc(vm, sizeof(*map));
     if (map == NULL) return LANA_ERR_OOM;
     map->count = 0u; map->capacity = capacity;
     map->entries = capacity == 0u ? NULL : lana_vm_alloc(vm, capacity * sizeof(*map->entries));
@@ -81,7 +86,10 @@ LanaError lana_map_set(LanaVM *vm, LanaMap *map, const char *key, const Value *v
         return LANA_OK;
     }
     if (map->count == map->capacity) {
-        size_t capacity = map->capacity == 0u ? 4u : map->capacity * 2u;
+        size_t capacity;
+        if (map->capacity > SIZE_MAX / 2u) return LANA_ERR_OOM;
+        capacity = map->capacity == 0u ? 4u : map->capacity * 2u;
+        if (capacity > SIZE_MAX / sizeof(LanaMapEntry)) return LANA_ERR_OOM;
         LanaMapEntry *entries = lana_vm_alloc(vm, capacity * sizeof(*entries));
         if (entries == NULL) return LANA_ERR_OOM;
         if (map->count > 0u) memcpy(entries, map->entries, map->count * sizeof(*entries));
@@ -167,6 +175,16 @@ static LanaError json_string(JsonParser *parser, char **out) {
     if (buffer.data == NULL) { buffer.data = malloc(1u); if (buffer.data == NULL) return LANA_ERR_OOM; buffer.data[0] = '\0'; }
     if (!utf8_valid((const unsigned char *)buffer.data, buffer.length)) { free(buffer.data); return LANA_ERR_PARSE; }
     *out = buffer.data; return LANA_OK;
+}
+
+LanaError lana_json_decode_string(const unsigned char *data, size_t length, size_t *offset, char **out) {
+    JsonParser parser;
+    LanaError error;
+    if (data == NULL || offset == NULL || out == NULL || *offset > length) return LANA_ERR_INVALID_STATE;
+    parser = (JsonParser){NULL, data + *offset, data + length, data};
+    error = json_string(&parser, out);
+    *offset = (size_t)(parser.cursor - data);
+    return error;
 }
 
 /* An integer literal whose magnitude exceeds 2^53 is not exactly representable

@@ -567,6 +567,7 @@ Value lana_value_channel(struct LanaTensor *tensor);
 Value lana_value_observable(struct LanaTensor *tensor);
 const char *lana_value_type_name(ValueType type);
 void lana_value_print(const Value *value);
+LanaError lana_value_format(const Value *value, size_t limit, char **text);
 void lana_value_free(Value value);
 
 #endif

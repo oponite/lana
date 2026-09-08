@@ -8,8 +8,7 @@
 //!   other bytes below `0x20` as `\u00xx`;
 //! * numbers use `%.17g` with no `0.0` special case (so `-0.0` prints `-0`).
 //!
-//! The decoder is the *strict* parser: it accepts only the named escapes
-//! (`\" \\ \/ \b \f \n \r \t`) and rejects `\u` escapes.
+//! String decoding is shared with the JSON boundary so encoded values round-trip.
 
 use std::sync::{Arc, Mutex};
 
@@ -60,7 +59,8 @@ pub fn format_17g(value: f64) -> String {
     out
 }
 
-fn append_string(out: &mut String, string: &str) {
+fn append_string(out: &mut String, string: &str) -> Result<(), LanaError> {
+    if string.contains('\0') { return Err(LanaError::Schema); }
     out.push('"');
     for character in string.chars() {
         let replacement = match character {
@@ -82,6 +82,7 @@ fn append_string(out: &mut String, string: &str) {
         }
     }
     out.push('"');
+    Ok(())
 }
 
 fn encode_value_into(out: &mut String, value: &Value) -> Result<(), LanaError> {
@@ -94,11 +95,11 @@ fn encode_value_into(out: &mut String, value: &Value) -> Result<(), LanaError> {
             }
             out.push_str(&format_17g(*number));
         }
-        ValueKind::String(string) => append_string(out, string),
+        ValueKind::String(string) => append_string(out, string)?,
         ValueKind::Array(array) => {
             out.push('[');
             let array = array.lock().unwrap();
-            for (index, item) in array.items.iter().enumerate() {
+            for (index, item) in array.items().iter().enumerate() {
                 if index != 0 {
                     out.push(',');
                 }
@@ -108,14 +109,14 @@ fn encode_value_into(out: &mut String, value: &Value) -> Result<(), LanaError> {
         }
         ValueKind::Map(map) => {
             let map = map.lock().unwrap();
-            let mut entries: Vec<&MapEntry> = map.entries.iter().collect();
+            let mut entries: Vec<&MapEntry> = map.entries().iter().collect();
             entries.sort_by(|a, b| a.key.cmp(&b.key));
             out.push('{');
             for (index, entry) in entries.iter().enumerate() {
                 if index != 0 {
                     out.push(',');
                 }
-                append_string(out, &entry.key);
+                append_string(out, &entry.key)?;
                 out.push(':');
                 encode_value_into(out, &entry.value)?;
             }
@@ -136,6 +137,7 @@ pub fn encode_value(value: &Value) -> Result<String, LanaError> {
 struct Parser<'a> {
     data: &'a [u8],
     offset: usize,
+    heap: lana_vm::heap::Heap,
 }
 
 impl<'a> Parser<'a> {
@@ -156,40 +158,7 @@ impl<'a> Parser<'a> {
 }
 
 fn parse_string(parser: &mut Parser) -> Result<Arc<str>, LanaError> {
-    if !parser.take(b'"') {
-        return Err(LanaError::Parse);
-    }
-    let mut out = String::new();
-    while parser.offset < parser.data.len() {
-        let character = parser.data[parser.offset];
-        parser.offset += 1;
-        if character == b'"' {
-            return Ok(Arc::from(out.as_str()));
-        }
-        if character < 0x20 {
-            return Err(LanaError::Parse);
-        }
-        if character == b'\\' {
-            if parser.offset >= parser.data.len() {
-                return Err(LanaError::Parse);
-            }
-            let escaped = parser.data[parser.offset];
-            parser.offset += 1;
-            let decoded = match escaped {
-                b'"' | b'\\' | b'/' => escaped,
-                b'b' => 0x08,
-                b'f' => 0x0c,
-                b'n' => b'\n',
-                b'r' => b'\r',
-                b't' => b'\t',
-                _ => return Err(LanaError::Parse),
-            };
-            out.push(decoded as char);
-        } else {
-            out.push(character as char);
-        }
-    }
-    Err(LanaError::Parse)
+    crate::data::decode_string(parser.data, &mut parser.offset)
 }
 
 fn parse_value(parser: &mut Parser) -> Result<Value, LanaError> {
@@ -217,16 +186,16 @@ fn parse_value(parser: &mut Parser) -> Result<Value, LanaError> {
     if parser.data[parser.offset] == b'[' {
         parser.offset += 1;
         parser.skip_space();
-        let mut items = Vec::new();
+        let mut array = Array::new(&parser.heap, 0)?;
         if parser.take(b']') {
-            return Ok(Value::array(Arc::new(Mutex::new(Array { items }))));
+            return Ok(Value::array(Arc::new(Mutex::new(array))));
         }
         loop {
             let item = parse_value(parser)?;
-            items.push(item);
+            array.push(item)?;
             parser.skip_space();
             if parser.take(b']') {
-                return Ok(Value::array(Arc::new(Mutex::new(Array { items }))));
+                return Ok(Value::array(Arc::new(Mutex::new(array))));
             }
             if !parser.take(b',') {
                 return Err(LanaError::Parse);
@@ -236,7 +205,7 @@ fn parse_value(parser: &mut Parser) -> Result<Value, LanaError> {
     if parser.data[parser.offset] == b'{' {
         parser.offset += 1;
         parser.skip_space();
-        let mut map = Map::new(4);
+        let mut map = Map::new(&parser.heap, 4)?;
         if parser.take(b'}') {
             return Ok(Value::map(Arc::new(Mutex::new(map))));
         }
@@ -322,7 +291,7 @@ pub fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, LanaError>
     if *offset > data.len() {
         return Err(LanaError::InvalidState);
     }
-    let mut parser = Parser { data, offset: *offset };
+    let mut parser = Parser { data, offset: *offset, heap: lana_vm::heap::Heap::new(256 * 1024 * 1024) };
     let value = parse_value(&mut parser)?;
     *offset = parser.offset;
     Ok(value)
@@ -378,7 +347,7 @@ mod tests {
 
     #[test]
     fn encode_map_sorts_keys() {
-        let mut map = Map::new(2);
+        let mut map = Map::new(&lana_vm::heap::Heap::default(), 2).unwrap();
         map.set(Arc::from("b"), Value::number(2.0), false).unwrap();
         map.set(Arc::from("a"), Value::number(1.0), false).unwrap();
         let value = Value::map(Arc::new(Mutex::new(map)));
@@ -393,8 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_unicode_escape() {
-        // codec.c's strict parser does not accept \u escapes.
-        assert_eq!(decode_document(br#""\u0041""#).unwrap_err(), LanaError::Parse);
+    fn round_trip_unicode_and_control_characters() {
+        let value = Value::string(Arc::from("café 🦀\u{1}\n"));
+        let encoded = encode_value(&value).unwrap();
+        assert_eq!(decode_document(encoded.as_bytes()).unwrap().as_string(), value.as_string());
+        assert_eq!(encode_value(&Value::string(Arc::from("a\0b"))).unwrap_err(), LanaError::Schema);
+    }
+
+    #[test]
+    fn decode_accepts_unicode_escape() {
+        assert_eq!(&*decode_document(br#""\u0041""#).unwrap().as_string(), "A");
+        assert_eq!(decode_document(br#""\ud800""#).unwrap_err(), LanaError::Parse);
     }
 }

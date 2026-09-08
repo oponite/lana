@@ -1,22 +1,20 @@
-import "./resolver.lana" as resolver;
-
 fn lower_expression(typed_expression) { return [200, typed_expression[0], typed_expression[1], typed_expression[2], typed_expression[3]]; }
 
 fn lower_statement(typed_statement, is_generator, is_async) {
     let node = typed_statement[3];
     if (node[0] == 4) {
-        node = [4, node[1], lower_statements(resolver.resolve_list(node[2], is_generator, is_async), is_generator, is_async), lower_statements(resolver.resolve_list(node[3], is_generator, is_async), is_generator, is_async), node[4], node[5]];
+        node = [4, node[1], lower_statements(node[2], is_generator, is_async), lower_statements(node[3], is_generator, is_async), node[4], node[5], node[6], node[7]];
     }
     if (node[0] == 5) {
-        node = [5, node[1], lower_statements(resolver.resolve_list(node[2], is_generator, is_async), is_generator, is_async), node[3], node[4]];
+        node = [5, node[1], lower_statements(node[2], is_generator, is_async), node[3], node[4]];
     }
     if (node[0] == 15) {
-        node = [15, node[1], node[2], lower_statements(resolver.resolve_list_with_binding(node[3], node[1], resolver.type_unknown(), is_generator, is_async), is_generator, is_async), node[4], node[5], node[6]];
+        node = [15, node[1], node[2], lower_statements(node[3], is_generator, is_async), node[4], node[5], node[6]];
     }
     if (node[0] == 12) {
-        node = [12, lower_statements(resolver.resolve_list(node[1], is_generator, is_async), is_generator, is_async), node[2], node[3]];
+        node = [12, lower_statements(node[1], is_generator, is_async), node[2], node[3]];
     }
-    return [201, typed_statement[0], typed_statement[2], node];
+    return [201, typed_statement[0], typed_statement[2], node, typed_statement[1]];
 }
 
 fn lower_statements(statements, is_generator, is_async) {

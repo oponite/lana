@@ -25,10 +25,9 @@ mod imp {
                 else { device.new_buffer_with_data(bytes.as_ptr() as *const c_void, bytes.len() as u64, MTLResourceOptions::StorageModeShared) };
             Some(Self { buffer, len: bytes.len() })
         }
-        pub fn copy_bytes(&self) -> Vec<u8> {
-            let mut bytes = vec![0; self.len];
+        pub(crate) fn copy_into(&self, bytes: &mut [u8]) {
+            assert_eq!(bytes.len(), self.len, "resident buffer length changed");
             if self.len > 0 { unsafe { std::ptr::copy_nonoverlapping(self.buffer.contents() as *const u8, bytes.as_mut_ptr(), self.len); } }
-            bytes
         }
     }
 
@@ -111,7 +110,7 @@ mod imp {
     pub struct ResidentBuffer;
     impl ResidentBuffer {
         pub fn new(_: &[u8]) -> Option<Self> { None }
-        pub fn copy_bytes(&self) -> Vec<u8> { Vec::new() }
+        pub(crate) fn copy_into(&self, _: &mut [u8]) { unreachable!("Metal buffer on unsupported platform") }
     }
     pub fn sgemm(_: usize, _: usize, _: usize, _: *const f32, _: *const f32, _: *mut f32) -> bool {
         false
