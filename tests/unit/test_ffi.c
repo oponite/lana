@@ -99,6 +99,7 @@ static int test_declare(void) {
         "RETURN R0\n",
         &chunk) == 0);
     result = run_capture(&chunk, &out);
+    lana_chunk_free(&chunk);
     CHECK(result == LANA_OK);
     if (out == NULL || strcmp(out, "0\n") != 0) {
         (void)fprintf(stderr, "declare output was: [%s]\n", out ? out : "(null)");
@@ -138,6 +139,7 @@ static int test_call_success(void) {
         LANA_FFI_TEST_LIB);
     CHECK(assemble(source, &chunk) == 0);
     result = run_capture(&chunk, &out);
+    lana_chunk_free(&chunk);
     CHECK(result == LANA_OK);
     CHECK(out != NULL && strstr(out, "\"ok\": 5") != NULL);
     free(out);
@@ -164,6 +166,7 @@ static int test_capability_denial(void) {
         "RETURN R0\n",
         &chunk) == 0);
     result = run_capture(&chunk, &out);
+    lana_chunk_free(&chunk);
     CHECK(result == LANA_ERR_EXTERNAL);
     free(out);
     return 0;
@@ -196,6 +199,7 @@ static int test_crash_containment(void) {
         LANA_FFI_TEST_LIB);
     CHECK(assemble(source, &chunk) == 0);
     result = run_capture(&chunk, &out);
+    lana_chunk_free(&chunk);
     /* The fault is contained: the VM reports {"error": external} and the
      * process survives. */
     CHECK(result == LANA_OK);

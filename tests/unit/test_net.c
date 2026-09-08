@@ -170,6 +170,7 @@ static int test_http_get(void) {
         "RETURN R0\n");
     CHECK(assemble(source, &chunk) == 0);
     result = run_capture(&chunk, &out);
+    lana_chunk_free(&chunk);
     CHECK(result == LANA_OK);
     CHECK(out != NULL && strstr(out, "\"status\": 200") != NULL);
     CHECK(out != NULL && strstr(out, "hello from lana") != NULL);
@@ -201,6 +202,7 @@ static int test_http_post(void) {
         "RETURN R0\n");
     CHECK(assemble(source, &chunk) == 0);
     result = run_capture(&chunk, &out);
+    lana_chunk_free(&chunk);
     CHECK(result == LANA_OK);
     CHECK(out != NULL && strstr(out, "\"status\": 200") != NULL);
     CHECK(out != NULL && strstr(out, "ping") != NULL);
@@ -238,6 +240,7 @@ static int test_socket_echo(void) {
         "RETURN R0\n",
         &chunk) == 0);
     result = run_capture(&chunk, &out);
+    lana_chunk_free(&chunk);
     CHECK(result == LANA_OK);
     CHECK(out != NULL && strstr(out, "[true, 0]") != NULL);
     CHECK(out != NULL && strstr(out, "[true, 5]") != NULL);
@@ -268,6 +271,7 @@ static int test_timeout(void) {
         "RETURN R0\n",
         &chunk) == 0);
     result = run_capture(&chunk, &out);
+    lana_chunk_free(&chunk);
     CHECK(result == LANA_OK);
     /* Strings print bare inside tagged pairs: `[false, timeout]`. */
     CHECK(out != NULL && strstr(out, "[false, timeout]") != NULL);
@@ -293,6 +297,7 @@ static int test_capability_denial(void) {
         "RETURN R0\n",
         &chunk) == 0);
     result = run_capture(&chunk, &out);
+    lana_chunk_free(&chunk);
     CHECK(result == LANA_ERR_CAPABILITY);
     free(out);
     return 0;
