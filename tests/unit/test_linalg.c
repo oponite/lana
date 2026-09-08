@@ -92,7 +92,7 @@ static void call(uint32_t host, Value *args, uint32_t argc, LanaError expected) 
  * the function returns (all 2x2 tensors share the same layout). */
 static LanaTensor complex2(double *data) {
     static size_t shape[2] = {2, 2}, strides[2] = {2, 1};
-    LanaTensor t = {2, shape, strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)data, 0, NULL, false};
+    LanaTensor t = {2, shape, strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)data, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
     return t;
 }
 
@@ -139,7 +139,7 @@ static void povm_channel_observable(void) {
     Value args[] = {lana_value_array(&arr)};
     size_t shape[3] = {2, 2, 2}, strides[3] = {4, 2, 1};
     double stack_data[] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0};
-    LanaTensor expected = {3, shape, strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)stack_data, 0, NULL, false};
+    LanaTensor expected = {3, shape, strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)stack_data, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
     call_checked(LANA_HOST_POVM, args, 1, LANA_OK, &expected);
 
     /* povm with Σ E_i != I is rejected. */
@@ -155,7 +155,7 @@ static void povm_channel_observable(void) {
     args[0] = lana_value_array(&k_arr);
     size_t k_shape[3] = {1, 2, 2}, k_strides[3] = {4, 2, 1};
     double k_stack[] = {1, 0, 0, 0, 0, 0, 1, 0};
-    LanaTensor k_expected = {3, k_shape, k_strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)k_stack, 0, NULL, false};
+    LanaTensor k_expected = {3, k_shape, k_strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)k_stack, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
     call_checked(LANA_HOST_CHANNEL, args, 1, LANA_OK, &k_expected);
 
     /* observable: Pauli Z = [[1, 0], [0, -1]]. */
@@ -187,7 +187,7 @@ static void operations(void) {
                         0, 0, 0.25, 0, 0, 0, 0, 0,
                         0, 0, 0, 0, 0.25, 0, 0, 0,
                         0, 0, 0, 0, 0, 0, 0.25, 0};
-    LanaTensor tp_expected = {2, shape4, strides4, true, LANA_TENSOR_COMPLEX, (uint8_t *)tp_data, 0, NULL, false};
+    LanaTensor tp_expected = {2, shape4, strides4, true, LANA_TENSOR_COMPLEX, (uint8_t *)tp_data, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
     call_checked(LANA_HOST_TENSOR_PRODUCT, args, 2, LANA_OK, &tp_expected);
 
     /* partial_trace(rho ⊗ rho, 1) = rho. */
@@ -203,7 +203,7 @@ static void operations(void) {
     /* measure_with(rho, povm) = [0.5, 0.5]. */
     size_t p_shape[3] = {2, 2, 2}, p_strides[3] = {4, 2, 1};
     double p_stack[] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0};
-    LanaTensor povm = {3, p_shape, p_strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)p_stack, 0, NULL, false};
+    LanaTensor povm = {3, p_shape, p_strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)p_stack, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
     args[0] = rho_v;
     args[1] = lana_value_povm(&povm);
     LanaChunk chunk;
@@ -227,7 +227,7 @@ static void operations(void) {
     /* apply_to(identity channel, rho) = rho. */
     size_t k_shape[3] = {1, 2, 2}, k_strides[3] = {4, 2, 1};
     double k_stack[] = {1, 0, 0, 0, 0, 0, 1, 0};
-    LanaTensor chan = {3, k_shape, k_strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)k_stack, 0, NULL, false};
+    LanaTensor chan = {3, k_shape, k_strides, true, LANA_TENSOR_COMPLEX, (uint8_t *)k_stack, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
     args[0] = lana_value_channel(&chan);
     args[1] = rho_v;
     call_checked(LANA_HOST_APPLY_TO, args, 2, LANA_OK, &rho_expected);

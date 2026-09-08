@@ -33,6 +33,7 @@ static const char *kSgemmSource =
  * are per-call. */
 static id<MTLDevice> sDevice = nil;
 static id<MTLComputePipelineState> sPipeline = nil;
+static id<MTLCommandQueue> sQueue = nil;
 
 static bool metal_pipeline_ready(void) {
     if (sPipeline != nil) {
@@ -56,7 +57,65 @@ static bool metal_pipeline_ready(void) {
     }
     sPipeline = [sDevice newComputePipelineStateWithFunction:function
                                                       error:&error];
-    return sPipeline != nil;
+    sQueue = [sDevice newCommandQueue];
+    return sPipeline != nil && sQueue != nil;
+}
+
+bool lana_metal_buffer_sgemm(size_t m, size_t k, size_t n,
+                             void *a, size_t a_offset,
+                             void *b, size_t b_offset,
+                             void *c, size_t c_offset) {
+    if (m == 0u || n == 0u) return true;
+    if (m > UINT32_MAX || k > UINT32_MAX || n > UINT32_MAX ||
+        !metal_pipeline_ready() || a == NULL || b == NULL || c == NULL) return false;
+    uint32_t dims[3] = {(uint32_t)m, (uint32_t)k, (uint32_t)n};
+    id<MTLBuffer> bufDims = [sDevice newBufferWithBytes:dims length:sizeof(dims)
+                                                options:MTLResourceStorageModeShared];
+    if (bufDims == nil) return false;
+    id<MTLCommandBuffer> commandBuffer = [sQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    [encoder setComputePipelineState:sPipeline];
+    [encoder setBuffer:(id<MTLBuffer>)a offset:a_offset atIndex:0];
+    [encoder setBuffer:(id<MTLBuffer>)b offset:b_offset atIndex:1];
+    [encoder setBuffer:(id<MTLBuffer>)c offset:c_offset atIndex:2];
+    [encoder setBuffer:bufDims offset:0 atIndex:3];
+    [encoder setBuffer:bufDims offset:4 atIndex:4];
+    [encoder setBuffer:bufDims offset:8 atIndex:5];
+    MTLSize threads = MTLSizeMake(16, 16, 1);
+    MTLSize groups = MTLSizeMake((m + 15u) / 16u, (n + 15u) / 16u, 1);
+    [encoder dispatchThreadgroups:groups threadsPerThreadgroup:threads];
+    [encoder endEncoding];
+    [commandBuffer commit];
+    [commandBuffer waitUntilCompleted];
+    return commandBuffer.status != MTLCommandBufferStatusError;
+}
+
+bool lana_metal_available(void) {
+    return metal_pipeline_ready();
+}
+
+void *lana_metal_buffer_create(const void *bytes, size_t length) {
+    if (!metal_pipeline_ready()) return NULL;
+    id<MTLBuffer> buffer = bytes == NULL ?
+        [sDevice newBufferWithLength:length options:MTLResourceStorageModeShared] :
+        [sDevice newBufferWithBytes:bytes length:length options:MTLResourceStorageModeShared];
+    return buffer == nil ? NULL : (void *)[buffer retain];
+}
+
+void lana_metal_buffer_release(void *buffer) {
+    if (buffer != NULL) [(id)buffer release];
+}
+
+void *lana_metal_buffer_contents(void *buffer) {
+    if (buffer == NULL) return NULL;
+    return [(id<MTLBuffer>)buffer contents];
+}
+
+bool lana_metal_buffer_copy(void *buffer, void *bytes, size_t length) {
+    if (buffer == NULL || (bytes == NULL && length > 0u) ||
+        [(id<MTLBuffer>)buffer length] < length) return false;
+    if (length > 0u) memcpy(bytes, [(id<MTLBuffer>)buffer contents], length);
+    return true;
 }
 
 bool lana_metal_sgemm(size_t m, size_t k, size_t n,
@@ -68,10 +127,6 @@ bool lana_metal_sgemm(size_t m, size_t k, size_t n,
         return false;
     }
     if (!metal_pipeline_ready()) {
-        return false;
-    }
-    id<MTLCommandQueue> queue = [sDevice newCommandQueue];
-    if (queue == nil) {
         return false;
     }
     size_t a_bytes = m * k * sizeof(float);
@@ -93,7 +148,7 @@ bool lana_metal_sgemm(size_t m, size_t k, size_t n,
         return false;
     }
 
-    id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
+    id<MTLCommandBuffer> commandBuffer = [sQueue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
     [encoder setComputePipelineState:sPipeline];
     [encoder setBuffer:bufA offset:0 atIndex:0];

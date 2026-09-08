@@ -1,0 +1,5 @@
+let gpu_admin = capability("gpu");
+let gpu_use = grant(gpu_admin, "use");
+let cpu = tensor([1.0], "f32");
+let metal = to_device(cpu, "metal", gpu_use);
+cpu + metal;

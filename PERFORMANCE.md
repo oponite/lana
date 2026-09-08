@@ -106,3 +106,40 @@ the backend widens them back to float for sgemm. On a compute-bound matrix this
 overhead amortizes toward parity; eliminating it entirely means passing float
 operands from the VM, which is a follow-up (the backend interface is held fixed
 here).
+
+## 7. Training allocation profile
+
+`build/mlip001-profile.trace` and `build/mlip001-sample.txt`. Fixed workload:
+256 scalar tensor pairs, full-batch SGD, and 300 epochs in the C11 Debug VM.
+Time Profiler attributed 493 of 1,679 samples (29.4%) to GC safepoints beneath
+the training function. Fused-step dispatch was unnecessary. Reusing the five
+immutable strings attached to every internal
+autodiff derivation reduced GC allocation pressure without changing values or
+step-boundary provenance.
+
+| implementation | warmed runs (s) | median |
+|---|---|---:|
+| original | 2.80, 2.76, 2.77, 2.80, 2.78 | 2.78 s |
+| shared autodiff strings | 2.24, 2.42, 2.35, 2.45, 2.28 | 2.35 s |
+
+The measured median improvement is 15.5%. These are machine-local results,
+not a conformance or release claim.
+
+## 8. LIP-028 resident Metal ML
+
+Apple M4 Pro, macOS 26.6 (25G72), arm64. Release C11 VM, three measured runs
+after one CPU and one Metal warm-up. Inputs are fixed f32 tensors; linear,
+ridge, and binary logistic use 128x32 with five epochs; multiclass logistic
+uses 96x24, three classes, and three epochs; dense neural uses 96x24, 16 hidden
+units, and three epochs. Sources are in `tests/benchmark/lip028_*.lana`.
+
+| Family | CPU median (ms) | Metal median (ms) | Metal / CPU |
+|---|---:|---:|---:|
+| linear | 14.172 | 3.172 | 22.4% |
+| ridge | 13.071 | 2.399 | 18.4% |
+| logistic binary | 13.712 | 2.148 | 15.7% |
+| logistic multiclass | 16.572 | 8.010 | 48.3% |
+| neural dense | 89.350 | 3.388 | 3.8% |
+
+Every fixed eligible-family workload is at or below half its CPU median. These
+are candidate-tree, machine-local performance gates, not portable conformance.

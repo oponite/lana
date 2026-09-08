@@ -163,3 +163,24 @@ Forked functions have independent registers, heap, instruction and memory
 budgets, RNG stream, and error state. Bytecode/constants remain immutable and may
 be shared. Task groups, cooperative cancellation, joins, tracing, and host calls
 retain their existing architecture.
+
+## Resident Metal tensor boundary (LIP-028)
+
+A Metal tensor owns a reference-counted Metal buffer plus ordinary shape,
+stride, offset, dtype, and base-view metadata. The owning VM accounts the full
+buffer and every staging or operation buffer against its memory budget. Views
+share the base buffer. Collection releases the final buffer reference; no
+device pointer is serialized or transferred between VMs.
+
+CPU-to-Metal transfer requires a live `gpu` use capability. Explicit Metal
+selection fails when the capability, device, dtype, or operation is not
+available. Mixed-device operations fail without staging a partial result.
+Metal commands complete before their result becomes observable, so an error,
+cancellation, or allocation failure exposes no partially written tensor.
+
+The Metal backend caches its device, queue, shader library, and pipelines.
+Training retains the active batch, parameters, autodiff intermediates,
+gradients, optimizer state, and f32 master weights on the device. Deterministic
+reduction kernels avoid unordered atomic accumulation. Replay is qualified per
+seed, input, M-series device family, precision, OS/runtime family, and Lana
+version within the tolerances in LIP-028.

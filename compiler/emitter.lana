@@ -116,6 +116,20 @@ fn is_host_call(name) {
     if (name == "eye") { return true; } if (name == "shape") { return true; }
     if (name == "ndim") { return true; } if (name == "dtype") { return true; }
     if (name == "cast") { return true; }
+    if (name == "reshape") { return true; } if (name == "transpose") { return true; }
+    if (name == "exp") { return true; } if (name == "log") { return true; }
+    if (name == "sqrt") { return true; } if (name == "relu") { return true; }
+    if (name == "softmax") { return true; } if (name == "logsumexp") { return true; }
+    if (name == "argmax") { return true; }
+    if (name == "tensor_compare") { return true; }
+    if (name == "tensor_select") { return true; }
+    if (name == "gather") { return true; }
+    if (name == "cholesky_solve") { return true; }
+    if (name == "random_uniform") { return true; }
+    if (name == "random_normal") { return true; }
+    if (name == "device") { return true; }
+    if (name == "to_device") { return true; }
+    if (name == "to_cpu") { return true; }
     if (name == "matmul") { return true; } if (name == "sum") { return true; }
     if (name == "mean") { return true; } if (name == "max") { return true; }
     if (name == "min") { return true; }
@@ -156,7 +170,7 @@ fn is_host_call(name) {
     if (name == "dataset_explain") { return true; }
     if (name == "http_get") { return true; } if (name == "http_post") { return true; }
     if (name == "socket_connect") { return true; } if (name == "socket_send") { return true; }
-    if (name == "socket_recv") { return true; } if (name == "socket_close") { return true; }
+    if (name == "socket_recv") { return true; } if (name == "socket_close") { return true; } if (name == "dataset_materialize") { return true; }
     return false;
 }
 
@@ -168,6 +182,22 @@ fn host_call_name(name) {
     if (name == "ndim") { return "tensor_ndim"; }
     if (name == "dtype") { return "tensor_dtype"; }
     if (name == "cast") { return "tensor_cast"; }
+    if (name == "reshape") { return "tensor_reshape"; }
+    if (name == "transpose") { return "tensor_transpose"; }
+    if (name == "exp") { return "tensor_exp"; } if (name == "log") { return "tensor_log"; }
+    if (name == "sqrt") { return "tensor_sqrt"; } if (name == "relu") { return "tensor_relu"; }
+    if (name == "softmax") { return "tensor_softmax"; }
+    if (name == "logsumexp") { return "tensor_logsumexp"; }
+    if (name == "argmax") { return "tensor_argmax"; }
+    if (name == "tensor_compare") { return "tensor_compare"; }
+    if (name == "tensor_select") { return "tensor_select"; }
+    if (name == "gather") { return "tensor_gather"; }
+    if (name == "cholesky_solve") { return "cholesky_solve"; }
+    if (name == "random_uniform") { return "random_uniform"; }
+    if (name == "random_normal") { return "random_normal"; }
+    if (name == "device") { return "tensor_device"; }
+    if (name == "to_device") { return "tensor_to_device"; }
+    if (name == "to_cpu") { return "tensor_to_cpu"; }
     if (name == "matmul") { return "tensor_matmul"; }
     if (name == "gpu_matmul") { return "gpu_matmul"; }
     if (name == "sum") { return "tensor_sum"; }

@@ -59,25 +59,6 @@ print(measure combined as probability);
 At `p = 0` or `p = 1`, the disposition is canonicalized to zero. `append()`
 creates an immutable lazy distribution, and `sample()` returns a concrete state.
 
-## Reference applications
-
-Four reference applications demonstrate the decision pipeline end to end, each
-with fixtures:
-
-- **Sensor fusion** — fuses two independent sensor readings into a single
-  confidence, attaches provenance to each reading, and measures the fused
-  probability.
-- **Service health** — compares a live metric against a baseline, combines the
-  two readings, and measures the resulting health probability.
-- **Document router** — routes a document by provenance and sensitivity, then
-  lets the policy decide whether the archive effect is authorized.
-- **Advisory forecast** — reads a trend series, builds a forecast state from
-  the latest point, and measures the forecast probability.
-
-Each reads a fixture, computes a probability or route, and writes a
-decision-request for the bridge pipeline. Sources live in
-[`examples/reference-apps/`](examples/reference-apps/).
-
 ## Install and run
 
 ```bash
@@ -245,45 +226,6 @@ MCP hosts, Jupyter, VS Code, Neovim, and a narrow native C ABI without adding
 dependencies to the normal Lana build. Start with
 [`integrations/README.md`](integrations/README.md).
 
-## Language basics
-
-State fields accept runtime expressions. Read `p`, `d_re`, and `d_im` directly.
-Optional `timestamp`, `source`, `weight`, and `confidence` metadata stays outside
-the mathematical state and is preserved by assignment, history, and transforms.
-
-`measure value` defaults to the Bernoulli distribution. Use `as probability` for
-its exact expected probability or `as sample` for one classical bit. These
-measurements are read-only. `sample(dist)` is distinct: it samples a concrete
-`STATE` from a `STATE_DIST`.
-
-Concrete states also support exact named-basis measurement with
-`in computational`, `in x`, or `in y`. Basis-qualified probability/distribution
-measurement of a `STATE_DIST` is intentionally unsupported; use the explicit
-`estimate_measure dist in x as probability with samples: N` or distribution form
-for the documented Monte Carlo approximation.
-
-`fork` runs a function in an isolated VM. Arguments and results are deep-copied,
-including shared distribution DAGs and metadata; bytecode remains immutable and
-shared. Task groups, cancellation, timeout joins, arrays, control flow, and typed
-JSON/CSV data boundaries remain ordinary language features. Model fitting and
-inference belong in external programs that exchange ordinary Lana values.
-
-The authority order is:
-
-1. [papers/semantics.md](papers/semantics.md) — mathematical authority for the
-   Lana 1.0 contract.
-2. [papers/semantics-2.md](papers/semantics-2.md) — mathematical authority for
-   the Lana 2.0 density-operator substrate and its operations.
-3. [SPEC.md](spec/SPEC.md) — source syntax and programmer-visible behavior.
-4. [BYTECODE.md](spec/BYTECODE.md) — the single LABC v2 encoding.
-5. [VM.md](spec/VM.md) — allocation, cloning, RNG, and budget architecture.
-
-New or changed source syntax must additionally satisfy
-[SYNTAX.md](spec/SYNTAX.md) — the syntax design principles.
-
-Benchmark programs are reproducible source evidence; generated reports and
-machine-local result snapshots are not part of the source release.
-
 ## Development Policy
 
 The Lana language, compiler, bytecode, and VM are under active development.
@@ -291,3 +233,17 @@ Changes preserve the documented authority order, compatibility expectations,
 correctness, security, and data integrity. Language, bytecode, and VM changes
 are proposed through the [LIP process](lip/README.md) and governed by
 [GOVERNANCE.md](GOVERNANCE.md).
+
+The authority order is:
+
+1. [papers/semantics.md](papers/semantics.md) — mathematical authority for the
+   Lana 1.0 contract.
+2. [papers/semantics-2.md](papers/semantics-2.md) — mathematical authority for
+   the Lana 2.0 density-operator substrate and its operations.
+3. [LIP-026](lip/archive/LIP-026.md) — source-surface design requirements.
+4. [SPEC.md](spec/SPEC.md) — source syntax and programmer-visible behavior.
+5. [BYTECODE.md](spec/BYTECODE.md) — the LABC encoding.
+6. [VM.md](spec/VM.md) — allocation, cloning, RNG, and budget architecture.
+
+New or changed source syntax must additionally satisfy
+[SYNTAX.md](spec/SYNTAX.md) — the syntax design principles.

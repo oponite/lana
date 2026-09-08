@@ -140,6 +140,21 @@ through the VM allocator in both VMs. A native tensor call is bounded by its
 operand buffers and is not interruptible mid-call; mid-call interruption is a
 v3 suspension concern, not part of this contract.
 
+### Resident Metal tensors (LIP-028)
+
+`device(t)` returns `"cpu"` or `"metal"`. `to_device(t, "metal", token)`
+requires a live `"gpu"` use capability and returns a new Metal-resident tensor;
+`to_cpu(t)` returns a CPU-resident copy. Transfers never change dtype. An
+unknown device, a revoked or wrong capability, or mixed-device arithmetic
+fails before producing a result. Views remain on their base tensor's device.
+
+Metal tensors support the tensor operations enumerated by LIP-028. F64 is not
+silently downcast and therefore remains CPU-only. All Metal buffers, staging
+buffers, autodiff intermediates, optimizer state, and master weights count
+against the existing memory limit. `device: "auto"` is an ML-library policy,
+not an implicit tensor transfer: it uses Metal only when capability, device,
+dtype, and operation support are all present.
+
 ## STATE
 
 ```lana

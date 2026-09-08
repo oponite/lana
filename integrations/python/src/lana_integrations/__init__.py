@@ -12,4 +12,4 @@ __all__ = [
     "LanaResult",
     "validate_evidence",
 ]
-__version__ = "2.0.0"
+__version__ = "2.1.0"

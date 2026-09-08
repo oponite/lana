@@ -14,5 +14,14 @@
  * Metal call fails; the caller maps that to LANA_ERR_UNSUPPORTED_OPERATION. */
 bool lana_metal_sgemm(size_t m, size_t k, size_t n,
                       const float *a, const float *b, float *c);
+bool lana_metal_available(void);
+void *lana_metal_buffer_create(const void *bytes, size_t length);
+void lana_metal_buffer_release(void *buffer);
+void *lana_metal_buffer_contents(void *buffer);
+bool lana_metal_buffer_copy(void *buffer, void *bytes, size_t length);
+bool lana_metal_buffer_sgemm(size_t m, size_t k, size_t n,
+                             void *a, size_t a_offset,
+                             void *b, size_t b_offset,
+                             void *c, size_t c_offset);
 
 #endif

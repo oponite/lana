@@ -10,6 +10,28 @@ mod imp {
 
     use metal::*;
 
+    pub struct ResidentBuffer { buffer: Buffer, len: usize }
+
+    impl std::fmt::Debug for ResidentBuffer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ResidentBuffer").field("len", &self.len).finish()
+        }
+    }
+
+    impl ResidentBuffer {
+        pub fn new(bytes: &[u8]) -> Option<Self> {
+            let (device, _) = pipeline()?;
+            let buffer = if bytes.is_empty() { device.new_buffer(0, MTLResourceOptions::StorageModeShared) }
+                else { device.new_buffer_with_data(bytes.as_ptr() as *const c_void, bytes.len() as u64, MTLResourceOptions::StorageModeShared) };
+            Some(Self { buffer, len: bytes.len() })
+        }
+        pub fn copy_bytes(&self) -> Vec<u8> {
+            let mut bytes = vec![0; self.len];
+            if self.len > 0 { unsafe { std::ptr::copy_nonoverlapping(self.buffer.contents() as *const u8, bytes.as_mut_ptr(), self.len); } }
+            bytes
+        }
+    }
+
     const SHADER: &str = include_str!("../../../metal/matmul.metal");
 
     /// The device and compiled pipeline are cached across calls (the VM is
@@ -79,14 +101,25 @@ mod imp {
         }
         true
     }
+
+    pub fn available() -> bool { pipeline().is_some() }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
+    #[derive(Debug)]
+    pub struct ResidentBuffer;
+    impl ResidentBuffer {
+        pub fn new(_: &[u8]) -> Option<Self> { None }
+        pub fn copy_bytes(&self) -> Vec<u8> { Vec::new() }
+    }
     pub fn sgemm(_: usize, _: usize, _: usize, _: *const f32, _: *const f32, _: *mut f32) -> bool {
         false
     }
+    pub fn available() -> bool { false }
 }
+
+pub use imp::ResidentBuffer;
 
 /// One row-major float32 general matrix multiply: `c = a . b` where `a` is
 /// `m x k`, `b` is `k x n`, and `c` is `m x n`. Returns `false` when no Metal
@@ -95,3 +128,5 @@ mod imp {
 pub fn metal_sgemm(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c: *mut f32) -> bool {
     imp::sgemm(m, k, n, a, b, c)
 }
+
+pub fn metal_available() -> bool { imp::available() }

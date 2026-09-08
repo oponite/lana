@@ -1,0 +1,27 @@
+import "std/ml" as ml;
+
+let x = tensor([[0.0], [1.0], [2.0], [3.0]]);
+let y = tensor([1.0, 3.0, 5.0, 7.0]);
+let linear = ml.fit("linear", {x: x, y: y}, {epochs: 1200, learning_rate: 0.05});
+assert(linear[0], "linear fit failed");
+let fitted = linear[1];
+assert(fitted.schema == 1, "fit schema");
+assert(fitted.prediction[3] > 6.9, "linear prediction lower bound");
+assert(fitted.prediction[3] < 7.1, "linear prediction upper bound");
+assert(fitted.uncertainty[0] >= 0, "linear uncertainty");
+
+let binary = ml.fit("logistic_binary",
+    {x: tensor([[-2.0], [-1.0], [1.0], [2.0]]), y: tensor([0.0, 0.0, 1.0, 1.0])},
+    {epochs: 400, learning_rate: 0.2});
+assert(binary[0], "binary fit failed");
+let classified = binary[1];
+assert(classified.prediction[0] < 0.5, "negative class probability");
+assert(classified.prediction[3] > 0.5, "positive class probability");
+assert(classified.uncertainty[0] >= 0, "binary uncertainty lower bound");
+assert(classified.uncertainty[0] <= 0.25, "binary uncertainty upper bound");
+
+let tensors = ml.predict_tensors(fitted.model, x, {});
+assert(tensors[0], "tensor prediction failed");
+assert(array_length(tensors[1]) == 2, "prediction and uncertainty pair");
+
+print("ML_REGRESSION_PASS");

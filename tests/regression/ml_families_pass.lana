@@ -1,0 +1,67 @@
+import "std/ml" as ml;
+
+fn test_neural_and_trees() {
+let x = tensor([[-2.0], [-1.0], [1.0], [2.0]]);
+let y = tensor([-3.0, -1.0, 3.0, 5.0]);
+let neural = ml.fit("neural_dense", {x: x, y: y},
+    {hidden: 4, epochs: 300, learning_rate: 0.03, task: "regression"});
+assert(neural[0], "neural fit");
+assert(neural[1].uncertainty[0] >= 0, "neural uncertainty");
+
+let gbt = ml.fit("gbt_regression", {x: x, y: y},
+    {trees: 12, learning_rate: 0.2, depth: 3, bins: 8});
+assert(gbt[0], "GBT fit");
+assert(gbt[1].uncertainty[0] >= 0, "GBT uncertainty");
+assert(gbt[1].model.training.depth == 3, "GBT depth");
+}
+
+fn test_sequence_models() {
+let kalman = ml.fit("kalman", {observations: tensor([1.0, 1.2, 0.9, 1.1])},
+    {q: 0.01, r: 0.1, x0: 1.0, p0: 1.0});
+assert(kalman[0], "Kalman fit");
+assert(kalman[1].prediction[3] > 0.9, "Kalman estimate");
+assert(kalman[1].uncertainty[3] >= 0, "Kalman covariance");
+
+let hmm = ml.fit("hmm_categorical", {observations: tensor([0.0, 0.0, 1.0, 1.0])},
+    {state_count: 2, symbol_count: 2});
+    assert(hmm[0], "HMM fit");
+    assert(hmm[1].model.training.method == "baum_welch", "categorical Baum-Welch");
+assert(shape(hmm[1].prediction)[0] == 4, "HMM rows");
+assert(hmm[1].uncertainty[0, 0] >= 0, "HMM uncertainty");
+    let decoded = ml.decode(hmm[1].model, tensor([0.0, 1.0]), {});
+    assert(decoded[0], "categorical HMM decode");
+    assert(shape(decoded[1].prediction)[0] == 2, "Viterbi path length");
+
+let gaussian_hmm = ml.fit("hmm_gaussian",
+    {observations: tensor([[-1.0], [-0.8], [1.0], [1.2]])}, {state_count: 2});
+    assert(gaussian_hmm[0], "Gaussian HMM fit");
+    assert(gaussian_hmm[1].model.training.method == "baum_welch", "Gaussian Baum-Welch");
+assert(gaussian_hmm[1].uncertainty[0, 0] >= 0, "Gaussian HMM uncertainty");
+
+let filtered = ml.filter(kalman[1].model, tensor([1.0, 1.1]), {});
+let smoothed = ml.smooth(kalman[1].model, tensor([1.0, 1.1]), {});
+assert(filtered[0], "Kalman filter API");
+assert(smoothed[0], "Kalman smoother API");
+}
+
+fn test_jump_modes() {
+let jumps = tensor([0.01, -0.02, 0.8, 0.7, -0.9, 0.01, 0.6]);
+let kou = ml.fit("jump", {returns: jumps}, {mode: "kou", threshold: 0.5});
+let hawkes = ml.fit("jump", {returns: jumps}, {mode: "hawkes", threshold: 0.5});
+let hybrid = ml.fit("jump", {returns: jumps}, {mode: "kou_hawkes", threshold: 0.5});
+assert(kou[0], "Kou jump fit");
+assert(hawkes[0], "Hawkes jump fit");
+assert(hybrid[0], "Kou-Hawkes jump fit");
+assert(kou[1].model.parameters.mode == "kou", "Kou mode");
+assert(hawkes[1].model.parameters.mode == "hawkes", "Hawkes mode");
+assert(hybrid[1].model.parameters.mode == "kou_hawkes", "hybrid mode");
+assert(hybrid[1].uncertainty[0] >= 0, "jump uncertainty");
+let simulated = ml.simulate(hybrid[1].model, null, {steps: 4});
+assert(simulated[0], "jump simulation");
+assert(shape(simulated[1].prediction)[0] == 4, "jump simulation length");
+}
+
+test_neural_and_trees();
+test_sequence_models();
+test_jump_modes();
+print("ML_FAMILIES_PASS");

@@ -26,9 +26,10 @@ state construction, module imports, measurement, and assertions.
 Resolve disagreements in this order:
 
 1. `papers/semantics.md` — mathematical meaning.
-2. `spec/SPEC.md` — source syntax and programmer-visible behavior.
-3. `spec/BYTECODE.md` — the one LABC v2 encoding.
-4. `spec/VM.md` — runtime architecture and resource behavior.
+2. `lip/archive/LIP-026.md` — source-surface design requirements.
+3. `spec/SPEC.md` — source syntax and programmer-visible behavior.
+4. `spec/BYTECODE.md` — the LABC encoding.
+5. `spec/VM.md` — runtime architecture and resource behavior.
 
 New or changed source syntax must additionally satisfy `spec/SYNTAX.md` — the
 syntax design principles (SYNTAX-1..12 + Acceptance Principle).

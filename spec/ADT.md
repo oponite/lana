@@ -1,8 +1,9 @@
 # Lana 2.0 — ADTs, pattern matching, generics, exhaustiveness, uncertainty
 
 > Follow-up spec for deferred item 1. Source syntax + opcode encoding + runtime
-> behavior. Sits below `papers/semantics-2.md` and above `spec/SPEC.md` /
-> `spec/BYTECODE.md` / `spec/VM.md` in the authority order. All new syntax
+> behavior. Sits below `papers/semantics-2.md` and
+> `../lip/archive/LIP-026.md`, and above `SPEC.md` / `BYTECODE.md` / `VM.md` in
+> the authority order. All new syntax
 > satisfies `spec/SYNTAX.md` (SYNTAX-1..12 + Acceptance Principle).
 
 ## Scope

@@ -20,7 +20,8 @@ change to source syntax, bytecode, or VM behavior.>
 ## Design test
 
 <Answer each question yes/no with a one-line justification. A "no" requires
-written justification. The ten questions are normative in LIP-026 §3.>
+written justification. The ten questions are normative in
+[`LIP-026`](archive/LIP-026.md) §3.
 
 1. Can a programmer guess what this does?
 2. Does this resemble an existing programming concept where appropriate?

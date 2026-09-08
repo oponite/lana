@@ -1,0 +1,2341 @@
+// std/ml — uncertainty-aware machine learning (LIP-028).
+//
+// Algorithms are ordinary Lana. The first reference path deliberately uses
+// only existing tensors, indexing, arrays, maps, and Result values so the CPU
+// behavior is a stable oracle for later Metal kernels.
+
+fn ml_error(code, message, field) {
+    return result_error({code: code, message: message, field: field});
+}
+
+fn option(options, name, fallback) {
+    if (map_has(options, name)) { return options[name]; }
+    return fallback;
+}
+
+fn finite(value) {
+    if (type_of(value) != "number") { return false; }
+    return value - value == 0;
+}
+
+fn abs_number(value) {
+    if (value < 0) { return -value; }
+    return value;
+}
+
+fn mod_number(value, divisor) {
+    return value - divisor * floor(value / divisor);
+}
+
+// Range reduction keeps this short Taylor series accurate and deterministic.
+fn exp_number(value) {
+    if (value > 40) { value = 40; }
+    if (value < -40) { value = -40; }
+    let negative = value < 0;
+    if (negative) { value = -value; }
+    let halvings = 0;
+    while (value > 0.5) {
+        value = value / 2;
+        halvings = halvings + 1;
+    }
+    let term = 1.0;
+    let total = 1.0;
+    let i = 1;
+    while (i <= 14) {
+        term = term * value / i;
+        total = total + term;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < halvings) {
+        total = total * total;
+        i = i + 1;
+    }
+    if (negative) { return 1.0 / total; }
+    return total;
+}
+
+fn sigmoid(value) {
+    if (value >= 0) { return 1.0 / (1.0 + exp_number(-value)); }
+    let e = exp_number(value);
+    return e / (1.0 + e);
+}
+
+fn sqrt_number(value) {
+    if (value <= 0) { return 0.0; }
+    let estimate = value;
+    if (estimate < 1) { estimate = 1.0; }
+    let i = 0;
+    while (i < 20) {
+        estimate = 0.5 * (estimate + value / estimate);
+        i = i + 1;
+    }
+    return estimate;
+}
+
+fn matrix_shape(x) {
+    if (type_of(x) != "tensor") { return null; }
+    let dims = shape(x);
+    if (array_length(dims) != 2) { return null; }
+    return dims;
+}
+
+fn vector_length(y) {
+    if (type_of(y) != "tensor") { return -1; }
+    let dims = shape(y);
+    if (array_length(dims) != 1) { return -1; }
+    return dims[0];
+}
+
+fn zeros_array(count) {
+    let values = array_new(0);
+    let i = 0;
+    while (i < count) {
+        array_push(values, 0.0);
+        i = i + 1;
+    }
+    return values;
+}
+
+fn validate_xy(data) {
+    if (type_of(data) != "map") { return "data must be a map"; }
+    if (!map_has(data, "x")) { return "data.x is required"; }
+    if (!map_has(data, "y")) { return "data.y is required"; }
+    let dims = matrix_shape(data.x);
+    if (dims == null) { return "data.x must be a rank-2 tensor"; }
+    let rows = vector_length(data.y);
+    if (rows < 0) { return "data.y must be a rank-1 tensor"; }
+    if (dims[0] != rows) { return "data.x and data.y row counts must match"; }
+    if (rows == 0) { return "training data must not be empty"; }
+    if (dims[1] == 0) { return "training data must contain a feature"; }
+    return null;
+}
+
+fn linear_values(x, weights, intercept) {
+    let dims = shape(x);
+    let values = array_new(0);
+    let row = 0;
+    while (row < dims[0]) {
+        let value = intercept;
+        let column = 0;
+        while (column < dims[1]) {
+            value = value + weights[column] * x[row, column];
+            column = column + 1;
+        }
+        array_push(values, value);
+        row = row + 1;
+    }
+    return values;
+}
+
+fn constant_tensor(count, value) {
+    let values = array_new(0);
+    let i = 0;
+    while (i < count) {
+        array_push(values, value);
+        i = i + 1;
+    }
+    return tensor(values);
+}
+
+fn prediction_record(model, prediction, uncertainty, method, assumptions) {
+    return {
+        schema: 1,
+        prediction: prediction,
+        uncertainty: uncertainty,
+        method: method,
+        assumptions: assumptions,
+        model_kind: model.kind,
+        model_version: model.version,
+        device: model.device,
+        compute_dtype: model.compute_dtype
+    };
+}
+
+fn fit_result(model, prediction, uncertainty, diagnostics, method, assumptions) {
+    return result_ok({
+        schema: 1,
+        model: model,
+        prediction: prediction,
+        uncertainty: uncertainty,
+        diagnostics: diagnostics,
+        method: method,
+        assumptions: assumptions
+    });
+}
+
+fn fit_linear(kind, data, options) {
+    let invalid = validate_xy(data);
+    if (invalid != null) { return ml_error("invalid_data", invalid, "data"); }
+    let x = data.x;
+    let y = data.y;
+    let dims = shape(x);
+    let rows = dims[0];
+    let columns = dims[1];
+    let learning_rate = option(options, "learning_rate", 0.05);
+    let epochs = option(options, "epochs", 500);
+    let ridge = option(options, "ridge", 0.0);
+    let include_intercept = option(options, "intercept", true);
+    if (kind == "ridge") {
+        if (!map_has(options, "ridge")) { ridge = 0.0001; }
+    }
+    if (!finite(learning_rate)) { return ml_error("invalid_option", "learning_rate must be finite", "learning_rate"); }
+    if (learning_rate <= 0) { return ml_error("invalid_option", "learning_rate must be positive", "learning_rate"); }
+    if (!finite(epochs)) { return ml_error("invalid_option", "epochs must be finite", "epochs"); }
+    if (epochs < 1) { return ml_error("invalid_option", "epochs must be positive", "epochs"); }
+    if (ridge < 0) { return ml_error("invalid_option", "ridge must be nonnegative", "ridge"); }
+
+    let weights = zeros_array(columns);
+    let intercept = 0.0;
+    let epoch = 0;
+    while (epoch < epochs) {
+        let gradient = zeros_array(columns);
+        let intercept_gradient = 0.0;
+        let row = 0;
+        while (row < rows) {
+            let estimate = intercept;
+            let column = 0;
+            while (column < columns) {
+                estimate = estimate + weights[column] * x[row, column];
+                column = column + 1;
+            }
+            let error = estimate - y[row];
+            column = 0;
+            while (column < columns) {
+                gradient[column] = gradient[column] + error * x[row, column];
+                column = column + 1;
+            }
+            intercept_gradient = intercept_gradient + error;
+            row = row + 1;
+        }
+        let column = 0;
+        while (column < columns) {
+            let g = gradient[column] / rows + ridge * weights[column];
+            weights[column] = weights[column] - learning_rate * g;
+            column = column + 1;
+        }
+        if (include_intercept) {
+            intercept = intercept - learning_rate * intercept_gradient / rows;
+        }
+        epoch = epoch + 1;
+    }
+
+    let values = linear_values(x, weights, intercept);
+    let squared_error = 0.0;
+    let row = 0;
+    while (row < rows) {
+        let difference = values[row] - y[row];
+        squared_error = squared_error + difference * difference;
+        row = row + 1;
+    }
+    let variance = squared_error / rows;
+    let prediction = tensor(values);
+    let uncertainty = constant_tensor(rows, variance);
+    let model = {
+        schema: 1,
+        kind: kind,
+        task: "regression",
+        parameters: {weights: tensor(weights), intercept: intercept},
+        parameter_uncertainty: {residual_variance: variance},
+        classes: [],
+        training: {epochs: epochs, learning_rate: learning_rate, ridge: ridge},
+        device: "cpu",
+        compute_dtype: dtype(x),
+        version: "2.1.0"
+    };
+    return fit_result(model, prediction, uncertainty,
+        {loss: variance, rows: rows}, "batch_gradient_descent",
+        ["independent residuals", "finite second moments"]);
+}
+
+fn fit_linear_metal(kind, data, options) {
+    let invalid = validate_xy(data);
+    if (invalid != null) { return ml_error("invalid_data", invalid, "data"); }
+    let x = data.x;
+    let y = data.y;
+    let rows = shape(x)[0];
+    let columns = shape(x)[1];
+    let learning_rate = option(options, "learning_rate", 0.05);
+    let epochs = option(options, "epochs", 500);
+    let ridge = option(options, "ridge", 0.0);
+    if (kind == "ridge") {
+        if (!map_has(options, "ridge")) { ridge = 0.0001; }
+    }
+    if (learning_rate <= 0) { return ml_error("invalid_option", "learning_rate must be positive", "learning_rate"); }
+    if (epochs < 1) { return ml_error("invalid_option", "epochs must be positive", "epochs"); }
+    if (ridge < 0) { return ml_error("invalid_option", "ridge must be nonnegative", "ridge"); }
+    let token = options.gpu_token;
+    let weights = metal_tensor(tensor(zeros_array(columns)), dtype(x), token);
+    let xt = metal_tensor(transpose(to_cpu(x)), dtype(x), token);
+    let intercept = 0.0;
+    let epoch = 0;
+    while (epoch < epochs) {
+        let error = matmul(x, weights) + intercept - y;
+        let gradient = matmul(xt, error) / rows + weights * ridge;
+        weights = weights - gradient * learning_rate;
+        intercept = intercept - learning_rate * mean(error);
+        epoch = epoch + 1;
+    }
+    let prediction = to_cpu(matmul(x, weights) + intercept);
+    let variance = mean((prediction - to_cpu(y)) * (prediction - to_cpu(y)));
+    let model = {
+        schema: 1, kind: kind, task: "regression",
+        parameters: {weights: weights, intercept: intercept},
+        parameter_uncertainty: {residual_variance: variance}, classes: [],
+        training: {epochs: epochs, learning_rate: learning_rate, ridge: ridge},
+        device: "metal", compute_dtype: dtype(x), version: "2.1.0"
+    };
+    return fit_result(model, prediction, constant_tensor(rows, variance),
+        {loss: variance, rows: rows}, "resident_batch_gradient_descent",
+        ["independent residuals", "finite second moments"]);
+}
+
+fn fit_logistic_binary(data, options) {
+    let invalid = validate_xy(data);
+    if (invalid != null) { return ml_error("invalid_data", invalid, "data"); }
+    let x = data.x;
+    let y = data.y;
+    let dims = shape(x);
+    let rows = dims[0];
+    let columns = dims[1];
+    let learning_rate = option(options, "learning_rate", 0.1);
+    let epochs = option(options, "epochs", 500);
+    let ridge = option(options, "ridge", 0.0);
+    if (learning_rate <= 0) { return ml_error("invalid_option", "learning_rate must be positive", "learning_rate"); }
+    if (epochs < 1) { return ml_error("invalid_option", "epochs must be positive", "epochs"); }
+    if (ridge < 0) { return ml_error("invalid_option", "ridge must be nonnegative", "ridge"); }
+    let row = 0;
+    while (row < rows) {
+        if (y[row] != 0) {
+            if (y[row] != 1) { return ml_error("invalid_target", "binary targets must be zero or one", "data.y"); }
+        }
+        row = row + 1;
+    }
+
+    let weights = zeros_array(columns);
+    let intercept = 0.0;
+    let epoch = 0;
+    while (epoch < epochs) {
+        let gradient = zeros_array(columns);
+        let intercept_gradient = 0.0;
+        row = 0;
+        while (row < rows) {
+            let score = intercept;
+            let column = 0;
+            while (column < columns) {
+                score = score + weights[column] * x[row, column];
+                column = column + 1;
+            }
+            let error = sigmoid(score) - y[row];
+            column = 0;
+            while (column < columns) {
+                gradient[column] = gradient[column] + error * x[row, column];
+                column = column + 1;
+            }
+            intercept_gradient = intercept_gradient + error;
+            row = row + 1;
+        }
+        let column = 0;
+        while (column < columns) {
+            weights[column] = weights[column] - learning_rate *
+                (gradient[column] / rows + ridge * weights[column]);
+            column = column + 1;
+        }
+        intercept = intercept - learning_rate * intercept_gradient / rows;
+        epoch = epoch + 1;
+    }
+
+    let scores = linear_values(x, weights, intercept);
+    let probabilities = array_new(0);
+    let variances = array_new(0);
+    let mistakes = 0;
+    row = 0;
+    while (row < rows) {
+        let probability = sigmoid(scores[row]);
+        array_push(probabilities, probability);
+        array_push(variances, probability * (1.0 - probability));
+        let label = 0;
+        if (probability >= 0.5) { label = 1; }
+        if (label != y[row]) { mistakes = mistakes + 1; }
+        row = row + 1;
+    }
+    let prediction = tensor(probabilities);
+    let uncertainty = tensor(variances);
+    let model = {
+        schema: 1,
+        kind: "logistic_binary",
+        task: "classification",
+        parameters: {weights: tensor(weights), intercept: intercept},
+        parameter_uncertainty: {method: "bernoulli_predictive_variance"},
+        classes: [0, 1],
+        training: {epochs: epochs, learning_rate: learning_rate, ridge: ridge},
+        device: "cpu",
+        compute_dtype: dtype(x),
+        version: "2.1.0"
+    };
+    return fit_result(model, prediction, uncertainty,
+        {error_rate: mistakes / rows, rows: rows}, "batch_gradient_descent",
+        ["independent rows", "Bernoulli conditional target"]);
+}
+
+fn fit_logistic_binary_metal(data, options) {
+    let invalid = validate_xy(data);
+    if (invalid != null) { return ml_error("invalid_data", invalid, "data"); }
+    let x = data.x;
+    let y = data.y;
+    let rows = shape(x)[0];
+    let columns = shape(x)[1];
+    let learning_rate = option(options, "learning_rate", 0.1);
+    let epochs = option(options, "epochs", 500);
+    let ridge = option(options, "ridge", 0.0);
+    let row = 0;
+    while (row < rows) {
+        if (y[row] != 0) {
+            if (y[row] != 1) { return ml_error("invalid_target", "binary targets must be zero or one", "data.y"); }
+        }
+        row = row + 1;
+    }
+    let token = options.gpu_token;
+    let weights = metal_tensor(tensor(zeros_array(columns)), dtype(x), token);
+    let xt = metal_tensor(transpose(to_cpu(x)), dtype(x), token);
+    let intercept = 0.0;
+    let epoch = 0;
+    while (epoch < epochs) {
+        let scores = matmul(x, weights) + intercept;
+        let exponentials = exp(scores);
+        let probabilities = exponentials / (exponentials + 1.0);
+        let error = probabilities - y;
+        let gradient = matmul(xt, error) / rows + weights * ridge;
+        weights = weights - gradient * learning_rate;
+        intercept = intercept - learning_rate * mean(error);
+        epoch = epoch + 1;
+    }
+    let scores = matmul(x, weights) + intercept;
+    let exponentials = exp(scores);
+    let probabilities = exponentials / (exponentials + 1.0);
+    let variance = probabilities * (probabilities * -1.0 + 1.0);
+    let prediction = to_cpu(probabilities);
+    let uncertainty = to_cpu(variance);
+    let model = {
+        schema: 1, kind: "logistic_binary", task: "classification",
+        parameters: {weights: weights, intercept: intercept},
+        parameter_uncertainty: {method: "bernoulli_predictive_variance"}, classes: [0, 1],
+        training: {epochs: epochs, learning_rate: learning_rate, ridge: ridge},
+        device: "metal", compute_dtype: dtype(x), version: "2.1.0"
+    };
+    return fit_result(model, prediction, uncertainty, {rows: rows},
+        "resident_batch_gradient_descent", ["independent rows", "Bernoulli conditional target"]);
+}
+
+fn fit_logistic_multiclass(data, options) {
+    let invalid = validate_xy(data);
+    if (invalid != null) { return ml_error("invalid_data", invalid, "data"); }
+    let class_count = option(options, "class_count", 0);
+    if (class_count < 2) { return ml_error("invalid_option", "class_count must be at least two", "class_count"); }
+    let x = data.x;
+    let y = data.y;
+    let rows = shape(x)[0];
+    let columns = shape(x)[1];
+    let models = array_new(0);
+    let class_index = 0;
+    while (class_index < class_count) {
+        let binary = array_new(0);
+        let row = 0;
+        while (row < rows) {
+            if (y[row] < 0) { return ml_error("invalid_target", "class targets are out of range", "data.y"); }
+            if (y[row] >= class_count) { return ml_error("invalid_target", "class targets are out of range", "data.y"); }
+            let target = 0.0;
+            if (y[row] == class_index) { target = 1.0; }
+            array_push(binary, target);
+            row = row + 1;
+        }
+        let binary_tensor = tensor(binary);
+        if (device(x) == "metal") {
+            binary_tensor = metal_tensor(binary_tensor, dtype(x), options.gpu_token);
+        }
+        let fitted = null;
+        if (device(x) == "metal") {
+            fitted = fit_logistic_binary_metal({x: x, y: binary_tensor}, options);
+        } else {
+            fitted = fit_logistic_binary({x: x, y: binary_tensor}, options);
+        }
+        if (!fitted[0]) { return fitted; }
+        array_push(models, fitted[1].model.parameters);
+        class_index = class_index + 1;
+    }
+
+    let weight_rows = array_new(0);
+    let intercepts = array_new(0);
+    class_index = 0;
+    while (class_index < class_count) {
+        let weights = models[class_index].weights;
+        let row_weights = array_new(0);
+        let column = 0;
+        while (column < columns) {
+            array_push(row_weights, weights[column]);
+            column = column + 1;
+        }
+        array_push(weight_rows, row_weights);
+        array_push(intercepts, models[class_index].intercept);
+        class_index = class_index + 1;
+    }
+    let model = {
+        schema: 1,
+        kind: "logistic_multiclass",
+        task: "classification",
+        parameters: {weights: tensor(weight_rows), intercepts: tensor(intercepts)},
+        parameter_uncertainty: {method: "categorical_predictive_variance"},
+        classes: class_count,
+        training: {epochs: option(options, "epochs", 500), learning_rate: option(options, "learning_rate", 0.1)},
+        device: "cpu",
+        compute_dtype: dtype(x),
+        version: "2.1.0"
+    };
+    let predicted = predict_multiclass(model, x);
+    return fit_result(model, predicted.prediction, predicted.uncertainty,
+        {rows: rows}, "one_vs_rest_logistic",
+        ["mutually exclusive classes", "independent rows"]);
+}
+
+fn predict_multiclass(model, x) {
+    let dims = shape(x);
+    let rows = dims[0];
+    let columns = dims[1];
+    let class_count = model.classes;
+    let probabilities = array_new(0);
+    let uncertainty = array_new(0);
+    let row = 0;
+    while (row < rows) {
+        let raw = array_new(0);
+        let total = 0.0;
+        let class_index = 0;
+        while (class_index < class_count) {
+            let score = model.parameters.intercepts[class_index];
+            let column = 0;
+            while (column < columns) {
+                score = score + model.parameters.weights[class_index, column] * x[row, column];
+                column = column + 1;
+            }
+            let p = sigmoid(score);
+            array_push(raw, p);
+            total = total + p;
+            class_index = class_index + 1;
+        }
+        let normalized = array_new(0);
+        let variances = array_new(0);
+        class_index = 0;
+        while (class_index < class_count) {
+            let p = raw[class_index] / total;
+            array_push(normalized, p);
+            array_push(variances, p * (1.0 - p));
+            class_index = class_index + 1;
+        }
+        array_push(probabilities, normalized);
+        array_push(uncertainty, variances);
+        row = row + 1;
+    }
+    return {prediction: tensor(probabilities), uncertainty: tensor(uncertainty)};
+}
+
+fn fit_neural_dense(data, options) {
+    let invalid = validate_xy(data);
+    if (invalid != null) { return ml_error("invalid_data", invalid, "data"); }
+    let x = data.x;
+    let y = data.y;
+    let rows = shape(x)[0];
+    let columns = shape(x)[1];
+    let hidden = option(options, "hidden", 8);
+    let epochs = option(options, "epochs", 300);
+    let learning_rate = option(options, "learning_rate", 0.03);
+    let task = option(options, "task", "regression");
+    if (hidden < 1) { return ml_error("invalid_option", "hidden must be positive", "hidden"); }
+    if (epochs < 1) { return ml_error("invalid_option", "epochs must be positive", "epochs"); }
+    if (learning_rate <= 0) { return ml_error("invalid_option", "learning_rate must be positive", "learning_rate"); }
+    if (task != "regression") {
+        if (task != "binary") { return ml_error("invalid_option", "task must be regression or binary", "task"); }
+    }
+    if (task == "binary") {
+        let target_index = 0;
+        while (target_index < rows) {
+            if (y[target_index] != 0) {
+                if (y[target_index] != 1) { return ml_error("invalid_target", "binary targets must be zero or one", "data.y"); }
+            }
+            target_index = target_index + 1;
+        }
+    }
+    let w1 = array_new(0);
+    let feature = 0;
+    while (feature < columns) {
+        let row_weights = array_new(0);
+        let unit = 0;
+        while (unit < hidden) {
+            array_push(row_weights, (mod_number((feature + 1) * (unit + 3), 11) - 5) * 0.02);
+            unit = unit + 1;
+        }
+        array_push(w1, row_weights);
+        feature = feature + 1;
+    }
+    let b1 = zeros_array(hidden);
+    let w2 = array_new(0);
+    let unit = 0;
+    while (unit < hidden) {
+        array_push(w2, (mod_number(unit + 5, 7) - 3) * 0.03);
+        unit = unit + 1;
+    }
+    let b2 = 0.0;
+    let epoch = 0;
+    while (epoch < epochs) {
+        let gw1 = array_new(0);
+        feature = 0;
+        while (feature < columns) {
+            array_push(gw1, zeros_array(hidden));
+            feature = feature + 1;
+        }
+        let gb1 = zeros_array(hidden);
+        let gw2 = zeros_array(hidden);
+        let gb2 = 0.0;
+        let row = 0;
+        while (row < rows) {
+            let hidden_values = array_new(0);
+            unit = 0;
+            while (unit < hidden) {
+                let activation = b1[unit];
+                feature = 0;
+                while (feature < columns) {
+                    activation = activation + x[row, feature] * w1[feature][unit];
+                    feature = feature + 1;
+                }
+                if (activation < 0) { activation = 0.0; }
+                array_push(hidden_values, activation);
+                unit = unit + 1;
+            }
+            let output = b2;
+            unit = 0;
+            while (unit < hidden) {
+                output = output + hidden_values[unit] * w2[unit];
+                unit = unit + 1;
+            }
+            if (task == "binary") { output = sigmoid(output); }
+            let delta = output - y[row];
+            gb2 = gb2 + delta;
+            unit = 0;
+            while (unit < hidden) {
+                gw2[unit] = gw2[unit] + delta * hidden_values[unit];
+                let hidden_delta = delta * w2[unit];
+                if (hidden_values[unit] == 0) { hidden_delta = 0.0; }
+                gb1[unit] = gb1[unit] + hidden_delta;
+                feature = 0;
+                while (feature < columns) {
+                    let gradient_row = gw1[feature];
+                    gradient_row[unit] = gradient_row[unit] + hidden_delta * x[row, feature];
+                    feature = feature + 1;
+                }
+                unit = unit + 1;
+            }
+            row = row + 1;
+        }
+        unit = 0;
+        while (unit < hidden) {
+            w2[unit] = w2[unit] - learning_rate * gw2[unit] / rows;
+            b1[unit] = b1[unit] - learning_rate * gb1[unit] / rows;
+            feature = 0;
+            while (feature < columns) {
+                let weight_row = w1[feature];
+                let gradient_row = gw1[feature];
+                weight_row[unit] = weight_row[unit] - learning_rate * gradient_row[unit] / rows;
+                feature = feature + 1;
+            }
+            unit = unit + 1;
+        }
+        b2 = b2 - learning_rate * gb2 / rows;
+        epoch = epoch + 1;
+    }
+    let model = {
+        schema: 1, kind: "neural_dense", task: task,
+        parameters: {w1: tensor(w1), b1: tensor(b1), w2: tensor(w2), b2: b2, hidden: hidden},
+        parameter_uncertainty: {method: "predictive_variance"}, classes: [],
+        training: {epochs: epochs, learning_rate: learning_rate}, device: "cpu",
+        compute_dtype: dtype(x), version: "2.1.0"
+    };
+    let predicted = predict_neural(model, x);
+    let residual_variance = 0.0;
+    let row = 0;
+    while (row < rows) {
+        let difference = predicted[row] - y[row];
+        residual_variance = residual_variance + difference * difference;
+        row = row + 1;
+    }
+    residual_variance = residual_variance / rows;
+    model["parameter_uncertainty"] = {residual_variance: residual_variance};
+    let uncertainties = constant_tensor(rows, residual_variance);
+    if (task == "binary") {
+        let variance_values = array_new(0);
+        row = 0;
+        while (row < rows) {
+            array_push(variance_values, predicted[row] * (1.0 - predicted[row]));
+            row = row + 1;
+        }
+        uncertainties = tensor(variance_values);
+    }
+    return fit_result(model, tensor(predicted), uncertainties,
+        {loss: residual_variance, rows: rows}, "dense_relu_backpropagation",
+        ["one hidden dense layer", "full batch optimization"]);
+}
+
+fn neural_metal_initial(columns, hidden, compute_dtype, token) {
+    let initial_w1 = array_new(0);
+    let feature = 0;
+    while (feature < columns) {
+        let row_weights = array_new(0);
+        let unit = 0;
+        while (unit < hidden) {
+            array_push(row_weights, (mod_number((feature + 1) * (unit + 3), 11) - 5) * 0.02);
+            unit = unit + 1;
+        }
+        array_push(initial_w1, row_weights);
+        feature = feature + 1;
+    }
+    let initial_w2 = array_new(0);
+    let unit = 0;
+    while (unit < hidden) {
+        array_push(initial_w2, (mod_number(unit + 5, 7) - 3) * 0.03);
+        unit = unit + 1;
+    }
+    return {w1: metal_tensor(tensor(initial_w1), compute_dtype, token),
+            b1: metal_tensor(tensor(zeros_array(hidden)), compute_dtype, token),
+            w2: metal_tensor(tensor(initial_w2), compute_dtype, token), b2: 0.0};
+}
+
+fn neural_metal_train(x, y, state, hidden, epochs, learning_rate, task, token) {
+    let rows = shape(x)[0];
+    let xt = metal_tensor(transpose(to_cpu(x)), dtype(x), token);
+    let w1 = state.w1;
+    let b1 = state.b1;
+    let w2 = state.w2;
+    let b2 = state.b2;
+    let epoch = 0;
+    while (epoch < epochs) {
+        let hidden_values = relu(matmul(x, w1) + b1);
+        let output = matmul(hidden_values, w2) + b2;
+        if (task == "binary") {
+            let exponentials = exp(output);
+            output = exponentials / (exponentials + 1.0);
+        }
+        let delta = output - y;
+        let gw2 = matmul(transpose(hidden_values), delta) / rows;
+        let hidden_delta = reshape(delta, [rows, 1]) * reshape(w2, [1, hidden]);
+        let mask = tensor_compare(hidden_values, hidden_values * 0.0, "gt");
+        hidden_delta = tensor_select(mask, hidden_delta, hidden_delta * 0.0);
+        let gw1 = matmul(xt, hidden_delta) / rows;
+        let gb1 = mean(hidden_delta, 0);
+        w2 = w2 - gw2 * learning_rate;
+        w1 = w1 - gw1 * learning_rate;
+        b1 = b1 - gb1 * learning_rate;
+        b2 = b2 - learning_rate * mean(delta);
+        epoch = epoch + 1;
+    }
+    return {w1: w1, b1: b1, w2: w2, b2: b2};
+}
+
+fn fit_neural_dense_metal(data, options) {
+    let invalid = validate_xy(data);
+    if (invalid != null) { return ml_error("invalid_data", invalid, "data"); }
+    let x = data.x;
+    let y = data.y;
+    let rows = shape(x)[0];
+    let columns = shape(x)[1];
+    let hidden = option(options, "hidden", 8);
+    let epochs = option(options, "epochs", 300);
+    let learning_rate = option(options, "learning_rate", 0.03);
+    let task = option(options, "task", "regression");
+    if (hidden < 1) { return ml_error("invalid_option", "hidden must be positive", "hidden"); }
+    if (epochs < 1) { return ml_error("invalid_option", "epochs must be positive", "epochs"); }
+    if (learning_rate <= 0) { return ml_error("invalid_option", "learning_rate must be positive", "learning_rate"); }
+    if (task != "regression") {
+        if (task != "binary") { return ml_error("invalid_option", "task must be regression or binary", "task"); }
+    }
+    let token = options.gpu_token;
+    let initial = neural_metal_initial(columns, hidden, dtype(x), token);
+    let trained = neural_metal_train(x, y, initial, hidden, epochs, learning_rate, task, token);
+    let hidden_values = relu(matmul(x, trained.w1) + trained.b1);
+    let output = matmul(hidden_values, trained.w2) + trained.b2;
+    if (task == "binary") {
+        let exponentials = exp(output);
+        output = exponentials / (exponentials + 1.0);
+    }
+    let prediction = to_cpu(output);
+    let residual_variance = mean((prediction - to_cpu(y)) * (prediction - to_cpu(y)));
+    let uncertainty = constant_tensor(rows, residual_variance);
+    if (task == "binary") {
+        uncertainty = to_cpu(output * (output * -1.0 + 1.0));
+    }
+    let model = {
+        schema: 1, kind: "neural_dense", task: task,
+        parameters: {w1: trained.w1, b1: trained.b1, w2: trained.w2, b2: trained.b2, hidden: hidden},
+        parameter_uncertainty: {residual_variance: residual_variance}, classes: [],
+        training: {epochs: epochs, learning_rate: learning_rate}, device: "metal",
+        compute_dtype: dtype(x), version: "2.1.0"
+    };
+    return fit_result(model, prediction, uncertainty, {loss: residual_variance, rows: rows},
+        "resident_dense_gradient_descent", ["dense ReLU hidden layer"]);
+}
+
+fn predict_neural(model, x) {
+    let rows = shape(x)[0];
+    let columns = shape(x)[1];
+    let hidden = model.parameters.hidden;
+    let values = array_new(0);
+    let row = 0;
+    while (row < rows) {
+        let output = model.parameters.b2;
+        let unit = 0;
+        while (unit < hidden) {
+            let activation = model.parameters.b1[unit];
+            let feature = 0;
+            while (feature < columns) {
+                activation = activation + x[row, feature] * model.parameters.w1[feature, unit];
+                feature = feature + 1;
+            }
+            if (activation < 0) { activation = 0.0; }
+            output = output + activation * model.parameters.w2[unit];
+            unit = unit + 1;
+        }
+        if (model.task == "binary") { output = sigmoid(output); }
+        array_push(values, output);
+        row = row + 1;
+    }
+    return values;
+}
+
+fn matrix_zeros(rows, columns) {
+    let result = array_new(0);
+    let row = 0;
+    while (row < rows) {
+        array_push(result, zeros_array(columns));
+        row = row + 1;
+    }
+    return result;
+}
+
+fn matrix_identity(size) {
+    let result = matrix_zeros(size, size);
+    let index = 0;
+    while (index < size) {
+        let row = result[index];
+        row[index] = 1.0;
+        index = index + 1;
+    }
+    return result;
+}
+
+fn matrix_from_tensor(value) {
+    let dims = shape(value);
+    let result = matrix_zeros(dims[0], dims[1]);
+    let row = 0;
+    while (row < dims[0]) {
+        let output_row = result[row];
+        let column = 0;
+        while (column < dims[1]) {
+            output_row[column] = value[row, column];
+            column = column + 1;
+        }
+        row = row + 1;
+    }
+    return result;
+}
+
+fn vector_from_tensor(value) {
+    let count = shape(value)[0];
+    let result = zeros_array(count);
+    let index = 0;
+    while (index < count) {
+        result[index] = value[index];
+        index = index + 1;
+    }
+    return result;
+}
+
+fn matrix_transpose(value) {
+    let rows = array_length(value);
+    let columns = array_length(value[0]);
+    let result = matrix_zeros(columns, rows);
+    let row = 0;
+    while (row < rows) {
+        let column = 0;
+        while (column < columns) {
+            let output_row = result[column];
+            output_row[row] = value[row][column];
+            column = column + 1;
+        }
+        row = row + 1;
+    }
+    return result;
+}
+
+fn matrix_add(left, right) {
+    let rows = array_length(left);
+    let columns = array_length(left[0]);
+    let result = matrix_zeros(rows, columns);
+    let row = 0;
+    while (row < rows) {
+        let output_row = result[row];
+        let column = 0;
+        while (column < columns) {
+            output_row[column] = left[row][column] + right[row][column];
+            column = column + 1;
+        }
+        row = row + 1;
+    }
+    return result;
+}
+
+fn matrix_subtract(left, right) {
+    let rows = array_length(left);
+    let columns = array_length(left[0]);
+    let result = matrix_zeros(rows, columns);
+    let row = 0;
+    while (row < rows) {
+        let output_row = result[row];
+        let column = 0;
+        while (column < columns) {
+            output_row[column] = left[row][column] - right[row][column];
+            column = column + 1;
+        }
+        row = row + 1;
+    }
+    return result;
+}
+
+fn matrix_multiply(left, right) {
+    let rows = array_length(left);
+    let inner = array_length(right);
+    let columns = array_length(right[0]);
+    let result = matrix_zeros(rows, columns);
+    let row = 0;
+    while (row < rows) {
+        let output_row = result[row];
+        let column = 0;
+        while (column < columns) {
+            let total = 0.0;
+            let index = 0;
+            while (index < inner) {
+                total = total + left[row][index] * right[index][column];
+                index = index + 1;
+            }
+            output_row[column] = total;
+            column = column + 1;
+        }
+        row = row + 1;
+    }
+    return result;
+}
+
+fn matrix_vector_multiply(matrix, vector) {
+    let rows = array_length(matrix);
+    let columns = array_length(vector);
+    let result = zeros_array(rows);
+    let row = 0;
+    while (row < rows) {
+        let total = 0.0;
+        let column = 0;
+        while (column < columns) {
+            total = total + matrix[row][column] * vector[column];
+            column = column + 1;
+        }
+        result[row] = total;
+        row = row + 1;
+    }
+    return result;
+}
+
+fn vector_add(left, right) {
+    let result = zeros_array(array_length(left));
+    let index = 0;
+    while (index < array_length(left)) {
+        result[index] = left[index] + right[index];
+        index = index + 1;
+    }
+    return result;
+}
+
+fn vector_subtract(left, right) {
+    let result = zeros_array(array_length(left));
+    let index = 0;
+    while (index < array_length(left)) {
+        result[index] = left[index] - right[index];
+        index = index + 1;
+    }
+    return result;
+}
+
+fn matrix_inverse(value) {
+    let size = array_length(value);
+    let work = matrix_zeros(size, size);
+    let inverse = matrix_identity(size);
+    let row = 0;
+    while (row < size) {
+        let work_row = work[row];
+        let column = 0;
+        while (column < size) {
+            work_row[column] = value[row][column];
+            column = column + 1;
+        }
+        row = row + 1;
+    }
+    let pivot_index = 0;
+    while (pivot_index < size) {
+        let best = pivot_index;
+        let candidate = pivot_index + 1;
+        while (candidate < size) {
+            if (abs_number(work[candidate][pivot_index]) > abs_number(work[best][pivot_index])) {
+                best = candidate;
+            }
+            candidate = candidate + 1;
+        }
+        if (abs_number(work[best][pivot_index]) < 0.000000000001) {
+            return result_error({code: "singular_matrix", message: "matrix is singular", field: "covariance"});
+        }
+        if (best != pivot_index) {
+            let saved_work = work[pivot_index];
+            work[pivot_index] = work[best];
+            work[best] = saved_work;
+            let saved_inverse = inverse[pivot_index];
+            inverse[pivot_index] = inverse[best];
+            inverse[best] = saved_inverse;
+        }
+        let work_row = work[pivot_index];
+        let inverse_row = inverse[pivot_index];
+        let pivot = work_row[pivot_index];
+        let column = 0;
+        while (column < size) {
+            work_row[column] = work_row[column] / pivot;
+            inverse_row[column] = inverse_row[column] / pivot;
+            column = column + 1;
+        }
+        row = 0;
+        while (row < size) {
+            if (row != pivot_index) {
+                let factor = work[row][pivot_index];
+                let target_work = work[row];
+                let target_inverse = inverse[row];
+                column = 0;
+                while (column < size) {
+                    target_work[column] = target_work[column] - factor * work_row[column];
+                    target_inverse[column] = target_inverse[column] - factor * inverse_row[column];
+                    column = column + 1;
+                }
+            }
+            row = row + 1;
+        }
+        pivot_index = pivot_index + 1;
+    }
+    return result_ok(inverse);
+}
+
+fn observation_row(observations, row) {
+    let columns = shape(observations)[1];
+    let result = zeros_array(columns);
+    let column = 0;
+    while (column < columns) {
+        result[column] = observations[row, column];
+        column = column + 1;
+    }
+    return result;
+}
+
+fn kalman_filter_multivariate(observations, parameters) {
+    let f = matrix_from_tensor(parameters.f);
+    let h = matrix_from_tensor(parameters.h);
+    let q = matrix_from_tensor(parameters.q);
+    let r = matrix_from_tensor(parameters.r);
+    let current_state = vector_from_tensor(parameters.x0);
+    let covariance = matrix_from_tensor(parameters.p0);
+    let identity = matrix_identity(array_length(current_state));
+    let estimates = array_new(0);
+    let covariances = array_new(0);
+    let predicted_estimates = array_new(0);
+    let predicted_covariances = array_new(0);
+    let row = 0;
+    while (row < shape(observations)[0]) {
+        let prior_state = matrix_vector_multiply(f, current_state);
+        let prior_covariance = matrix_add(matrix_multiply(matrix_multiply(f, covariance), matrix_transpose(f)), q);
+        let innovation = vector_subtract(observation_row(observations, row), matrix_vector_multiply(h, prior_state));
+        let innovation_covariance = matrix_add(matrix_multiply(matrix_multiply(h, prior_covariance), matrix_transpose(h)), r);
+        let inverse_result = matrix_inverse(innovation_covariance);
+        if (!inverse_result[0]) { return inverse_result; }
+        let gain = matrix_multiply(matrix_multiply(prior_covariance, matrix_transpose(h)), inverse_result[1]);
+        current_state = vector_add(prior_state, matrix_vector_multiply(gain, innovation));
+        covariance = matrix_multiply(matrix_subtract(identity, matrix_multiply(gain, h)), prior_covariance);
+        array_push(predicted_estimates, prior_state);
+        array_push(predicted_covariances, prior_covariance);
+        array_push(estimates, current_state);
+        array_push(covariances, covariance);
+        row = row + 1;
+    }
+    return result_ok({estimates: estimates, variances: covariances,
+        predicted_estimates: predicted_estimates, predicted_variances: predicted_covariances});
+}
+
+fn kalman_filter_values(observations, parameters) {
+    let count = vector_length(observations);
+    let estimates = array_new(0);
+    let variances = array_new(0);
+    let predicted_estimates = array_new(0);
+    let predicted_variances = array_new(0);
+    let current_state = parameters.x0;
+    let variance = parameters.p0;
+    let i = 0;
+    while (i < count) {
+        let prior_state = parameters.f * current_state;
+        let prior_variance = parameters.f * variance * parameters.f + parameters.q;
+        let innovation_variance = parameters.h * prior_variance * parameters.h + parameters.r;
+        let gain = prior_variance * parameters.h / innovation_variance;
+        current_state = prior_state + gain * (observations[i] - parameters.h * prior_state);
+        variance = (1.0 - gain * parameters.h) * prior_variance;
+        array_push(predicted_estimates, prior_state);
+        array_push(predicted_variances, prior_variance);
+        array_push(estimates, current_state);
+        array_push(variances, variance);
+        i = i + 1;
+    }
+    return {estimates: estimates, variances: variances,
+        predicted_estimates: predicted_estimates, predicted_variances: predicted_variances};
+}
+
+fn fit_kalman(data, options) {
+    if (type_of(data) != "map") { return ml_error("invalid_data", "data must be a map", "data"); }
+    if (!map_has(data, "observations")) { return ml_error("invalid_data", "observations are required", "data.observations"); }
+    if (type_of(data.observations) != "tensor") { return ml_error("invalid_data", "observations must be a tensor", "data.observations"); }
+    if (ndim(data.observations) == 2) { return fit_kalman_multivariate(data, options); }
+    if (vector_length(data.observations) < 1) { return ml_error("invalid_data", "observations must be a nonempty vector", "data.observations"); }
+    let parameters = {
+        f: option(options, "f", 1.0), h: option(options, "h", 1.0),
+        q: option(options, "q", 0.0001), r: option(options, "r", 0.01),
+        x0: option(options, "x0", data.observations[0]), p0: option(options, "p0", 1.0),
+        multivariate: false
+    };
+    if (parameters.q < 0) { return ml_error("invalid_option", "q must be nonnegative", "q"); }
+    if (parameters.r <= 0) { return ml_error("invalid_option", "r must be positive", "r"); }
+    if (parameters.p0 < 0) { return ml_error("invalid_option", "p0 must be nonnegative", "p0"); }
+    if (!finite(parameters.f)) { return ml_error("invalid_option", "f must be finite", "f"); }
+    if (!finite(parameters.h)) { return ml_error("invalid_option", "h must be finite", "h"); }
+    let filtered = kalman_filter_values(data.observations, parameters);
+    let model = {schema: 1, kind: "kalman", task: "filtering", parameters: parameters,
+        parameter_uncertainty: {method: "state_covariance"}, classes: [], training: {rows: vector_length(data.observations)},
+        device: "cpu", compute_dtype: dtype(data.observations), version: "2.1.0"};
+    return fit_result(model, tensor(filtered.estimates), tensor(filtered.variances),
+        {innovation_variance: parameters.r}, "linear_gaussian_filter",
+        ["scalar linear dynamics", "Gaussian process and observation noise"]);
+}
+
+fn require_tensor_option(options, name) {
+    if (!map_has(options, name)) { return false; }
+    return type_of(options[name]) == "tensor";
+}
+
+fn fit_kalman_multivariate(data, options) {
+    let names = ["f", "h", "q", "r", "x0", "p0"];
+    let name_index = 0;
+    while (name_index < array_length(names)) {
+        if (!require_tensor_option(options, names[name_index])) {
+            return ml_error("invalid_option", "multivariate Kalman parameters must be tensors", names[name_index]);
+        }
+        name_index = name_index + 1;
+    }
+    let observations = data.observations;
+    let observation_dims = shape(observations);
+    if (observation_dims[0] < 1) { return ml_error("invalid_data", "observations must be nonempty", "data.observations"); }
+    let state_count = shape(options.x0)[0];
+    let observation_count = observation_dims[1];
+    if (ndim(options.x0) != 1) { return ml_error("invalid_option", "x0 must be a vector", "x0"); }
+    if (shape(options.f)[0] != state_count) { return ml_error("invalid_option", "f must be state by state", "f"); }
+    if (shape(options.f)[1] != state_count) { return ml_error("invalid_option", "f must be state by state", "f"); }
+    if (shape(options.q)[0] != state_count) { return ml_error("invalid_option", "q must be state by state", "q"); }
+    if (shape(options.q)[1] != state_count) { return ml_error("invalid_option", "q must be state by state", "q"); }
+    if (shape(options.p0)[0] != state_count) { return ml_error("invalid_option", "p0 must be state by state", "p0"); }
+    if (shape(options.p0)[1] != state_count) { return ml_error("invalid_option", "p0 must be state by state", "p0"); }
+    if (shape(options.h)[0] != observation_count) { return ml_error("invalid_option", "h rows must match observations", "h"); }
+    if (shape(options.h)[1] != state_count) { return ml_error("invalid_option", "h columns must match state", "h"); }
+    if (shape(options.r)[0] != observation_count) { return ml_error("invalid_option", "r must be observation by observation", "r"); }
+    if (shape(options.r)[1] != observation_count) { return ml_error("invalid_option", "r must be observation by observation", "r"); }
+    let parameters = {f: options.f, h: options.h, q: options.q, r: options.r,
+        x0: options.x0, p0: options.p0, multivariate: true};
+    let filtered_result = kalman_filter_multivariate(observations, parameters);
+    if (!filtered_result[0]) { return filtered_result; }
+    let filtered = filtered_result[1];
+    let model = {schema: 1, kind: "kalman", task: "filtering", parameters: parameters,
+        parameter_uncertainty: {method: "state_covariance"}, classes: [],
+        training: {rows: observation_dims[0], state_dimension: state_count, observation_dimension: observation_count},
+        device: "cpu", compute_dtype: dtype(observations), version: "2.1.0"};
+    return fit_result(model, tensor(filtered.estimates), tensor(filtered.variances),
+        {rows: observation_dims[0]}, "multivariate_linear_gaussian_filter",
+        ["linear dynamics", "Gaussian process and observation noise"]);
+}
+
+fn smooth_kalman(model, observations) {
+    let filtered = kalman_filter_values(observations, model.parameters);
+    let estimates = filtered.estimates;
+    let variances = filtered.variances;
+    let index = array_length(estimates) - 2;
+    while (index >= 0) {
+        let predicted_variance = filtered.predicted_variances[index + 1];
+        let gain = 0.0;
+        if (predicted_variance > 0) {
+            gain = variances[index] * model.parameters.f / predicted_variance;
+        }
+        estimates[index] = estimates[index] + gain *
+            (estimates[index + 1] - filtered.predicted_estimates[index + 1]);
+        variances[index] = variances[index] + gain * gain *
+            (variances[index + 1] - predicted_variance);
+        index = index - 1;
+    }
+    return {prediction: tensor(estimates), uncertainty: tensor(variances)};
+}
+
+fn smooth_kalman_multivariate(model, observations) {
+    let filtered_result = kalman_filter_multivariate(observations, model.parameters);
+    if (!filtered_result[0]) { return filtered_result; }
+    let filtered = filtered_result[1];
+    let estimates = filtered.estimates;
+    let covariances = filtered.variances;
+    let f = matrix_from_tensor(model.parameters.f);
+    let index = array_length(estimates) - 2;
+    while (index >= 0) {
+        let inverse_result = matrix_inverse(filtered.predicted_variances[index + 1]);
+        if (!inverse_result[0]) { return inverse_result; }
+        let gain = matrix_multiply(matrix_multiply(covariances[index], matrix_transpose(f)), inverse_result[1]);
+        estimates[index] = vector_add(estimates[index], matrix_vector_multiply(gain,
+            vector_subtract(estimates[index + 1], filtered.predicted_estimates[index + 1])));
+        covariances[index] = matrix_add(covariances[index], matrix_multiply(
+            matrix_multiply(gain, matrix_subtract(covariances[index + 1], filtered.predicted_variances[index + 1])),
+            matrix_transpose(gain)));
+        index = index - 1;
+    }
+    return result_ok({prediction: tensor(estimates), uncertainty: tensor(covariances)});
+}
+
+fn fit_hmm_categorical(data, options) {
+    if (type_of(data) != "map") { return ml_error("invalid_data", "data must be a map", "data"); }
+    if (!map_has(data, "observations")) { return ml_error("invalid_data", "observations are required", "data.observations"); }
+    let observations = data.observations;
+    let count = vector_length(observations);
+    let states = option(options, "state_count", 2);
+    let symbols = option(options, "symbol_count", 2);
+    if (count < 1) { return ml_error("invalid_data", "observations must be nonempty", "data.observations"); }
+    if (states < 2) { return ml_error("invalid_option", "state_count must be at least two", "state_count"); }
+    if (symbols < 2) { return ml_error("invalid_option", "symbol_count must be at least two", "symbol_count"); }
+    let observation_index = 0;
+    while (observation_index < count) {
+        let symbol_value = observations[observation_index];
+        if (symbol_value < 0) { return ml_error("invalid_target", "categorical observations are out of range", "data.observations"); }
+        if (symbol_value >= symbols) { return ml_error("invalid_target", "categorical observations are out of range", "data.observations"); }
+        if (floor(symbol_value) != symbol_value) { return ml_error("invalid_target", "categorical observations must be integers", "data.observations"); }
+        observation_index = observation_index + 1;
+    }
+    let transition = array_new(0);
+    let emission = array_new(0);
+    let state_index = 0;
+    while (state_index < states) {
+        let transition_row = array_new(0);
+        let emission_row = array_new(0);
+        let other = 0;
+        while (other < states) {
+            let value = 0.15 / (states - 1);
+            if (state_index == other) { value = 0.85; }
+            array_push(transition_row, value);
+            other = other + 1;
+        }
+        let symbol = 0;
+        while (symbol < symbols) {
+            let value = 0.2 / (symbols - 1);
+            if (symbol == mod_number(state_index, symbols)) { value = 0.8; }
+            array_push(emission_row, value);
+            symbol = symbol + 1;
+        }
+        array_push(transition, transition_row);
+        array_push(emission, emission_row);
+        state_index = state_index + 1;
+    }
+    let initial = array_new(0);
+    state_index = 0;
+    while (state_index < states) { array_push(initial, 1.0 / states); state_index = state_index + 1; }
+    let model = {schema: 1, kind: "hmm_categorical", task: "sequence",
+        parameters: {transition: tensor(transition), emission: tensor(emission), initial: tensor(initial), states: states, symbols: symbols},
+        parameter_uncertainty: {method: "posterior_state_probability"}, classes: states,
+        training: {method: "baum_welch", iterations: option(options, "iterations", 10)}, device: "cpu", compute_dtype: "f64", version: "2.1.0"};
+    model = hmm_train_categorical(model, observations, option(options, "iterations", 10));
+    let decoded = hmm_forward(model, observations);
+    return fit_result(model, decoded.prediction, decoded.uncertainty,
+        {rows: count, iterations: option(options, "iterations", 10)}, "baum_welch_categorical",
+        ["categorical emissions", "first-order Markov states"]);
+}
+
+fn hmm_forward(model, observations) {
+    let count = vector_length(observations);
+    let states = model.parameters.states;
+    let posterior_rows = array_new(0);
+    let uncertainty_rows = array_new(0);
+    let previous_probs = array_new(0);
+    let state_index = 0;
+    while (state_index < states) {
+        array_push(previous_probs, model.parameters["initial"][state_index]);
+        state_index = state_index + 1;
+    }
+    let index = 0;
+    while (index < count) {
+        let current = zeros_array(states);
+        let total = 0.0;
+        state_index = 0;
+        while (state_index < states) {
+            let prior = 0.0;
+            let from = 0;
+            while (from < states) {
+                prior = prior + previous_probs[from] * model.parameters.transition[from, state_index];
+                from = from + 1;
+            }
+            current[state_index] = prior * model.parameters.emission[state_index, observations[index]];
+            total = total + current[state_index];
+            state_index = state_index + 1;
+        }
+        let variance_row = array_new(0);
+        state_index = 0;
+        while (state_index < states) {
+            current[state_index] = current[state_index] / total;
+            array_push(variance_row, current[state_index] * (1.0 - current[state_index]));
+            state_index = state_index + 1;
+        }
+        array_push(posterior_rows, current);
+        array_push(uncertainty_rows, variance_row);
+        previous_probs = current;
+        index = index + 1;
+    }
+    return {prediction: tensor(posterior_rows), uncertainty: tensor(uncertainty_rows)};
+}
+
+fn fit_hmm_gaussian(data, options) {
+    if (type_of(data) != "map") { return ml_error("invalid_data", "data must be a map", "data"); }
+    if (!map_has(data, "observations")) { return ml_error("invalid_data", "observations are required", "data.observations"); }
+    let observations = data.observations;
+    let dims = matrix_shape(observations);
+    if (dims == null) { return ml_error("invalid_data", "Gaussian observations must be rank two", "data.observations"); }
+    if (dims[0] < 1) { return ml_error("invalid_data", "observations must be nonempty", "data.observations"); }
+    let states = option(options, "state_count", 2);
+    if (states < 2) { return ml_error("invalid_option", "state_count must be at least two", "state_count"); }
+    let features = dims[1];
+    let minima = array_new(0);
+    let maxima = array_new(0);
+    let variances = array_new(0);
+    let feature = 0;
+    while (feature < features) {
+        let minimum = observations[0, feature];
+        let maximum = minimum;
+        let average = 0.0;
+        let row = 0;
+        while (row < dims[0]) {
+            if (observations[row, feature] < minimum) { minimum = observations[row, feature]; }
+            if (observations[row, feature] > maximum) { maximum = observations[row, feature]; }
+            average = average + observations[row, feature];
+            row = row + 1;
+        }
+        average = average / dims[0];
+        let variance = 0.0;
+        row = 0;
+        while (row < dims[0]) {
+            let difference = observations[row, feature] - average;
+            variance = variance + difference * difference;
+            row = row + 1;
+        }
+        variance = variance / dims[0];
+        if (variance < 0.00000001) { variance = 0.00000001; }
+        array_push(minima, minimum);
+        array_push(maxima, maximum);
+        array_push(variances, variance);
+        feature = feature + 1;
+    }
+    let means = array_new(0);
+    let covariance = array_new(0);
+    let transition = array_new(0);
+    let initial = array_new(0);
+    let state_index = 0;
+    while (state_index < states) {
+        let mean_row = array_new(0);
+        let variance_row = array_new(0);
+        feature = 0;
+        while (feature < features) {
+            array_push(mean_row, minima[feature] + (maxima[feature] - minima[feature]) * state_index / (states - 1));
+            array_push(variance_row, variances[feature]);
+            feature = feature + 1;
+        }
+        let transition_row = array_new(0);
+        let other = 0;
+        while (other < states) {
+            let value = 0.15 / (states - 1);
+            if (other == state_index) { value = 0.85; }
+            array_push(transition_row, value);
+            other = other + 1;
+        }
+        array_push(means, mean_row);
+        array_push(covariance, variance_row);
+        array_push(transition, transition_row);
+        array_push(initial, 1.0 / states);
+        state_index = state_index + 1;
+    }
+    let model = {schema: 1, kind: "hmm_gaussian", task: "sequence",
+        parameters: {transition: tensor(transition), means: tensor(means), variances: tensor(covariance),
+            initial: tensor(initial), states: states, features: features},
+        parameter_uncertainty: {method: "posterior_state_probability"}, classes: states,
+        training: {method: "baum_welch", iterations: option(options, "iterations", 10)}, device: "cpu",
+        compute_dtype: dtype(observations), version: "2.1.0"};
+    model = hmm_train_gaussian(model, observations, option(options, "iterations", 10));
+    let predicted = hmm_gaussian_forward(model, observations);
+    return fit_result(model, predicted.prediction, predicted.uncertainty,
+        {rows: dims[0], iterations: option(options, "iterations", 10)}, "baum_welch_diagonal_gaussian",
+        ["diagonal Gaussian emissions", "first-order Markov states"]);
+}
+
+fn gaussian_score(model, observations, row, state_index) {
+    let score = 1.0;
+    let feature = 0;
+    while (feature < model.parameters.features) {
+        let variance = model.parameters.variances[state_index, feature];
+        let difference = observations[row, feature] - model.parameters.means[state_index, feature];
+        score = score * exp_number(-0.5 * difference * difference / variance) / sqrt_number(variance);
+        feature = feature + 1;
+    }
+    return score;
+}
+
+fn hmm_gaussian_forward(model, observations) {
+    let count = shape(observations)[0];
+    let states = model.parameters.states;
+    let posterior_rows = array_new(0);
+    let uncertainty_rows = array_new(0);
+    let previous_probs = array_new(0);
+    let state_index = 0;
+    while (state_index < states) {
+        array_push(previous_probs, model.parameters["initial"][state_index]);
+        state_index = state_index + 1;
+    }
+    let row = 0;
+    while (row < count) {
+        let current = zeros_array(states);
+        let total = 0.0;
+        state_index = 0;
+        while (state_index < states) {
+            let prior = 0.0;
+            let from = 0;
+            while (from < states) {
+                prior = prior + previous_probs[from] * model.parameters.transition[from, state_index];
+                from = from + 1;
+            }
+            current[state_index] = prior * gaussian_score(model, observations, row, state_index);
+            total = total + current[state_index];
+            state_index = state_index + 1;
+        }
+        if (total <= 0) { total = 0.000000000001; }
+        let variance_row = array_new(0);
+        state_index = 0;
+        while (state_index < states) {
+            current[state_index] = current[state_index] / total;
+            array_push(variance_row, current[state_index] * (1.0 - current[state_index]));
+            state_index = state_index + 1;
+        }
+        array_push(posterior_rows, current);
+        array_push(uncertainty_rows, variance_row);
+        previous_probs = current;
+        row = row + 1;
+    }
+    return {prediction: tensor(posterior_rows), uncertainty: tensor(uncertainty_rows)};
+}
+
+fn hmm_emission_probability(model, observations, row, state_index) {
+    if (model.kind == "hmm_categorical") {
+        return model.parameters.emission[state_index, observations[row]];
+    }
+    return gaussian_score(model, observations, row, state_index);
+}
+
+fn hmm_expectation(model, observations) {
+    let count = shape(observations)[0];
+    let states = model.parameters.states;
+    let alpha = array_new(0);
+    let scales = array_new(0);
+    let row = 0;
+    while (row < count) {
+        let values = zeros_array(states);
+        let total = 0.0;
+        let state_index = 0;
+        while (state_index < states) {
+            let prior = model.parameters["initial"][state_index];
+            if (row > 0) {
+                prior = 0.0;
+                let from = 0;
+                while (from < states) {
+                    prior = prior + alpha[row - 1][from] * model.parameters.transition[from, state_index];
+                    from = from + 1;
+                }
+            }
+            values[state_index] = prior * hmm_emission_probability(model, observations, row, state_index);
+            total = total + values[state_index];
+            state_index = state_index + 1;
+        }
+        if (total < 0.000000000000001) { total = 0.000000000000001; }
+        state_index = 0;
+        while (state_index < states) {
+            values[state_index] = values[state_index] / total;
+            state_index = state_index + 1;
+        }
+        array_push(alpha, values);
+        array_push(scales, total);
+        row = row + 1;
+    }
+
+    let beta = matrix_zeros(count, states);
+    let last = beta[count - 1];
+    let state_index = 0;
+    while (state_index < states) { last[state_index] = 1.0; state_index = state_index + 1; }
+    row = count - 2;
+    while (row >= 0) {
+        let beta_row = beta[row];
+        state_index = 0;
+        while (state_index < states) {
+            let total = 0.0;
+            let next_state = 0;
+            while (next_state < states) {
+                total = total + model.parameters.transition[state_index, next_state] *
+                    hmm_emission_probability(model, observations, row + 1, next_state) * beta[row + 1][next_state];
+                next_state = next_state + 1;
+            }
+            beta_row[state_index] = total / scales[row + 1];
+            state_index = state_index + 1;
+        }
+        row = row - 1;
+    }
+
+    let gamma = matrix_zeros(count, states);
+    row = 0;
+    while (row < count) {
+        let gamma_row = gamma[row];
+        let total = 0.0;
+        state_index = 0;
+        while (state_index < states) {
+            gamma_row[state_index] = alpha[row][state_index] * beta[row][state_index];
+            total = total + gamma_row[state_index];
+            state_index = state_index + 1;
+        }
+        if (total < 0.000000000000001) { total = 0.000000000000001; }
+        state_index = 0;
+        while (state_index < states) {
+            gamma_row[state_index] = gamma_row[state_index] / total;
+            state_index = state_index + 1;
+        }
+        row = row + 1;
+    }
+
+    let xi = array_new(0);
+    row = 0;
+    while (row < count - 1) {
+        let slice = matrix_zeros(states, states);
+        let total = 0.0;
+        state_index = 0;
+        while (state_index < states) {
+            let slice_row = slice[state_index];
+            let next_state = 0;
+            while (next_state < states) {
+                let value = alpha[row][state_index] * model.parameters.transition[state_index, next_state] *
+                    hmm_emission_probability(model, observations, row + 1, next_state) * beta[row + 1][next_state];
+                slice_row[next_state] = value;
+                total = total + value;
+                next_state = next_state + 1;
+            }
+            state_index = state_index + 1;
+        }
+        if (total < 0.000000000000001) { total = 0.000000000000001; }
+        state_index = 0;
+        while (state_index < states) {
+            let slice_row = slice[state_index];
+            let next_state = 0;
+            while (next_state < states) {
+                slice_row[next_state] = slice_row[next_state] / total;
+                next_state = next_state + 1;
+            }
+            state_index = state_index + 1;
+        }
+        array_push(xi, slice);
+        row = row + 1;
+    }
+    return {gamma: gamma, xi: xi, scales: scales};
+}
+
+fn hmm_update_transition(model, expected) {
+    let states = model.parameters.states;
+    let count = array_length(expected.gamma);
+    let transition = matrix_zeros(states, states);
+    let state_index = 0;
+    while (state_index < states) {
+        let denominator = 0.0;
+        let row = 0;
+        while (row < count - 1) {
+            denominator = denominator + expected.gamma[row][state_index];
+            row = row + 1;
+        }
+        if (denominator < 0.000000000001) { denominator = 0.000000000001; }
+        let transition_row = transition[state_index];
+        let next_state = 0;
+        while (next_state < states) {
+            let numerator = 0.0;
+            row = 0;
+            while (row < count - 1) {
+                numerator = numerator + expected.xi[row][state_index][next_state];
+                row = row + 1;
+            }
+            transition_row[next_state] = numerator / denominator;
+            next_state = next_state + 1;
+        }
+        state_index = state_index + 1;
+    }
+    return transition;
+}
+
+fn hmm_train_categorical(model, observations, iterations) {
+    let iteration = 0;
+    while (iteration < iterations) {
+        let expected = hmm_expectation(model, observations);
+        let states = model.parameters.states;
+        let symbols = model.parameters.symbols;
+        let emission = matrix_zeros(states, symbols);
+        let state_index = 0;
+        while (state_index < states) {
+            let denominator = 0.0;
+            let row = 0;
+            while (row < shape(observations)[0]) {
+                denominator = denominator + expected.gamma[row][state_index];
+                row = row + 1;
+            }
+            if (denominator < 0.000000000001) { denominator = 0.000000000001; }
+            let emission_row = emission[state_index];
+            let symbol = 0;
+            while (symbol < symbols) {
+                let numerator = 0.0;
+                row = 0;
+                while (row < shape(observations)[0]) {
+                    if (observations[row] == symbol) { numerator = numerator + expected.gamma[row][state_index]; }
+                    row = row + 1;
+                }
+                emission_row[symbol] = numerator / denominator;
+                symbol = symbol + 1;
+            }
+            state_index = state_index + 1;
+        }
+        model["parameters"] = {transition: tensor(hmm_update_transition(model, expected)), emission: tensor(emission),
+            initial: tensor(expected.gamma[0]), states: states, symbols: symbols};
+        iteration = iteration + 1;
+    }
+    return model;
+}
+
+fn hmm_train_gaussian(model, observations, iterations) {
+    let iteration = 0;
+    while (iteration < iterations) {
+        let expected = hmm_expectation(model, observations);
+        let states = model.parameters.states;
+        let features = model.parameters.features;
+        let means = matrix_zeros(states, features);
+        let variances = matrix_zeros(states, features);
+        let state_index = 0;
+        while (state_index < states) {
+            let denominator = 0.0;
+            let row = 0;
+            while (row < shape(observations)[0]) {
+                denominator = denominator + expected.gamma[row][state_index];
+                row = row + 1;
+            }
+            if (denominator < 0.000000000001) { denominator = 0.000000000001; }
+            let mean_row = means[state_index];
+            let feature = 0;
+            while (feature < features) {
+                let total = 0.0;
+                row = 0;
+                while (row < shape(observations)[0]) {
+                    total = total + expected.gamma[row][state_index] * observations[row, feature];
+                    row = row + 1;
+                }
+                mean_row[feature] = total / denominator;
+                feature = feature + 1;
+            }
+            let variance_row = variances[state_index];
+            feature = 0;
+            while (feature < features) {
+                let total = 0.0;
+                row = 0;
+                while (row < shape(observations)[0]) {
+                    let difference = observations[row, feature] - mean_row[feature];
+                    total = total + expected.gamma[row][state_index] * difference * difference;
+                    row = row + 1;
+                }
+                variance_row[feature] = total / denominator;
+                if (variance_row[feature] < 0.00000001) { variance_row[feature] = 0.00000001; }
+                feature = feature + 1;
+            }
+            state_index = state_index + 1;
+        }
+        model["parameters"] = {transition: tensor(hmm_update_transition(model, expected)), means: tensor(means),
+            variances: tensor(variances), initial: tensor(expected.gamma[0]), states: states, features: features};
+        iteration = iteration + 1;
+    }
+    return model;
+}
+
+fn hmm_viterbi(model, observations) {
+    let count = shape(observations)[0];
+    let states = model.parameters.states;
+    let scores = matrix_zeros(count, states);
+    let back = matrix_zeros(count, states);
+    let state_index = 0;
+    let first_scores = scores[0];
+    while (state_index < states) {
+        first_scores[state_index] = model.parameters["initial"][state_index] *
+            hmm_emission_probability(model, observations, 0, state_index);
+        state_index = state_index + 1;
+    }
+    let row = 1;
+    while (row < count) {
+        let score_row = scores[row];
+        let back_row = back[row];
+        state_index = 0;
+        let scale = 0.0;
+        while (state_index < states) {
+            let best_from = 0;
+            let best_score = scores[row - 1][0] * model.parameters.transition[0, state_index];
+            let from = 1;
+            while (from < states) {
+                let candidate = scores[row - 1][from] * model.parameters.transition[from, state_index];
+                if (candidate > best_score) { best_score = candidate; best_from = from; }
+                from = from + 1;
+            }
+            score_row[state_index] = best_score * hmm_emission_probability(model, observations, row, state_index);
+            back_row[state_index] = best_from;
+            scale = scale + score_row[state_index];
+            state_index = state_index + 1;
+        }
+        if (scale > 0) {
+            state_index = 0;
+            while (state_index < states) {
+                score_row[state_index] = score_row[state_index] / scale;
+                state_index = state_index + 1;
+            }
+        }
+        row = row + 1;
+    }
+    let path = zeros_array(count);
+    let best_state = 0;
+    state_index = 1;
+    while (state_index < states) {
+        if (scores[count - 1][state_index] > scores[count - 1][best_state]) { best_state = state_index; }
+        state_index = state_index + 1;
+    }
+    path[count - 1] = best_state;
+    row = count - 2;
+    while (row >= 0) {
+        path[row] = back[row + 1][path[row + 1]];
+        row = row - 1;
+    }
+    let expected = hmm_expectation(model, observations);
+    let uncertainty = zeros_array(count);
+    row = 0;
+    while (row < count) {
+        uncertainty[row] = 1.0 - expected.gamma[row][path[row]];
+        row = row + 1;
+    }
+    return {prediction: tensor(path), uncertainty: tensor(uncertainty)};
+}
+
+fn gbt_leaf(residuals, indices) {
+    let total = 0.0;
+    let index = 0;
+    while (index < array_length(indices)) {
+        total = total + residuals[indices[index]];
+        index = index + 1;
+    }
+    return {leaf: true, value: total / array_length(indices)};
+}
+
+fn gbt_best_split(x, residuals, indices, bins) {
+    let columns = shape(x)[1];
+    let best = {valid: false, error: 0.0, feature: 0, threshold: 0.0};
+    let feature = 0;
+    while (feature < columns) {
+        let minimum = x[indices[0], feature];
+        let maximum = minimum;
+        let index = 1;
+        while (index < array_length(indices)) {
+            let value = x[indices[index], feature];
+            if (value < minimum) { minimum = value; }
+            if (value > maximum) { maximum = value; }
+            index = index + 1;
+        }
+        let bin = 1;
+        while (bin < bins) {
+            let threshold = minimum + (maximum - minimum) * bin / bins;
+            let left_count = 0;
+            let right_count = 0;
+            let left_sum = 0.0;
+            let right_sum = 0.0;
+            let left_square = 0.0;
+            let right_square = 0.0;
+            index = 0;
+            while (index < array_length(indices)) {
+                let row = indices[index];
+                let residual = residuals[row];
+                if (x[row, feature] <= threshold) {
+                    left_count = left_count + 1;
+                    left_sum = left_sum + residual;
+                    left_square = left_square + residual * residual;
+                } else {
+                    right_count = right_count + 1;
+                    right_sum = right_sum + residual;
+                    right_square = right_square + residual * residual;
+                }
+                index = index + 1;
+            }
+            if (left_count > 0) {
+                if (right_count > 0) {
+                    let error = left_square - left_sum * left_sum / left_count +
+                        right_square - right_sum * right_sum / right_count;
+                    if (!best.valid) {
+                        best = {valid: true, error: error, feature: feature, threshold: threshold};
+                    } else {
+                        if (error < best.error) {
+                            best = {valid: true, error: error, feature: feature, threshold: threshold};
+                        }
+                    }
+                }
+            }
+            bin = bin + 1;
+        }
+        feature = feature + 1;
+    }
+    return best;
+}
+
+fn gbt_build_tree(x, residuals, indices, level, maximum_depth, bins) {
+    if (level >= maximum_depth) { return gbt_leaf(residuals, indices); }
+    if (array_length(indices) < 2) { return gbt_leaf(residuals, indices); }
+    let split = gbt_best_split(x, residuals, indices, bins);
+    if (!split.valid) { return gbt_leaf(residuals, indices); }
+    let left_indices = array_new(0);
+    let right_indices = array_new(0);
+    let index = 0;
+    while (index < array_length(indices)) {
+        let row = indices[index];
+        if (x[row, split.feature] <= split.threshold) {
+            array_push(left_indices, row);
+        } else {
+            array_push(right_indices, row);
+        }
+        index = index + 1;
+    }
+    return {leaf: false, feature: split.feature, threshold: split.threshold,
+        left: gbt_build_tree(x, residuals, left_indices, level + 1, maximum_depth, bins),
+        right: gbt_build_tree(x, residuals, right_indices, level + 1, maximum_depth, bins)};
+}
+
+fn gbt_tree_value(tree, x, row) {
+    let node = tree;
+    while (!node.leaf) {
+        if (x[row, node.feature] <= node.threshold) { node = node.left; }
+        else { node = node.right; }
+    }
+    return node.value;
+}
+
+fn gbt_values(model, x) {
+    let rows = shape(x)[0];
+    let values = array_new(0);
+    let row = 0;
+    while (row < rows) {
+        let score = model.parameters.base;
+        let tree_index = 0;
+        while (tree_index < array_length(model.parameters.trees)) {
+            let tree = model.parameters.trees[tree_index];
+            score = score + model.parameters.learning_rate * gbt_tree_value(tree, x, row);
+            tree_index = tree_index + 1;
+        }
+        if (model.task == "binary") { score = sigmoid(score); }
+        array_push(values, score);
+        row = row + 1;
+    }
+    return values;
+}
+
+fn fit_gbt(data, options, task) {
+    let invalid = validate_xy(data);
+    if (invalid != null) { return ml_error("invalid_data", invalid, "data"); }
+    let x = data.x;
+    let y = data.y;
+    let rows = shape(x)[0];
+    let columns = shape(x)[1];
+    let tree_count = option(options, "trees", 20);
+    let learning_rate = option(options, "learning_rate", 0.1);
+    let maximum_depth = option(options, "depth", 3);
+    let bins = option(options, "bins", 16);
+    if (tree_count < 1) { return ml_error("invalid_option", "trees must be positive", "trees"); }
+    if (learning_rate <= 0) { return ml_error("invalid_option", "learning_rate must be positive", "learning_rate"); }
+    if (maximum_depth < 1) { return ml_error("invalid_option", "depth must be positive", "depth"); }
+    if (bins < 2) { return ml_error("invalid_option", "bins must be at least two", "bins"); }
+    if (task == "binary") {
+        let target_index = 0;
+        while (target_index < rows) {
+            if (y[target_index] != 0) {
+                if (y[target_index] != 1) { return ml_error("invalid_target", "binary targets must be zero or one", "data.y"); }
+            }
+            target_index = target_index + 1;
+        }
+    }
+    let base = mean(y);
+    if (task == "binary") { base = 0.0; }
+    let scores = array_new(0);
+    let row = 0;
+    while (row < rows) { array_push(scores, base); row = row + 1; }
+    let trees = array_new(0);
+    let tree = 0;
+    while (tree < tree_count) {
+        let residuals = array_new(0);
+        row = 0;
+        while (row < rows) {
+            let target = y[row] - scores[row];
+            if (task == "binary") { target = y[row] - sigmoid(scores[row]); }
+            array_push(residuals, target);
+            row = row + 1;
+        }
+        let indices = array_new(0);
+        row = 0;
+        while (row < rows) { array_push(indices, row); row = row + 1; }
+        let tree_model = gbt_build_tree(x, residuals, indices, 0, maximum_depth, bins);
+        array_push(trees, tree_model);
+        row = 0;
+        while (row < rows) {
+            scores[row] = scores[row] + learning_rate * gbt_tree_value(tree_model, x, row);
+            row = row + 1;
+        }
+        tree = tree + 1;
+    }
+    let predictions = scores;
+    if (task == "binary") {
+        row = 0;
+        while (row < rows) { predictions[row] = sigmoid(predictions[row]); row = row + 1; }
+    }
+    let variance_values = array_new(0);
+    let residual_variance = 0.0;
+    row = 0;
+    while (row < rows) {
+        let difference = predictions[row] - y[row];
+        residual_variance = residual_variance + difference * difference;
+        row = row + 1;
+    }
+    residual_variance = residual_variance / rows;
+    row = 0;
+    while (row < rows) {
+        let variance = residual_variance;
+        if (task == "binary") { variance = predictions[row] * (1.0 - predictions[row]); }
+        array_push(variance_values, variance);
+        row = row + 1;
+    }
+    let kind = "gbt_regression";
+    if (task == "binary") { kind = "gbt_binary"; }
+    let model = {schema: 1, kind: kind, task: task,
+        parameters: {base: base, trees: trees, learning_rate: learning_rate,
+            depth: maximum_depth, bins: bins},
+        parameter_uncertainty: {residual_variance: residual_variance}, classes: [],
+        training: {trees: tree_count, depth: maximum_depth, bins: bins},
+        device: "cpu", compute_dtype: dtype(x), version: "2.1.0"};
+    return fit_result(model, tensor(predictions), tensor(variance_values),
+        {loss: residual_variance, rows: rows}, "gradient_boosted_trees",
+        ["histogram CART learners", "squared residual updates"]);
+}
+
+fn fit_jump(data, options) {
+    if (type_of(data) != "map") { return ml_error("invalid_data", "data must be a map", "data"); }
+    let mode = option(options, "mode", "kou");
+    if (mode != "kou") {
+        if (mode != "hawkes") {
+            if (mode != "kou_hawkes") { return ml_error("invalid_option", "mode must be kou, hawkes, or kou_hawkes", "mode"); }
+        }
+    }
+    let sizes = array_new(0);
+    let event_times = array_new(0);
+    let observation_count = 0;
+    let threshold = null;
+    if (map_has(data, "returns")) {
+        if (!map_has(options, "threshold")) { return ml_error("invalid_option", "threshold is required for returns", "threshold"); }
+        threshold = options.threshold;
+        if (threshold <= 0) { return ml_error("invalid_option", "threshold must be positive", "threshold"); }
+        observation_count = vector_length(data.returns);
+        let index = 0;
+        while (index < observation_count) {
+            if (abs_number(data.returns[index]) >= threshold) {
+                array_push(event_times, index);
+                array_push(sizes, data.returns[index]);
+            }
+            index = index + 1;
+        }
+    } else {
+        if (!map_has(data, "event_times")) { return ml_error("invalid_data", "returns or event_times are required", "data"); }
+        if (!map_has(data, "event_sizes")) { return ml_error("invalid_data", "event_sizes are required", "data.event_sizes"); }
+        let count = vector_length(data.event_times);
+        if (count != vector_length(data.event_sizes)) { return ml_error("invalid_data", "event times and sizes must match", "data"); }
+        let index = 0;
+        while (index < count) {
+            array_push(event_times, data.event_times[index]);
+            array_push(sizes, data.event_sizes[index]);
+            index = index + 1;
+        }
+        observation_count = option(options, "horizon", count);
+    }
+    if (observation_count < 1) { return ml_error("invalid_data", "observation horizon must be positive", "data"); }
+    let event_count = array_length(sizes);
+    if (event_count == 0) { return ml_error("invalid_data", "no jumps satisfy the supplied data and threshold", "data"); }
+    let positive_sum = 0.0;
+    let negative_sum = 0.0;
+    let positive_count = 0;
+    let negative_count = 0;
+    let clustered = 0;
+    let index = 0;
+    while (index < event_count) {
+        if (sizes[index] >= 0) {
+            positive_sum = positive_sum + sizes[index];
+            positive_count = positive_count + 1;
+        } else {
+            negative_sum = negative_sum - sizes[index];
+            negative_count = negative_count + 1;
+        }
+        if (index > 0) {
+            if (event_times[index] - event_times[index - 1] <= option(options, "cluster_window", 5)) {
+                clustered = clustered + 1;
+            }
+        }
+        index = index + 1;
+    }
+    let up_probability = positive_count / event_count;
+    let up_mean = 0.0;
+    let down_mean = 0.0;
+    if (positive_count > 0) { up_mean = positive_sum / positive_count; }
+    if (negative_count > 0) { down_mean = negative_sum / negative_count; }
+    let base_intensity = event_count / observation_count;
+    let excitation = 0.0;
+    if (event_count > 1) { excitation = clustered / (event_count - 1); }
+    if (mode == "kou") { excitation = 0.0; }
+    let intensity_values = array_new(0);
+    let uncertainty_values = array_new(0);
+    index = 0;
+    while (index < observation_count) {
+        let intensity = base_intensity;
+        if (mode != "kou") {
+            let event_index = 0;
+            while (event_index < event_count) {
+                if (event_times[event_index] < index) {
+                    intensity = intensity + excitation * exp_number(-(index - event_times[event_index]));
+                }
+                event_index = event_index + 1;
+            }
+        }
+        array_push(intensity_values, intensity);
+        array_push(uncertainty_values, intensity + up_probability * up_mean * up_mean + (1.0 - up_probability) * down_mean * down_mean);
+        index = index + 1;
+    }
+    let model = {schema: 1, kind: "jump", task: "jump_diffusion",
+        parameters: {mode: mode, base_intensity: base_intensity, excitation: excitation,
+            up_probability: up_probability, up_mean: up_mean, down_mean: down_mean, threshold: threshold},
+        parameter_uncertainty: {method: "intensity_and_mark_second_moment"}, classes: [],
+        training: {events: event_count, observations: observation_count}, device: "cpu", compute_dtype: "f64", version: "2.1.0"};
+    return fit_result(model, tensor(intensity_values), tensor(uncertainty_values),
+        {events: event_count, clustered_pairs: clustered}, "bounded_moment_fit",
+        ["exponential Hawkes decay", "double-exponential sign-separated marks"]);
+}
+
+fn metal_eligible(kind) {
+    if (kind == "linear") { return true; }
+    if (kind == "ridge") { return true; }
+    if (kind == "logistic_binary") { return true; }
+    if (kind == "logistic_multiclass") { return true; }
+    return kind == "neural_dense";
+}
+
+fn metal_tensor(value, compute_dtype, token) {
+    if (compute_dtype == "f32") { value = cast(value, "f32"); }
+    if (compute_dtype == "f16") { value = cast(value, "f16"); }
+    if (compute_dtype == "bf16") { value = cast(value, "bf16"); }
+    return to_device(value, "metal", token);
+}
+
+fn fit_cpu(kind, data, options) {
+    if (type_of(options) != "map") { return ml_error("invalid_options", "options must be a map", "options"); }
+    if (kind == "linear") { return fit_linear(kind, data, options); }
+    if (kind == "ridge") { return fit_linear(kind, data, options); }
+    if (kind == "logistic_binary") { return fit_logistic_binary(data, options); }
+    if (kind == "logistic_multiclass") { return fit_logistic_multiclass(data, options); }
+    if (kind == "neural_dense") { return fit_neural_dense(data, options); }
+    if (kind == "kalman") { return fit_kalman(data, options); }
+    if (kind == "hmm_categorical") { return fit_hmm_categorical(data, options); }
+    if (kind == "hmm_gaussian") { return fit_hmm_gaussian(data, options); }
+    if (kind == "gbt_regression") { return fit_gbt(data, options, "regression"); }
+    if (kind == "gbt_binary") { return fit_gbt(data, options, "binary"); }
+    if (kind == "jump") { return fit_jump(data, options); }
+    return ml_error("unsupported_kind", "model kind is not implemented", "kind");
+}
+
+fn move_model_to_metal(result, token) {
+    let model = result[1].model;
+    let vector_model = model.kind == "linear";
+    if (model.kind == "ridge") { vector_model = true; }
+    if (model.kind == "logistic_binary") { vector_model = true; }
+    let parameters = model.parameters;
+    if (vector_model) {
+        parameters["weights"] = metal_tensor(parameters.weights, model.compute_dtype, token);
+    }
+    if (model.kind == "logistic_multiclass") {
+        parameters["weights"] = metal_tensor(parameters.weights, model.compute_dtype, token);
+        parameters["intercepts"] = metal_tensor(parameters.intercepts, model.compute_dtype, token);
+    }
+    if (model.kind == "neural_dense") {
+        parameters["w1"] = metal_tensor(parameters.w1, model.compute_dtype, token);
+        parameters["b1"] = metal_tensor(parameters.b1, model.compute_dtype, token);
+        parameters["w2"] = metal_tensor(parameters.w2, model.compute_dtype, token);
+    }
+    model["parameters"] = parameters;
+    model["device"] = "metal";
+    return result;
+}
+
+fn fit(kind, data, options) {
+    if (type_of(options) != "map") { return ml_error("invalid_options", "options must be a map", "options"); }
+    let requested = option(options, "device", "auto");
+    if (requested != "auto") {
+        if (requested != "cpu") {
+            if (requested != "metal") {
+                return ml_error("invalid_option", "device must be auto, cpu, or metal", "device");
+            }
+        }
+    }
+    if (requested == "metal") {
+        if (!metal_eligible(kind)) {
+            return ml_error("device_unsupported", "model family has no Metal implementation", "device");
+        }
+    }
+    let use_metal = requested == "metal";
+    if (requested == "auto") {
+        if (metal_eligible(kind)) {
+            if (map_has(options, "gpu_token")) { use_metal = true; }
+        }
+    }
+    if (!use_metal) { return fit_cpu(kind, data, options); }
+    if (!map_has(options, "gpu_token")) {
+        return ml_error("capability_required", "Metal requires options.gpu_token", "gpu_token");
+    }
+    if (type_of(options.gpu_token) != "shared_capability") {
+        return ml_error("invalid_option", "gpu_token must be a shared capability", "gpu_token");
+    }
+    if (type_of(data) != "map") {
+        return ml_error("invalid_data", "Metal fitting requires data.x and data.y", "data");
+    }
+    if (!map_has(data, "x")) {
+        return ml_error("invalid_data", "Metal fitting requires data.x and data.y", "data");
+    }
+    if (!map_has(data, "y")) {
+        return ml_error("invalid_data", "Metal fitting requires data.x and data.y", "data");
+    }
+    let x_dtype = dtype(data.x);
+    if (x_dtype == "f64") {
+        return ml_error("dtype_unsupported", "Metal ML requires f32, f16, or bf16", "data.x");
+    }
+    if (x_dtype == "complex") {
+        return ml_error("dtype_unsupported", "Metal ML requires f32, f16, or bf16", "data.x");
+    }
+    let resident = {x: to_device(data.x, "metal", options.gpu_token),
+                    y: to_device(data.y, "metal", options.gpu_token)};
+    if (kind == "linear") { return fit_linear_metal(kind, resident, options); }
+    if (kind == "ridge") { return fit_linear_metal(kind, resident, options); }
+    if (kind == "logistic_binary") { return fit_logistic_binary_metal(resident, options); }
+    if (kind == "neural_dense") { return fit_neural_dense_metal(resident, options); }
+    let result = fit_cpu(kind, resident, options);
+    if (!result[0]) { return result; }
+    return move_model_to_metal(result, options.gpu_token);
+}
+
+fn fit_dataset(kind, source, options) {
+    // Use the explicit host-call name because module parameters are currently
+    // conservatively typed as unknown by the self-hosted compiler.
+    let rows = dataset_materialize(source);
+    if (array_length(rows) == 0) { return ml_error("invalid_data", "dataset must not be empty", "dataset"); }
+    let first = rows[0];
+    if (type_of(first) != "map") { return ml_error("invalid_data", "dataset rows must be maps", "dataset"); }
+    if (!map_has(first, "x")) { return ml_error("invalid_data", "dataset row x is required", "dataset.x"); }
+    if (!map_has(first, "y")) { return ml_error("invalid_data", "dataset row y is required", "dataset.y"); }
+    let x_rows = array_new(0);
+    let y_values = array_new(0);
+    let index = 0;
+    while (index < array_length(rows)) {
+        array_push(x_rows, rows[index].x);
+        array_push(y_values, rows[index].y);
+        index = index + 1;
+    }
+    return fit(kind, {x: tensor(x_rows), y: tensor(y_values)}, options);
+}
+
+fn predict(model, inputs, options) {
+    if (type_of(model) != "map") { return ml_error("invalid_model", "model must be a map", "model"); }
+    let dims = matrix_shape(inputs);
+    if (dims == null) { return ml_error("invalid_data", "inputs must be a rank-2 tensor", "inputs"); }
+    if (model.kind == "linear") {
+        let values = linear_values(inputs, model.parameters.weights, model.parameters.intercept);
+        let variance = model.parameter_uncertainty.residual_variance;
+        return result_ok(prediction_record(model, tensor(values), constant_tensor(dims[0], variance),
+            "linear_prediction", ["training residual variance applies"]));
+    }
+    if (model.kind == "ridge") {
+        let values = linear_values(inputs, model.parameters.weights, model.parameters.intercept);
+        let variance = model.parameter_uncertainty.residual_variance;
+        return result_ok(prediction_record(model, tensor(values), constant_tensor(dims[0], variance),
+            "ridge_prediction", ["training residual variance applies"]));
+    }
+    if (model.kind == "logistic_binary") {
+        let scores = linear_values(inputs, model.parameters.weights, model.parameters.intercept);
+        let probabilities = array_new(0);
+        let variances = array_new(0);
+        let row = 0;
+        while (row < dims[0]) {
+            let p = sigmoid(scores[row]);
+            array_push(probabilities, p);
+            array_push(variances, p * (1.0 - p));
+            row = row + 1;
+        }
+        return result_ok(prediction_record(model, tensor(probabilities), tensor(variances),
+            "logistic_prediction", ["Bernoulli conditional target"]));
+    }
+    if (model.kind == "logistic_multiclass") {
+        let predicted = predict_multiclass(model, inputs);
+        return result_ok(prediction_record(model, predicted.prediction, predicted.uncertainty,
+            "one_vs_rest_probability_normalization", ["mutually exclusive classes"]));
+    }
+    if (model.kind == "neural_dense") {
+        let values = predict_neural(model, inputs);
+        let uncertainty = constant_tensor(dims[0], model.parameter_uncertainty.residual_variance);
+        if (model.task == "binary") {
+            let variances = array_new(0);
+            let row = 0;
+            while (row < dims[0]) {
+                array_push(variances, values[row] * (1.0 - values[row]));
+                row = row + 1;
+            }
+            uncertainty = tensor(variances);
+        }
+        return result_ok(prediction_record(model, tensor(values), uncertainty,
+            "dense_relu_prediction", ["training task and architecture apply"]));
+    }
+    if (model.kind == "gbt_regression") {
+        let values = gbt_values(model, inputs);
+        return result_ok(prediction_record(model, tensor(values),
+            constant_tensor(dims[0], model.parameter_uncertainty.residual_variance),
+            "boosted_tree_prediction", ["training feature distribution applies"]));
+    }
+    if (model.kind == "gbt_binary") {
+        let values = gbt_values(model, inputs);
+        let variances = array_new(0);
+        let row = 0;
+        while (row < dims[0]) {
+            array_push(variances, values[row] * (1.0 - values[row]));
+            row = row + 1;
+        }
+        return result_ok(prediction_record(model, tensor(values), tensor(variances),
+            "boosted_tree_probability", ["Bernoulli conditional target"]));
+    }
+    return ml_error("unsupported_kind", "model kind is not implemented", "model.kind");
+}
+
+fn predict_tensors(model, inputs, options) {
+    let rich = predict(model, inputs, options);
+    if (!rich[0]) { return rich; }
+    let value = rich[1];
+    if (model.device == "metal") {
+        if (!map_has(options, "gpu_token")) {
+            return ml_error("capability_required", "Metal output requires options.gpu_token", "gpu_token");
+        }
+        let prediction = value.prediction;
+        let uncertainty = value.uncertainty;
+        if (model.compute_dtype == "f32") {
+            prediction = cast(prediction, "f32");
+            uncertainty = cast(uncertainty, "f32");
+        }
+        if (model.compute_dtype == "f16") {
+            prediction = cast(prediction, "f16");
+            uncertainty = cast(uncertainty, "f16");
+        }
+        if (model.compute_dtype == "bf16") {
+            prediction = cast(prediction, "bf16");
+            uncertainty = cast(uncertainty, "bf16");
+        }
+        return result_ok([to_device(prediction, "metal", options.gpu_token),
+                          to_device(uncertainty, "metal", options.gpu_token)]);
+    }
+    return result_ok([value.prediction, value.uncertainty]);
+}
+
+fn filter(model, observations, options) {
+    if (model.kind != "kalman") { return ml_error("invalid_model", "filter requires a Kalman model", "model.kind"); }
+    if (model.parameters.multivariate) {
+        let filtered_result = kalman_filter_multivariate(observations, model.parameters);
+        if (!filtered_result[0]) { return filtered_result; }
+        let filtered_value = filtered_result[1];
+        return result_ok(prediction_record(model, tensor(filtered_value.estimates), tensor(filtered_value.variances),
+            "multivariate_linear_gaussian_filter", ["model noise matrices apply"]));
+    }
+    let filtered = kalman_filter_values(observations, model.parameters);
+    return result_ok(prediction_record(model, tensor(filtered.estimates), tensor(filtered.variances),
+        "linear_gaussian_filter", ["model noise parameters apply"]));
+}
+
+fn smooth(model, observations, options) {
+    if (model.kind != "kalman") { return ml_error("invalid_model", "smooth requires a Kalman model", "model.kind"); }
+    if (model.parameters.multivariate) {
+        let smoothed_result = smooth_kalman_multivariate(model, observations);
+        if (!smoothed_result[0]) { return smoothed_result; }
+        let smoothed_value = smoothed_result[1];
+        return result_ok(prediction_record(model, smoothed_value.prediction, smoothed_value.uncertainty,
+            "multivariate_rauch_tung_striebel_smoother", ["model noise matrices apply"]));
+    }
+    let smoothed = smooth_kalman(model, observations);
+    return result_ok(prediction_record(model, smoothed.prediction, smoothed.uncertainty,
+        "rauch_tung_striebel_smoother", ["model noise parameters apply"]));
+}
+
+fn decode(model, observations, options) {
+    if (model.kind != "hmm_categorical") {
+        if (model.kind != "hmm_gaussian") { return ml_error("invalid_model", "decode requires an HMM model", "model.kind"); }
+    }
+    let decoded = hmm_viterbi(model, observations);
+    return result_ok(prediction_record(model, decoded.prediction, decoded.uncertainty,
+        "viterbi_sequence_decode", ["maximum-probability complete state path"]));
+}
+
+fn simulate(model, inputs, options) {
+    if (model.kind != "jump") { return ml_error("invalid_model", "simulate requires a jump model", "model.kind"); }
+    let steps = option(options, "steps", 1);
+    if (steps < 1) { return ml_error("invalid_option", "steps must be positive", "steps"); }
+    let values = array_new(0);
+    let variances = array_new(0);
+    let index = 0;
+    while (index < steps) {
+        let expected_mark = model.parameters.up_probability * model.parameters.up_mean -
+            (1.0 - model.parameters.up_probability) * model.parameters.down_mean;
+        let intensity = model.parameters.base_intensity;
+        if (model.parameters.mode != "kou") {
+            intensity = intensity + model.parameters.excitation * exp_number(-index);
+        }
+        array_push(values, intensity * expected_mark);
+        array_push(variances, intensity * (model.parameters.up_probability * model.parameters.up_mean * model.parameters.up_mean +
+            (1.0 - model.parameters.up_probability) * model.parameters.down_mean * model.parameters.down_mean));
+        index = index + 1;
+    }
+    return result_ok(prediction_record(model, tensor(values), tensor(variances),
+        "expected_jump_path", ["expected path; no sampled diffusion component"]));
+}

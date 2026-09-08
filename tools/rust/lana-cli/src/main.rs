@@ -18,7 +18,9 @@ use lana_vm::Vm;
 
 mod repl;
 
-const LANA_VERSION: &str = "2.0.0";
+fn lana_version() -> &'static str {
+    include_str!("../../../../VERSION").trim()
+}
 
 /// Full usage text, mirroring `usage()` in `tools/c/cli.c` (with `lanavm` folded
 /// into the single `lana` binary).
@@ -984,7 +986,7 @@ fn main() -> ExitCode {
             repl::run_repl(&compiler)
         }
         "version" => {
-            println!("Lana {LANA_VERSION} (LABC v2, Rust VM, native compiler)");
+            println!("Lana {} (LABC v2, Rust VM, native compiler)", lana_version());
             ExitCode::SUCCESS
         }
         "new" => {

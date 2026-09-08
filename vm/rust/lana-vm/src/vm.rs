@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,10 +32,24 @@ use crate::value::{
     JointState, Map, MapEntry, Optimizer, PathAlternative, PathSet, PlannedEffect, PlannedEffectState, Possibility, Posterior, Reactive,
     ReactiveKind, ReactiveVersion, RelationshipKind, SharedCommit, SharedInformation,
     SharedObservation, SharedState, SharedVersion, Set, StateDist, StateDistKind, Task, Tensor, TensorDtype, TrainingResult, Value,
-    ValueKind, VmError, Regex, RegexClass, RegexInst, RegexOp, Future, LANA_CAPABILITY_ADMIN, LANA_CAPABILITY_OBSERVE, LANA_CAPABILITY_READ,
+    ValueKind, VmError, Regex, RegexClass, RegexInst, RegexOp, Future, TensorDevice, LANA_CAPABILITY_ADMIN, LANA_CAPABILITY_OBSERVE, LANA_CAPABILITY_READ,
     LANA_JOINT_CAN_CONDITION, LANA_JOINT_CAN_PROJECT, LANA_JOINT_CAN_RESOLVE,
     LANA_JOINT_CAN_SAMPLE,
 };
+
+fn shared_derivation_text(text: &'static str) -> Arc<str> {
+    static EMPTY: OnceLock<Arc<str>> = OnceLock::new();
+    static AUTODIFF: OnceLock<Arc<str>> = OnceLock::new();
+    static INPUT: OnceLock<Arc<str>> = OnceLock::new();
+    static NONE: OnceLock<Arc<str>> = OnceLock::new();
+    match text {
+        "" => EMPTY.get_or_init(|| Arc::from("")).clone(),
+        "autodiff" => AUTODIFF.get_or_init(|| Arc::from("autodiff")).clone(),
+        "input" => INPUT.get_or_init(|| Arc::from("input")).clone(),
+        "none" => NONE.get_or_init(|| Arc::from("none")).clone(),
+        _ => unreachable!("non-autodiff derivation text"),
+    }
+}
 
 /// Reinterpret a state tensor's byte buffer as `&[f64]`. State tensors are
 /// always complex (16 bytes/element = 2 f64s), so the buffer length is a
@@ -540,6 +554,24 @@ pub const LANA_HOST_SOCKET_RECV: u32 = 164;
 pub const LANA_HOST_SOCKET_CLOSE: u32 = 165;
 // LIP-027: cast a tensor to another real dtype.
 pub const LANA_HOST_TENSOR_CAST: u32 = 166;
+pub const LANA_HOST_TENSOR_RESHAPE: u32 = 167;
+pub const LANA_HOST_TENSOR_TRANSPOSE: u32 = 168;
+pub const LANA_HOST_TENSOR_EXP: u32 = 169;
+pub const LANA_HOST_TENSOR_LOG: u32 = 170;
+pub const LANA_HOST_TENSOR_SQRT: u32 = 171;
+pub const LANA_HOST_TENSOR_RELU: u32 = 172;
+pub const LANA_HOST_TENSOR_SOFTMAX: u32 = 173;
+pub const LANA_HOST_TENSOR_LOGSUMEXP: u32 = 174;
+pub const LANA_HOST_TENSOR_ARGMAX: u32 = 175;
+pub const LANA_HOST_TENSOR_COMPARE: u32 = 176;
+pub const LANA_HOST_TENSOR_SELECT: u32 = 177;
+pub const LANA_HOST_TENSOR_GATHER: u32 = 178;
+pub const LANA_HOST_CHOLESKY_SOLVE: u32 = 179;
+pub const LANA_HOST_RANDOM_UNIFORM: u32 = 180;
+pub const LANA_HOST_RANDOM_NORMAL: u32 = 181;
+pub const LANA_HOST_TENSOR_DEVICE: u32 = 182;
+pub const LANA_HOST_TENSOR_TO_DEVICE: u32 = 183;
+pub const LANA_HOST_TENSOR_TO_CPU: u32 = 184;
 
 // LIP-024 async/await. Present in both the C11 VM and the Rust VM at ids
 // 126-129 (matching the C11 assembler's host-call table and the
@@ -1964,20 +1996,37 @@ impl<'a> Vm<'a> {
             }
         }
         self.derivation_sequence += 1;
+        let autodiff = details == "autodiff" && (operation == "autodiff" || operation == "input");
         Some(Arc::new(Derivation {
             task_lineage: self.lineage,
             local_sequence: self.derivation_sequence,
             revision: self.revision,
             kind,
-            operation: Arc::from(operation),
+            operation: if autodiff {
+                shared_derivation_text(if operation == "input" { "input" } else { "autodiff" })
+            } else {
+                Arc::from(operation)
+            },
             inputs: retained,
-            label: Arc::from(label),
+            label: if autodiff {
+                shared_derivation_text("")
+            } else {
+                Arc::from(label)
+            },
             function: Arc::from(self.current_function_name()),
             line,
             exactness,
-            details: Arc::from(details),
+            details: if autodiff {
+                shared_derivation_text("autodiff")
+            } else {
+                Arc::from(details)
+            },
             outcome,
-            reason: Arc::from(reason),
+            reason: if autodiff {
+                shared_derivation_text("none")
+            } else {
+                Arc::from(reason)
+            },
             ad_op: -1,
             ad_a: None,
             ad_b: None,
@@ -2167,7 +2216,8 @@ impl<'a> Vm<'a> {
 
     /// Record a differentiable primitive onto `result`'s derivation, mirroring
     /// `ad_record` in `vm/c/vm.c`. `ad_op` is 0=add 1=sub 2=mul 3=div 4=matmul
-    /// 5=sum 6=mean. `b` is `None` for reductions.
+    /// 5=sum 6=mean 10=reshape 11=transpose 12=exp 13=log 14=sqrt 15=relu
+    /// 16=softmax 17=logsumexp 18=gather 19=cholesky_solve.
     fn ad_record(
         &mut self,
         ad_op: i32,
@@ -2432,6 +2482,161 @@ impl<'a> Vm<'a> {
                         return error;
                     }
                 }
+                LanaError::Ok
+            }
+            10 | 11 => {
+                let a = node.ad_a.as_ref().unwrap();
+                let mut ga = {
+                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                    match tensor::tensor_new(&mut alloc, a.ndim, &a.shape, false) {
+                        Ok(t) => t,
+                        Err(error) => return error,
+                    }
+                };
+                let total = tensor::tensor_element_count(a);
+                for linear in 0..total {
+                    let source_index = if node.ad_op == 10 {
+                        let mut rem = linear;
+                        let mut index = seed.offset;
+                        for i in (0..seed.ndim).rev() {
+                            index += (if seed.shape[i] == 0 { 0 } else { rem % seed.shape[i] }) * seed.strides[i];
+                            rem /= seed.shape[i];
+                        }
+                        index
+                    } else {
+                        if seed.ndim < 2 { return LanaError::InvalidParameters; }
+                        let mut rem = linear;
+                        let mut coordinates = [0; tensor::TENSOR_MAX_RANK];
+                        for i in (0..a.ndim).rev() {
+                            coordinates[i] = if a.shape[i] == 0 { 0 } else { rem % a.shape[i] };
+                            rem /= a.shape[i];
+                        }
+                        let last = a.ndim - 1;
+                        let second = a.ndim - 2;
+                        coordinates.swap(last, second);
+                        (0..seed.ndim).fold(seed.offset, |index, i| index + coordinates[i] * seed.strides[i])
+                    };
+                    tensor_set_real(&mut ga, linear, tensor_get_real(seed, source_index));
+                }
+                if let Some(a_deriv) = &node.ad_a_deriv { return self.ad_backward(a_deriv, &ga); }
+                LanaError::Ok
+            }
+            12 | 13 | 14 | 15 => {
+                let a = node.ad_a.as_ref().unwrap();
+                let mut ga = {
+                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                    match tensor::tensor_new(&mut alloc, a.ndim, &a.shape, false) {
+                        Ok(t) => t,
+                        Err(error) => return error,
+                    }
+                };
+                for i in 0..tensor::tensor_element_count(a) {
+                    let mut rem = i;
+                    let mut a_index = a.offset;
+                    let mut seed_index = seed.offset;
+                    for axis in (0..a.ndim).rev() {
+                        let coordinate = if a.shape[axis] == 0 { 0 } else { rem % a.shape[axis] };
+                        rem /= a.shape[axis];
+                        a_index += coordinate * a.strides[axis];
+                        seed_index += coordinate * seed.strides[axis];
+                    }
+                    let x = tensor_get_real(a, a_index);
+                    let derivative = match node.ad_op {
+                        12 => x.exp(),
+                        13 => 1.0 / x,
+                        14 => 0.5 / x.sqrt(),
+                        _ => if x > 0.0 { 1.0 } else { 0.0 },
+                    };
+                    tensor_set_real(&mut ga, i, tensor_get_real(seed, seed_index) * derivative);
+                }
+                if let Some(a_deriv) = &node.ad_a_deriv { return self.ad_backward(a_deriv, &ga); }
+                LanaError::Ok
+            }
+            16 | 17 => {
+                let a = node.ad_a.as_ref().unwrap();
+                let axis = node.ad_axis as usize;
+                let width = a.shape[axis];
+                let inner = a.shape[axis + 1..].iter().product::<usize>();
+                let outer = a.shape[..axis].iter().product::<usize>();
+                let mut ga = {
+                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                    match tensor::tensor_new(&mut alloc, a.ndim, &a.shape, false) { Ok(t) => t, Err(error) => return error }
+                };
+                for o in 0..outer { for ii in 0..inner {
+                    let base = o * width * inner + ii;
+                    let mut maximum = f64::NEG_INFINITY;
+                    for k in 0..width { maximum = maximum.max(tensor_get_real(a, tensor::logical_index(a, base + k * inner))); }
+                    let mut total = 0.0;
+                    for k in 0..width { total += (tensor_get_real(a, tensor::logical_index(a, base + k * inner)) - maximum).exp(); }
+                    let mut weighted = 0.0;
+                    if node.ad_op == 16 { for k in 0..width {
+                        let probability = (tensor_get_real(a, tensor::logical_index(a, base + k * inner)) - maximum).exp() / total;
+                        weighted += tensor_get_real(seed, tensor::logical_index(seed, base + k * inner)) * probability;
+                    } }
+                    for k in 0..width {
+                        let probability = (tensor_get_real(a, tensor::logical_index(a, base + k * inner)) - maximum).exp() / total;
+                        let incoming = if node.ad_op == 16 { tensor_get_real(seed, tensor::logical_index(seed, base + k * inner)) - weighted }
+                            else { tensor_get_real(seed, tensor::logical_index(seed, o * inner + ii)) };
+                        tensor_set_real(&mut ga, base + k * inner, probability * incoming);
+                    }
+                } }
+                if let Some(a_deriv) = &node.ad_a_deriv { return self.ad_backward(a_deriv, &ga); }
+                LanaError::Ok
+            }
+            18 => {
+                let source = node.ad_a.as_ref().unwrap();
+                let indices = node.ad_b.as_ref().unwrap();
+                let axis = node.ad_axis as usize;
+                let mut ga = {
+                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                    match tensor::tensor_new(&mut alloc, source.ndim, &source.shape, false) { Ok(t) => t, Err(error) => return error }
+                };
+                let mut coordinates = [0; tensor::TENSOR_MAX_RANK];
+                for linear in 0..tensor::tensor_element_count(seed) {
+                    let mut rem = linear;
+                    for i in (0..seed.ndim).rev() { coordinates[i] = if seed.shape[i] == 0 { 0 } else { rem % seed.shape[i] }; rem /= seed.shape[i]; }
+                    let index_linear = indices.shape.iter().enumerate().fold(0, |n, (i, width)| n * width + coordinates[axis + i]);
+                    let mut requested = tensor_get_real(indices, tensor::logical_index(indices, index_linear));
+                    if requested < 0.0 { requested += source.shape[axis] as f64; }
+                    let mut source_linear = 0;
+                    for i in 0..axis { source_linear = source_linear * source.shape[i] + coordinates[i]; }
+                    source_linear = source_linear * source.shape[axis] + requested as usize;
+                    for i in axis + 1..source.ndim { source_linear = source_linear * source.shape[i] + coordinates[i - 1 + indices.ndim]; }
+                    let value = tensor_get_real(&ga, source_linear) + tensor_get_real(seed, tensor::logical_index(seed, linear));
+                    tensor_set_real(&mut ga, source_linear, value);
+                }
+                if let Some(a_deriv) = &node.ad_a_deriv { return self.ad_backward(a_deriv, &ga); }
+                LanaError::Ok
+            }
+            19 => {
+                let matrix = node.ad_a.as_ref().unwrap();
+                let rhs = node.ad_b.as_ref().unwrap();
+                let (db, x) = {
+                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                    let db = match tensor::tensor_cholesky_solve(&mut alloc, matrix, seed) { Ok(v) => v, Err(error) => return error };
+                    let x = match tensor::tensor_cholesky_solve(&mut alloc, matrix, rhs) { Ok(v) => v, Err(error) => return error };
+                    let (ValueKind::Tensor(db), ValueKind::Tensor(x)) = (db.kind, x.kind) else { unreachable!() };
+                    (db, x)
+                };
+                let n = matrix.shape[0];
+                let columns = if rhs.ndim == 1 { 1 } else { rhs.shape[1] };
+                let mut ga = {
+                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                    match tensor::tensor_new(&mut alloc, 2, &matrix.shape, false) { Ok(t) => t, Err(error) => return error }
+                };
+                for i in 0..n { for j in 0..n {
+                    let mut value = 0.0;
+                    for c in 0..columns {
+                        let dbi = tensor_get_real(&db, tensor::logical_index(&db, i * columns + c));
+                        let dbj = tensor_get_real(&db, tensor::logical_index(&db, j * columns + c));
+                        let xi = tensor_get_real(&x, tensor::logical_index(&x, i * columns + c));
+                        let xj = tensor_get_real(&x, tensor::logical_index(&x, j * columns + c));
+                        value -= 0.5 * (dbi * xj + xi * dbj);
+                    }
+                    tensor_set_real(&mut ga, i * n + j, value);
+                } }
+                if let Some(a_deriv) = &node.ad_a_deriv { let error = self.ad_backward(a_deriv, &ga); if error != LanaError::Ok { return error; } }
+                if let Some(b_deriv) = &node.ad_b_deriv { return self.ad_backward(b_deriv, &db); }
                 LanaError::Ok
             }
             7 => {
@@ -9262,6 +9467,183 @@ impl<'a> Vm<'a> {
                     }
                     Err(error) => error,
                 }
+            }
+            LANA_HOST_TENSOR_RESHAPE => {
+                if argc != 2 { return LanaError::Type; }
+                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
+                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_reshape(&mut alloc, source, &arguments[1]) };
+                match result {
+                    Ok(value) => {
+                        *out = value;
+                        if arguments[0].derivation.is_some() { self.ad_record(10, &arguments[0], None, -1, out) } else { LanaError::Ok }
+                    }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_TENSOR_TRANSPOSE => {
+                if argc != 1 { return LanaError::Type; }
+                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
+                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_transpose(&mut alloc, source) };
+                match result {
+                    Ok(value) => {
+                        *out = value;
+                        if arguments[0].derivation.is_some() { self.ad_record(11, &arguments[0], None, -1, out) } else { LanaError::Ok }
+                    }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_TENSOR_EXP | LANA_HOST_TENSOR_LOG | LANA_HOST_TENSOR_SQRT | LANA_HOST_TENSOR_RELU => {
+                if argc != 1 { return LanaError::Type; }
+                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
+                let op = host_id - LANA_HOST_TENSOR_EXP;
+                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_unary_math(&mut alloc, source, op) };
+                match result {
+                    Ok(value) => {
+                        *out = value;
+                        if arguments[0].derivation.is_some() { self.ad_record(12 + op as i32, &arguments[0], None, -1, out) } else { LanaError::Ok }
+                    }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_TENSOR_SOFTMAX | LANA_HOST_TENSOR_LOGSUMEXP => {
+                if argc != 1 && argc != 2 { return LanaError::Type; }
+                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
+                let axis_value = if argc == 2 { Some(&arguments[1]) } else { None };
+                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_softmax_like(&mut alloc, source, axis_value, host_id == LANA_HOST_TENSOR_LOGSUMEXP) };
+                match result {
+                    Ok(value) => {
+                        *out = value;
+                        if arguments[0].derivation.is_none() { return LanaError::Ok; }
+                        let mut axis_number = match axis_value { None => -1.0, Some(v) => v.as_number() };
+                        if axis_number < 0.0 { axis_number += source.ndim as f64; }
+                        self.ad_record(if host_id == LANA_HOST_TENSOR_LOGSUMEXP { 17 } else { 16 }, &arguments[0], None, axis_number as i32, out)
+                    }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_TENSOR_ARGMAX => {
+                if argc != 1 && argc != 2 { return LanaError::Type; }
+                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
+                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                match tensor::tensor_argmax(&mut alloc, source, if argc == 2 { Some(&arguments[1]) } else { None }) {
+                    Ok(value) => { *out = value; LanaError::Ok }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_TENSOR_COMPARE => {
+                if argc != 3 { return LanaError::Type; }
+                let (ValueKind::Tensor(a), ValueKind::Tensor(b), ValueKind::String(operation)) =
+                    (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind) else { return LanaError::Type; };
+                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                match tensor::tensor_compare_values(&mut alloc, a, b, operation) {
+                    Ok(value) => { *out = value; LanaError::Ok }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_TENSOR_SELECT => {
+                if argc != 3 { return LanaError::Type; }
+                let (ValueKind::Tensor(mask), ValueKind::Tensor(yes), ValueKind::Tensor(no)) =
+                    (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind) else { return LanaError::Type; };
+                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_select_values(&mut alloc, mask, yes, no) };
+                match result {
+                    Ok(value) => {
+                        *out = value;
+                        if arguments[1].derivation.is_none() && arguments[2].derivation.is_none() { return LanaError::Ok; }
+                        let shape = match &out.kind { ValueKind::Tensor(t) => t.shape.clone(), _ => unreachable!() };
+                        let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                        let mut yes_mask = match tensor::tensor_new_dtype(&mut alloc, shape.len(), &shape, yes.dtype) { Ok(t) => t, Err(error) => return error };
+                        let mut no_mask = match tensor::tensor_new_dtype(&mut alloc, shape.len(), &shape, no.dtype) { Ok(t) => t, Err(error) => return error };
+                        for i in 0..shape.iter().product() {
+                            let selected = if tensor_get_real(mask, tensor::broadcast_index(mask, &shape, i)) != 0.0 { 1.0 } else { 0.0 };
+                            tensor_set_real(&mut yes_mask, i, selected); tensor_set_real(&mut no_mask, i, 1.0 - selected);
+                        }
+                        drop(alloc);
+                        let yes_mask_value = Value::tensor(Arc::new(yes_mask.clone()));
+                        let no_mask_value = Value::tensor(Arc::new(no_mask.clone()));
+                        let mut yes_product = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); match tensor::tensor_elementwise(&mut alloc, yes, &yes_mask, 2) { Ok(t) => Value::tensor(Arc::new(t)), Err(error) => return error } };
+                        if arguments[1].derivation.is_some() { let error = self.ad_record(2, &arguments[1], Some(&yes_mask_value), -1, &mut yes_product); if error != LanaError::Ok { return error; } }
+                        let mut no_product = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); match tensor::tensor_elementwise(&mut alloc, no, &no_mask, 2) { Ok(t) => Value::tensor(Arc::new(t)), Err(error) => return error } };
+                        if arguments[2].derivation.is_some() { let error = self.ad_record(2, &arguments[2], Some(&no_mask_value), -1, &mut no_product); if error != LanaError::Ok { return error; } }
+                        self.ad_record(0, &yes_product, Some(&no_product), -1, out)
+                    }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_TENSOR_GATHER => {
+                if argc != 3 { return LanaError::Type; }
+                let (ValueKind::Tensor(source), ValueKind::Tensor(indices)) =
+                    (&arguments[0].kind, &arguments[1].kind) else { return LanaError::Type; };
+                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_gather_values(&mut alloc, source, indices, &arguments[2]) };
+                match result {
+                    Ok(value) => {
+                        *out = value;
+                        if arguments[0].derivation.is_none() { return LanaError::Ok; }
+                        let mut axis = arguments[2].as_number(); if axis < 0.0 { axis += source.ndim as f64; }
+                        self.ad_record(18, &arguments[0], Some(&arguments[1]), axis as i32, out)
+                    }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_CHOLESKY_SOLVE => {
+                if argc != 2 { return LanaError::Type; }
+                let (ValueKind::Tensor(matrix), ValueKind::Tensor(rhs)) =
+                    (&arguments[0].kind, &arguments[1].kind) else { return LanaError::Type; };
+                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_cholesky_solve(&mut alloc, matrix, rhs) };
+                match result {
+                    Ok(value) => {
+                        *out = value;
+                        if arguments[0].derivation.is_some() || arguments[1].derivation.is_some() { self.ad_record(19, &arguments[0], Some(&arguments[1]), -1, out) } else { LanaError::Ok }
+                    }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_RANDOM_UNIFORM | LANA_HOST_RANDOM_NORMAL => {
+                if argc != 2 { return LanaError::Type; }
+                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                match tensor::tensor_random(&mut alloc, &arguments[0], &arguments[1], host_id == LANA_HOST_RANDOM_NORMAL) {
+                    Ok(value) => { *out = value; LanaError::Ok }
+                    Err(error) => error,
+                }
+            }
+            LANA_HOST_TENSOR_DEVICE => {
+                if argc != 1 { return LanaError::Type; }
+                let ValueKind::Tensor(tensor) = &arguments[0].kind else { return LanaError::Type; };
+                *out = Value::string(Arc::from(if tensor.device == TensorDevice::Metal { "metal" } else { "cpu" }));
+                LanaError::Ok
+            }
+            LANA_HOST_TENSOR_TO_DEVICE => {
+                if argc != 3 { return LanaError::Type; }
+                let (ValueKind::Tensor(source), ValueKind::String(device), ValueKind::Capability(token)) =
+                    (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind) else { return LanaError::Type; };
+                let target = match &**device { "cpu" => TensorDevice::Cpu, "metal" => TensorDevice::Metal, _ => return LanaError::InvalidParameters };
+                if target == TensorDevice::Metal {
+                    let shared = &token.shared;
+                    let named_gpu = matches!(&shared.base_snapshot.kind, ValueKind::String(name) if &**name == "gpu");
+                    if !named_gpu || !capability_allows_locked(shared, token, LANA_CAPABILITY_READ) { return LanaError::Capability; }
+                    if source.dtype == TensorDtype::F64 || source.is_complex || !crate::metal::metal_available() { return LanaError::UnsupportedOperation; }
+                }
+                let result = self.tensor_copy_contiguous(source);
+                match result { Ok(mut tensor) => {
+                    if target == TensorDevice::Metal {
+                        if self.alloc_bytes(source.data.len()) != LanaError::Ok { return LanaError::Oom; }
+                        let Some(buffer) = crate::metal::ResidentBuffer::new(&tensor.data) else { return LanaError::UnsupportedOperation; };
+                        let tensor_mut = Arc::make_mut(&mut tensor);
+                        tensor_mut.metal_buffer = Some(Arc::new(buffer));
+                        tensor_mut.device = target;
+                    } else { Arc::make_mut(&mut tensor).device = target; }
+                    *out = Value::tensor(tensor); LanaError::Ok
+                }, Err(error) => error }
+            }
+            LANA_HOST_TENSOR_TO_CPU => {
+                if argc != 1 { return LanaError::Type; }
+                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
+                match self.tensor_copy_contiguous(source) { Ok(mut tensor) => {
+                    let tensor_mut = Arc::make_mut(&mut tensor);
+                    if let Some(buffer) = &source.metal_buffer { tensor_mut.data = Arc::new(buffer.copy_bytes()); }
+                    tensor_mut.metal_buffer = None;
+                    tensor_mut.device = TensorDevice::Cpu;
+                    *out = Value::tensor(tensor); LanaError::Ok
+                }, Err(error) => error }
             }
             LANA_HOST_TENSOR_SHAPE => {
                 if argc != 1 {

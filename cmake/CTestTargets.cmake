@@ -213,6 +213,20 @@ add_test(NAME native_m4_gpu_matmul_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE
 set_tests_properties(native_m4_gpu_matmul_pass PROPERTIES
     PASS_REGULAR_EXPRESSION "GPU_MATMUL_PASS" TIMEOUT 15
     ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_tensor_shapes_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_tensor_shapes_pass.lana")
+set_tests_properties(native_ml_tensor_shapes_pass PROPERTIES PASS_REGULAR_EXPRESSION "ML_TENSOR_SHAPES_PASS")
+add_test(NAME native_ml_tensor_math_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_tensor_math_pass.lana")
+set_tests_properties(native_ml_tensor_math_pass PROPERTIES PASS_REGULAR_EXPRESSION "ML_TENSOR_MATH_PASS")
+add_test(NAME native_ml_tensor_device_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_tensor_device_pass.lana")
+set_tests_properties(native_ml_tensor_device_pass PROPERTIES PASS_REGULAR_EXPRESSION "ML_TENSOR_DEVICE_PASS")
+add_test(NAME native_ml_metal_fit_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_metal_fit_pass.lana")
+set_tests_properties(native_ml_metal_fit_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_METAL_FIT_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_metal_revoked COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_metal_revoked.lana")
+set_tests_properties(native_ml_metal_revoked PROPERTIES WILL_FAIL TRUE)
+add_test(NAME native_ml_metal_mixed_device COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_metal_mixed_device.lana")
+set_tests_properties(native_ml_metal_mixed_device PROPERTIES WILL_FAIL TRUE)
 add_test(NAME native_tensor_ragged_rejected COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_ragged_rejected.lana")
 set_tests_properties(native_tensor_ragged_rejected PROPERTIES WILL_FAIL TRUE)
 add_test(NAME native_inspect_json COMMAND lana inspect "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/inspect_state_dist.lana")
@@ -272,6 +286,34 @@ set_tests_properties(native_std_import_pass PROPERTIES
 add_test(NAME native_std_modules_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/std_modules_pass.lana")
 set_tests_properties(native_std_modules_pass PROPERTIES
     PASS_REGULAR_EXPRESSION "STD_MODULES_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_decision_voi_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/decision_voi_pass.lana")
+set_tests_properties(native_decision_voi_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "DECISION_VOI_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_decision_voi_invalid COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/decision_voi_invalid.lana")
+set_tests_properties(native_decision_voi_invalid PROPERTIES
+    WILL_FAIL TRUE
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_regression_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_regression_pass.lana")
+set_tests_properties(native_ml_regression_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_REGRESSION_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_invalid_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_invalid_pass.lana")
+set_tests_properties(native_ml_invalid_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_INVALID_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_families_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_families_pass.lana")
+set_tests_properties(native_ml_families_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_FAMILIES_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_dataset_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_dataset_pass.lana")
+set_tests_properties(native_ml_dataset_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_DATASET_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_kalman_multivariate_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_kalman_multivariate_pass.lana")
+set_tests_properties(native_ml_kalman_multivariate_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_KALMAN_MULTIVARIATE_PASS"
     ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
 
 add_test(NAME native_compiler_bootstrap

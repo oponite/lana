@@ -1,0 +1,14 @@
+import "std/ml" as ml;
+
+fn row(index) {
+    return {x: [index], y: 2 * index + 1};
+}
+
+let source = dataset(lazy(row, 4));
+let fitted = ml.fit_dataset("linear", source, {epochs: 1200, learning_rate: 0.05});
+assert(fitted[0], "dataset fit");
+assert(fitted[1].prediction[3] > 6.9, "dataset prediction lower bound");
+assert(fitted[1].prediction[3] < 7.1, "dataset prediction upper bound");
+assert(fitted[1].uncertainty[0] >= 0, "dataset uncertainty");
+
+print("ML_DATASET_PASS");

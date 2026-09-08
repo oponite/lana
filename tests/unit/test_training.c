@@ -145,7 +145,7 @@ static void test_train_errors(void) {
     Value optimizer;
     static size_t shape[1] = {1}, strides[1] = {1};
     static double data[1] = {0.0};
-    LanaTensor init = {1, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false};
+    LanaTensor init = {1, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
 
     /* Create a live optimizer value in its own VM. Its GC heap must stay alive
      * until the train calls below have consumed it, so opt_vm is freed last. */
@@ -186,7 +186,7 @@ static void test_update_errors(void) {
     LanaOptimizer optimizer;
     static size_t shape[1] = {1}, strides[1] = {1};
     static double data[1] = {0.0};
-    LanaTensor init = {1, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false};
+    LanaTensor init = {1, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
 
     /* A minimal training result: only the fields `host_update` inspects before
      * the steps/capability checks are populated. */
@@ -258,7 +258,7 @@ static void test_resume_errors(void) {
     LanaArray steps;
     static size_t shape[1] = {1}, strides[1] = {1};
     static double data[1] = {0.0};
-    LanaTensor init = {1, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false};
+    LanaTensor init = {1, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)data, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
 
     /* A minimal training result: only the fields `host_resume` inspects before
      * the capability check are populated. `steps` is empty (count 0) because the

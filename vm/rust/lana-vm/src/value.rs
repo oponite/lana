@@ -439,6 +439,12 @@ impl TensorDtype {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorDevice {
+    Cpu,
+    Metal,
+}
+
 #[derive(Debug, Clone)]
 pub struct Tensor {
     pub ndim: usize,
@@ -447,6 +453,8 @@ pub struct Tensor {
     pub is_complex: bool,
     /// LIP-027: numeric dtype (F64 default).
     pub dtype: TensorDtype,
+    pub device: TensorDevice,
+    pub metal_buffer: Option<Arc<crate::metal::ResidentBuffer>>,
     /// LIP-027: compact byte buffer, `prod(shape) * element_width` bytes.
     /// Element access goes through the `tensor_get_*`/`tensor_set_*` helpers
     /// in `tensor.rs`, which convert between the storage dtype and f64.

@@ -69,6 +69,11 @@ future that completes after that duration, yielding `null`. The event loop
 schedules ready futures FIFO by creation order, so resumption order (and thus
 results) is deterministic for a given computation.
 
+LIP-028 appends host calls for tensor device transfer and shared numerical
+operations. It adds no opcode and does not change the LABC layout or version.
+Device buffers and runtime pointers are never serialized; rebuild a model's
+device placement explicitly after loading ordinary model data.
+
 Opcodes have stable numeric values within Lana 2.0. Their names and operands
 are defined by `vm/include/bytecode.h`; the verifier checks register ranges,
 constant types, function metadata, jump targets, host-call IDs, and every
@@ -91,5 +96,5 @@ MEASURE R0 R1 probability
 HALT
 ```
 
-The authority order is `../papers/semantics.md`, `SPEC.md`, this document, then
-`VM.md`.
+The authority order is `../papers/semantics.md`,
+`../lip/archive/LIP-026.md`, `SPEC.md`, this document, then `VM.md`.

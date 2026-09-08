@@ -313,6 +313,20 @@ fn host_is_pure(name) {
     if (name == "eye") { return true; } if (name == "shape") { return true; }
     if (name == "ndim") { return true; } if (name == "dtype") { return true; }
     if (name == "matmul") { return true; } if (name == "sum") { return true; }
+    if (name == "reshape") { return true; } if (name == "transpose") { return true; }
+    if (name == "exp") { return true; } if (name == "log") { return true; }
+    if (name == "sqrt") { return true; } if (name == "relu") { return true; }
+    if (name == "softmax") { return true; } if (name == "logsumexp") { return true; }
+    if (name == "argmax") { return true; }
+    if (name == "tensor_compare") { return true; }
+    if (name == "tensor_select") { return true; }
+    if (name == "gather") { return true; }
+    if (name == "cholesky_solve") { return true; }
+    if (name == "random_uniform") { return true; }
+    if (name == "random_normal") { return true; }
+    if (name == "device") { return true; }
+    if (name == "to_device") { return true; }
+    if (name == "to_cpu") { return true; }
     if (name == "mean") { return true; } if (name == "max") { return true; }
     if (name == "min") { return true; }
     if (name == "set_new") { return true; } if (name == "set_add") { return true; }
@@ -443,6 +457,21 @@ fn host_type(name) {
     if (name == "eye") { return type_ordinary("tensor"); }
     if (name == "dtype") { return type_ordinary("string"); }
     if (name == "cast") { return type_ordinary("tensor"); }
+    if (name == "reshape") { return type_ordinary("tensor"); }
+    if (name == "transpose") { return type_ordinary("tensor"); }
+    if (name == "exp") { return type_ordinary("tensor"); } if (name == "log") { return type_ordinary("tensor"); }
+    if (name == "sqrt") { return type_ordinary("tensor"); } if (name == "relu") { return type_ordinary("tensor"); }
+    if (name == "softmax") { return type_ordinary("tensor"); } if (name == "logsumexp") { return type_ordinary("tensor"); }
+    if (name == "argmax") { return type_unknown(); }
+    if (name == "tensor_compare") { return type_unknown(); }
+    if (name == "tensor_select") { return type_unknown(); }
+    if (name == "gather") { return type_unknown(); }
+    if (name == "cholesky_solve") { return type_unknown(); }
+    if (name == "random_uniform") { return type_unknown(); }
+    if (name == "random_normal") { return type_unknown(); }
+    if (name == "device") { return type_unknown(); }
+    if (name == "to_device") { return type_unknown(); }
+    if (name == "to_cpu") { return type_unknown(); }
     if (name == "shape") { return type_ordinary("array"); }
     if (name == "ndim") { return type_ordinary("number"); }
     if (name == "matmul") { return type_ordinary("tensor"); }
@@ -1136,6 +1165,103 @@ fn builtin_tensor_type(node, resolved) {
         let dtype_node = resolved[1][3];
         if (dtype_node[0] != 20) { type_error(node, "cast: dtype must be a string literal"); }
         if (dtype_node[1] != "string") { type_error(node, "cast: dtype must be a string literal"); }
+        return type_tensor(tensor_shape_of(resolved[0]));
+    }
+    if (name == "reshape") {
+        require_argument_count(name, resolved, 2);
+        require_certain_tensor(resolved[0][1], "reshape", node);
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "transpose") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], "transpose", node);
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "exp") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], name, node);
+        return type_tensor(tensor_shape_of(resolved[0]));
+    }
+    if (name == "log") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], name, node);
+        return type_tensor(tensor_shape_of(resolved[0]));
+    }
+    if (name == "sqrt") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], name, node);
+        return type_tensor(tensor_shape_of(resolved[0]));
+    }
+    if (name == "relu") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], name, node);
+        return type_tensor(tensor_shape_of(resolved[0]));
+    }
+    if (name == "softmax") {
+        let count = array_length(resolved);
+        if (count != 1) { if (count != 2) { type_error(node, string_concat(name, " expects a tensor and optional axis")); } }
+        require_certain_tensor(resolved[0][1], name, node);
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "logsumexp") {
+        let count = array_length(resolved);
+        if (count != 1) { if (count != 2) { type_error(node, string_concat(name, " expects a tensor and optional axis")); } }
+        require_certain_tensor(resolved[0][1], name, node);
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "argmax") {
+        let count = array_length(resolved);
+        if (count != 1) { if (count != 2) { type_error(node, "argmax expects a tensor and optional axis"); } }
+        require_certain_tensor(resolved[0][1], name, node);
+        if (count == 1) { return type_ordinary("number"); }
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "tensor_compare") {
+        require_argument_count(name, resolved, 3);
+        require_certain_tensor(resolved[0][1], name, node);
+        require_certain_tensor(resolved[1][1], name, node);
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "tensor_select") {
+        require_argument_count(name, resolved, 3);
+        require_certain_tensor(resolved[0][1], name, node);
+        require_certain_tensor(resolved[1][1], name, node);
+        require_certain_tensor(resolved[2][1], name, node);
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "gather") {
+        require_argument_count(name, resolved, 3);
+        require_certain_tensor(resolved[0][1], name, node);
+        require_certain_tensor(resolved[1][1], name, node);
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "cholesky_solve") {
+        require_argument_count(name, resolved, 2);
+        require_certain_tensor(resolved[0][1], name, node);
+        require_certain_tensor(resolved[1][1], name, node);
+        return type_tensor(tensor_shape_of(resolved[1]));
+    }
+    if (name == "random_uniform") {
+        require_argument_count(name, resolved, 2);
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "random_normal") {
+        require_argument_count(name, resolved, 2);
+        return type_tensor(shape_dynamic());
+    }
+    if (name == "device") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], name, node);
+        return type_ordinary("string");
+    }
+    if (name == "to_device") {
+        require_argument_count(name, resolved, 3);
+        require_certain_tensor(resolved[0][1], name, node);
+        return type_tensor(tensor_shape_of(resolved[0]));
+    }
+    if (name == "to_cpu") {
+        require_argument_count(name, resolved, 1);
+        require_certain_tensor(resolved[0][1], name, node);
         return type_tensor(tensor_shape_of(resolved[0]));
     }
     return null;

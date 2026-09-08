@@ -79,7 +79,12 @@ const HOST_CALL_NAMES: &[&str] = &[
     "ffi_declare", "ffi_load", "ffi_call",
     "http_get", "http_post", "socket_connect", "socket_send",
     "socket_recv", "socket_close",
-    "tensor_cast",
+    "tensor_cast", "tensor_reshape", "tensor_transpose",
+    "tensor_exp", "tensor_log", "tensor_sqrt", "tensor_relu",
+    "tensor_softmax", "tensor_logsumexp", "tensor_argmax",
+    "tensor_compare", "tensor_select", "tensor_gather",
+    "cholesky_solve", "random_uniform", "random_normal",
+    "tensor_device", "tensor_to_device", "tensor_to_cpu",
 ];
 
 struct Label {

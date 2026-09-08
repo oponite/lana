@@ -4,11 +4,10 @@ A LIP is a written proposal for a change to Lana's language, bytecode, or VM
 semantics. It is the mechanism by which a design target becomes an
 implementation-ready contract.
 
-The current implementation scope and verification state are tracked in
-[`MILESTONE-2.1.md`](MILESTONE-2.1.md). It includes LIPs 004–016 and 018–025;
-the package-manager/registry proposal (017) is deferred.
+Closed proposals are retained in [`archive/`](archive/README.md). Active or
+deferred proposals remain in this directory.
 
-[`LIP-026.md`](LIP-026.md) is the design charter: fifteen normative design
+[`LIP-026.md`](archive/LIP-026.md) is the design charter: fifteen normative design
 requirements plus the ten-question design test that every surface change must
 answer. All LIPs carry the resulting "Design test" section (see
 [`TEMPLATE.md`](TEMPLATE.md)).
@@ -31,10 +30,10 @@ do not alter the contracts above.
 2. **Discuss** — refine the motivation, specification, and rationale.
 3. **Accept / Reject** — the maintainer (BDFL) records the decision in the
    status line. Acceptance requires the change to be consistent with the
-   authority order (`papers/semantics.md` → `spec/SPEC.md` → `spec/BYTECODE.md`
-   → `spec/VM.md`).
+   authority order (`papers/semantics.md` → `LIP-026` → `spec/SPEC.md` →
+   `spec/BYTECODE.md` → `spec/VM.md`).
 4. **Implement** — once accepted, the change is implemented and the LIP status
-   moves to `Final`.
+   moves to `Final` and the document moves to `archive/`.
 
 ## Status lifecycle
 

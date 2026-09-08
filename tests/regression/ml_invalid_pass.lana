@@ -1,0 +1,33 @@
+import "std/ml" as ml;
+
+let bad_device = ml.fit("linear", {x: tensor([[1.0]]), y: tensor([1.0])}, {device: "metal"});
+assert(!bad_device[0], "explicit unavailable Metal must fail");
+assert(bad_device[1].code == "capability_required", "Metal capability error code");
+
+let cpu_only = ml.fit("kalman", {observations: tensor([1.0])}, {device: "metal"});
+assert(!cpu_only[0], "CPU-only family must reject explicit Metal");
+assert(cpu_only[1].code == "device_unsupported", "CPU-only Metal error code");
+
+let gpu_admin = capability("gpu");
+let gpu_use = grant(gpu_admin, "use");
+let bad_dtype = ml.fit("linear", {x: tensor([[1.0]]), y: tensor([1.0])},
+    {device: "metal", gpu_token: gpu_use});
+assert(!bad_dtype[0], "f64 Metal ML must fail");
+assert(bad_dtype[1].code == "dtype_unsupported", "Metal dtype error code");
+
+let bad_target = ml.fit("logistic_binary",
+    {x: tensor([[1.0], [2.0]]), y: tensor([0.0, 2.0])}, {});
+assert(!bad_target[0], "invalid binary target must fail");
+assert(bad_target[1].field == "data.y", "target error field");
+
+let unsupported = ml.fit("not_a_model", {x: tensor([[1.0]]), y: tensor([1.0])}, {});
+assert(!unsupported[0], "unknown model kind must fail");
+
+let bad_hmm = ml.fit("hmm_categorical", {observations: tensor([0.0, 2.0])},
+    {state_count: 2, symbol_count: 2});
+assert(!bad_hmm[0], "out-of-range HMM observation must fail");
+
+let missing_threshold = ml.fit("jump", {returns: tensor([0.1, 0.2])}, {mode: "kou"});
+assert(!missing_threshold[0], "returns require an explicit jump threshold");
+
+print("ML_INVALID_PASS");

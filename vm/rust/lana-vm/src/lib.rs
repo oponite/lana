@@ -30,7 +30,7 @@ pub use value::{
     Adt, CapabilityToken, Claim, EffectReceipt, JointKind, JointRow, JointState, PathAlternative,
     PathSet, PlannedEffect, Possibility, Reactive, ReactiveKind, ReactiveVersion,
     RelationshipKind, SharedCommit, SharedInformation, SharedObservation, SharedState,
-    SharedVersion, Task, Tensor, Value, ValueKind, VmError, ADT_UNKNOWN_VARIANT, LANA_CAPABILITY_ADMIN,
+    SharedVersion, Task, Tensor, TensorDevice, Value, ValueKind, VmError, ADT_UNKNOWN_VARIANT, LANA_CAPABILITY_ADMIN,
     LANA_CAPABILITY_OBSERVE, LANA_CAPABILITY_READ,
 };
 pub use vm::{
