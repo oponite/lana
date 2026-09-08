@@ -360,7 +360,12 @@ static int repl_compile_source(const char *compiler_path, const char *source_tex
     const char *arguments[2] = {source_path, assembly_path};
     descriptor = mkstemp(source_path);
     if (descriptor < 0) return 1;
-    (void)write(descriptor, source_text, strlen(source_text));
+    size_t source_length = strlen(source_text);
+    if (write(descriptor, source_text, source_length) != (ssize_t)source_length) {
+        (void)close(descriptor);
+        (void)unlink(source_path);
+        return 1;
+    }
     (void)close(descriptor);
     descriptor = mkstemp(assembly_path);
     if (descriptor < 0) { (void)unlink(source_path); return 1; }
