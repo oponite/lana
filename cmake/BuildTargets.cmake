@@ -29,8 +29,13 @@ set(LANA_RUNTIME_SOURCES
     runtime/c/effects.c
     runtime/c/adapters.c
     vm/c/backend.c
-    vm/c/metal.m
 )
+
+if(APPLE)
+    list(APPEND LANA_RUNTIME_SOURCES vm/c/metal.m)
+else()
+    list(APPEND LANA_RUNTIME_SOURCES vm/c/metal_stub.c)
+endif()
 
 # Native matmul backend selection (LIP-004 section 5). Every runtime variant
 # must select the same backend on a platform so the C11 VM stays byte-identical
