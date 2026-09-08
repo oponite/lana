@@ -883,10 +883,10 @@ fn emit_expression(context, node) {
     return emit_extended_expression(context, node);
 }
 
-fn emit_assignment(context, target, value) {
+fn emit_assignment(context, target, value, information) {
     if (target[0] == 21) {
         let source = emit_expression(context, value); let destination = symbol_find(context, target[1]);
-        if (expression_is_information(context, value)) { array_push(context[5], target[1]); }
+        map_set(context[5], target[1], information);
         emit(context, string_concat("MOVE ", reg(destination), " ", reg(source))); return null;
     }
     if (target[0] == 26) {
@@ -909,11 +909,17 @@ fn emit_assignment(context, target, value) {
 fn emit_if(context, node) {
     let otherwise = new_label(context, "else"); let end = new_label(context, "endif");
     let predicate = emit_expression(context, node[1]);
-    let uncertain = expression_is_information(context, node[1]); let opcode = "JUMP_IF_FALSE";
+    let uncertain = node[4]; let opcode = "JUMP_IF_FALSE";
     if (uncertain) { opcode = "PATH_SPLIT"; }
     emit(context, string_concat(opcode, " ", reg(predicate), " ", otherwise));
     emit_statements(context, node[2]); emit(context, string_concat("JUMP ", end)); emit(context, string_concat(otherwise, ":"));
-    emit_statements(context, node[3]); emit(context, string_concat(end, ":")); if (uncertain) { emit(context, "PATH_JOIN"); } return null;
+    emit_statements(context, node[3]); emit(context, string_concat(end, ":")); if (uncertain) { emit(context, "PATH_JOIN"); }
+    let keys = map_keys(node[5]); let index = 0;
+    while (index < array_length(keys)) {
+        map_set(context[5], keys[index], map_get(node[5], keys[index])[0] == "information");
+        index = index + 1;
+    }
+    return null;
 }
 
 fn emit_while(context, node) {
@@ -1171,9 +1177,9 @@ fn emit_statement(context, ir_node) {
     let node = ir_node[3]; emit(context, string_concat(".line ", number_to_string(node[array_length(node) - 2])));
     if (node[0] == 2) {
         let source = emit_expression(context, node[3]); let destination = new_register(context);
-        symbol_add(context, node[1], destination, expression_is_information(context, node[3])); emit(context, string_concat("MOVE ", reg(destination), " ", reg(source))); return null;
+        symbol_add(context, node[1], destination, ir_node[4][0] == "information"); emit(context, string_concat("MOVE ", reg(destination), " ", reg(source))); return null;
     }
-    if (node[0] == 3) { return emit_assignment(context, node[1], node[2]); }
+    if (node[0] == 3) { return emit_assignment(context, node[1], node[2], ir_node[4][0] == "information"); }
     if (node[0] == 4) { return emit_if(context, node); }
     if (node[0] == 5) { return emit_while(context, node); }
     if (node[0] == 15) { return emit_for(context, node); }

@@ -1,10 +1,8 @@
 //! LIP-004 tensor helpers, mirroring `vm/c/vm.c` lines 3163-3496.
 //!
-//! The C11 VM allocates tensor buffers through the GC (`lana_vm_alloc`); the
-//! Rust VM accounts the same bytes through the caller-supplied `alloc` closure
-//! (the VM's `alloc_bytes`), so the 256 MiB memory limit is preserved. Every
-//! per-operation temporary — shape/stride scratch and BLAS packing buffers —
-//! is accounted through the same closure in both VMs (LIP-004).
+//! Payloads, view metadata, and scratch buffers reserve capacity on the caller's
+//! heap before allocation. Each owner releases its reservation on drop; views
+//! share the backing buffer and its single reservation.
 
 use std::sync::{Arc, Mutex};
 
@@ -244,7 +242,7 @@ pub fn tensor_set_imag(t: &mut Tensor, i: usize, v: f64) {
 /// `tensor_new_dtype`. Returns `LanaError::Oom` on allocation failure or shape
 /// overflow.
 pub fn tensor_new_dtype(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     ndim: usize,
     shape: &[usize],
     dtype: TensorDtype,
@@ -252,18 +250,12 @@ pub fn tensor_new_dtype(
     if ndim > TENSOR_MAX_RANK || ndim != shape.len() {
         return Err(LanaError::InvalidParameters);
     }
-    if alloc(std::mem::size_of::<Tensor>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
+    let owner = alloc.reserve(std::mem::size_of::<Tensor>() + 2 * ndim * std::mem::size_of::<usize>())?;
     let is_complex = dtype == TensorDtype::Complex;
-    let mut strides = vec![0usize; ndim];
+    let mut strides = Vec::new();
+    strides.try_reserve_exact(ndim).map_err(|_| LanaError::Oom)?;
+    strides.resize(ndim, 0usize);
     if ndim > 0 {
-        if alloc(ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        if alloc(ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
         let mut stride: usize = 1;
         for i in (0..ndim).rev() {
             strides[i] = stride;
@@ -296,19 +288,14 @@ pub fn tensor_new_dtype(
         TensorDtype::Complex => 8,
         TensorDtype::F64 => 8,
     };
-    let mut data = Vec::new();
-    if elem_count > 0 {
-        let data_bytes = elem_count
-            .checked_mul(width)
-            .ok_or(LanaError::Oom)?;
-        if alloc(data_bytes) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        data = vec![0u8; elem_count * width];
-    }
+    let data_bytes = elem_count.checked_mul(width).ok_or(LanaError::Oom)?;
+    let data = crate::heap::Buffer::filled(alloc, data_bytes, 0u8)?;
+    let mut owned_shape = Vec::new();
+    owned_shape.try_reserve_exact(ndim).map_err(|_| LanaError::Oom)?;
+    owned_shape.extend_from_slice(shape);
     Ok(Tensor {
         ndim,
-        shape: shape.to_vec(),
+        shape: owned_shape,
         strides,
         is_complex,
         dtype,
@@ -317,14 +304,39 @@ pub fn tensor_new_dtype(
         data: Arc::new(data),
         offset: 0,
         is_state: false,
+        _owner: owner,
+        metal_charge: None,
     })
+}
+
+impl Tensor {
+    /// Copy view metadata; retain the single reservation owned by its backing buffer.
+    pub fn try_clone(&self, heap: &crate::heap::Heap) -> Result<Self, LanaError> {
+        self.view(heap, &self.shape, &self.strides, self.offset)
+    }
+
+    fn view(&self, heap: &crate::heap::Heap, shape: &[usize], strides: &[usize], offset: usize) -> Result<Self, LanaError> {
+        let owner = heap.reserve(std::mem::size_of::<Self>() + 2 * shape.len() * std::mem::size_of::<usize>())?;
+        let mut owned_shape = Vec::new();
+        owned_shape.try_reserve_exact(shape.len()).map_err(|_| LanaError::Oom)?;
+        owned_shape.extend_from_slice(shape);
+        let mut owned_strides = Vec::new();
+        owned_strides.try_reserve_exact(strides.len()).map_err(|_| LanaError::Oom)?;
+        owned_strides.extend_from_slice(strides);
+        Ok(Self {
+            ndim: shape.len(), shape: owned_shape, strides: owned_strides,
+            is_complex: self.is_complex, dtype: self.dtype, device: self.device,
+            metal_buffer: self.metal_buffer.clone(), data: self.data.clone(), offset,
+            is_state: self.is_state, _owner: owner, metal_charge: self.metal_charge.clone(),
+        })
+    }
 }
 
 /// Allocate a zero-initialized tensor with the given shape, defaulting to F64
 /// (or COMPLEX when `is_complex`). Kept for the common case; dtype-specific
 /// callers use `tensor_new_dtype`.
 pub fn tensor_new(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     ndim: usize,
     shape: &[usize],
     is_complex: bool,
@@ -338,14 +350,15 @@ pub fn tensor_new(
 }
 
 fn promote_metal(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     tensor: &mut Tensor,
 ) -> Result<(), LanaError> {
     if tensor.device != TensorDevice::Metal || tensor.metal_buffer.is_some() { return Ok(()); }
-    if alloc(tensor.data.len()) != LanaError::Ok { return Err(LanaError::Oom); }
+    let charge = alloc.reserve(tensor.data.len())?;
     tensor.metal_buffer = Some(Arc::new(
         metal::ResidentBuffer::new(&tensor.data).ok_or(LanaError::UnsupportedOperation)?
     ));
+    tensor.metal_charge = Some(Arc::new(charge));
     Ok(())
 }
 
@@ -353,7 +366,7 @@ fn promote_metal(
 /// (returns the same tensor). Cast to/from complex is out of scope (`Type`).
 /// The result is a fresh base tensor; a view is never mutated.
 pub fn tensor_cast(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     t: &Tensor,
     dtype: TensorDtype,
 ) -> Result<Tensor, LanaError> {
@@ -361,12 +374,12 @@ pub fn tensor_cast(
         return Err(LanaError::Type);
     }
     if t.dtype == dtype {
-        return Ok(t.clone());
+        return t.try_clone(alloc);
     }
     let mut r = tensor_new_dtype(alloc, t.ndim, &t.shape, dtype)?;
     r.device = t.device;
     let total: usize = t.shape.iter().product();
-    let mut idx = vec![0usize; t.ndim];
+    let mut idx = crate::heap::Buffer::filled(alloc, t.ndim, 0usize)?;
     for lin in 0..total {
         let mut rem = lin;
         for i in (0..t.ndim).rev() {
@@ -388,9 +401,9 @@ pub fn tensor_cast(
 /// raise `Type`; negative or non-integer items raise `InvalidParameters`. The
 /// shape buffer is accounted through `alloc`.
 pub fn tensor_shape_from_array(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     v: &Value,
-) -> Result<Vec<usize>, LanaError> {
+) -> Result<crate::heap::Buffer<usize>, LanaError> {
     let ValueKind::Array(array) = &v.kind else {
         return Err(LanaError::Type);
     };
@@ -398,23 +411,18 @@ pub fn tensor_shape_from_array(
     if array.items.len() > TENSOR_MAX_RANK {
         return Err(LanaError::InvalidParameters);
     }
-    if !array.items.is_empty()
-        && alloc(array.items.len() * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut shape = Vec::with_capacity(array.items.len());
+    let mut shape = crate::heap::Buffer::new(alloc, array.items.len(), 0)?;
     for item in &array.items {
         let ValueKind::Number(n) = item.kind else {
             return Err(LanaError::Type);
         };
-        shape.push(tensor_dimension(n)?);
+        shape.push(tensor_dimension(n)?)?;
     }
     Ok(shape)
 }
 
 pub fn tensor_reshape(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     source: &Tensor,
     shape_value: &Value,
 ) -> Result<Value, LanaError> {
@@ -442,16 +450,13 @@ pub fn tensor_reshape(
 }
 
 pub fn tensor_transpose(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     source: &Tensor,
 ) -> Result<Value, LanaError> {
     if source.ndim < 2 {
         return Err(LanaError::InvalidParameters);
     }
-    if alloc(std::mem::size_of::<Tensor>() + 2 * source.ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut result = source.clone();
+    let mut result = source.try_clone(alloc)?;
     result.shape.swap(source.ndim - 2, source.ndim - 1);
     result.strides.swap(source.ndim - 2, source.ndim - 1);
     promote_metal(alloc, &mut result)?;
@@ -468,7 +473,7 @@ pub fn logical_index(tensor: &Tensor, mut linear: usize) -> usize {
 }
 
 pub fn tensor_unary_math(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     source: &Tensor,
     operation: u32,
 ) -> Result<Value, LanaError> {
@@ -489,7 +494,7 @@ pub fn tensor_unary_math(
 }
 
 pub fn tensor_softmax_like(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     source: &Tensor,
     axis_value: Option<&Value>,
     logsumexp: bool,
@@ -505,7 +510,8 @@ pub fn tensor_softmax_like(
     if width == 0 { return Err(LanaError::InvalidParameters); }
     let inner = source.shape[axis + 1..].iter().product::<usize>();
     let outer = source.shape[..axis].iter().product::<usize>();
-    let shape = if logsumexp { source.shape.iter().enumerate().filter_map(|(i, n)| (i != axis).then_some(*n)).collect::<Vec<_>>() } else { source.shape.clone() };
+    let mut shape = crate::heap::Buffer::new(alloc, source.ndim, 0)?;
+    shape.extend(source.shape.iter().enumerate().filter_map(|(i, n)| (!logsumexp || i != axis).then_some(*n)))?;
     let mut result = tensor_new_dtype(alloc, shape.len(), &shape, source.dtype)?;
     result.device = source.device;
     for o in 0..outer { for inner_index in 0..inner {
@@ -523,7 +529,7 @@ pub fn tensor_softmax_like(
 }
 
 pub fn tensor_argmax(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     source: &Tensor,
     axis_value: Option<&Value>,
 ) -> Result<Value, LanaError> {
@@ -547,7 +553,8 @@ pub fn tensor_argmax(
     if width == 0 { return Err(LanaError::InvalidParameters); }
     let inner = source.shape[axis + 1..].iter().product::<usize>();
     let outer = source.shape[..axis].iter().product::<usize>();
-    let shape = source.shape.iter().enumerate().filter_map(|(i, n)| (i != axis).then_some(*n)).collect::<Vec<_>>();
+    let mut shape = crate::heap::Buffer::new(alloc, source.ndim - 1, 0)?;
+    shape.extend(source.shape.iter().enumerate().filter_map(|(i, n)| (i != axis).then_some(*n)))?;
     let mut result = tensor_new_dtype(alloc, shape.len(), &shape, TensorDtype::F64)?;
     result.device = source.device;
     for o in 0..outer { for inner_index in 0..inner {
@@ -564,9 +571,9 @@ pub fn tensor_argmax(
     Ok(Value::tensor(Arc::new(result)))
 }
 
-fn broadcast_shape(a: &Tensor, b: &Tensor) -> Result<Vec<usize>, LanaError> {
+fn broadcast_shape(alloc: &crate::heap::Heap, a: &Tensor, b: &Tensor) -> Result<crate::heap::Buffer<usize>, LanaError> {
     let ndim = a.ndim.max(b.ndim);
-    let mut shape = vec![0; ndim];
+    let mut shape = crate::heap::Buffer::filled(alloc, ndim, 0)?;
     for (i, item) in shape.iter_mut().enumerate() {
         let ai = if i < ndim - a.ndim { 1 } else { a.shape[i - (ndim - a.ndim)] };
         let bi = if i < ndim - b.ndim { 1 } else { b.shape[i - (ndim - b.ndim)] };
@@ -595,7 +602,7 @@ pub fn broadcast_index(tensor: &Tensor, shape: &[usize], mut linear: usize) -> u
 }
 
 pub fn tensor_compare_values(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     a: &Tensor,
     b: &Tensor,
     operation: &str,
@@ -603,7 +610,7 @@ pub fn tensor_compare_values(
     if a.dtype != b.dtype || a.is_complex || b.is_complex { return Err(LanaError::Type); }
     if a.device != b.device { return Err(LanaError::InvalidParameters); }
     let op = match operation { "eq" => 0, "ne" => 1, "lt" => 2, "le" => 3, "gt" => 4, "ge" => 5, _ => return Err(LanaError::InvalidParameters) };
-    let shape = broadcast_shape(a, b)?;
+    let shape = broadcast_shape(alloc, a, b)?;
     let mut result = tensor_new_dtype(alloc, shape.len(), &shape, a.dtype)?;
     result.device = a.device;
     for i in 0..tensor_element_count(&result) {
@@ -617,14 +624,14 @@ pub fn tensor_compare_values(
 }
 
 pub fn tensor_select_values(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     mask: &Tensor,
     yes: &Tensor,
     no: &Tensor,
 ) -> Result<Value, LanaError> {
     if mask.is_complex || yes.dtype != no.dtype { return Err(LanaError::Type); }
     if mask.device != yes.device || yes.device != no.device { return Err(LanaError::InvalidParameters); }
-    let shape = broadcast_shape(yes, no)?;
+    let shape = broadcast_shape(alloc, yes, no)?;
     if !broadcast_compatible(mask, &shape) { return Err(LanaError::InvalidParameters); }
     let mut result = tensor_new_dtype(alloc, shape.len(), &shape, yes.dtype)?;
     result.device = yes.device;
@@ -639,7 +646,7 @@ pub fn tensor_select_values(
 }
 
 pub fn tensor_gather_values(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     source: &Tensor,
     indices: &Tensor,
     axis_value: &Value,
@@ -690,7 +697,7 @@ fn random_unit(state: &mut u64) -> f64 {
 }
 
 pub fn tensor_random(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     shape_value: &Value,
     seed_value: &Value,
     normal: bool,
@@ -724,7 +731,7 @@ pub fn tensor_random(
 }
 
 pub fn tensor_cholesky_solve(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     matrix: &Tensor,
     rhs: &Tensor,
 ) -> Result<Value, LanaError> {
@@ -736,10 +743,8 @@ pub fn tensor_cholesky_solve(
     }
     let n = matrix.shape[0];
     let columns = if rhs.ndim == 1 { 1 } else { rhs.shape[1] };
-    let scratch = (n * n + n * columns) * std::mem::size_of::<f64>();
-    if alloc(scratch) != LanaError::Ok { return Err(LanaError::Oom); }
-    let mut lower = vec![0.0; n * n];
-    let mut work = vec![0.0; n * columns];
+    let mut lower = crate::heap::Buffer::filled(alloc, n * n, 0.0)?;
+    let mut work = crate::heap::Buffer::filled(alloc, n * columns, 0.0)?;
     for i in 0..n { for j in 0..=i {
         let aij = tensor_get_real(matrix, logical_index(matrix, i * n + j));
         let aji = tensor_get_real(matrix, logical_index(matrix, j * n + i));
@@ -766,7 +771,7 @@ pub fn tensor_cholesky_solve(
     }
     let mut result = tensor_new_dtype(alloc, rhs.ndim, &rhs.shape, rhs.dtype)?;
     result.device = rhs.device;
-    for (i, value) in work.into_iter().enumerate() { tensor_set_real(&mut result, i, value); }
+    for (i, value) in work.iter().copied().enumerate() { tensor_set_real(&mut result, i, value); }
     Ok(Value::tensor(Arc::new(result)))
 }
 
@@ -791,7 +796,7 @@ fn tensor_broadcast_strides(t: &Tensor, out_ndim: usize, out_shape: &[usize], st
 /// Element-wise binary op with NumPy broadcasting, mirroring
 /// `tensor_elementwise`. `op`: 0=add 1=sub 2=mul 3=div.
 pub fn tensor_elementwise(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     a: &Tensor,
     b: &Tensor,
     op: u32,
@@ -802,12 +807,7 @@ pub fn tensor_elementwise(
         return Err(LanaError::Type);
     }
     let out_ndim = a.ndim.max(b.ndim);
-    if out_ndim > 0
-        && alloc(out_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut out_shape = vec![0usize; out_ndim];
+    let mut out_shape = crate::heap::Buffer::filled(alloc, out_ndim, 0usize)?;
     for i in 0..out_ndim {
         let ai = if i < out_ndim - a.ndim {
             1
@@ -831,30 +831,15 @@ pub fn tensor_elementwise(
     }
     let mut r = tensor_new_dtype(alloc, out_ndim, &out_shape, a.dtype)?;
     r.device = a.device;
-    if out_ndim > 0
-        && alloc(out_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut a_strides = vec![0usize; out_ndim];
-    if out_ndim > 0
-        && alloc(out_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut b_strides = vec![0usize; out_ndim];
+    let mut a_strides = crate::heap::Buffer::filled(alloc, out_ndim, 0usize)?;
+    let mut b_strides = crate::heap::Buffer::filled(alloc, out_ndim, 0usize)?;
     tensor_broadcast_strides(a, out_ndim, &out_shape, &mut a_strides);
     tensor_broadcast_strides(b, out_ndim, &out_shape, &mut b_strides);
     let mut total: usize = 1;
     for i in 0..out_ndim {
         total *= out_shape[i];
     }
-    if out_ndim > 0
-        && alloc(out_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut idx = vec![0usize; out_ndim];
+    let mut idx = crate::heap::Buffer::filled(alloc, out_ndim, 0usize)?;
     let complex = a.is_complex;
     for lin in 0..total {
         let mut rem = lin;
@@ -910,7 +895,7 @@ pub fn tensor_elementwise(
 /// LIP-027: element-wise between a tensor and a scalar number. The scalar
 /// adopts the tensor's dtype (cast to it), so `f16_tensor + 1.0` is "f16".
 pub fn tensor_elementwise_scalar(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     t: &Tensor,
     s: f64,
     op: u32,
@@ -918,7 +903,7 @@ pub fn tensor_elementwise_scalar(
     let mut r = tensor_new_dtype(alloc, t.ndim, &t.shape, t.dtype)?;
     r.device = t.device;
     let total: usize = t.shape.iter().product();
-    let mut idx = vec![0usize; t.ndim];
+    let mut idx = crate::heap::Buffer::filled(alloc, t.ndim, 0usize)?;
     for lin in 0..total {
         let mut rem = lin;
         for i in (0..t.ndim).rev() {
@@ -1005,7 +990,7 @@ pub fn matmul_accumulation_fp32(a: &Tensor, b: &Tensor) -> bool {
 }
 
 pub fn tensor_matmul(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     a: &Tensor,
     b: &Tensor,
     out_dtype: TensorDtype,
@@ -1036,12 +1021,7 @@ pub fn tensor_matmul(
     let a_batch = if a_ndim <= 2 { 0 } else { a_ndim - 2 };
     let b_batch = if b_ndim <= 2 { 0 } else { b_ndim - 2 };
     let batch_ndim = a_batch.max(b_batch);
-    if batch_ndim > 0
-        && alloc(batch_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut batch_shape = vec![0usize; batch_ndim];
+    let mut batch_shape = crate::heap::Buffer::filled(alloc, batch_ndim, 0usize)?;
     for i in 0..batch_ndim {
         let ai = if i < batch_ndim - a_batch {
             1
@@ -1066,12 +1046,7 @@ pub fn tensor_matmul(
     let a_vec = a_ndim == 1;
     let b_vec = b_ndim == 1;
     let out_ndim = batch_ndim + if a_vec { 0 } else { 1 } + if b_vec { 0 } else { 1 };
-    if out_ndim > 0
-        && alloc(out_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut out_shape = vec![0usize; out_ndim];
+    let mut out_shape = crate::heap::Buffer::filled(alloc, out_ndim, 0usize)?;
     for i in 0..batch_ndim {
         out_shape[i] = batch_shape[i];
     }
@@ -1085,18 +1060,8 @@ pub fn tensor_matmul(
     }
     let mut r = tensor_new_dtype(alloc, out_ndim, &out_shape, out_dtype)?;
     r.device = a.device;
-    if batch_ndim > 0
-        && alloc(batch_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut a_batch_strides = vec![0usize; batch_ndim];
-    if batch_ndim > 0
-        && alloc(batch_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut b_batch_strides = vec![0usize; batch_ndim];
+    let mut a_batch_strides = crate::heap::Buffer::filled(alloc, batch_ndim, 0usize)?;
+    let mut b_batch_strides = crate::heap::Buffer::filled(alloc, batch_ndim, 0usize)?;
     for i in 0..batch_ndim {
         let a_dim = if i < batch_ndim - a_batch {
             1
@@ -1159,30 +1124,21 @@ pub fn tensor_matmul(
     let b_ld = if pack_b { n } else { b_row_stride };
     let a_core = m * k * mult;
     let b_core = k * n * mult;
-    let mut a_packed: Vec<f64> = Vec::new();
-    let mut b_packed: Vec<f64> = Vec::new();
+    let mut a_packed: crate::heap::Buffer<f64> = crate::heap::Buffer::new(alloc, 0, 0)?;
+    let mut b_packed: crate::heap::Buffer<f64> = crate::heap::Buffer::new(alloc, 0, 0)?;
     if pack_a && a_core > 0 {
-        if alloc(a_core * std::mem::size_of::<f64>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        a_packed = vec![0.0; a_core];
+        a_packed = crate::heap::Buffer::filled(alloc, a_core, 0.0)?;
     }
     if pack_b && b_core > 0 {
-        if alloc(b_core * std::mem::size_of::<f64>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        b_packed = vec![0.0; b_core];
+        b_packed = crate::heap::Buffer::filled(alloc, b_core, 0.0)?;
     }
     // LIP-027: the backend gemm accumulates in binary64. When the output dtype
     // is narrower than f64 (f32/f16/bf16), the result is staged in a scratch
     // buffer and converted element-wise into the compact output buffer.
     let c_core = m * n * mult;
-    let mut c_scratch: Vec<f64> = Vec::new();
+    let mut c_scratch: crate::heap::Buffer<f64> = crate::heap::Buffer::new(alloc, 0, 0)?;
     if c_core > 0 {
-        if alloc(c_core * std::mem::size_of::<f64>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        c_scratch = vec![0.0; c_core];
+        c_scratch = crate::heap::Buffer::filled(alloc, c_core, 0.0)?;
     }
     for batch in 0..batch_total {
         let mut rem = batch;
@@ -1251,7 +1207,7 @@ pub fn tensor_matmul(
 /// and the float32 -> binary64 upcast is exact. The caller attaches the
 /// APPROXIMATE derivation.
 pub fn tensor_gpu_matmul(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     a: &Tensor,
     b: &Tensor,
 ) -> Result<Tensor, LanaError> {
@@ -1274,12 +1230,7 @@ pub fn tensor_gpu_matmul(
     let a_batch = if a_ndim <= 2 { 0 } else { a_ndim - 2 };
     let b_batch = if b_ndim <= 2 { 0 } else { b_ndim - 2 };
     let batch_ndim = a_batch.max(b_batch);
-    if batch_ndim > 0
-        && alloc(batch_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut batch_shape = vec![0usize; batch_ndim];
+    let mut batch_shape = crate::heap::Buffer::filled(alloc, batch_ndim, 0usize)?;
     for i in 0..batch_ndim {
         let ai = if i < batch_ndim - a_batch {
             1
@@ -1304,12 +1255,7 @@ pub fn tensor_gpu_matmul(
     let a_vec = a_ndim == 1;
     let b_vec = b_ndim == 1;
     let out_ndim = batch_ndim + if a_vec { 0 } else { 1 } + if b_vec { 0 } else { 1 };
-    if out_ndim > 0
-        && alloc(out_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut out_shape = vec![0usize; out_ndim];
+    let mut out_shape = crate::heap::Buffer::filled(alloc, out_ndim, 0usize)?;
     for i in 0..batch_ndim {
         out_shape[i] = batch_shape[i];
     }
@@ -1322,18 +1268,8 @@ pub fn tensor_gpu_matmul(
         out_shape[pos] = b_cols;
     }
     let mut r = tensor_new(alloc, out_ndim, &out_shape, false)?;
-    if batch_ndim > 0
-        && alloc(batch_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut a_batch_strides = vec![0usize; batch_ndim];
-    if batch_ndim > 0
-        && alloc(batch_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
-    {
-        return Err(LanaError::Oom);
-    }
-    let mut b_batch_strides = vec![0usize; batch_ndim];
+    let mut a_batch_strides = crate::heap::Buffer::filled(alloc, batch_ndim, 0usize)?;
+    let mut b_batch_strides = crate::heap::Buffer::filled(alloc, batch_ndim, 0usize)?;
     for i in 0..batch_ndim {
         let a_dim = if i < batch_ndim - a_batch {
             1
@@ -1382,18 +1318,9 @@ pub fn tensor_gpu_matmul(
     let a_core = m * k;
     let b_core = k * n;
     let c_core = m * n;
-    if alloc(a_core * std::mem::size_of::<f32>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    if alloc(b_core * std::mem::size_of::<f32>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    if alloc(c_core * std::mem::size_of::<f32>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut a_float = vec![0.0f32; a_core];
-    let mut b_float = vec![0.0f32; b_core];
-    let mut c_float = vec![0.0f32; c_core];
+    let mut a_float = crate::heap::Buffer::filled(alloc, a_core, 0.0f32)?;
+    let mut b_float = crate::heap::Buffer::filled(alloc, b_core, 0.0f32)?;
+    let mut c_float = crate::heap::Buffer::filled(alloc, c_core, 0.0f32)?;
     for batch in 0..batch_total {
         let mut rem = batch;
         let mut a_off = 0usize;
@@ -1416,6 +1343,10 @@ pub fn tensor_gpu_matmul(
                     tensor_get_real(&b, b.offset + b_off + kk * b_row_stride + j * b_col_stride) as f32;
             }
         }
+        let device_bytes = a_core.checked_add(b_core).and_then(|n| n.checked_add(c_core))
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .and_then(|n| n.checked_add(3 * std::mem::size_of::<u32>())).ok_or(LanaError::Oom)?;
+        let _device_buffers = alloc.reserve(device_bytes)?;
         if !metal::metal_sgemm(m, k, n, a_float.as_ptr(), b_float.as_ptr(), c_float.as_mut_ptr()) {
             return Err(LanaError::UnsupportedOperation);
         }
@@ -1466,7 +1397,7 @@ fn tensor_reduce_fiber(
 /// be non-contiguous, so this traverses the strided layout per dimension
 /// instead of assuming a flat fiber.
 pub fn tensor_reduce(
-    alloc: &mut dyn FnMut(usize) -> LanaError, t: &Tensor, op: u32,
+    alloc: &crate::heap::Heap, t: &Tensor, op: u32,
 ) -> Result<Value, LanaError> {
     if t.is_complex && op >= 2 { return Err(LanaError::Type); }
     let total: usize = t.shape.iter().product();
@@ -1507,7 +1438,7 @@ pub fn tensor_reduce(
 
 /// Axis reductions remove the selected dimension, preserving the element type.
 pub fn tensor_reduce_axis(
-    alloc: &mut dyn FnMut(usize) -> LanaError, t: &Tensor, op: u32, axis: &Value,
+    alloc: &crate::heap::Heap, t: &Tensor, op: u32, axis: &Value,
 ) -> Result<Value, LanaError> {
     if t.is_complex && op >= 2 { return Err(LanaError::Type); }
     let ValueKind::Number(n) = axis.kind else { return Err(LanaError::Type); };
@@ -1594,14 +1525,11 @@ pub fn tensor_uncertainty_unpack(
 /// Build the { prediction, uncertainty } map result, mirroring
 /// `tensor_uncertain_result`.
 pub fn tensor_uncertain_result(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    heap: &crate::heap::Heap,
     pred: Arc<Tensor>,
     var: Arc<Tensor>,
 ) -> Result<Value, LanaError> {
-    if alloc(std::mem::size_of::<Map>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut map = Map::new(2);
+    let mut map = Map::new(heap, 2)?;
     map.set(Arc::from("prediction"), Value::tensor(pred), false)?;
     map.set(Arc::from("uncertainty"), Value::tensor(var), false)?;
     Ok(Value::map(Arc::new(Mutex::new(map))))
@@ -1610,7 +1538,7 @@ pub fn tensor_uncertain_result(
 /// A zero real tensor with the same shape as `t` (the variance of a certain
 /// operand), mirroring `tensor_zeros_like`.
 pub fn tensor_zeros_like(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     t: &Tensor,
 ) -> Result<Tensor, LanaError> {
     tensor_new(alloc, t.ndim, &t.shape, false)
@@ -1632,7 +1560,7 @@ pub fn tensor_all_finite(t: &Tensor) -> bool {
 /// First-order variance propagation for element-wise + - * / (real-only),
 /// mirroring `tensor_elementwise_uncertain`.
 pub fn tensor_elementwise_uncertain(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     a_pred: &Tensor,
     a_var: &Tensor,
     b_pred: &Tensor,
@@ -1669,7 +1597,7 @@ pub fn tensor_elementwise_uncertain(
 /// First-order variance propagation for matmul (real-only), mirroring
 /// `tensor_matmul_uncertain`.
 pub fn tensor_matmul_uncertain(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     a_pred: &Tensor,
     a_var: &Tensor,
     b_pred: &Tensor,
@@ -1693,7 +1621,7 @@ pub fn tensor_matmul_uncertain(
 /// Reduce to a tensor, wrapping a full-reduction number in a rank-0 tensor,
 /// mirroring `tensor_reduce_tensor`.
 pub fn tensor_reduce_tensor(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     t: &Tensor,
     op: u32,
     axis: Option<&Value>,
@@ -1716,7 +1644,7 @@ pub fn tensor_reduce_tensor(
 /// Scale a freshly-allocated (contiguous) tensor by a constant factor,
 /// mirroring `tensor_scale`.
 pub fn tensor_scale(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     t: &Tensor,
     factor: f64,
 ) -> Result<Tensor, LanaError> {
@@ -1732,7 +1660,7 @@ pub fn tensor_scale(
 /// First-order variance propagation for sum/mean reductions (real-only),
 /// mirroring `tensor_reduce_uncertain`.
 pub fn tensor_reduce_uncertain(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     pred: &Tensor,
     var: &Tensor,
     op: u32,
@@ -1763,34 +1691,19 @@ pub fn tensor_reduce_uncertain(
 
 /// A view of `t` with its last two axes swapped, mirroring
 /// `tensor_transpose_last_two`. Shares the source buffer.
-pub fn tensor_transpose_last_two(t: &Tensor) -> Tensor {
-    if t.ndim < 2 {
-        return t.clone();
+pub fn tensor_transpose_last_two(heap: &crate::heap::Heap, t: &Tensor) -> Result<Tensor, LanaError> {
+    let mut view = t.try_clone(heap)?;
+    if t.ndim >= 2 {
+        view.shape.swap(t.ndim - 1, t.ndim - 2);
+        view.strides.swap(t.ndim - 1, t.ndim - 2);
     }
-    let mut shape = t.shape.clone();
-    let mut strides = t.strides.clone();
-    let last = t.ndim - 1;
-    let second = t.ndim - 2;
-    shape.swap(last, second);
-    strides.swap(last, second);
-    Tensor {
-        ndim: t.ndim,
-        shape,
-        strides,
-        is_complex: t.is_complex,
-        dtype: t.dtype,
-        device: t.device.clone(),
-        metal_buffer: t.metal_buffer.clone(),
-        data: Arc::clone(&t.data),
-        offset: t.offset,
-        is_state: t.is_state,
-    }
+    Ok(view)
 }
 
 /// Outer product of two 1-D tensors: `out[i,j] = u[i] * v[j]`, mirroring
 /// `tensor_outer`.
 pub fn tensor_outer(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     u: &Tensor,
     v: &Tensor,
 ) -> Result<Tensor, LanaError> {
@@ -1814,14 +1727,11 @@ pub fn tensor_outer(
 /// Negate a tensor into a fresh base tensor (view-correct), mirroring
 /// `tensor_negate`.
 pub fn tensor_negate(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     t: &Tensor,
 ) -> Result<Tensor, LanaError> {
     let mut r = tensor_new(alloc, t.ndim, &t.shape, false)?;
     let total = tensor_element_count(t);
-    if t.ndim > 0 && alloc(t.ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
     for lin in 0..total {
         let mut rem = lin;
         let mut index = t.offset;
@@ -1838,17 +1748,14 @@ pub fn tensor_negate(
 /// mirroring `tensor_unbroadcast`. `g` is a contiguous base tensor; `target`
 /// supplies only its shape.
 pub fn tensor_unbroadcast(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     g: &Tensor,
     target: &Tensor,
 ) -> Result<Tensor, LanaError> {
     let out_ndim = target.ndim;
     let mut r = tensor_new(alloc, out_ndim, &target.shape, false)?;
     let total = tensor_element_count(g);
-    if g.ndim > 0 && alloc(g.ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut idx = vec![0usize; g.ndim];
+    let mut idx = crate::heap::Buffer::filled(alloc, g.ndim, 0usize)?;
     let offset = g.ndim - out_ndim;
     for lin in 0..total {
         let mut rem = lin;
@@ -1872,7 +1779,7 @@ pub fn tensor_unbroadcast(
 /// mirroring `tensor_broadcast_reduce`. `axis` is the reduced axis (-1 for a
 /// full reduction).
 pub fn tensor_broadcast_reduce(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     g: &Tensor,
     input: &Tensor,
     axis: i32,
@@ -1880,10 +1787,7 @@ pub fn tensor_broadcast_reduce(
 ) -> Result<Tensor, LanaError> {
     let mut r = tensor_new(alloc, input.ndim, &input.shape, false)?;
     let total = tensor_element_count(input);
-    if input.ndim > 0 && alloc(input.ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut idx = vec![0usize; input.ndim];
+    let mut idx = crate::heap::Buffer::filled(alloc, input.ndim, 0usize)?;
     let mut g_strides = [0usize; TENSOR_MAX_RANK];
     let mut stride = 1usize;
     for i in (0..g.ndim).rev() {
@@ -1919,19 +1823,19 @@ pub fn tensor_broadcast_reduce(
 /// leaves raise `Type`. Every per-level shape buffer is accounted through
 /// `alloc`.
 pub fn tensor_infer_shape(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     v: &Value,
-) -> Result<Vec<usize>, LanaError> {
+) -> Result<crate::heap::Buffer<usize>, LanaError> {
     tensor_infer_shape_at(alloc, v, 0)
 }
 
 fn tensor_infer_shape_at(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &crate::heap::Heap,
     v: &Value,
     depth: usize,
-) -> Result<Vec<usize>, LanaError> {
+) -> Result<crate::heap::Buffer<usize>, LanaError> {
     match &v.kind {
-        ValueKind::Number(_) => Ok(Vec::new()),
+        ValueKind::Number(_) => crate::heap::Buffer::new(alloc, 0, 0),
         ValueKind::Array(array) => {
             if depth == TENSOR_MAX_RANK {
                 return Err(LanaError::InvalidParameters);
@@ -1939,10 +1843,7 @@ fn tensor_infer_shape_at(
             // A recursive lock here means an array contains itself.
             let array = array.try_lock().map_err(|_| LanaError::InvalidParameters)?;
             if array.items.is_empty() {
-                if alloc(std::mem::size_of::<usize>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
-                }
-                return Ok(vec![0]);
+                return crate::heap::Buffer::filled(alloc, 1, 0);
             }
             let sub_shape = tensor_infer_shape_at(alloc, &array.items[0], depth + 1)?;
             for item in &array.items[1..] {
@@ -1956,12 +1857,9 @@ fn tensor_infer_shape_at(
                     }
                 }
             }
-            if alloc((sub_shape.len() + 1) * std::mem::size_of::<usize>()) != LanaError::Ok {
-                return Err(LanaError::Oom);
-            }
-            let mut shape = Vec::with_capacity(sub_shape.len() + 1);
-            shape.push(array.items.len());
-            shape.extend_from_slice(&sub_shape);
+            let mut shape = crate::heap::Buffer::new(alloc, sub_shape.len() + 1, 0)?;
+            shape.push(array.items.len())?;
+            shape.extend(sub_shape.iter().copied())?;
             Ok(shape)
         }
         _ => Err(LanaError::Type),
@@ -2049,7 +1947,7 @@ fn tensor_resolve_slice_bound(n: f64, dim: usize) -> Result<usize, LanaError> {
 /// slices keep it. Every non-fully-integer result shares the source buffer
 /// (through `Arc`) as a view.
 pub fn tensor_index(
-    alloc: &mut dyn FnMut(usize) -> LanaError, t: &Tensor, spec: &Value,
+    alloc: &crate::heap::Heap, t: &Tensor, spec: &Value,
 ) -> Result<Value, LanaError> {
     let mut is_int = [false; TENSOR_MAX_RANK];
     let mut start = [0usize; TENSOR_MAX_RANK];
@@ -2134,41 +2032,74 @@ pub fn tensor_index(
         return Ok(Value::tensor(Arc::new(r)));
     }
 
-    if alloc(std::mem::size_of::<Tensor>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    if view_ndim > 0 {
-        if alloc(view_ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        if alloc(view_ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-    }
-    Ok(Value::tensor(Arc::new(Tensor {
-        ndim: view_ndim,
-        shape: view_shape[..view_ndim].to_vec(),
-        strides: view_strides[..view_ndim].to_vec(),
-        is_complex: t.is_complex,
-        dtype: t.dtype,
-        device: t.device,
-        metal_buffer: t.metal_buffer.clone(),
-        data: Arc::clone(&t.data),
-        offset: view_offset,
-        is_state: t.is_state,
-    })))
+    Ok(Value::tensor(Arc::new(t.view(alloc, &view_shape[..view_ndim], &view_strides[..view_ndim], view_offset)?)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn ok_alloc(_bytes: usize) -> LanaError {
-        LanaError::Ok
+    fn array(items: Vec<Value>) -> Value {
+        let heap = crate::heap::Heap::new(256 * 1024 * 1024);
+        Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array::from_items(&heap, items).unwrap())))
     }
 
-    fn array(items: Vec<Value>) -> Value {
-        Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array { items })))
+    #[test]
+    fn tensor_reservations_release_and_views_charge_the_backing_once() {
+        let heap = crate::heap::Heap::new(16384);
+        for _ in 0..1000 {
+            let tensor = tensor_new(&heap, 2, &[2, 128], false).unwrap();
+            let base_bytes = heap.live_bytes();
+            let view = tensor_index(&heap, &tensor, &Value::number(0.)).unwrap();
+            let view_bytes = std::mem::size_of::<Tensor>() + 2 * std::mem::size_of::<usize>();
+            assert_eq!(heap.live_bytes(), base_bytes + view_bytes);
+            let alias = view.clone();
+            assert_eq!(heap.live_bytes(), base_bytes + view_bytes);
+            drop(tensor);
+            assert_eq!(heap.live_bytes(), 256 * 8 + view_bytes);
+            drop(view);
+            assert_eq!(heap.live_bytes(), 256 * 8 + view_bytes);
+            drop(alias);
+            assert_eq!(heap.live_bytes(), 0);
+        }
+        assert!(heap.peak_bytes() <= 16384);
+    }
+
+    #[test]
+    fn tensor_budget_failure_rolls_back_all_partial_allocations() {
+        let bytes = std::mem::size_of::<Tensor>() + 4 * std::mem::size_of::<usize>() + 256 * 8;
+        for limit in [0, 1, bytes / 2, bytes - 1, bytes] {
+            let heap = crate::heap::Heap::new(limit);
+            let result = tensor_new(&heap, 2, &[2, 128], false);
+            assert_eq!(result.is_ok(), limit == bytes);
+            drop(result);
+            assert_eq!(heap.live_bytes(), 0);
+            assert!(heap.peak_bytes() <= limit);
+        }
+        let heap = crate::heap::Heap::default();
+        assert!(matches!(tensor_new(&heap, 2, &[usize::MAX, 2], false), Err(LanaError::Oom)));
+        assert_eq!(heap.live_bytes(), 0);
+    }
+
+    #[test]
+    fn tensor_scratch_is_released_after_success_and_failure() {
+        let heap = crate::heap::Heap::new(65536);
+        let a = tensor_new(&heap, 2, &[8, 8], false).unwrap();
+        let b = tensor_new(&heap, 2, &[8, 8], false).unwrap();
+        let baseline = heap.live_bytes();
+        for _ in 0..100 {
+            let result = tensor_matmul(&heap, &a, &b, TensorDtype::F64).unwrap();
+            assert!(heap.live_bytes() > baseline);
+            drop(result);
+            assert_eq!(heap.live_bytes(), baseline);
+            assert!(matches!(tensor_elementwise(&heap, &a, &b, 3), Err(LanaError::InvalidParameters)));
+            assert_eq!(heap.live_bytes(), baseline);
+        }
+        heap.set_limit(baseline + 8).unwrap();
+        assert!(matches!(tensor_matmul(&heap, &a, &b, TensorDtype::F64), Err(LanaError::Oom)));
+        assert_eq!(heap.live_bytes(), baseline);
+        drop((a, b));
+        assert_eq!(heap.live_bytes(), 0);
     }
 
     #[test]
@@ -2176,26 +2107,20 @@ mod tests {
         // LIP-027 B18: a tensor's buffer accounts the actual element width, so
         // an f16 buffer is a quarter of an f64 buffer. The data-buffer
         // allocation dominates the struct/shape overhead.
-        let mut f16_bytes = 0usize;
-        let mut alloc_f16 = |bytes: usize| {
-            f16_bytes = f16_bytes.max(bytes);
-            LanaError::Ok
-        };
-        let t16 = tensor_new_dtype(&mut alloc_f16, 1, &[100000], TensorDtype::F16).unwrap();
+        let heap16 = crate::heap::Heap::default();
+        let t16 = tensor_new_dtype(&heap16, 1, &[100000], TensorDtype::F16).unwrap();
         assert_eq!(t16.dtype, TensorDtype::F16);
 
-        let mut f64_bytes = 0usize;
-        let mut alloc_f64 = |bytes: usize| {
-            f64_bytes = f64_bytes.max(bytes);
-            LanaError::Ok
-        };
-        let t64 = tensor_new_dtype(&mut alloc_f64, 1, &[100000], TensorDtype::F64).unwrap();
+        let heap64 = crate::heap::Heap::default();
+        let t64 = tensor_new_dtype(&heap64, 1, &[100000], TensorDtype::F64).unwrap();
         assert_eq!(t64.dtype, TensorDtype::F64);
 
-        // f16 = 100000 * 2 = 200000 bytes; f64 = 100000 * 8 = 800000 bytes.
-        assert!(f16_bytes >= 200000, "f16 buffer too small: {f16_bytes}");
-        assert!(f64_bytes >= 800000, "f64 buffer too small: {f64_bytes}");
-        assert!(f64_bytes >= f16_bytes * 3, "f64 not ~4x f16: {f64_bytes} vs {f16_bytes}");
+        assert_eq!(t16.data.len(), 200000);
+        assert_eq!(t64.data.len(), 800000);
+        assert_eq!(heap64.live_bytes() - heap16.live_bytes(), 600000);
+        drop((t16, t64));
+        assert_eq!(heap16.live_bytes(), 0);
+        assert_eq!(heap64.live_bytes(), 0);
     }
 
     #[test]
@@ -2203,41 +2128,41 @@ mod tests {
         let t = tensor(&[2, 3], &[1., 2., 3., 4., 5., 6.]);
 
         // One integer position selects a row: a rank-1 view sharing the buffer.
-        let row = tensor_index(&mut ok_alloc, &t, &Value::number(1.)).unwrap();
+        let row = tensor_index(&crate::heap::Heap::default(), &t, &Value::number(1.)).unwrap();
         let ValueKind::Tensor(r) = &row.kind else { panic!("expected tensor") };
         assert_eq!(r.shape, [3]); assert_eq!(r.strides, [1]); assert_eq!(r.offset, 3);
         assert_eq!(tensor_f64(r), [1., 2., 3.]); // logical elements of the row view
         assert!(Arc::ptr_eq(&r.data, &t.data));
-        let neg = tensor_index(&mut ok_alloc, &t, &Value::number(-1.)).unwrap();
+        let neg = tensor_index(&crate::heap::Heap::default(), &t, &Value::number(-1.)).unwrap();
         let ValueKind::Tensor(r) = &neg.kind else { panic!("expected tensor") };
         assert_eq!(r.shape.as_slice(), [3].as_slice());
         assert_eq!(r.offset, 3);
 
         // Out-of-range integer positions are Key errors (after negative wrap).
         for n in [2., -3., 1e100] {
-            assert!(matches!(tensor_index(&mut ok_alloc, &t, &Value::number(n)),
+            assert!(matches!(tensor_index(&crate::heap::Heap::default(), &t, &Value::number(n)),
                              Err(LanaError::Key)));
         }
 
         // Non-number, non-integer, and non-finite positions are Type errors.
         for n in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.5, -0.5] {
-            assert!(matches!(tensor_index(&mut ok_alloc, &t, &Value::number(n)),
+            assert!(matches!(tensor_index(&crate::heap::Heap::default(), &t, &Value::number(n)),
                              Err(LanaError::Type)));
         }
-        assert!(matches!(tensor_index(&mut ok_alloc, &t, &Value::boolean(true)),
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), &t, &Value::boolean(true)),
                          Err(LanaError::Type)));
 
         // A full set of integer positions selects one element as a number.
         let full = array(vec![Value::number(1.), Value::number(2.)]);
-        assert!(matches!(tensor_index(&mut ok_alloc, &t, &full).unwrap().kind,
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), &t, &full).unwrap().kind,
                          ValueKind::Number(6.0)));
         let wrapped = array(vec![Value::number(-1.), Value::number(-3.)]);
-        assert!(matches!(tensor_index(&mut ok_alloc, &t, &wrapped).unwrap().kind,
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), &t, &wrapped).unwrap().kind,
                          ValueKind::Number(4.0)));
 
         // More positions than the rank is InvalidParameters.
         let extra = array(vec![Value::number(0.), Value::number(0.), Value::number(0.)]);
-        assert!(matches!(tensor_index(&mut ok_alloc, &t, &extra),
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), &t, &extra),
                          Err(LanaError::InvalidParameters)));
 
         // Slices keep their axis and may be non-contiguous: t[0:2, 1].
@@ -2245,40 +2170,40 @@ mod tests {
             array(vec![Value::number(0.), Value::number(2.)]),
             Value::number(1.),
         ]);
-        let col_value = tensor_index(&mut ok_alloc, &t, &col_spec).unwrap();
+        let col_value = tensor_index(&crate::heap::Heap::default(), &t, &col_spec).unwrap();
         let ValueKind::Tensor(col) = &col_value.kind else { panic!("expected tensor") };
         assert_eq!(col.shape, [2]); assert_eq!(col.strides, [3]); assert_eq!(col.offset, 1);
         assert!(Arc::ptr_eq(&col.data, &t.data));
 
         // Views chain: selecting the column view again still reads through
         // offset and strides.
-        assert!(matches!(tensor_index(&mut ok_alloc, col, &Value::number(1.)).unwrap().kind,
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), col, &Value::number(1.)).unwrap().kind,
                          ValueKind::Number(5.0)));
-        assert!(matches!(tensor_index(&mut ok_alloc, col, &Value::number(-1.)).unwrap().kind,
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), col, &Value::number(-1.)).unwrap().kind,
                          ValueKind::Number(5.0)));
-        assert!(matches!(tensor_index(&mut ok_alloc, col, &Value::number(2.)),
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), col, &Value::number(2.)),
                          Err(LanaError::Key)));
 
         // Strided traversal: arithmetic and full reduction over the view
         // follow its strides rather than assuming a contiguous fiber.
-        let doubled = tensor_elementwise(&mut ok_alloc, col, col, 0).unwrap();
+        let doubled = tensor_elementwise(&crate::heap::Heap::default(), col, col, 0).unwrap();
         assert_eq!(tensor_f64(&doubled), [4.0, 10.0]);
-        assert!(matches!(tensor_reduce(&mut ok_alloc, col, 0).unwrap().kind,
+        assert!(matches!(tensor_reduce(&crate::heap::Heap::default(), col, 0).unwrap().kind,
                          ValueKind::Number(7.0)));
 
         // Fewer positions than the rank keep trailing axes whole; slice bounds
         // clamp and never range-error; start > end is an empty axis.
-        let whole = tensor_index(&mut ok_alloc, &t, &array(vec![
+        let whole = tensor_index(&crate::heap::Heap::default(), &t, &array(vec![
             array(vec![Value::number(-10.), Value::number(10.)]),
         ])).unwrap();
         let ValueKind::Tensor(r) = &whole.kind else { panic!("expected tensor") };
         assert_eq!(r.shape, [2, 3]); assert_eq!(r.offset, 0);
-        let empty = tensor_index(&mut ok_alloc, &t, &array(vec![
+        let empty = tensor_index(&crate::heap::Heap::default(), &t, &array(vec![
             array(vec![Value::number(5.), Value::number(10.)]),
         ])).unwrap();
         let ValueKind::Tensor(r) = &empty.kind else { panic!("expected tensor") };
         assert_eq!(r.shape, [0, 3]);
-        let back = tensor_index(&mut ok_alloc, &t, &array(vec![
+        let back = tensor_index(&crate::heap::Heap::default(), &t, &array(vec![
             array(vec![Value::number(1.), Value::number(0.)]),
         ])).unwrap();
         let ValueKind::Tensor(r) = &back.kind else { panic!("expected tensor") };
@@ -2286,32 +2211,32 @@ mod tests {
 
         // Malformed specs are Type errors: a non-number position, a pair
         // holding a non-number bound, and a pair that is not two elements long.
-        assert!(matches!(tensor_index(&mut ok_alloc, &t,
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), &t,
                          &array(vec![Value::boolean(true), Value::number(0.)])),
                          Err(LanaError::Type)));
-        assert!(matches!(tensor_index(&mut ok_alloc, &t, &array(vec![
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), &t, &array(vec![
             array(vec![Value::number(0.), Value::boolean(true)]), Value::number(0.),
         ])), Err(LanaError::Type)));
-        assert!(matches!(tensor_index(&mut ok_alloc, &t, &array(vec![
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), &t, &array(vec![
             array(vec![Value::number(0.), Value::number(0.), Value::number(0.)]),
         ])), Err(LanaError::Type)));
 
         // A position on a rank-zero tensor has no axis to select.
-        let scalar = tensor_new(&mut ok_alloc, 0, &[], false).unwrap();
-        assert!(matches!(tensor_index(&mut ok_alloc, &scalar, &Value::number(0.)),
+        let scalar = tensor_new(&crate::heap::Heap::default(), 0, &[], false).unwrap();
+        assert!(matches!(tensor_index(&crate::heap::Heap::default(), &scalar, &Value::number(0.)),
                          Err(LanaError::InvalidParameters)));
 
         // A complex element selection yields the rank-zero complex form.
-        let mut c = tensor_new(&mut ok_alloc, 1, &[1], true).unwrap();
+        let mut c = tensor_new(&crate::heap::Heap::default(), 1, &[1], true).unwrap();
         set_f64(&mut c, &[3., 4.]);
-        let picked = tensor_index(&mut ok_alloc, &c, &Value::number(0.)).unwrap();
+        let picked = tensor_index(&crate::heap::Heap::default(), &c, &Value::number(0.)).unwrap();
         let ValueKind::Tensor(r) = &picked.kind else { panic!("expected tensor") };
         assert_eq!(r.ndim, 0); assert!(r.is_complex); assert_eq!(tensor_f64(r), [3., 4.]);
     }
 
     #[test]
     fn axis_reductions_cover_shapes_values_and_errors() {
-        let mut t = tensor_new(&mut ok_alloc, 2, &[2, 3], false).unwrap();
+        let mut t = tensor_new(&crate::heap::Heap::default(), 2, &[2, 3], false).unwrap();
         set_f64(&mut t, &[1., 2., 3., 4., 5., 6.]);
         for (op, axis, shape, data) in [
             (0, 0., vec![3], vec![5., 7., 9.]),
@@ -2319,53 +2244,53 @@ mod tests {
             (2, -1., vec![2], vec![3., 6.]),
             (3, -1., vec![2], vec![1., 4.]),
         ] {
-            let result = tensor_reduce_axis(&mut ok_alloc, &t, op, &Value::number(axis)).unwrap();
+            let result = tensor_reduce_axis(&crate::heap::Heap::default(), &t, op, &Value::number(axis)).unwrap();
             let ValueKind::Tensor(r) = result.kind else { panic!("expected tensor"); };
             assert_eq!(r.shape, shape); assert_eq!(tensor_f64(&r), data);
         }
         for axis in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.5, -3., 2., 1e100] {
-            assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &t, 0, &Value::number(axis)), Err(LanaError::InvalidParameters)));
+            assert!(matches!(tensor_reduce_axis(&crate::heap::Heap::default(), &t, 0, &Value::number(axis)), Err(LanaError::InvalidParameters)));
         }
-        assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &t, 0, &Value::boolean(false)), Err(LanaError::Type)));
-        let empty = tensor_new(&mut ok_alloc, 2, &[0, 3], false).unwrap();
-        let result = tensor_reduce_axis(&mut ok_alloc, &empty, 0, &Value::number(0.)).unwrap();
+        assert!(matches!(tensor_reduce_axis(&crate::heap::Heap::default(), &t, 0, &Value::boolean(false)), Err(LanaError::Type)));
+        let empty = tensor_new(&crate::heap::Heap::default(), 2, &[0, 3], false).unwrap();
+        let result = tensor_reduce_axis(&crate::heap::Heap::default(), &empty, 0, &Value::number(0.)).unwrap();
         let ValueKind::Tensor(r) = result.kind else { panic!("expected tensor"); };
         assert_eq!(r.shape, [3]); assert_eq!(tensor_f64(&r), [0., 0., 0.]);
         for op in 1..4 {
-            assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &empty, op, &Value::number(0.)), Err(LanaError::InvalidParameters)));
-            let result = tensor_reduce_axis(&mut ok_alloc, &empty, op, &Value::number(1.)).unwrap();
+            assert!(matches!(tensor_reduce_axis(&crate::heap::Heap::default(), &empty, op, &Value::number(0.)), Err(LanaError::InvalidParameters)));
+            let result = tensor_reduce_axis(&crate::heap::Heap::default(), &empty, op, &Value::number(1.)).unwrap();
             let ValueKind::Tensor(r) = result.kind else { panic!("expected tensor"); };
             assert_eq!(r.shape, [0]); assert!(r.data.is_empty());
         }
-        let scalar = tensor_new(&mut ok_alloc, 0, &[], false).unwrap();
-        assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &scalar, 0, &Value::number(0.)), Err(LanaError::InvalidParameters)));
-        let mut complex = tensor_new(&mut ok_alloc, 1, &[2], true).unwrap();
+        let scalar = tensor_new(&crate::heap::Heap::default(), 0, &[], false).unwrap();
+        assert!(matches!(tensor_reduce_axis(&crate::heap::Heap::default(), &scalar, 0, &Value::number(0.)), Err(LanaError::InvalidParameters)));
+        let mut complex = tensor_new(&crate::heap::Heap::default(), 1, &[2], true).unwrap();
         set_f64(&mut complex, &[1., 2., 3., 4.]);
         for (op, data) in [(0, vec![4., 6.]), (1, vec![2., 3.])] {
-            let result = tensor_reduce_axis(&mut ok_alloc, &complex, op, &Value::number(-1.)).unwrap();
+            let result = tensor_reduce_axis(&crate::heap::Heap::default(), &complex, op, &Value::number(-1.)).unwrap();
             let ValueKind::Tensor(r) = result.kind else { panic!("expected tensor"); };
             assert_eq!(r.ndim, 0); assert!(r.is_complex); assert_eq!(tensor_f64(&r), data);
         }
-        assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &complex, 2, &Value::number(0.)), Err(LanaError::Type)));
+        assert!(matches!(tensor_reduce_axis(&crate::heap::Heap::default(), &complex, 2, &Value::number(0.)), Err(LanaError::Type)));
         tensor_set_imag(&mut complex, 0, f64::INFINITY);
-        assert!(matches!(tensor_reduce_axis(&mut ok_alloc, &complex, 0, &Value::number(0.)), Err(LanaError::InvalidParameters)));
+        assert!(matches!(tensor_reduce_axis(&crate::heap::Heap::default(), &complex, 0, &Value::number(0.)), Err(LanaError::InvalidParameters)));
     }
 
     #[test]
     fn compare_select_and_gather_match_cpu_contract() {
         let a = tensor(&[2], &[1., 3.]);
         let b = tensor(&[2], &[2., 3.]);
-        let compared = tensor_compare_values(&mut ok_alloc, &a, &b, "lt").unwrap();
+        let compared = tensor_compare_values(&crate::heap::Heap::default(), &a, &b, "lt").unwrap();
         let ValueKind::Tensor(mask) = compared.kind else { panic!("expected tensor"); };
         assert_eq!(tensor_f64(&mask), [1., 0.]);
         let yes = tensor(&[2], &[10., 10.]);
         let no = tensor(&[2], &[20., 20.]);
-        let selected = tensor_select_values(&mut ok_alloc, &mask, &yes, &no).unwrap();
+        let selected = tensor_select_values(&crate::heap::Heap::default(), &mask, &yes, &no).unwrap();
         let ValueKind::Tensor(selected) = selected.kind else { panic!("expected tensor"); };
         assert_eq!(tensor_f64(&selected), [10., 20.]);
         let source = tensor(&[2, 3], &[1., 2., 3., 4., 5., 6.]);
         let indices = tensor(&[2], &[2., 0.]);
-        let gathered = tensor_gather_values(&mut ok_alloc, &source, &indices, &Value::number(1.)).unwrap();
+        let gathered = tensor_gather_values(&crate::heap::Heap::default(), &source, &indices, &Value::number(1.)).unwrap();
         let ValueKind::Tensor(gathered) = gathered.kind else { panic!("expected tensor"); };
         assert_eq!(gathered.shape, [2, 2]);
         assert_eq!(tensor_f64(&gathered), [3., 1., 6., 4.]);
@@ -2375,21 +2300,21 @@ mod tests {
     fn cholesky_and_seeded_random_match_cpu_contract() {
         let matrix = tensor(&[2, 2], &[4., 1., 1., 3.]);
         let rhs = tensor(&[2], &[1., 2.]);
-        let solved = tensor_cholesky_solve(&mut ok_alloc, &matrix, &rhs).unwrap();
+        let solved = tensor_cholesky_solve(&crate::heap::Heap::default(), &matrix, &rhs).unwrap();
         let ValueKind::Tensor(solved) = solved.kind else { panic!("expected tensor"); };
         assert!((tensor_get_real(&solved, 0) - 1. / 11.).abs() < 1e-12);
         assert!((tensor_get_real(&solved, 1) - 7. / 11.).abs() < 1e-12);
         let shape = array(vec![Value::number(2.), Value::number(2.)]);
-        let first = tensor_random(&mut ok_alloc, &shape, &Value::number(42.), false).unwrap();
-        let second = tensor_random(&mut ok_alloc, &shape, &Value::number(42.), false).unwrap();
+        let first = tensor_random(&crate::heap::Heap::default(), &shape, &Value::number(42.), false).unwrap();
+        let second = tensor_random(&crate::heap::Heap::default(), &shape, &Value::number(42.), false).unwrap();
         let (ValueKind::Tensor(first), ValueKind::Tensor(second)) = (first.kind, second.kind) else { panic!("expected tensors"); };
         assert_eq!(first.data, second.data);
         assert_eq!(tensor_get_real(&first, 0), 0.7415648787718233);
-        let normal = tensor_random(&mut ok_alloc, &shape, &Value::number(42.), true).unwrap();
+        let normal = tensor_random(&crate::heap::Heap::default(), &shape, &Value::number(42.), true).unwrap();
         let ValueKind::Tensor(normal) = normal.kind else { panic!("expected tensor"); };
         assert_eq!(tensor_get_real(&normal, 0), 0.4147197504315306);
-        assert!(matches!(tensor_cholesky_solve(&mut ok_alloc, &tensor(&[2, 2], &[1., 2., 2., 1.]), &rhs), Err(LanaError::InvalidParameters)));
-        assert!(matches!(tensor_random(&mut ok_alloc, &shape, &Value::number(-1.), false), Err(LanaError::InvalidParameters)));
+        assert!(matches!(tensor_cholesky_solve(&crate::heap::Heap::default(), &tensor(&[2, 2], &[1., 2., 2., 1.]), &rhs), Err(LanaError::InvalidParameters)));
+        assert!(matches!(tensor_random(&crate::heap::Heap::default(), &shape, &Value::number(-1.), false), Err(LanaError::InvalidParameters)));
     }
 
     #[test]
@@ -2397,35 +2322,35 @@ mod tests {
         for n in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.5,
                   18446744073709551616.0] {
             assert_eq!(tensor_dimension(n), Err(LanaError::InvalidParameters));
-            assert_eq!(tensor_shape_from_array(&mut ok_alloc, &array(vec![Value::number(n)])),
+            assert_eq!(tensor_shape_from_array(&crate::heap::Heap::default(), &array(vec![Value::number(n)])),
                        Err(LanaError::InvalidParameters));
         }
-        assert!(tensor_new(&mut ok_alloc, 32, &[1; 32], false).is_ok());
-        assert!(matches!(tensor_new(&mut ok_alloc, 33, &[1; 33], false),
+        assert!(tensor_new(&crate::heap::Heap::default(), 32, &[1; 32], false).is_ok());
+        assert!(matches!(tensor_new(&crate::heap::Heap::default(), 33, &[1; 33], false),
                          Err(LanaError::InvalidParameters)));
-        assert!(matches!(tensor_new(&mut ok_alloc, 1, &[], false),
+        assert!(matches!(tensor_new(&crate::heap::Heap::default(), 1, &[], false),
                          Err(LanaError::InvalidParameters)));
-        assert!(matches!(tensor_new(&mut ok_alloc, 1, &[usize::MAX / 8 + 1], false),
+        assert!(matches!(tensor_new(&crate::heap::Heap::default(), 1, &[usize::MAX / 8 + 1], false),
                          Err(LanaError::Oom)));
-        assert!(matches!(tensor_new(&mut ok_alloc, 1, &[usize::MAX / 8 + 1], true),
+        assert!(matches!(tensor_new(&crate::heap::Heap::default(), 1, &[usize::MAX / 8 + 1], true),
                          Err(LanaError::Oom)));
         let cyclic = array(vec![]);
         let ValueKind::Array(a) = &cyclic.kind else { unreachable!() };
-        a.lock().unwrap().items.push(cyclic.clone());
+        a.lock().unwrap().items.push(cyclic.clone()).unwrap();
         assert!(!cyclic.is_unresolved());
-        let result = tensor_infer_shape(&mut ok_alloc, &cyclic);
+        let result = tensor_infer_shape(&crate::heap::Heap::default(), &cyclic);
         a.lock().unwrap().items.clear();
         assert_eq!(result, Err(LanaError::InvalidParameters));
         let mut nested = Value::number(1.0);
         for _ in 0..32 { nested = array(vec![nested]); }
-        assert_eq!(tensor_infer_shape(&mut ok_alloc, &nested).unwrap().len(), 32);
-        assert_eq!(tensor_infer_shape(&mut ok_alloc, &array(vec![nested])), Err(LanaError::InvalidParameters));
+        assert_eq!(tensor_infer_shape(&crate::heap::Heap::default(), &nested).unwrap().len(), 32);
+        assert_eq!(tensor_infer_shape(&crate::heap::Heap::default(), &array(vec![nested])), Err(LanaError::InvalidParameters));
     }
 
     #[test]
     fn complex_components_may_share_arrays() {
         let a = array(vec![array(vec![Value::number(1.0), Value::number(2.0)])]);
-        let mut t = tensor_new(&mut ok_alloc, 1, &[2], true).unwrap();
+        let mut t = tensor_new(&crate::heap::Heap::default(), 1, &[2], true).unwrap();
         tensor_fill_complex(&a, &a, &mut t, &mut 0).unwrap();
         assert_eq!(tensor_get_real(&t, 0), 1.0);
         assert_eq!(tensor_get_imag(&t, 0), 1.0);
@@ -2436,21 +2361,21 @@ mod tests {
     #[test]
     fn reductions_reject_empty_domains_and_nonfinite_results() {
         let empty = tensor(&[0], &[]);
-        assert!(matches!(tensor_reduce(&mut ok_alloc, &empty, 0).unwrap().kind,
+        assert!(matches!(tensor_reduce(&crate::heap::Heap::default(), &empty, 0).unwrap().kind,
                          ValueKind::Number(0.0)));
         for op in 1..4 {
-            assert!(matches!(tensor_reduce(&mut ok_alloc, &empty, op),
+            assert!(matches!(tensor_reduce(&crate::heap::Heap::default(), &empty, op),
                              Err(LanaError::InvalidParameters)));
         }
         let overflow = tensor(&[2], &[f64::MAX, f64::MAX]);
-        assert!(matches!(tensor_reduce(&mut ok_alloc, &overflow, 0),
+        assert!(matches!(tensor_reduce(&crate::heap::Heap::default(), &overflow, 0),
                          Err(LanaError::InvalidParameters)));
-        let mut complex = tensor_new(&mut ok_alloc, 1, &[2], true).unwrap();
+        let mut complex = tensor_new(&crate::heap::Heap::default(), 1, &[2], true).unwrap();
         set_f64(&mut complex, &[1.0, f64::INFINITY, 2.0, 0.0]);
-        assert!(matches!(tensor_reduce(&mut ok_alloc, &complex, 0),
+        assert!(matches!(tensor_reduce(&crate::heap::Heap::default(), &complex, 0),
                          Err(LanaError::InvalidParameters)));
         set_f64(&mut complex, &[f64::MAX, 0.0, f64::MAX, 0.0]);
-        assert!(matches!(tensor_reduce(&mut ok_alloc, &complex, 0),
+        assert!(matches!(tensor_reduce(&crate::heap::Heap::default(), &complex, 0),
                          Err(LanaError::InvalidParameters)));
     }
 
@@ -2486,14 +2411,14 @@ mod tests {
     }
 
     fn tensor(shape: &[usize], data: &[f64]) -> Tensor {
-        let mut t = tensor_new(&mut ok_alloc, shape.len(), shape, false).unwrap();
+        let mut t = tensor_new(&crate::heap::Heap::default(), shape.len(), shape, false).unwrap();
         set_f64(&mut t, data);
         t
     }
 
     #[test]
     fn new_computes_row_major_strides() {
-        let t = tensor_new(&mut ok_alloc, 2, &[2, 3], false).unwrap();
+        let t = tensor_new(&crate::heap::Heap::default(), 2, &[2, 3], false).unwrap();
         assert_eq!(t.ndim, 2);
         assert_eq!(t.shape, vec![2, 3]);
         assert_eq!(t.strides, vec![3, 1]);
@@ -2503,7 +2428,7 @@ mod tests {
 
     #[test]
     fn new_zero_dim_is_scalar() {
-        let t = tensor_new(&mut ok_alloc, 0, &[], false).unwrap();
+        let t = tensor_new(&crate::heap::Heap::default(), 0, &[], false).unwrap();
         assert_eq!(t.ndim, 0);
         assert_eq!(t.data.len(), 8);
     }
@@ -2512,7 +2437,7 @@ mod tests {
     fn elementwise_add_broadcasts() {
         let a = tensor(&[2, 1], &[1.0, 2.0]);
         let b = tensor(&[1, 3], &[10.0, 20.0, 30.0]);
-        let r = tensor_elementwise(&mut ok_alloc, &a, &b, 0).unwrap();
+        let r = tensor_elementwise(&crate::heap::Heap::default(), &a, &b, 0).unwrap();
         assert_eq!(r.shape, vec![2, 3]);
         assert_eq!(tensor_f64(&r), vec![11.0, 21.0, 31.0, 12.0, 22.0, 32.0]);
     }
@@ -2522,7 +2447,7 @@ mod tests {
         let a = tensor(&[1], &[1.0]);
         let b = tensor(&[1], &[0.0]);
         assert!(matches!(
-            tensor_elementwise(&mut ok_alloc, &a, &b, 3),
+            tensor_elementwise(&crate::heap::Heap::default(), &a, &b, 3),
             Err(LanaError::InvalidParameters)
         ));
     }
@@ -2534,7 +2459,7 @@ mod tests {
         b.is_complex = true;
         b.dtype = TensorDtype::Complex;
         assert!(matches!(
-            tensor_elementwise(&mut ok_alloc, &a, &b, 0),
+            tensor_elementwise(&crate::heap::Heap::default(), &a, &b, 0),
             Err(LanaError::Type)
         ));
     }
@@ -2543,7 +2468,7 @@ mod tests {
     fn matmul_1d_dot_product() {
         let a = tensor(&[3], &[1.0, 2.0, 3.0]);
         let b = tensor(&[3], &[4.0, 5.0, 6.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
+        let r = tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.ndim, 0);
         assert_eq!(tensor_f64(&r), vec![32.0]);
     }
@@ -2552,7 +2477,7 @@ mod tests {
     fn matmul_2d() {
         let a = tensor(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
         let b = tensor(&[2, 2], &[5.0, 6.0, 7.0, 8.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
+        let r = tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 2]);
         assert_eq!(tensor_f64(&r), vec![19.0, 22.0, 43.0, 50.0]);
     }
@@ -2562,25 +2487,14 @@ mod tests {
         let a = tensor(&[2, 3], &[1.0; 6]);
         let b = tensor(&[2, 2], &[1.0; 4]);
         assert!(matches!(
-            tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64),
+            tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64),
             Err(LanaError::InvalidParameters)
         ));
     }
 
     /// A view over `base` sharing its buffer: custom shape/strides/offset.
     fn view(base: &Tensor, shape: &[usize], strides: &[usize], offset: usize) -> Tensor {
-        Tensor {
-            ndim: shape.len(),
-            shape: shape.to_vec(),
-            strides: strides.to_vec(),
-            is_complex: base.is_complex,
-            dtype: base.dtype,
-            device: base.device,
-            metal_buffer: base.metal_buffer.clone(),
-            data: Arc::clone(&base.data),
-            offset,
-            is_state: base.is_state,
-        }
+        base.view(&crate::heap::Heap::default(), shape, strides, offset).unwrap()
     }
 
     #[test]
@@ -2588,13 +2502,13 @@ mod tests {
         // 1d x 2d promotes the vector to a row: [1,2,3] . [[1,2],[3,4],[5,6]].
         let a = tensor(&[3], &[1.0, 2.0, 3.0]);
         let b = tensor(&[3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
+        let r = tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2]);
         assert_eq!(tensor_f64(&r), vec![22.0, 28.0]);
 
         // 2d x 1d promotes the vector to a column: [[1,2,3],[4,5,6]] . [1,2,3].
         let m = tensor(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        let r = tensor_matmul(&mut ok_alloc, &m, &a, TensorDtype::F64).unwrap();
+        let r = tensor_matmul(&crate::heap::Heap::default(), &m, &a, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2]);
         assert_eq!(tensor_f64(&r), vec![14.0, 32.0]);
     }
@@ -2604,7 +2518,7 @@ mod tests {
         // a[2,2,2] . b[1,2,2] -> [2,2,2]; b's batch dim 1 broadcasts to 2.
         let a = tensor(&[2, 2, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let b = tensor(&[1, 2, 2], &[1.0, 0.0, 0.0, 1.0]); // identity
-        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
+        let r = tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 2, 2]);
         assert_eq!(tensor_f64(&r), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     }
@@ -2612,11 +2526,11 @@ mod tests {
     #[test]
     fn matmul_complex_zgemm() {
         // (iI) . (iI) = -I, interleaved [re, im] per element.
-        let mut a = tensor_new(&mut ok_alloc, 2, &[2, 2], true).unwrap();
+        let mut a = tensor_new(&crate::heap::Heap::default(), 2, &[2, 2], true).unwrap();
         set_f64(&mut a, &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
-        let mut b = tensor_new(&mut ok_alloc, 2, &[2, 2], true).unwrap();
+        let mut b = tensor_new(&crate::heap::Heap::default(), 2, &[2, 2], true).unwrap();
         set_f64(&mut b, &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::Complex).unwrap();
+        let r = tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::Complex).unwrap();
         assert!(r.is_complex);
         assert_eq!(tensor_f64(&r), vec![-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0]);
     }
@@ -2628,7 +2542,7 @@ mod tests {
         let base = tensor(&[2, 4], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let a = view(&base, &[2, 3], &[4, 1], 0);
         let b = tensor(&[3, 2], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
+        let r = tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 2]);
         assert_eq!(tensor_f64(&r), vec![4.0, 5.0, 12.0, 13.0]);
     }
@@ -2640,7 +2554,7 @@ mod tests {
         let base = tensor(&[2, 4], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let a = view(&base, &[2, 2], &[4, 2], 0);
         let b = tensor(&[2, 2], &[1.0, 1.0, 0.0, 1.0]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
+        let r = tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 2]);
         assert_eq!(tensor_f64(&r), vec![1.0, 4.0, 5.0, 12.0]);
     }
@@ -2650,18 +2564,18 @@ mod tests {
         // [2,0] . [0,3] -> [2,3] of zeros (the sum over an empty contraction).
         let a = tensor(&[2, 0], &[]);
         let b = tensor(&[0, 3], &[]);
-        let r = tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64).unwrap();
+        let r = tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64).unwrap();
         assert_eq!(r.shape, vec![2, 3]);
         assert_eq!(tensor_f64(&r), vec![0.0; 6]);
     }
 
     #[test]
     fn matmul_mismatched_complex_is_type_error() {
-        let mut a = tensor_new(&mut ok_alloc, 2, &[2, 2], true).unwrap();
+        let mut a = tensor_new(&crate::heap::Heap::default(), 2, &[2, 2], true).unwrap();
         set_f64(&mut a, &[0.0; 8]);
         let b = tensor(&[2, 2], &[1.0; 4]);
         assert!(matches!(
-            tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64),
+            tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64),
             Err(LanaError::Type)
         ));
     }
@@ -2671,7 +2585,7 @@ mod tests {
         let a = tensor(&[], &[1.0]);
         let b = tensor(&[2, 2], &[1.0; 4]);
         assert!(matches!(
-            tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64),
+            tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64),
             Err(LanaError::InvalidParameters)
         ));
     }
@@ -2681,7 +2595,7 @@ mod tests {
         let a = tensor(&[3, 2, 2], &[1.0; 12]);
         let b = tensor(&[2, 2, 2], &[1.0; 8]);
         assert!(matches!(
-            tensor_matmul(&mut ok_alloc, &a, &b, TensorDtype::F64),
+            tensor_matmul(&crate::heap::Heap::default(), &a, &b, TensorDtype::F64),
             Err(LanaError::InvalidParameters)
         ));
     }
@@ -2689,10 +2603,10 @@ mod tests {
     #[test]
     fn reduce_sum_mean_max_min() {
         let t = tensor(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
-        let sum = tensor_reduce(&mut ok_alloc, &t, 0).unwrap();
-        let mean = tensor_reduce(&mut ok_alloc, &t, 1).unwrap();
-        let max = tensor_reduce(&mut ok_alloc, &t, 2).unwrap();
-        let min = tensor_reduce(&mut ok_alloc, &t, 3).unwrap();
+        let sum = tensor_reduce(&crate::heap::Heap::default(), &t, 0).unwrap();
+        let mean = tensor_reduce(&crate::heap::Heap::default(), &t, 1).unwrap();
+        let max = tensor_reduce(&crate::heap::Heap::default(), &t, 2).unwrap();
+        let min = tensor_reduce(&crate::heap::Heap::default(), &t, 3).unwrap();
         assert!(matches!(sum.kind, ValueKind::Number(n) if n == 10.0));
         assert!(matches!(mean.kind, ValueKind::Number(n) if n == 2.5));
         assert!(matches!(max.kind, ValueKind::Number(n) if n == 4.0));
@@ -2704,56 +2618,36 @@ mod tests {
         let mut t = tensor(&[2], &[1.0, 2.0]);
         t.is_complex = true;
         assert!(matches!(
-            tensor_reduce(&mut ok_alloc, &t, 2),
+            tensor_reduce(&crate::heap::Heap::default(), &t, 2),
             Err(LanaError::Type)
         ));
     }
 
     #[test]
     fn infer_shape_nested() {
-        let v = Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array {
-            items: vec![
-                Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array {
-                    items: vec![Value::number(1.0), Value::number(2.0)],
-                }))),
-                Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array {
-                    items: vec![Value::number(3.0), Value::number(4.0)],
-                }))),
-            ],
-        })));
-        assert_eq!(tensor_infer_shape(&mut ok_alloc, &v).unwrap(), vec![2, 2]);
+        let v = array(vec![array(vec![Value::number(1.0), Value::number(2.0)]),
+                           array(vec![Value::number(3.0), Value::number(4.0)])]);
+        assert_eq!(&*tensor_infer_shape(&crate::heap::Heap::default(), &v).unwrap(), &[2, 2]);
     }
 
     #[test]
     fn infer_shape_ragged_is_invalid() {
-        let v = Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array {
-            items: vec![
-                Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array {
-                    items: vec![Value::number(1.0), Value::number(2.0)],
-                }))),
-                Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array {
-                    items: vec![Value::number(3.0)],
-                }))),
-            ],
-        })));
-        assert_eq!(tensor_infer_shape(&mut ok_alloc, &v), Err(LanaError::InvalidParameters));
+        let v = array(vec![array(vec![Value::number(1.0), Value::number(2.0)]),
+                           array(vec![Value::number(3.0)])]);
+        assert_eq!(tensor_infer_shape(&crate::heap::Heap::default(), &v), Err(LanaError::InvalidParameters));
     }
 
     #[test]
     fn shape_from_array_rejects_non_number() {
-        let v = Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array {
-            items: vec![Value::string(Arc::from("x"))],
-        })));
-        assert_eq!(tensor_shape_from_array(&mut ok_alloc, &v), Err(LanaError::Type));
+        let v = array(vec![Value::string(Arc::from("x"))]);
+        assert_eq!(tensor_shape_from_array(&crate::heap::Heap::default(), &v), Err(LanaError::Type));
     }
 
     #[test]
     fn shape_from_array_rejects_fractional() {
-        let v = Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array {
-            items: vec![Value::number(2.5)],
-        })));
+        let v = array(vec![Value::number(2.5)]);
         assert_eq!(
-            tensor_shape_from_array(&mut ok_alloc, &v),
+            tensor_shape_from_array(&crate::heap::Heap::default(), &v),
             Err(LanaError::InvalidParameters)
         );
     }
@@ -2762,7 +2656,7 @@ mod tests {
     fn gpu_matmul_2d_within_float32_tolerance() {
         let a = tensor(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
         let b = tensor(&[2, 2], &[5.0, 6.0, 7.0, 8.0]);
-        let r = match tensor_gpu_matmul(&mut ok_alloc, &a, &b) {
+        let r = match tensor_gpu_matmul(&crate::heap::Heap::default(), &a, &b) {
             Ok(r) => r,
             // No Metal device on this host; the GPU path is optional.
             Err(LanaError::UnsupportedOperation) => return,
@@ -2781,22 +2675,15 @@ mod tests {
         let mut ca = tensor(&[2, 2], &[1.0, 2.0, 3.0, 4.0]);
         ca.is_complex = true;
         assert!(matches!(
-            tensor_gpu_matmul(&mut ok_alloc, &ca, &a),
+            tensor_gpu_matmul(&crate::heap::Heap::default(), &ca, &a),
             Err(LanaError::Type)
         ));
     }
 
-    fn uncertain(pred: &Tensor, var: &Tensor) -> Value {
-        let mut map = Map::new(2);
-        map.set(Arc::from("prediction"), Value::tensor(Arc::new(pred.clone())), false).unwrap();
-        map.set(Arc::from("uncertainty"), Value::tensor(Arc::new(var.clone())), false).unwrap();
-        Value::map(Arc::new(Mutex::new(map)))
-    }
-
-    fn unpack_uncertain(v: &Value) -> (Tensor, Tensor) {
+    fn unpack_uncertain(v: &Value) -> (Arc<Tensor>, Arc<Tensor>) {
         let (pred, var, unc) = tensor_uncertainty_unpack(v).unwrap();
         assert!(unc);
-        ((*pred).clone(), (*var.unwrap()).clone())
+        (pred, var.unwrap())
     }
 
     #[test]
@@ -2807,12 +2694,12 @@ mod tests {
         let vb = tensor(&[2], &[0.125, 0.0625]);
 
         let (pred, var) = unpack_uncertain(
-            &tensor_elementwise_uncertain(&mut ok_alloc, &a, &va, &b, &vb, 0).unwrap());
+            &tensor_elementwise_uncertain(&crate::heap::Heap::default(), &a, &va, &b, &vb, 0).unwrap());
         assert_eq!(tensor_f64(&pred), [4.0, 6.0]);
         assert_eq!(tensor_f64(&var), [0.625, 0.3125]);
 
         let (pred, var) = unpack_uncertain(
-            &tensor_elementwise_uncertain(&mut ok_alloc, &a, &va, &b, &vb, 1).unwrap());
+            &tensor_elementwise_uncertain(&crate::heap::Heap::default(), &a, &va, &b, &vb, 1).unwrap());
         assert_eq!(tensor_f64(&pred), [-2.0, -2.0]);
         assert_eq!(tensor_f64(&var), [0.625, 0.3125]);
     }
@@ -2825,7 +2712,7 @@ mod tests {
         let vb = tensor(&[2], &[0.125, 0.0625]);
 
         let (pred, var) = unpack_uncertain(
-            &tensor_elementwise_uncertain(&mut ok_alloc, &a, &va, &b, &vb, 2).unwrap());
+            &tensor_elementwise_uncertain(&crate::heap::Heap::default(), &a, &va, &b, &vb, 2).unwrap());
         assert_eq!(tensor_f64(&pred), [3.0, 8.0]);
         assert_eq!(tensor_f64(&var), [4.625, 4.25]);
 
@@ -2834,7 +2721,7 @@ mod tests {
         let e = tensor(&[2], &[2.0, 2.0]);
         let ve = tensor(&[2], &[1.0, 1.0]);
         let (pred, var) = unpack_uncertain(
-            &tensor_elementwise_uncertain(&mut ok_alloc, &d, &vd, &e, &ve, 3).unwrap());
+            &tensor_elementwise_uncertain(&crate::heap::Heap::default(), &d, &vd, &e, &ve, 3).unwrap());
         assert_eq!(tensor_f64(&pred), [0.5, 0.5]);
         assert_eq!(tensor_f64(&var), [0.3125, 0.3125]);
     }
@@ -2846,7 +2733,7 @@ mod tests {
         let b = tensor(&[2], &[3.0, 4.0]);
         let vb = tensor(&[2], &[0.125, 0.0625]);
         let (pred, var) = unpack_uncertain(
-            &tensor_matmul_uncertain(&mut ok_alloc, &a, &va, &b, &vb).unwrap());
+            &tensor_matmul_uncertain(&crate::heap::Heap::default(), &a, &va, &b, &vb).unwrap());
         assert_eq!(tensor_f64(&pred), [11.0]);
         assert_eq!(tensor_f64(&var), [8.875]);
     }
@@ -2857,12 +2744,12 @@ mod tests {
         let vs = tensor(&[4], &[0.5, 0.25, 0.125, 0.0625]);
 
         let (pred, var) = unpack_uncertain(
-            &tensor_reduce_uncertain(&mut ok_alloc, &s, &vs, 0, None).unwrap());
+            &tensor_reduce_uncertain(&crate::heap::Heap::default(), &s, &vs, 0, None).unwrap());
         assert_eq!(tensor_f64(&pred), [10.0]);
         assert_eq!(tensor_f64(&var), [0.9375]);
 
         let (pred, var) = unpack_uncertain(
-            &tensor_reduce_uncertain(&mut ok_alloc, &s, &vs, 1, None).unwrap());
+            &tensor_reduce_uncertain(&crate::heap::Heap::default(), &s, &vs, 1, None).unwrap());
         assert_eq!(tensor_f64(&pred), [2.5]);
         assert_eq!(tensor_f64(&var), [0.05859375]);
 
@@ -2871,12 +2758,12 @@ mod tests {
         let vm = tensor(&[2, 2], &[0.5, 0.25, 0.125, 0.0625]);
         let axis = Value::number(0.0);
         let (pred, var) = unpack_uncertain(
-            &tensor_reduce_uncertain(&mut ok_alloc, &m, &vm, 0, Some(&axis)).unwrap());
+            &tensor_reduce_uncertain(&crate::heap::Heap::default(), &m, &vm, 0, Some(&axis)).unwrap());
         assert_eq!(tensor_f64(&pred), [4.0, 6.0]);
         assert_eq!(tensor_f64(&var), [0.625, 0.3125]);
 
         let (pred, var) = unpack_uncertain(
-            &tensor_reduce_uncertain(&mut ok_alloc, &m, &vm, 1, Some(&axis)).unwrap());
+            &tensor_reduce_uncertain(&crate::heap::Heap::default(), &m, &vm, 1, Some(&axis)).unwrap());
         assert_eq!(tensor_f64(&pred), [2.0, 3.0]);
         assert_eq!(tensor_f64(&var), [0.15625, 0.078125]);
     }
@@ -2891,13 +2778,13 @@ mod tests {
         let mut ca = tensor(&[2], &[1.0, 2.0]);
         ca.is_complex = true;
         assert!(matches!(
-            tensor_elementwise_uncertain(&mut ok_alloc, &ca, &va, &b, &vb, 0),
+            tensor_elementwise_uncertain(&crate::heap::Heap::default(), &ca, &va, &b, &vb, 0),
             Err(LanaError::Type)
         ));
 
         let vinf = tensor(&[2], &[0.5, f64::INFINITY]);
         assert!(matches!(
-            tensor_elementwise_uncertain(&mut ok_alloc, &a, &vinf, &b, &vb, 0),
+            tensor_elementwise_uncertain(&crate::heap::Heap::default(), &a, &vinf, &b, &vb, 0),
             Err(LanaError::InvalidParameters)
         ));
     }
@@ -2908,25 +2795,25 @@ mod tests {
         let va = tensor(&[2], &[0.5, 0.25]);
 
         // Wrong entry count.
-        let mut map1 = Map::new(1);
-        map1.set(Arc::from("prediction"), Value::tensor(Arc::new(a.clone())), false).unwrap();
+        let mut map1 = Map::new(&crate::heap::Heap::default(), 1).unwrap();
+        map1.set(Arc::from("prediction"), Value::tensor(Arc::new(a.try_clone(&crate::heap::Heap::default()).unwrap())), false).unwrap();
         assert!(matches!(
             tensor_uncertainty_unpack(&Value::map(Arc::new(Mutex::new(map1)))),
             Err(LanaError::Type)
         ));
 
         // Wrong key.
-        let mut map2 = Map::new(2);
-        map2.set(Arc::from("prediction"), Value::tensor(Arc::new(a.clone())), false).unwrap();
-        map2.set(Arc::from("variance"), Value::tensor(Arc::new(va.clone())), false).unwrap();
+        let mut map2 = Map::new(&crate::heap::Heap::default(), 2).unwrap();
+        map2.set(Arc::from("prediction"), Value::tensor(Arc::new(a.try_clone(&crate::heap::Heap::default()).unwrap())), false).unwrap();
+        map2.set(Arc::from("variance"), Value::tensor(Arc::new(va.try_clone(&crate::heap::Heap::default()).unwrap())), false).unwrap();
         assert!(matches!(
             tensor_uncertainty_unpack(&Value::map(Arc::new(Mutex::new(map2)))),
             Err(LanaError::Type)
         ));
 
         // Non-tensor value.
-        let mut map3 = Map::new(2);
-        map3.set(Arc::from("prediction"), Value::tensor(Arc::new(a.clone())), false).unwrap();
+        let mut map3 = Map::new(&crate::heap::Heap::default(), 2).unwrap();
+        map3.set(Arc::from("prediction"), Value::tensor(Arc::new(a.try_clone(&crate::heap::Heap::default()).unwrap())), false).unwrap();
         map3.set(Arc::from("uncertainty"), Value::number(1.0), false).unwrap();
         assert!(matches!(
             tensor_uncertainty_unpack(&Value::map(Arc::new(Mutex::new(map3)))),
@@ -2934,7 +2821,7 @@ mod tests {
         ));
 
         // A bare tensor is certain.
-        let (pred, var, unc) = tensor_uncertainty_unpack(&Value::tensor(Arc::new(a.clone()))).unwrap();
+        let (pred, var, unc) = tensor_uncertainty_unpack(&Value::tensor(Arc::new(a.try_clone(&crate::heap::Heap::default()).unwrap()))).unwrap();
         assert!(!unc);
         assert!(var.is_none());
         assert_eq!(tensor_f64(&pred), [1.0, 2.0]);

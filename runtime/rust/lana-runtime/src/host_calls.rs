@@ -32,17 +32,23 @@ use crate::store::{self, Store, StoreOptions};
 pub struct StoreHost {
     store: Option<Store>,
     adapter: Option<Adapter>,
+    heap: lana_vm::heap::Heap,
 }
 
 impl StoreHost {
     pub fn new() -> Self {
-        Self { store: None, adapter: None }
+        Self::with_heap(lana_vm::heap::Heap::new(256 * 1024 * 1024))
+    }
+
+    pub fn with_heap(heap: lana_vm::heap::Heap) -> Self {
+        Self { store: None, adapter: None, heap }
     }
 
     /// Dispatch one durable-pipeline host call. Returns `LanaError::Format` for
     /// an ID outside the store/policy/ledger range (the VM's own host calls are
     /// handled before the extension is consulted).
     pub fn dispatch(&mut self, host_id: u32, args: &[Value], out: &mut Value) -> LanaError {
+        *out = Value::null();
         match host_id {
             LANA_HOST_STORE_OPEN => self.store_open(args, out),
             LANA_HOST_STORE_PUT => self.store_put(args, out),
@@ -181,12 +187,16 @@ impl StoreHost {
             Ok(records) => {
                 let mut items = Vec::with_capacity(records.len());
                 for record in records {
-                    let mut map = Map::new(2);
-                    map.set(Arc::from("key"), Value::string(Arc::from(record.key.as_str())), false).unwrap();
-                    map.set(Arc::from("value"), record.value, false).unwrap();
+                    let mut map = match Map::new(&self.heap, 2) { Ok(map) => map, Err(error) => return error };
+                    let key = match self.heap.string(&record.key) { Ok(key) => key, Err(error) => return error };
+                    if let Err(error) = map.set(Arc::from("key"), Value::string(key), false) { return error; }
+                    if let Err(error) = map.set(Arc::from("value"), record.value, false) { return error; }
                     items.push(Value::map(Arc::new(Mutex::new(map))));
                 }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                let array = match Array::from_items(&self.heap, items) {
+                    Ok(array) => array, Err(error) => return error,
+                };
+                *out = Value::array(Arc::new(Mutex::new(array)));
                 LanaError::Ok
             }
             Err(e) => e,
@@ -224,7 +234,8 @@ impl StoreHost {
             Some(store) => store,
             None => return LanaError::InvalidState,
         };
-        match store::store_get_at(store, *revision as u64, key) {
+        let revision = match number_as_u64(*revision) { Ok(value) => value, Err(error) => return error };
+        match store::store_get_at(store, revision, key) {
             Ok(value) => {
                 *out = value;
                 LanaError::Ok
@@ -265,7 +276,8 @@ impl StoreHost {
             Ok(info) => info,
             Err(e) => return e,
         };
-        if current.revision_id != *base_rev as u64 {
+        let base_rev = match number_as_u64(*base_rev) { Ok(value) => value, Err(error) => return error };
+        if current.revision_id != base_rev {
             return LanaError::Conflict;
         }
         match store::store_commit(store) {
@@ -341,7 +353,7 @@ impl StoreHost {
         };
         match policy::policy_evaluate(&policy, &args[1], &evaluation) {
             Ok(decision) => {
-                *out = decision_to_value(&decision);
+                *out = match decision_to_value(&self.heap, &decision) { Ok(value) => value, Err(error) => return error };
                 LanaError::Ok
             }
             Err(e) => e,
@@ -387,7 +399,7 @@ impl StoreHost {
         };
         match ledger::ledger_append(&mut ledger, &input) {
             Ok(event) => {
-                *out = event_to_value(&event);
+                *out = match event_to_value(&self.heap, &event) { Ok(value) => value, Err(error) => return error };
                 LanaError::Ok
             }
             Err(e) => e,
@@ -414,9 +426,12 @@ impl StoreHost {
             Ok(events) => {
                 let mut items = Vec::with_capacity(events.len());
                 for event in &events {
-                    items.push(event_to_value(event));
+                    items.push(match event_to_value(&self.heap, event) { Ok(value) => value, Err(error) => return error });
                 }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                let array = match Array::from_items(&self.heap, items) {
+                    Ok(array) => array, Err(error) => return error,
+                };
+                *out = Value::array(Arc::new(Mutex::new(array)));
                 LanaError::Ok
             }
             Err(e) => e,
@@ -449,11 +464,18 @@ fn map_get_number(map: &Map, key: &str) -> Result<f64, LanaError> {
 }
 
 fn map_get_u64(map: &Map, key: &str) -> Result<u64, LanaError> {
-    Ok(map_get_number(map, key)? as u64)
+    number_as_u64(map_get_number(map, key)?)
+}
+
+fn number_as_u64(number: f64) -> Result<u64, LanaError> {
+    if !number.is_finite() || number < 0.0 || number >= 18446744073709551616.0 || number.fract() != 0.0 {
+        return Err(LanaError::InvalidParameters);
+    }
+    Ok(number as u64)
 }
 
 fn map_get_u32(map: &Map, key: &str) -> Result<u32, LanaError> {
-    Ok(map_get_number(map, key)? as u32)
+    u32::try_from(map_get_u64(map, key)?).map_err(|_| LanaError::Schema)
 }
 
 fn policy_from_value(value: &Value) -> Result<Policy, LanaError> {
@@ -568,46 +590,46 @@ fn ledger_query_from_value(value: &Value) -> Result<LedgerQuery, LanaError> {
     })
 }
 
-fn decision_to_value(decision: &Decision) -> Value {
-    let mut map = Map::new(14);
-    map.set(Arc::from("decision_id"), Value::number(decision.decision_id as f64), false).unwrap();
-    map.set(Arc::from("policy_id"), Value::string(decision.policy_id.clone()), false).unwrap();
-    map.set(Arc::from("policy_version"), Value::string(Arc::from(hex_encode(&decision.policy_version).as_str())), false).unwrap();
-    map.set(Arc::from("target"), Value::string(decision.target.clone()), false).unwrap();
-    map.set(Arc::from("scope"), Value::string(decision.scope.clone()), false).unwrap();
-    map.set(Arc::from("input_revision"), Value::number(decision.input_revision as f64), false).unwrap();
+fn decision_to_value(heap: &lana_vm::heap::Heap, decision: &Decision) -> Result<Value, LanaError> {
+    let mut map = Map::new(heap, 14)?;
+    map.set(Arc::from("decision_id"), Value::number(decision.decision_id as f64), false)?;
+    map.set(Arc::from("policy_id"), Value::string(decision.policy_id.clone()), false)?;
+    map.set(Arc::from("policy_version"), Value::string(Arc::from(hex_encode(&decision.policy_version).as_str())), false)?;
+    map.set(Arc::from("target"), Value::string(decision.target.clone()), false)?;
+    map.set(Arc::from("scope"), Value::string(decision.scope.clone()), false)?;
+    map.set(Arc::from("input_revision"), Value::number(decision.input_revision as f64), false)?;
     if let Some(s) = &decision.evidence_ids {
-        map.set(Arc::from("evidence_ids"), Value::string(s.clone()), false).unwrap();
+        map.set(Arc::from("evidence_ids"), Value::string(s.clone()), false)?;
     }
     if let Some(s) = &decision.derivation_ids {
-        map.set(Arc::from("derivation_ids"), Value::string(s.clone()), false).unwrap();
+        map.set(Arc::from("derivation_ids"), Value::string(s.clone()), false)?;
     }
     if let Some(s) = &decision.relationship_resolution {
-        map.set(Arc::from("relationship_resolution"), Value::string(s.clone()), false).unwrap();
+        map.set(Arc::from("relationship_resolution"), Value::string(s.clone()), false)?;
     }
-    map.set(Arc::from("outcome"), Value::number(decision.outcome as u32 as f64), false).unwrap();
+    map.set(Arc::from("outcome"), Value::number(decision.outcome as u32 as f64), false)?;
     if let Some(s) = &decision.effect {
-        map.set(Arc::from("effect"), Value::string(s.clone()), false).unwrap();
+        map.set(Arc::from("effect"), Value::string(s.clone()), false)?;
     }
-    map.set(Arc::from("evaluation_time"), Value::number(decision.evaluation_time as f64), false).unwrap();
-    map.set(Arc::from("reason"), Value::string(decision.reason.clone()), false).unwrap();
+    map.set(Arc::from("evaluation_time"), Value::number(decision.evaluation_time as f64), false)?;
+    map.set(Arc::from("reason"), Value::string(decision.reason.clone()), false)?;
     if let Some(s) = &decision.requested_evidence {
-        map.set(Arc::from("requested_evidence"), Value::string(s.clone()), false).unwrap();
+        map.set(Arc::from("requested_evidence"), Value::string(s.clone()), false)?;
     }
-    Value::map(Arc::new(Mutex::new(map)))
+    Ok(Value::map(Arc::new(Mutex::new(map))))
 }
 
-fn event_to_value(event: &Event) -> Value {
-    let mut map = Map::new(8);
-    map.set(Arc::from("event_id"), Value::number(event.event_id as f64), false).unwrap();
-    map.set(Arc::from("entity"), Value::string(event.entity.clone()), false).unwrap();
-    map.set(Arc::from("actor"), Value::string(event.actor.clone()), false).unwrap();
-    map.set(Arc::from("action"), Value::string(event.action.clone()), false).unwrap();
-    map.set(Arc::from("reason"), Value::string(event.reason.clone()), false).unwrap();
-    map.set(Arc::from("timestamp"), Value::number(event.timestamp as f64), false).unwrap();
-    map.set(Arc::from("revision"), Value::number(event.revision as f64), false).unwrap();
-    map.set(Arc::from("correction_of"), Value::number(event.correction_of as f64), false).unwrap();
-    Value::map(Arc::new(Mutex::new(map)))
+fn event_to_value(heap: &lana_vm::heap::Heap, event: &Event) -> Result<Value, LanaError> {
+    let mut map = Map::new(heap, 8)?;
+    map.set(Arc::from("event_id"), Value::number(event.event_id as f64), false)?;
+    map.set(Arc::from("entity"), Value::string(event.entity.clone()), false)?;
+    map.set(Arc::from("actor"), Value::string(event.actor.clone()), false)?;
+    map.set(Arc::from("action"), Value::string(event.action.clone()), false)?;
+    map.set(Arc::from("reason"), Value::string(event.reason.clone()), false)?;
+    map.set(Arc::from("timestamp"), Value::number(event.timestamp as f64), false)?;
+    map.set(Arc::from("revision"), Value::number(event.revision as f64), false)?;
+    map.set(Arc::from("correction_of"), Value::number(event.correction_of as f64), false)?;
+    Ok(Value::map(Arc::new(Mutex::new(map))))
 }
 
 fn hex_encode(digest: &[u8; 32]) -> String {
@@ -643,6 +665,15 @@ fn hex_decode(text: &str) -> Result<[u8; 32], LanaError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn numeric_ids_reject_truncation_saturation_and_nonfinite_values() {
+        for number in [-1.0, 0.5, f64::NAN, f64::INFINITY, 18446744073709551616.0] {
+            assert_eq!(super::number_as_u64(number), Err(LanaError::InvalidParameters));
+        }
+        assert_eq!(super::number_as_u64(0.0), Ok(0));
+        assert_eq!(super::number_as_u64(42.0), Ok(42));
+    }
+
     use super::*;
 
     fn temp_store(name: &str) -> String {
@@ -652,7 +683,7 @@ mod tests {
     }
 
     fn map(entries: &[(&str, Value)]) -> Value {
-        let mut map = Map::new(entries.len());
+        let mut map = Map::new(&lana_vm::heap::Heap::default(), entries.len()).unwrap();
         for (key, value) in entries {
             map.set(Arc::from(*key), value.clone(), false).unwrap();
         }
@@ -700,7 +731,7 @@ mod tests {
         let (code, out) = dispatch(&mut host, LANA_HOST_STORE_SCAN, &[string("k")]);
         assert_eq!(code, LanaError::Ok);
         let ValueKind::Array(array) = &out.kind else { panic!("expected array") };
-        assert_eq!(array.lock().unwrap().items.len(), 1);
+        assert_eq!(array.lock().unwrap().items().len(), 1);
 
         let (code, _) = dispatch(&mut host, LANA_HOST_STORE_DELETE, &[string("k1")]);
         assert_eq!(code, LanaError::Ok);
@@ -781,7 +812,7 @@ mod tests {
         let (code, out) = dispatch(&mut host, LANA_HOST_ADAPTER_FETCH, &[string("[{\"a\":1}]")]);
         assert_eq!(code, LanaError::Ok);
         let ValueKind::Array(array) = &out.kind else { panic!("expected array") };
-        assert_eq!(array.lock().unwrap().items.len(), 1);
+        assert_eq!(array.lock().unwrap().items().len(), 1);
     }
 
     #[test]
@@ -846,7 +877,7 @@ mod tests {
         let (code, out) = dispatch(&mut host, LANA_HOST_LEDGER_QUERY, &[query]);
         assert_eq!(code, LanaError::Ok);
         let ValueKind::Array(array) = &out.kind else { panic!("expected array") };
-        assert_eq!(array.lock().unwrap().items.len(), 1);
+        assert_eq!(array.lock().unwrap().items().len(), 1);
 
         let _ = std::fs::remove_dir_all(&path);
     }

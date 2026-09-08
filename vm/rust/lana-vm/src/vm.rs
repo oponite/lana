@@ -22,6 +22,7 @@ use crate::derivation::{
     self, Derivation, DerivationExactness, DerivationKind, DerivationOutcome, EvidenceStatus,
 };
 use crate::rng::Rng;
+use crate::heap::{Buffer, Heap};
 use crate::sha256::{hex_digest, sha256};
 use crate::state::{self, Indexes, State, StateValue};
 use crate::state_dist::{self, DistEvalFrame, EvalAction, LANA_STATE_DIST_DEPTH_LIMIT};
@@ -29,7 +30,7 @@ use crate::tensor;
 use crate::tensor::{tensor_get_imag, tensor_get_real, tensor_set_imag, tensor_set_real};
 use crate::value::{
     Adt, Array, CapabilityToken, Claim, Dataset, DatasetOp, DistOperand, EffectReceipt, InferenceAlgorithm, JointKind, JointRow,
-    JointState, Map, MapEntry, Optimizer, PathAlternative, PathSet, PlannedEffect, PlannedEffectState, Possibility, Posterior, Reactive,
+    JointState, Map, Optimizer, PathAlternative, PathSet, PlannedEffect, PlannedEffectState, Possibility, Posterior, Reactive,
     ReactiveKind, ReactiveVersion, RelationshipKind, SharedCommit, SharedInformation,
     SharedObservation, SharedState, SharedVersion, Set, StateDist, StateDistKind, Task, Tensor, TensorDtype, TrainingResult, Value,
     ValueKind, VmError, Regex, RegexClass, RegexInst, RegexOp, Future, TensorDevice, LANA_CAPABILITY_ADMIN, LANA_CAPABILITY_OBSERVE, LANA_CAPABILITY_READ,
@@ -228,6 +229,7 @@ fn compute_max_registers(chunk: &Chunk) -> Vec<usize> {
 /// One pending path split, mirroring `struct LanaPathExecution` in `vm/c/vm.c`.
 /// The Rust VM keeps the executions on a `Vec` stack; the C11 uses a linked
 /// list with `next` pointing at the previous execution.
+#[derive(Default)]
 struct PathExecution {
     false_frames: Vec<Frame>,
     true_frames: Vec<Frame>,
@@ -238,6 +240,7 @@ struct PathExecution {
     false_weight: f64,
     previous_path_count: usize,
     running_false: bool,
+    split: bool,
 }
 
 /// A memo mapping source container pointers to their clones, mirroring
@@ -251,6 +254,7 @@ struct DeepCloneMemo {
     arrays: HashMap<usize, Arc<Mutex<Array>>>,
     maps: HashMap<usize, Arc<Mutex<Map>>>,
     sets: HashMap<usize, Arc<Mutex<Set>>>,
+    strings: HashMap<usize, Arc<str>>,
 }
 
 /// Resolution reasons, matching `LanaResolutionReason` in
@@ -759,6 +763,7 @@ pub struct Vm<'a> {
     allocation_count: u64,
     memory_limit: usize,
     allocated_bytes: usize,
+    heap: Heap,
     rng: Rng,
     root_seed: u64,
     lineage: u64,
@@ -841,9 +846,29 @@ enum NetSocket {
 }
 
 /// LIP-019 networking: a network failure, mapped to a `Result` error reason.
+#[derive(Debug)]
 enum NetError {
     Timeout,
     Io,
+}
+
+// RFC 9112 section 6.3: completion is determined by framing, not TLS EOF.
+fn net_response_length(response: &[u8]) -> Result<Option<usize>, NetError> {
+    let Some(end) = response.windows(4).position(|part| part == b"\r\n\r\n") else { return Ok(None); };
+    let header = std::str::from_utf8(&response[..end]).map_err(|_| NetError::Io)?;
+    let mut length = None;
+    for line in header.split("\r\n").skip(1) {
+        let (name, value) = line.split_once(':').ok_or(NetError::Io)?;
+        // ponytail: transfer-coded bodies are unsupported; add a decoder before accepting them.
+        if name.eq_ignore_ascii_case("transfer-encoding") { return Err(NetError::Io); }
+        if !name.eq_ignore_ascii_case("content-length") { continue; }
+        let value = value.trim_matches([' ', '\t']);
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) { return Err(NetError::Io); }
+        let parsed = value.parse::<usize>().map_err(|_| NetError::Io)?;
+        if length.is_some_and(|previous| previous != parsed) { return Err(NetError::Io); }
+        length = Some(parsed);
+    }
+    length.map(|length| end.checked_add(4).and_then(|end| end.checked_add(length)).ok_or(NetError::Io)).transpose()
 }
 
 /// Parse a URL into `(scheme, host, port, path)`. Returns `None` on malformed.
@@ -1325,6 +1350,7 @@ impl<'a> Vm<'a> {
             allocation_count: 0,
             memory_limit: 256 * 1024 * 1024,
             allocated_bytes: 0,
+            heap: Heap::new(256 * 1024 * 1024),
             rng: Rng::new(),
             root_seed: 0,
             lineage: 0,
@@ -1400,13 +1426,15 @@ impl<'a> Vm<'a> {
 
     /// The allocation count, for `--stats` output.
     pub fn allocation_count(&self) -> u64 {
-        self.allocation_count
+        self.allocation_count.saturating_add(self.heap.allocations())
     }
 
     /// The cumulative allocated bytes, for `--stats` output.
     pub fn allocated_bytes(&self) -> usize {
-        self.allocated_bytes
+        self.allocated_bytes + self.heap.live_bytes()
     }
+
+    pub fn heap(&self) -> Heap { self.heap.clone() }
 
     /// Per-opcode execution counts, for `--stats` output.
     pub fn opcode_counts(&self) -> &[u64] {
@@ -1465,7 +1493,7 @@ impl<'a> Vm<'a> {
                 self.event_loop_active = false;
                 break;
             }
-            if self.allocated_bytes > self.memory_limit {
+            if self.allocated_bytes() > self.memory_limit {
                 return self.fail(LanaError::Oom, self.ip, 0, 0, "execute", "memory limit exceeded");
             }
             if self.cancelled.load(Ordering::Relaxed) {
@@ -1537,7 +1565,7 @@ impl<'a> Vm<'a> {
                 guard.function == u32::MAX
             };
             if is_composite {
-                self.poll_composite_future(future);
+                if let Err(error) = self.poll_composite_future(future) { return error; }
                 continue;
             }
             let (function, ip, registers) = {
@@ -1597,6 +1625,7 @@ impl<'a> Vm<'a> {
     /// flag. Child VMs inherit the parent's limit at FORK time.
     pub fn set_memory_limit(&mut self, bytes: usize) {
         self.memory_limit = bytes;
+        let _ = self.heap.set_limit(bytes.saturating_sub(self.allocated_bytes));
     }
 
     /// Set the program arguments exposed to the `args` host call, mirroring
@@ -1666,7 +1695,7 @@ impl<'a> Vm<'a> {
         child.ip = function.entry as usize;
         child.frames[0].function = function_index;
         child.instruction_limit = self.instruction_limit;
-        child.memory_limit = self.memory_limit;
+        child.set_memory_limit(self.memory_limit);
         child.program_argc = self.program_argc;
         child.program_argv = self.program_argv.clone();
         child.lineage = mix64(self.lineage ^ { self.spawn_counter += 1; self.spawn_counter });
@@ -1676,7 +1705,7 @@ impl<'a> Vm<'a> {
         let mut memo = DeepCloneMemo::default();
         for index in 0..argc as usize {
             let argument = self.current_frame().registers[(first_arg as usize) + index].clone();
-            let cloned = self.deep_clone_value(&argument, &mut memo)?;
+            let cloned = child.deep_clone_value(&argument, &mut memo)?;
             child.frames[0].registers[index] = cloned;
         }
         for index in 0..argc as usize {
@@ -1824,7 +1853,7 @@ impl<'a> Vm<'a> {
                 error.resource_limit = Some((
                     LANA_RESOURCE_MEMORY,
                     self.memory_limit as u64,
-                    self.allocated_bytes as u64,
+                    self.allocated_bytes() as u64,
                     "bytes".to_string(),
                 ));
             }
@@ -2283,8 +2312,8 @@ impl<'a> Vm<'a> {
         {
             let mut guard = node.ad_grad.lock().unwrap();
             if guard.is_none() {
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let t = match tensor::tensor_new(&mut alloc, seed.ndim, &seed.shape, seed.is_complex) {
+                let alloc = self.heap.clone();
+                let t = match tensor::tensor_new(&alloc, seed.ndim, &seed.shape, seed.is_complex) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -2306,45 +2335,48 @@ impl<'a> Vm<'a> {
                 let a = node.ad_a.as_ref().unwrap();
                 let b = node.ad_b.as_ref().unwrap();
                 let (ga, gb) = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                    let alloc = self.heap.clone();
                     match node.ad_op {
-                        0 => (seed.clone(), seed.clone()),
+                        0 => (
+                            match seed.try_clone(&alloc) { Ok(t) => t, Err(error) => return error },
+                            match seed.try_clone(&alloc) { Ok(t) => t, Err(error) => return error },
+                        ),
                         1 => {
-                            let gb = match tensor::tensor_negate(&mut alloc, seed) {
+                            let gb = match tensor::tensor_negate(&alloc, seed) {
                                 Ok(t) => t,
                                 Err(error) => return error,
                             };
-                            (seed.clone(), gb)
+                            (match seed.try_clone(&alloc) { Ok(t) => t, Err(error) => return error }, gb)
                         }
                         2 => {
-                            let ga = match tensor::tensor_elementwise(&mut alloc, seed, b, 2) {
+                            let ga = match tensor::tensor_elementwise(&alloc, seed, b, 2) {
                                 Ok(t) => t,
                                 Err(error) => return error,
                             };
-                            let gb = match tensor::tensor_elementwise(&mut alloc, seed, a, 2) {
+                            let gb = match tensor::tensor_elementwise(&alloc, seed, a, 2) {
                                 Ok(t) => t,
                                 Err(error) => return error,
                             };
                             (ga, gb)
                         }
                         _ => {
-                            let ga = match tensor::tensor_elementwise(&mut alloc, seed, b, 3) {
+                            let ga = match tensor::tensor_elementwise(&alloc, seed, b, 3) {
                                 Ok(t) => t,
                                 Err(error) => return error,
                             };
-                            let t1 = match tensor::tensor_elementwise(&mut alloc, seed, a, 2) {
+                            let t1 = match tensor::tensor_elementwise(&alloc, seed, a, 2) {
                                 Ok(t) => t,
                                 Err(error) => return error,
                             };
-                            let t2 = match tensor::tensor_elementwise(&mut alloc, b, b, 2) {
+                            let t2 = match tensor::tensor_elementwise(&alloc, b, b, 2) {
                                 Ok(t) => t,
                                 Err(error) => return error,
                             };
-                            let t3 = match tensor::tensor_elementwise(&mut alloc, &t1, &t2, 3) {
+                            let t3 = match tensor::tensor_elementwise(&alloc, &t1, &t2, 3) {
                                 Ok(t) => t,
                                 Err(error) => return error,
                             };
-                            let gb = match tensor::tensor_negate(&mut alloc, &t3) {
+                            let gb = match tensor::tensor_negate(&alloc, &t3) {
                                 Ok(t) => t,
                                 Err(error) => return error,
                             };
@@ -2353,12 +2385,12 @@ impl<'a> Vm<'a> {
                     }
                 };
                 let (ga_u, gb_u) = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    let ga_u = match tensor::tensor_unbroadcast(&mut alloc, &ga, a) {
+                    let alloc = self.heap.clone();
+                    let ga_u = match tensor::tensor_unbroadcast(&alloc, &ga, a) {
                         Ok(t) => t,
                         Err(error) => return error,
                     };
-                    let gb_u = match tensor::tensor_unbroadcast(&mut alloc, &gb, b) {
+                    let gb_u = match tensor::tensor_unbroadcast(&alloc, &gb, b) {
                         Ok(t) => t,
                         Err(error) => return error,
                     };
@@ -2384,63 +2416,63 @@ impl<'a> Vm<'a> {
                 let a_ndim = a.ndim;
                 let b_ndim = b.ndim;
                 let (ga, gb) = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                    let alloc = self.heap.clone();
                     if a_ndim == 1 && b_ndim == 1 {
-                        let ga = match tensor::tensor_elementwise(&mut alloc, seed, b, 2) {
+                        let ga = match tensor::tensor_elementwise(&alloc, seed, b, 2) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
-                        let gb = match tensor::tensor_elementwise(&mut alloc, seed, a, 2) {
+                        let gb = match tensor::tensor_elementwise(&alloc, seed, a, 2) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
                         (ga, gb)
                     } else if a_ndim == 1 {
-                        let bt = tensor::tensor_transpose_last_two(b);
+                        let bt = match tensor::tensor_transpose_last_two(&alloc, b) { Ok(t) => t, Err(error) => return error };
                         let ga = match tensor::tensor_matmul(
-                            &mut alloc, seed, &bt, tensor::matmul_default_dtype(seed, &bt),
+                            &alloc, seed, &bt, tensor::matmul_default_dtype(seed, &bt),
                         ) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
-                        let gb = match tensor::tensor_outer(&mut alloc, a, seed) {
+                        let gb = match tensor::tensor_outer(&alloc, a, seed) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
                         (ga, gb)
                     } else if b_ndim == 1 {
-                        let at = tensor::tensor_transpose_last_two(a);
-                        let ga = match tensor::tensor_outer(&mut alloc, seed, b) {
+                        let at = match tensor::tensor_transpose_last_two(&alloc, a) { Ok(t) => t, Err(error) => return error };
+                        let ga = match tensor::tensor_outer(&alloc, seed, b) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
                         let gb = match tensor::tensor_matmul(
-                            &mut alloc, &at, seed, tensor::matmul_default_dtype(&at, seed),
+                            &alloc, &at, seed, tensor::matmul_default_dtype(&at, seed),
                         ) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
                         (ga, gb)
                     } else {
-                        let bt = tensor::tensor_transpose_last_two(b);
-                        let at = tensor::tensor_transpose_last_two(a);
+                        let bt = match tensor::tensor_transpose_last_two(&alloc, b) { Ok(t) => t, Err(error) => return error };
+                        let at = match tensor::tensor_transpose_last_two(&alloc, a) { Ok(t) => t, Err(error) => return error };
                         let ga_raw = match tensor::tensor_matmul(
-                            &mut alloc, seed, &bt, tensor::matmul_default_dtype(seed, &bt),
+                            &alloc, seed, &bt, tensor::matmul_default_dtype(seed, &bt),
                         ) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
                         let gb_raw = match tensor::tensor_matmul(
-                            &mut alloc, &at, seed, tensor::matmul_default_dtype(&at, seed),
+                            &alloc, &at, seed, tensor::matmul_default_dtype(&at, seed),
                         ) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
-                        let ga = match tensor::tensor_unbroadcast(&mut alloc, &ga_raw, a) {
+                        let ga = match tensor::tensor_unbroadcast(&alloc, &ga_raw, a) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
-                        let gb = match tensor::tensor_unbroadcast(&mut alloc, &gb_raw, b) {
+                        let gb = match tensor::tensor_unbroadcast(&alloc, &gb_raw, b) {
                             Ok(t) => t,
                             Err(error) => return error,
                         };
@@ -2470,8 +2502,8 @@ impl<'a> Vm<'a> {
                 };
                 let scale = if node.ad_op == 6 { 1.0 / n as f64 } else { 1.0 };
                 let ga = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    match tensor::tensor_broadcast_reduce(&mut alloc, seed, a, node.ad_axis, scale) {
+                    let alloc = self.heap.clone();
+                    match tensor::tensor_broadcast_reduce(&alloc, seed, a, node.ad_axis, scale) {
                         Ok(t) => t,
                         Err(error) => return error,
                     }
@@ -2487,8 +2519,8 @@ impl<'a> Vm<'a> {
             10 | 11 => {
                 let a = node.ad_a.as_ref().unwrap();
                 let mut ga = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    match tensor::tensor_new(&mut alloc, a.ndim, &a.shape, false) {
+                    let alloc = self.heap.clone();
+                    match tensor::tensor_new(&alloc, a.ndim, &a.shape, false) {
                         Ok(t) => t,
                         Err(error) => return error,
                     }
@@ -2524,8 +2556,8 @@ impl<'a> Vm<'a> {
             12 | 13 | 14 | 15 => {
                 let a = node.ad_a.as_ref().unwrap();
                 let mut ga = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    match tensor::tensor_new(&mut alloc, a.ndim, &a.shape, false) {
+                    let alloc = self.heap.clone();
+                    match tensor::tensor_new(&alloc, a.ndim, &a.shape, false) {
                         Ok(t) => t,
                         Err(error) => return error,
                     }
@@ -2559,8 +2591,8 @@ impl<'a> Vm<'a> {
                 let inner = a.shape[axis + 1..].iter().product::<usize>();
                 let outer = a.shape[..axis].iter().product::<usize>();
                 let mut ga = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    match tensor::tensor_new(&mut alloc, a.ndim, &a.shape, false) { Ok(t) => t, Err(error) => return error }
+                    let alloc = self.heap.clone();
+                    match tensor::tensor_new(&alloc, a.ndim, &a.shape, false) { Ok(t) => t, Err(error) => return error }
                 };
                 for o in 0..outer { for ii in 0..inner {
                     let base = o * width * inner + ii;
@@ -2588,8 +2620,8 @@ impl<'a> Vm<'a> {
                 let indices = node.ad_b.as_ref().unwrap();
                 let axis = node.ad_axis as usize;
                 let mut ga = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    match tensor::tensor_new(&mut alloc, source.ndim, &source.shape, false) { Ok(t) => t, Err(error) => return error }
+                    let alloc = self.heap.clone();
+                    match tensor::tensor_new(&alloc, source.ndim, &source.shape, false) { Ok(t) => t, Err(error) => return error }
                 };
                 let mut coordinates = [0; tensor::TENSOR_MAX_RANK];
                 for linear in 0..tensor::tensor_element_count(seed) {
@@ -2612,17 +2644,17 @@ impl<'a> Vm<'a> {
                 let matrix = node.ad_a.as_ref().unwrap();
                 let rhs = node.ad_b.as_ref().unwrap();
                 let (db, x) = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    let db = match tensor::tensor_cholesky_solve(&mut alloc, matrix, seed) { Ok(v) => v, Err(error) => return error };
-                    let x = match tensor::tensor_cholesky_solve(&mut alloc, matrix, rhs) { Ok(v) => v, Err(error) => return error };
+                    let alloc = self.heap.clone();
+                    let db = match tensor::tensor_cholesky_solve(&alloc, matrix, seed) { Ok(v) => v, Err(error) => return error };
+                    let x = match tensor::tensor_cholesky_solve(&alloc, matrix, rhs) { Ok(v) => v, Err(error) => return error };
                     let (ValueKind::Tensor(db), ValueKind::Tensor(x)) = (db.kind, x.kind) else { unreachable!() };
                     (db, x)
                 };
                 let n = matrix.shape[0];
                 let columns = if rhs.ndim == 1 { 1 } else { rhs.shape[1] };
                 let mut ga = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    match tensor::tensor_new(&mut alloc, 2, &matrix.shape, false) { Ok(t) => t, Err(error) => return error }
+                    let alloc = self.heap.clone();
+                    match tensor::tensor_new(&alloc, 2, &matrix.shape, false) { Ok(t) => t, Err(error) => return error }
                 };
                 for i in 0..n { for j in 0..n {
                     let mut value = 0.0;
@@ -2648,12 +2680,12 @@ impl<'a> Vm<'a> {
                 for i in 0..a.ndim.saturating_sub(2) {
                     batch *= a.shape[i];
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let mut ga = match tensor::tensor_new(&mut alloc, a.ndim, &a.shape, true) {
+                let alloc = self.heap.clone();
+                let mut ga = match tensor::tensor_new(&alloc, a.ndim, &a.shape, true) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
-                let mut gb = match tensor::tensor_new(&mut alloc, b.ndim, &b.shape, true) {
+                let mut gb = match tensor::tensor_new(&alloc, b.ndim, &b.shape, true) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -2757,8 +2789,8 @@ impl<'a> Vm<'a> {
                 for i in 0..s.ndim.saturating_sub(2) {
                     batch *= s.shape[i];
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let mut gs = match tensor::tensor_new(&mut alloc, s.ndim, &s.shape, true) {
+                let alloc = self.heap.clone();
+                let mut gs = match tensor::tensor_new(&alloc, s.ndim, &s.shape, true) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -2799,8 +2831,8 @@ impl<'a> Vm<'a> {
                 for i in 0..s.ndim.saturating_sub(2) {
                     batch *= s.shape[i];
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let mut gs = match tensor::tensor_new(&mut alloc, s.ndim, &s.shape, true) {
+                let alloc = self.heap.clone();
+                let mut gs = match tensor::tensor_new(&alloc, s.ndim, &s.shape, true) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -2914,11 +2946,11 @@ impl<'a> Vm<'a> {
         let grad = {
             let guard = leaf.ad_grad.lock().unwrap();
             if let Some(t) = guard.as_ref() {
-                t.clone()
+                match t.try_clone(&self.heap) { Ok(t) => t, Err(error) => return error }
             } else {
                 let a = leaf.ad_a.as_ref().unwrap();
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match tensor::tensor_new(&mut alloc, a.ndim, &a.shape, a.is_complex) {
+                let alloc = self.heap.clone();
+                match tensor::tensor_new(&alloc, a.ndim, &a.shape, a.is_complex) {
                     Ok(t) => t,
                     Err(error) => return error,
                 }
@@ -2932,8 +2964,8 @@ impl<'a> Vm<'a> {
             }
         }
         let mut result_tensor = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            match tensor::tensor_new(&mut alloc, grad.ndim, &grad.shape, grad.is_complex) {
+            let alloc = self.heap.clone();
+            match tensor::tensor_new(&alloc, grad.ndim, &grad.shape, grad.is_complex) {
                 Ok(t) => t,
                 Err(error) => return error,
             }
@@ -2994,8 +3026,8 @@ impl<'a> Vm<'a> {
             return LanaError::Type;
         }
         let mut seed = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            match tensor::tensor_new(&mut alloc, 0, &[], false) {
+            let alloc = self.heap.clone();
+            match tensor::tensor_new(&alloc, 0, &[], false) {
                 Ok(t) => t,
                 Err(error) => return error,
             }
@@ -3040,19 +3072,13 @@ impl<'a> Vm<'a> {
             return LanaError::Type;
         }
         let mut seed = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            match tensor::tensor_new(&mut alloc, v_tensor.ndim, &v_tensor.shape, false) {
+            let alloc = self.heap.clone();
+            match tensor::tensor_new(&alloc, v_tensor.ndim, &v_tensor.shape, false) {
                 Ok(t) => t,
                 Err(error) => return error,
             }
         };
         let count = tensor::tensor_element_count(v_tensor);
-        if v_tensor.ndim > 0 {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            if alloc(v_tensor.ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-                return LanaError::Oom;
-            }
-        }
         {
             for lin in 0..count {
                 let mut rem = lin;
@@ -3077,15 +3103,11 @@ impl<'a> Vm<'a> {
     /// Copy a tensor (possibly a view) into a fresh contiguous base tensor,
     /// mirroring `tensor_copy_contiguous` in `vm/c/vm.c`.
     fn tensor_copy_contiguous(&mut self, t: &Tensor) -> Result<Arc<Tensor>, LanaError> {
-        let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-        let mut copy = tensor::tensor_new(&mut alloc, t.ndim, &t.shape, t.is_complex)?;
+        let alloc = self.heap.clone();
+        let mut copy = tensor::tensor_new_dtype(&alloc, t.ndim, &t.shape, t.dtype)?;
         copy.is_state = t.is_state;
+        copy.device = t.device;
         let count = tensor::tensor_element_count(t);
-        if t.ndim > 0 {
-            if self.alloc_bytes(t.ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
-                return Err(LanaError::Oom);
-            }
-        }
         for lin in 0..count {
             let mut rem = lin;
             let mut index = t.offset;
@@ -3339,27 +3361,24 @@ impl<'a> Vm<'a> {
         let mut v: Option<Arc<Tensor>> = None;
         let mut velocity: Option<Arc<Tensor>> = None;
         if is_adam {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            let m_t = tensor::tensor_new(&mut alloc, params.ndim, &params.shape, params.is_complex)?;
-            let v_t = tensor::tensor_new(&mut alloc, params.ndim, &params.shape, params.is_complex)?;
+            let alloc = self.heap.clone();
+            let m_t = tensor::tensor_new(&alloc, params.ndim, &params.shape, params.is_complex)?;
+            let v_t = tensor::tensor_new(&alloc, params.ndim, &params.shape, params.is_complex)?;
             m = Some(Arc::new(m_t));
             v = Some(Arc::new(v_t));
         } else if optimizer.momentum != 0.0 {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            let vel = tensor::tensor_new(&mut alloc, params.ndim, &params.shape, params.is_complex)?;
+            let alloc = self.heap.clone();
+            let vel = tensor::tensor_new(&alloc, params.ndim, &params.shape, params.is_complex)?;
             velocity = Some(Arc::new(vel));
         }
 
         let mut batch_grad = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, params.ndim, &params.shape, params.is_complex)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, params.ndim, &params.shape, params.is_complex)?)
         };
 
         let total_steps = epoch_count * ((dataset_size + batch - 1) / batch);
-        if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        let mut steps = Array { items: Vec::with_capacity(total_steps) };
+        let mut steps = Array::new(&self.heap, total_steps)?;
 
         let mut params_deriv: Option<Arc<Derivation>> = None;
 
@@ -3452,8 +3471,8 @@ impl<'a> Vm<'a> {
                     }
 
                     let mut seed = {
-                        let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                        tensor::tensor_new(&mut alloc, 0, &[], false)?
+                        let alloc = self.heap.clone();
+                        tensor::tensor_new(&alloc, 0, &[], false)?
                     };
                     tensor_set_real(&mut seed, 0, 1.0 / batch_actual as f64);
                     if let Some(derivation) = &y.derivation {
@@ -3466,10 +3485,10 @@ impl<'a> Vm<'a> {
                     let grad = {
                         let guard = leaf.ad_grad.lock().unwrap();
                         if let Some(t) = guard.as_ref() {
-                            t.clone()
+                            t.try_clone(&self.heap)?
                         } else {
-                            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                            tensor::tensor_new(&mut alloc, params.ndim, &params.shape, params.is_complex)?
+                            let alloc = self.heap.clone();
+                            tensor::tensor_new(&alloc, params.ndim, &params.shape, params.is_complex)?
                         }
                     };
                     {
@@ -3487,8 +3506,8 @@ impl<'a> Vm<'a> {
                 }
 
                 let mut new_params = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    Arc::new(tensor::tensor_new(&mut alloc, params.ndim, &params.shape, params.is_complex)?)
+                    let alloc = self.heap.clone();
+                    Arc::new(tensor::tensor_new(&alloc, params.ndim, &params.shape, params.is_complex)?)
                 };
                 Arc::get_mut(&mut new_params).unwrap().is_state = params.is_state;
                 if is_adam {
@@ -3554,10 +3573,7 @@ impl<'a> Vm<'a> {
                 let mut new_params_value = Value::tensor(new_params.clone());
                 new_params_value.derivation = Some(step_deriv.clone());
 
-                if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
-                }
-                let mut step_map = Map::new(5);
+                let mut step_map = Map::new(&self.heap, 5)?;
                 step_map.set(Arc::from("epoch"), Value::number(epoch as f64), true)?;
                 step_map.set(
                     Arc::from("batch"),
@@ -3567,10 +3583,7 @@ impl<'a> Vm<'a> {
                 step_map.set(Arc::from("parameters"), new_params_value, true)?;
                 step_map.set(Arc::from("gradient"), grad_value, true)?;
 
-                if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
-                }
-                let mut state_map = Map::new(3);
+                let mut state_map = Map::new(&self.heap, 3)?;
                 if is_adam {
                     let m_snap = self.tensor_copy_contiguous(m.as_ref().unwrap())?;
                     let v_snap = self.tensor_copy_contiguous(v.as_ref().unwrap())?;
@@ -3587,7 +3600,7 @@ impl<'a> Vm<'a> {
                     true,
                 )?;
 
-                steps.items.push(Value::map(Arc::new(Mutex::new(step_map))));
+                steps.items.push(Value::map(Arc::new(Mutex::new(step_map))))?;
 
                 params = new_params;
                 params_deriv = Some(step_deriv);
@@ -3743,14 +3756,14 @@ impl<'a> Vm<'a> {
                 .ok_or(LanaError::Type)?;
             params_deriv = params_value.derivation.clone();
         } else if is_adam {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            let m_t = tensor::tensor_new(&mut alloc, prior.params.ndim, &prior.params.shape, false)?;
-            let v_t = tensor::tensor_new(&mut alloc, prior.params.ndim, &prior.params.shape, false)?;
+            let alloc = self.heap.clone();
+            let m_t = tensor::tensor_new(&alloc, prior.params.ndim, &prior.params.shape, false)?;
+            let v_t = tensor::tensor_new(&alloc, prior.params.ndim, &prior.params.shape, false)?;
             m = Some(Arc::new(m_t));
             v = Some(Arc::new(v_t));
         } else if optimizer.momentum != 0.0 {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            let vel = tensor::tensor_new(&mut alloc, prior.params.ndim, &prior.params.shape, false)?;
+            let alloc = self.heap.clone();
+            let vel = tensor::tensor_new(&alloc, prior.params.ndim, &prior.params.shape, false)?;
             velocity = Some(Arc::new(vel));
         }
 
@@ -3758,18 +3771,15 @@ impl<'a> Vm<'a> {
         let param_count = tensor::tensor_element_count(&params);
 
         let mut batch_grad = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, params.ndim, &params.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, params.ndim, &params.shape, false)?)
         };
 
-        if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        let mut steps = Array { items: Vec::with_capacity(prior_count + step_count) };
+        let mut steps = Array::new(&self.heap, prior_count + step_count)?;
         {
             let prior_items = prior.steps.lock().unwrap();
             for item in prior_items.items.iter() {
-                steps.items.push(item.clone());
+                steps.items.push(item.clone())?;
             }
         }
 
@@ -3853,8 +3863,8 @@ impl<'a> Vm<'a> {
                 }
 
                 let mut seed = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    tensor::tensor_new(&mut alloc, 0, &[], false)?
+                    let alloc = self.heap.clone();
+                    tensor::tensor_new(&alloc, 0, &[], false)?
                 };
                 tensor_set_real(&mut seed, 0, 1.0 / dataset_size as f64);
                 if let Some(derivation) = &y.derivation {
@@ -3867,10 +3877,10 @@ impl<'a> Vm<'a> {
                 let grad = {
                     let guard = leaf.ad_grad.lock().unwrap();
                     if let Some(t) = guard.as_ref() {
-                        t.clone()
+                        t.try_clone(&self.heap)?
                     } else {
-                        let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                        tensor::tensor_new(&mut alloc, params.ndim, &params.shape, false)?
+                        let alloc = self.heap.clone();
+                        tensor::tensor_new(&alloc, params.ndim, &params.shape, false)?
                     }
                 };
                 {
@@ -3888,8 +3898,8 @@ impl<'a> Vm<'a> {
             }
 
             let mut new_params = {
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                Arc::new(tensor::tensor_new(&mut alloc, params.ndim, &params.shape, false)?)
+                let alloc = self.heap.clone();
+                Arc::new(tensor::tensor_new(&alloc, params.ndim, &params.shape, false)?)
             };
             if is_adam {
                 adam_t += 1;
@@ -3954,19 +3964,13 @@ impl<'a> Vm<'a> {
             let mut new_params_value = Value::tensor(new_params.clone());
             new_params_value.derivation = Some(step_deriv.clone());
 
-            if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-                return Err(LanaError::Oom);
-            }
-            let mut step_map = Map::new(5);
+            let mut step_map = Map::new(&self.heap, 5)?;
             step_map.set(Arc::from("epoch"), Value::number((prior_count + step) as f64), true)?;
             step_map.set(Arc::from("batch"), Value::number(0.0), true)?;
             step_map.set(Arc::from("parameters"), new_params_value, true)?;
             step_map.set(Arc::from("gradient"), grad_value, true)?;
 
-            if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-                return Err(LanaError::Oom);
-            }
-            let mut state_map = Map::new(3);
+            let mut state_map = Map::new(&self.heap, 3)?;
             if is_adam {
                 let m_snap = self.tensor_copy_contiguous(m.as_ref().unwrap())?;
                 let v_snap = self.tensor_copy_contiguous(v.as_ref().unwrap())?;
@@ -3983,7 +3987,7 @@ impl<'a> Vm<'a> {
                 true,
             )?;
 
-            steps.items.push(Value::map(Arc::new(Mutex::new(step_map))));
+            steps.items.push(Value::map(Arc::new(Mutex::new(step_map))))?;
 
             params = new_params;
             params_deriv = Some(step_deriv);
@@ -4075,7 +4079,10 @@ impl<'a> Vm<'a> {
             prior.clone()
         };
 
-        let single = Arc::new(Mutex::new(Array { items: vec![observation.clone()] }));
+        let single = match Array::from_items(&self.heap, vec![observation.clone()]) {
+            Ok(array) => Arc::new(Mutex::new(array)),
+            Err(error) => return error,
+        };
         let single_value = Value::array(single);
 
         match self.incremental_train(&prior, &single_value, 1, 1, scratch_register, out) {
@@ -4234,19 +4241,16 @@ impl<'a> Vm<'a> {
         let param_count = tensor::tensor_element_count(&params);
 
         let mut batch_grad = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, params.ndim, &params.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, params.ndim, &params.shape, false)?)
         };
 
         // New step history: copy steps 0..=step_index, recompute step_index+1..
-        if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        let mut steps = Array { items: Vec::with_capacity(total_steps) };
+        let mut steps = Array::new(&self.heap, total_steps)?;
         {
             let prior_items = prior.steps.lock().unwrap();
             for item in prior_items.items.iter().take(step_index + 1) {
-                steps.items.push(item.clone());
+                steps.items.push(item.clone())?;
             }
         }
 
@@ -4339,8 +4343,8 @@ impl<'a> Vm<'a> {
                 }
 
                 let mut seed = {
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    tensor::tensor_new(&mut alloc, 0, &[], false)?
+                    let alloc = self.heap.clone();
+                    tensor::tensor_new(&alloc, 0, &[], false)?
                 };
                 tensor_set_real(&mut seed, 0, 1.0 / batch_actual as f64);
                 if let Some(derivation) = &y.derivation {
@@ -4353,10 +4357,10 @@ impl<'a> Vm<'a> {
                 let grad = {
                     let guard = leaf.ad_grad.lock().unwrap();
                     if let Some(t) = guard.as_ref() {
-                        t.clone()
+                        t.try_clone(&self.heap)?
                     } else {
-                        let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                        tensor::tensor_new(&mut alloc, params.ndim, &params.shape, false)?
+                        let alloc = self.heap.clone();
+                        tensor::tensor_new(&alloc, params.ndim, &params.shape, false)?
                     }
                 };
                 {
@@ -4374,8 +4378,8 @@ impl<'a> Vm<'a> {
             }
 
             let mut new_params = {
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                Arc::new(tensor::tensor_new(&mut alloc, params.ndim, &params.shape, false)?)
+                let alloc = self.heap.clone();
+                Arc::new(tensor::tensor_new(&alloc, params.ndim, &params.shape, false)?)
             };
             if is_adam {
                 adam_t += 1;
@@ -4457,19 +4461,13 @@ impl<'a> Vm<'a> {
             let mut new_params_value = Value::tensor(new_params.clone());
             new_params_value.derivation = Some(step_deriv.clone());
 
-            if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-                return Err(LanaError::Oom);
-            }
-            let mut step_map = Map::new(5);
+            let mut step_map = Map::new(&self.heap, 5)?;
             step_map.set(Arc::from("epoch"), Value::number(epoch as f64), true)?;
             step_map.set(Arc::from("batch"), Value::number(batch_index as f64), true)?;
             step_map.set(Arc::from("parameters"), new_params_value, true)?;
             step_map.set(Arc::from("gradient"), grad_value, true)?;
 
-            if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-                return Err(LanaError::Oom);
-            }
-            let mut state_map = Map::new(3);
+            let mut state_map = Map::new(&self.heap, 3)?;
             if is_adam {
                 let m_snap = self.tensor_copy_contiguous(m.as_ref().unwrap())?;
                 let v_snap = self.tensor_copy_contiguous(v.as_ref().unwrap())?;
@@ -4486,7 +4484,7 @@ impl<'a> Vm<'a> {
                 true,
             )?;
 
-            steps.items.push(Value::map(Arc::new(Mutex::new(step_map))));
+            steps.items.push(Value::map(Arc::new(Mutex::new(step_map))))?;
 
             params = new_params;
             params_deriv = Some(step_deriv);
@@ -4554,7 +4552,7 @@ impl<'a> Vm<'a> {
         data: &Tensor,
         scratch: u32,
     ) -> Result<f64, LanaError> {
-        let params_value = Value::tensor(Arc::new(params.clone()));
+        let params_value = Value::tensor(Arc::new(params.try_clone(&self.heap)?));
         let mut pred = Value::null();
         let error = self.run_function(model_fn, &params_value, scratch, &mut pred);
         if error != LanaError::Ok {
@@ -4598,13 +4596,10 @@ impl<'a> Vm<'a> {
         prior: &Tensor,
         data: &Tensor,
     ) -> Result<(), LanaError> {
-        if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        let mut map = Map::new(3);
+        let mut map = Map::new(&self.heap, 3)?;
         let snap = self.tensor_copy_contiguous(params)?;
-        let prior_value = Value::tensor(Arc::new(prior.clone()));
-        let data_value = Value::tensor(Arc::new(data.clone()));
+        let prior_value = Value::tensor(Arc::new(prior.try_clone(&self.heap)?));
+        let data_value = Value::tensor(Arc::new(data.try_clone(&self.heap)?));
         let inputs = [&prior_value, &data_value];
         let step_deriv = self.record_derivation(
             DerivationKind::Operation,
@@ -4624,7 +4619,7 @@ impl<'a> Vm<'a> {
         map.set(Arc::from("step"), Value::number(step as f64), true)?;
         map.set(Arc::from("parameters"), params_value, true)?;
         map.set(Arc::from("log_likelihood"), Value::number(log_likelihood), true)?;
-        steps.items.push(Value::map(Arc::new(Mutex::new(map))));
+        steps.items.push(Value::map(Arc::new(Mutex::new(map))))?;
         Ok(())
     }
 
@@ -4766,13 +4761,10 @@ impl<'a> Vm<'a> {
         let mut params = self.tensor_copy_contiguous(prior)?;
         let sample_shape = [kept, param_count];
         let mut sample_matrix = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, 2, &sample_shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, 2, &sample_shape, false)?)
         };
-        if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        let mut steps = Array { items: Vec::with_capacity(samples) };
+        let mut steps = Array::new(&self.heap, samples)?;
 
         let mut current_ll = self.infer_log_likelihood(model_fn, &params, data, scratch)?;
 
@@ -4783,8 +4775,8 @@ impl<'a> Vm<'a> {
                 return Err(error);
             }
             let mut proposal = {
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+                let alloc = self.heap.clone();
+                Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
             };
             {
                 let proposal_tensor = Arc::get_mut(&mut proposal).unwrap();
@@ -4810,12 +4802,12 @@ impl<'a> Vm<'a> {
         }
 
         let mut mean = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         let mut variance = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         {
             let mean_tensor = Arc::get_mut(&mut mean).unwrap();
@@ -4860,20 +4852,20 @@ impl<'a> Vm<'a> {
         const LR: f64 = 0.01;
         let mut mu = self.tensor_copy_contiguous(prior)?;
         let mut log_sigma = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         let mut eps = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         let mut sigma = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         let mut params = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         {
             let log_sigma_tensor = Arc::get_mut(&mut log_sigma).unwrap();
@@ -4881,10 +4873,7 @@ impl<'a> Vm<'a> {
                 tensor_set_real(log_sigma_tensor, k, 0.1f64.ln());
             }
         }
-        if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        let mut steps = Array { items: Vec::with_capacity(iterations) };
+        let mut steps = Array::new(&self.heap, iterations)?;
 
         for i in 0..iterations {
             let error = self.consume_sampling_budget();
@@ -4921,8 +4910,8 @@ impl<'a> Vm<'a> {
                 return Err(LanaError::Type);
             }
             let diff = {
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                Arc::new(tensor::tensor_elementwise(&mut alloc, pred_tensor, data, 1)?)
+                let alloc = self.heap.clone();
+                Arc::new(tensor::tensor_elementwise(&alloc, pred_tensor, data, 1)?)
             };
             let diff_value = Value::tensor(diff.clone());
             let model_value = Value::function(model_fn);
@@ -4954,12 +4943,12 @@ impl<'a> Vm<'a> {
         }
 
         let mut mean = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         let mut variance = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         {
             let mean_tensor = Arc::get_mut(&mut mean).unwrap();
@@ -4994,8 +4983,8 @@ impl<'a> Vm<'a> {
         let param_count = tensor::tensor_element_count(prior);
         let particle_shape = [particles, param_count];
         let mut matrix = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, 2, &particle_shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, 2, &particle_shape, false)?)
         };
         {
             let matrix_tensor = Arc::get_mut(&mut matrix).unwrap();
@@ -5009,10 +4998,7 @@ impl<'a> Vm<'a> {
         if self.alloc_bytes(particles * std::mem::size_of::<f64>()) != LanaError::Ok {
             return Err(LanaError::Oom);
         }
-        if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        let mut steps = Array { items: Vec::with_capacity(1) };
+        let mut steps = Array::new(&self.heap, 1)?;
 
         let error = self.consume_sampling_budget();
         if error != LanaError::Ok {
@@ -5032,8 +5018,8 @@ impl<'a> Vm<'a> {
         let mut weight_sum = 0.0;
         for p in 0..particles {
             let mut particle = {
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+                let alloc = self.heap.clone();
+                Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
             };
             {
                 let particle_tensor = Arc::get_mut(&mut particle).unwrap();
@@ -5053,8 +5039,8 @@ impl<'a> Vm<'a> {
         }
 
         let mut resampled = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, 2, &particle_shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, 2, &particle_shape, false)?)
         };
         {
             let u0 = self.uniform01() / particles as f64;
@@ -5075,12 +5061,12 @@ impl<'a> Vm<'a> {
         }
 
         let mut mean = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         let mut variance = {
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-            Arc::new(tensor::tensor_new(&mut alloc, prior.ndim, &prior.shape, false)?)
+            let alloc = self.heap.clone();
+            Arc::new(tensor::tensor_new(&alloc, prior.ndim, &prior.shape, false)?)
         };
         {
             let mean_tensor = Arc::get_mut(&mut mean).unwrap();
@@ -5200,9 +5186,12 @@ impl<'a> Vm<'a> {
 
     /// Build a `Result` tagged pair `[ok, value]`, mirroring `make_result` in
     /// `vm/c/vm.c`.
-    fn make_result(&self, ok: bool, value: Value) -> Value {
-        let array = Array { items: vec![Value::boolean(ok), value] };
-        Value::array(Arc::new(Mutex::new(array)))
+    fn make_result(&self, ok: bool, value: Value) -> Result<Value, LanaError> {
+        self.array_value(vec![Value::boolean(ok), value])
+    }
+
+    fn array_value(&self, items: Vec<Value>) -> Result<Value, LanaError> {
+        Ok(Value::array(Arc::new(Mutex::new(Array::from_items(&self.heap, items)?))))
     }
 
     /// Dispatch one instruction, mirroring the `switch` in `lana_vm_run`.
@@ -5589,14 +5578,19 @@ impl<'a> Vm<'a> {
             }
             ArrayNew => {
                 let count = ins.c as usize;
-                let items: Vec<Value> = (0..count)
-                    .map(|i| self.current_frame().registers[ins.b as usize + i].clone())
-                    .collect();
+                let mut items = match self.allocate_array_items(count) {
+                    Ok(items) => items,
+                    Err(error) => return error,
+                };
+                if let Err(error) = items.extend((0..count).map(|i| self.current_frame().registers[ins.b as usize + i].clone())) { return error; }
                 let array = Arc::new(Mutex::new(Array { items }));
                 self.current_frame_mut().registers[ins.a as usize] = Value::array(array);
                 LanaError::Ok
             }
             ArrayGet | ArraySet => {
+                if ins.opcode == ArraySet && self.active_path_count > 1 {
+                    return LanaError::UnsupportedOperation;
+                }
                 let array_value = self.current_frame().registers[ins.a as usize].clone();
                 let index_value = self.current_frame().registers[ins.b as usize].clone();
                 if !matches!(array_value.kind, ValueKind::Array(_))
@@ -5720,6 +5714,7 @@ impl<'a> Vm<'a> {
                 LanaError::Ok
             }
             Yield => {
+                if self.active_path_count > 1 { return LanaError::UnsupportedOperation; }
                 let gen_value = self.current_frame().registers[ins.a as usize].clone();
                 let yielded = self.current_frame().registers[ins.b as usize].clone();
                 let ValueKind::Generator(generator) = gen_value.kind else {
@@ -5740,12 +5735,13 @@ impl<'a> Vm<'a> {
                 let return_ip = self.current_frame().return_ip;
                 let destination = self.current_frame().return_register;
                 self.frames.pop();
-                let result = self.make_result(true, yielded);
+                let result = match self.make_result(true, yielded) { Ok(value) => value, Err(error) => return error };
                 self.current_frame_mut().registers[destination as usize] = result;
                 self.ip = return_ip;
                 LanaError::Ok
             }
             Next => {
+                if self.active_path_count > 1 { return LanaError::UnsupportedOperation; }
                 let gen_value = self.current_frame().registers[ins.a as usize].clone();
                 let ValueKind::Generator(generator) = &gen_value.kind else {
                     return LanaError::Type;
@@ -5761,7 +5757,7 @@ impl<'a> Vm<'a> {
                     )
                 };
                 if exhausted {
-                    let result = self.make_result(false, Value::string(Arc::from("exhausted")));
+                    let result = match self.make_result(false, Value::string(Arc::from("exhausted"))) { Ok(value) => value, Err(error) => return error };
                     self.current_frame_mut().registers[ins.b as usize] = result;
                     return LanaError::Ok;
                 }
@@ -5810,6 +5806,7 @@ impl<'a> Vm<'a> {
                 LanaError::Ok
             }
             Await => {
+                if self.active_path_count > 1 { return LanaError::UnsupportedOperation; }
                 let awaited_value = self.current_frame().registers[ins.a as usize].clone();
                 let ValueKind::Future(awaited) = &awaited_value.kind else {
                     return LanaError::Type;
@@ -5888,7 +5885,7 @@ impl<'a> Vm<'a> {
                     return LanaError::InvalidParameters;
                 }
                 let b = b as usize;
-                let data = data_arc.lock().unwrap().items.clone();
+                let data = data_arc.lock().unwrap().items.to_vec();
                 let n = data.len();
                 if n == 0 {
                     return LanaError::InvalidParameters;
@@ -5917,7 +5914,7 @@ impl<'a> Vm<'a> {
                         let draw = (self.rng.random() as usize) % n;
                         items.push(data[draw].clone());
                     }
-                    let resampled = Value::array(Arc::new(Mutex::new(Array { items })));
+                    let resampled = match self.array_value(items) { Ok(value) => value, Err(error) => return error };
                     let mut result = Value::null();
                     let error = self.run_function(ins.b, &resampled, ins.a, &mut result);
                     if error != LanaError::Ok {
@@ -5933,17 +5930,16 @@ impl<'a> Vm<'a> {
                 let hi = ((0.975 * b as f64) as usize).min(b - 1);
                 let ci_low = resamples[lo];
                 let ci_high = resamples[hi];
-                if self.alloc_bytes(std::mem::size_of::<crate::value::Map>()) != LanaError::Ok {
-                    return LanaError::Oom;
+                let mut map = match crate::value::Map::new(&self.heap, 7) { Ok(map) => map, Err(error) => return error };
+                let method = match self.string_value("sampled") { Ok(value) => value, Err(error) => return error };
+                let procedure = match self.string_value("bootstrap") { Ok(value) => value, Err(error) => return error };
+                for (key, value) in [
+                    ("estimate", Value::number(estimate)), ("ci_low", Value::number(ci_low)),
+                    ("ci_high", Value::number(ci_high)), ("method", method), ("procedure", procedure),
+                    ("sample_count", Value::number(b as f64)), ("seed", Value::number(self.root_seed as f64)),
+                ] {
+                    if let Err(error) = map.set(Arc::from(key), value, false) { return error; }
                 }
-                let mut map = crate::value::Map::new(7);
-                map.set(Arc::from("estimate"), Value::number(estimate), false).ok();
-                map.set(Arc::from("ci_low"), Value::number(ci_low), false).ok();
-                map.set(Arc::from("ci_high"), Value::number(ci_high), false).ok();
-                map.set(Arc::from("method"), Value::string(Arc::from("sampled")), false).ok();
-                map.set(Arc::from("procedure"), Value::string(Arc::from("bootstrap")), false).ok();
-                map.set(Arc::from("sample_count"), Value::number(b as f64), false).ok();
-                map.set(Arc::from("seed"), Value::number(self.root_seed as f64), false).ok();
                 self.current_frame_mut().registers[ins.a as usize] =
                     Value::map(Arc::new(Mutex::new(map)));
                 LanaError::Ok
@@ -5980,7 +5976,7 @@ impl<'a> Vm<'a> {
                     let return_ip = self.current_frame().return_ip;
                     let destination = self.current_frame().return_register;
                     self.frames.pop();
-                    let result = self.make_result(false, Value::string(Arc::from("exhausted")));
+                    let result = match self.make_result(false, Value::string(Arc::from("exhausted"))) { Ok(value) => value, Err(error) => return error };
                     self.current_frame_mut().registers[destination as usize] = result;
                     self.ip = return_ip;
                 } else if self.frames.len() == 1 {
@@ -5996,11 +5992,14 @@ impl<'a> Vm<'a> {
                 LanaError::Ok
             }
             Print => {
+                if self.active_path_count > 1 { return LanaError::UnsupportedOperation; }
                 let value = self.current_frame().registers[ins.a as usize].clone();
-                if value.is_unresolved() {
-                    return LanaError::UnresolvedValue;
-                }
-                println!("{}", value.print());
+                if let Err(error) = self.check_resolved(&value) { return error; }
+                let rendered = match value.try_print(self.memory_limit.saturating_sub(self.allocated_bytes())) {
+                    Ok(text) => text,
+                    Err(error) => return error,
+                };
+                println!("{}", rendered);
                 LanaError::Ok
             }
             Halt => {
@@ -6181,13 +6180,11 @@ impl<'a> Vm<'a> {
                     Ok(items) => items,
                     Err(error) => return error,
                 };
-                if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-                    return LanaError::Oom;
-                }
-                let array = Arc::new(Mutex::new(Array {
-                    items: items.into_iter().map(Value::state).collect(),
-                }));
-                self.current_frame_mut().registers[ins.a as usize] = Value::array(array);
+                let array = match self.array_value(items.into_iter().map(Value::state).collect()) {
+                    Ok(array) => array,
+                    Err(error) => return error,
+                };
+                self.current_frame_mut().registers[ins.a as usize] = array;
                 let inputs = [&source];
                 self.attach_derivation(ins.a, DerivationKind::Operation, "support", &inputs, "",
                                        ins.line, DerivationExactness::Exact, "")
@@ -6409,7 +6406,7 @@ impl<'a> Vm<'a> {
                 let ValueKind::Array(array) = &source.kind else {
                     return LanaError::Type;
                 };
-                let items = array.lock().unwrap().items.clone();
+                let items = array.lock().unwrap().items.to_vec();
                 let possibility = match self.possibility_build(&items) {
                     Ok(possibility) => possibility,
                     Err(error) => return error,
@@ -6507,9 +6504,7 @@ impl<'a> Vm<'a> {
                     return LanaError::UnsupportedOperation;
                 }
                 for argument in 0..ins.imm as usize {
-                    if self.current_frame().registers[(ins.c as usize) + argument].is_unresolved() {
-                        return LanaError::UnresolvedValue;
-                    }
+                    if let Err(error) = self.check_resolved(&self.current_frame().registers[(ins.c as usize) + argument]) { return error; }
                 }
                 let task = match self.start_task(ins.b, ins.imm, ins.c) {
                     Ok(task) => task,
@@ -6574,8 +6569,11 @@ impl<'a> Vm<'a> {
                 }
                 let inputs: Vec<Value> = results.clone();
                 let input_refs: Vec<&Value> = inputs.iter().collect();
-                let array = Arc::new(Mutex::new(Array { items: results }));
-                self.current_frame_mut().registers[ins.b as usize] = Value::array(array);
+                let array = match self.array_value(results) {
+                    Ok(array) => array,
+                    Err(error) => return error,
+                };
+                self.current_frame_mut().registers[ins.b as usize] = array;
                 self.attach_derivation(ins.b, DerivationKind::Operation, "task_join_all", &input_refs, "",
                                        ins.line, DerivationExactness::Exact, "joined_task_results")
             }
@@ -6643,10 +6641,8 @@ impl<'a> Vm<'a> {
                 }
                 let argc = ins.imm as usize;
                 for argument in 0..argc {
-                    if !accepts_unresolved
-                        && self.value_is_unresolved(&self.current_frame().registers[ins.c as usize + argument])
-                    {
-                        return LanaError::UnresolvedValue;
+                    if !accepts_unresolved {
+                        if let Err(error) = self.check_resolved(&self.current_frame().registers[ins.c as usize + argument]) { return error; }
                     }
                 }
                 let mut arguments: Vec<Value> = Vec::with_capacity(argc);
@@ -6755,12 +6751,36 @@ impl<'a> Vm<'a> {
     /// Account for an allocation, mirroring `lana_vm_alloc`. Returns `Oom` when
     /// the byte budget is exhausted.
     fn alloc_bytes(&mut self, bytes: usize) -> LanaError {
-        self.allocation_count += 1;
+        if bytes > self.memory_limit.saturating_sub(self.allocated_bytes()) {
+            return LanaError::Oom;
+        }
+        self.allocation_count = self.allocation_count.saturating_add(1);
         self.allocated_bytes += bytes;
-        if self.allocated_bytes > self.memory_limit {
-            LanaError::Oom
-        } else {
-            LanaError::Ok
+        let _ = self.heap.set_limit(self.memory_limit - self.allocated_bytes);
+        LanaError::Ok
+    }
+
+    fn allocate_array_items(&mut self, count: usize) -> Result<crate::heap::Buffer<Value>, LanaError> {
+        Ok(Array::new(&self.heap, count)?.items)
+    }
+
+    fn string_value(&self, text: &str) -> Result<Value, LanaError> {
+        Ok(Value::string(self.heap.string(text)?))
+    }
+
+    fn clone_string(&self, string: &Arc<str>, memo: &mut DeepCloneMemo) -> Result<Arc<str>, LanaError> {
+        let key = Arc::as_ptr(string) as *const () as usize;
+        if let Some(copy) = memo.strings.get(&key) { return Ok(copy.clone()); }
+        memo.strings.try_reserve(1).map_err(|_| LanaError::Oom)?;
+        let copy = self.heap.string(string)?;
+        memo.strings.insert(key, copy.clone());
+        Ok(copy)
+    }
+
+    fn string_output(&self, text: &str, out: &mut Value) -> LanaError {
+        match self.string_value(text) {
+            Ok(value) => { *out = value; LanaError::Ok }
+            Err(error) => { *out = Value::null(); error }
         }
     }
 
@@ -7176,10 +7196,7 @@ impl<'a> Vm<'a> {
         value: f64,
         observable: u32,
     ) -> Result<Arc<Mutex<Map>>, LanaError> {
-        if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        let mut map = Map::new(6);
+        let mut map = Map::new(&self.heap, 6)?;
         map.set(Arc::from("method"), Value::string(Arc::from(method)), false)?;
         map.set(Arc::from("value"), Value::number(value), false)?;
         map.set(
@@ -7199,10 +7216,7 @@ impl<'a> Vm<'a> {
 
     /// Build a validation-result map, mirroring `validate_result`.
     fn validate_result(&mut self, status: &str, reason: &str) -> Result<Arc<Mutex<Map>>, LanaError> {
-        if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        let mut map = Map::new(3);
+        let mut map = Map::new(&self.heap, 3)?;
         map.set(Arc::from("status"), Value::string(Arc::from(status)), false)?;
         map.set(Arc::from("reason"), Value::string(Arc::from(reason)), false)?;
         map.set(Arc::from("schema_version"), Value::number(1.0), false)?;
@@ -7356,24 +7370,22 @@ impl<'a> Vm<'a> {
             | ValueKind::Dataset(_) => {
                 cloned.kind = value.kind.clone();
             }
-            ValueKind::String(string) => cloned.kind = ValueKind::String(string.clone()),
+            ValueKind::String(string) => cloned.kind = ValueKind::String(self.clone_string(string, memo)?),
             ValueKind::State(state) => cloned.kind = ValueKind::State(state.clone()),
             ValueKind::Array(array) => {
                 let key = Arc::as_ptr(array) as usize;
                 if let Some(existing) = memo.arrays.get(&key) {
                     cloned.kind = ValueKind::Array(existing.clone());
                 } else {
-                    if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-                        return Err(LanaError::Oom);
-                    }
-                    let items = array
-                        .lock().unwrap()
-                        .items
-                        .iter()
-                        .map(|item| self.deep_clone_value(item, memo))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let count = array.lock().unwrap().items.len();
+                    let items = self.allocate_array_items(count)?;
                     let copy = Arc::new(Mutex::new(Array { items }));
                     memo.arrays.insert(key, copy.clone());
+                    for index in 0..count {
+                        let item = array.lock().unwrap().items[index].clone();
+                        let item = self.deep_clone_value(&item, memo)?;
+                        copy.lock().unwrap().items.push(item)?;
+                    }
                     cloned.kind = ValueKind::Array(copy);
                 }
             }
@@ -7382,16 +7394,14 @@ impl<'a> Vm<'a> {
                 if let Some(existing) = memo.maps.get(&key) {
                     cloned.kind = ValueKind::Map(existing.clone());
                 } else {
-                    if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-                        return Err(LanaError::Oom);
-                    }
-                    let mut copy = Map::new(map.lock().unwrap().entries.len());
-                    for entry in &map.lock().unwrap().entries {
-                        let value = self.deep_clone_value(&entry.value, memo)?;
-                        copy.set(entry.key.clone(), value, true)?;
-                    }
-                    let copy = Arc::new(Mutex::new(copy));
+                    let copy = Arc::new(Mutex::new(Map::new(&self.heap, map.lock().unwrap().entries.len())?));
                     memo.maps.insert(key, copy.clone());
+                    let count = map.lock().unwrap().entries.len();
+                    for index in 0..count {
+                        let entry = map.lock().unwrap().entries[index].clone();
+                        let value = self.deep_clone_value(&entry.value, memo)?;
+                        copy.lock().unwrap().set(entry.key.clone(), value, true)?;
+                    }
                     cloned.kind = ValueKind::Map(copy);
                 }
             }
@@ -7470,17 +7480,14 @@ impl<'a> Vm<'a> {
                 if let Some(existing) = memo.sets.get(&key) {
                     cloned.kind = ValueKind::Set(existing.clone());
                 } else {
-                    if self.alloc_bytes(std::mem::size_of::<Set>()) != LanaError::Ok {
-                        return Err(LanaError::Oom);
-                    }
-                    let items = set
-                        .lock().unwrap()
-                        .items
-                        .iter()
-                        .map(|item| self.deep_clone_value(item, memo))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let copy = Arc::new(Mutex::new(Set { items }));
+                    let count = set.lock().unwrap().items.len();
+                    let copy = Arc::new(Mutex::new(Set::new(&self.heap, count)?));
                     memo.sets.insert(key, copy.clone());
+                    for index in 0..count {
+                        let item = set.lock().unwrap().items[index].clone();
+                        let item = self.deep_clone_value(&item, memo)?;
+                        copy.lock().unwrap().items.push(item)?;
+                    }
                     cloned.kind = ValueKind::Set(copy);
                 }
             }
@@ -7551,18 +7558,10 @@ impl<'a> Vm<'a> {
         }
     }
 
-    /// Snapshot the current frames, deep-cloning registers, mirroring
-    /// `snapshot_frames` in `vm/c/vm.c`. Histories are shallow-cloned because
-    /// state values are immutable records.
+    /// Snapshot register bindings without changing shared heap identity.
+    /// Guarded execution rejects heap mutation and suspension.
     fn snapshot_frames(&mut self) -> Result<Vec<Frame>, LanaError> {
-        let mut frames = self.frames.clone();
-        for frame in &mut frames {
-            for register in frame.registers.iter_mut() {
-                let mut memo = DeepCloneMemo::default();
-                *register = self.deep_clone_value(register, &mut memo)?;
-            }
-        }
-        Ok(frames)
+        Ok(self.frames.clone())
     }
 
     /// Split execution on a condition, mirroring `path_split` in `vm/c/vm.c`.
@@ -7571,6 +7570,7 @@ impl<'a> Vm<'a> {
             if !condition.as_bool() {
                 self.ip = false_ip;
             }
+            self.path_execution.push(PathExecution::default());
             return LanaError::Ok;
         }
         let ValueKind::Possibility(possibility) = &condition.kind else {
@@ -7598,9 +7598,11 @@ impl<'a> Vm<'a> {
         }
         if !has_true {
             self.ip = false_ip;
+            self.path_execution.push(PathExecution::default());
             return LanaError::Ok;
         }
         if !has_false {
+            self.path_execution.push(PathExecution::default());
             return LanaError::Ok;
         }
         if self.active_path_count > self.path_limit / 2 {
@@ -7620,6 +7622,7 @@ impl<'a> Vm<'a> {
             false_weight,
             previous_path_count: self.active_path_count,
             running_false: false,
+            split: true,
         });
         self.active_path_count *= 2;
         LanaError::Ok
@@ -7631,6 +7634,10 @@ impl<'a> Vm<'a> {
         let Some(execution) = self.path_execution.last() else {
             return LanaError::Ok;
         };
+        if !execution.split {
+            self.path_execution.pop();
+            return LanaError::Ok;
+        }
         if !execution.running_false {
             let false_frames = execution.false_frames.clone();
             let false_ip = execution.false_ip;
@@ -8054,7 +8061,7 @@ impl<'a> Vm<'a> {
                 }
             }
         }
-        Ok(Value::array(Arc::new(Mutex::new(Array { items }))))
+        self.array_value(items)
     }
 
     /// Resolve a joint to a definite value, mirroring `lana_vm_joint_resolve`.
@@ -8084,7 +8091,7 @@ impl<'a> Vm<'a> {
         for value in values {
             items.push(self.deep_clone_value(value, &mut memo)?);
         }
-        Ok(Value::array(Arc::new(Mutex::new(Array { items }))))
+        self.array_value(items)
     }
 
     /// Rename a joint variable, mirroring `lana_vm_joint_rename`.
@@ -8254,28 +8261,28 @@ impl<'a> Vm<'a> {
             Value::number(node.task_lineage as f64),
             Value::number(node.local_sequence as f64),
         ];
-        Ok(Value::array(Arc::new(Mutex::new(Array { items }))))
+        self.array_value(items)
     }
 
     /// Render a derivation as a map, mirroring `derivation_to_value`.
     fn derivation_to_value(&mut self, node: &Derivation) -> Result<Value, LanaError> {
-        let mut map = Map::new(13);
+        let mut map = Map::new(&self.heap, 13)?;
         let id = self.derivation_id_to_value(node)?;
         let mut inputs = Vec::with_capacity(node.inputs.len());
         for input in &node.inputs {
             inputs.push(self.derivation_id_to_value(input)?);
         }
-        let mut source_map = Map::new(3);
+        let mut source_map = Map::new(&self.heap, 3)?;
         source_map.set(Arc::from("label"), Value::string(node.label.clone()), true)?;
         source_map.set(Arc::from("function"), Value::string(node.function.clone()), true)?;
         source_map.set(Arc::from("line"), Value::number(node.line as f64), true)?;
-        let mut details_map = Map::new(1);
+        let mut details_map = Map::new(&self.heap, 1)?;
         details_map.set(Arc::from("summary"), Value::string(node.details.clone()), true)?;
         map.set(Arc::from("id"), id, true)?;
         map.set(Arc::from("revision"), Value::number(node.revision as f64), true)?;
         map.set(Arc::from("kind"), Value::string(Arc::from(derivation::kind_name(node.kind))), true)?;
         map.set(Arc::from("operation"), Value::string(node.operation.clone()), true)?;
-        map.set(Arc::from("inputs"), Value::array(Arc::new(Mutex::new(Array { items: inputs }))), true)?;
+        map.set(Arc::from("inputs"), self.array_value(inputs)?, true)?;
         map.set(Arc::from("source"), Value::map(Arc::new(Mutex::new(source_map))), true)?;
         map.set(Arc::from("exactness"), Value::string(Arc::from(derivation::exactness_name(node.exactness))), true)?;
         map.set(Arc::from("details"), Value::map(Arc::new(Mutex::new(details_map))), true)?;
@@ -8314,7 +8321,7 @@ impl<'a> Vm<'a> {
         if rendered.len() >= 1024 {
             return Err(LanaError::Limit);
         }
-        Ok(Value::string(Arc::from(rendered)))
+        self.string_value(&rendered)
     }
 
     /// Lift a binary operation over paths/possibilities, mirroring `lift_binary`
@@ -8351,8 +8358,8 @@ impl<'a> Vm<'a> {
             if matches!(left.kind, ValueKind::Tensor(_)) && matches!(right.kind, ValueKind::Number(_)) {
                 let ValueKind::Tensor(t) = &left.kind else { unreachable!() };
                 let ValueKind::Number(s) = &right.kind else { unreachable!() };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let t = match tensor::tensor_elementwise_scalar(&mut alloc, t, *s, operation) {
+                let alloc = self.heap.clone();
+                let t = match tensor::tensor_elementwise_scalar(&alloc, t, *s, operation) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -8362,8 +8369,8 @@ impl<'a> Vm<'a> {
             if matches!(left.kind, ValueKind::Number(_)) && matches!(right.kind, ValueKind::Tensor(_)) {
                 let ValueKind::Number(s) = &left.kind else { unreachable!() };
                 let ValueKind::Tensor(t) = &right.kind else { unreachable!() };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let t = match tensor::tensor_elementwise_scalar(&mut alloc, t, *s, operation) {
+                let alloc = self.heap.clone();
+                let t = match tensor::tensor_elementwise_scalar(&alloc, t, *s, operation) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -8378,31 +8385,31 @@ impl<'a> Vm<'a> {
                 Ok(v) => v,
                 Err(error) => return error,
             };
-            let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+            let alloc = self.heap.clone();
             if a_unc || b_unc {
                 let a_var = match a_var {
                     Some(v) => v,
-                    None => match tensor::tensor_zeros_like(&mut alloc, &a_pred) {
+                    None => match tensor::tensor_zeros_like(&alloc, &a_pred) {
                         Ok(t) => Arc::new(t),
                         Err(error) => return error,
                     },
                 };
                 let b_var = match b_var {
                     Some(v) => v,
-                    None => match tensor::tensor_zeros_like(&mut alloc, &b_pred) {
+                    None => match tensor::tensor_zeros_like(&alloc, &b_pred) {
                         Ok(t) => Arc::new(t),
                         Err(error) => return error,
                     },
                 };
                 *out = match tensor::tensor_elementwise_uncertain(
-                    &mut alloc, &a_pred, &a_var, &b_pred, &b_var, operation,
+                    &alloc, &a_pred, &a_var, &b_pred, &b_var, operation,
                 ) {
                     Ok(v) => v,
                     Err(error) => return error,
                 };
                 return LanaError::Ok;
             }
-            let t = match tensor::tensor_elementwise(&mut alloc, &a_pred, &b_pred, operation) {
+            let t = match tensor::tensor_elementwise(&alloc, &a_pred, &b_pred, operation) {
                 Ok(t) => t,
                 Err(error) => return error,
             };
@@ -8589,64 +8596,82 @@ impl<'a> Vm<'a> {
     /// Whether a value is unresolved, mirroring `value_is_unresolved` in
     /// `vm/c/vm.c`. Resolves the reactive first, then recurses into arrays and
     /// maps.
-    fn value_is_unresolved(&self, value: &Value) -> bool {
-        value.is_unresolved()
+    fn check_resolved(&self, value: &Value) -> Result<(), LanaError> {
+        value.check_resolved(self.memory_limit.saturating_sub(self.allocated_bytes()))
     }
 
     /// Deep-clone a value with its reactive/claim/planned-effect metadata
     /// stripped, mirroring `clone_without_runtime_metadata` in `vm/c/vm.c`. The
     /// derivation is preserved.
     fn clone_without_runtime_metadata(&mut self, source: &Value) -> Result<Value, LanaError> {
+        self.clone_without_runtime_metadata_memo(source, &mut DeepCloneMemo::default())
+    }
+
+    fn clone_without_runtime_metadata_memo(&mut self, source: &Value, memo: &mut DeepCloneMemo) -> Result<Value, LanaError> {
         let mut plain = self.reactive_value(source);
         plain.reactive = None;
         plain.claim = None;
         plain.planned_effect = None;
-        let mut memo = DeepCloneMemo::default();
-        self.deep_clone_value(&plain, &mut memo)
+        self.deep_clone_value(&plain, memo)
     }
 
     /// Recursively materialize arrays and maps, mirroring `materialize_value`
     /// in `vm/c/vm.c`. Used by the write/stringify host calls so a reactive
     /// value's current contents are emitted.
     fn materialize_value(&mut self, source: &Value) -> Result<Value, LanaError> {
+        self.materialize_value_memo(source, &mut DeepCloneMemo::default())
+    }
+
+    fn materialize_value_memo(&mut self, source: &Value, memo: &mut DeepCloneMemo) -> Result<Value, LanaError> {
         let current = self.reactive_value(source);
         match &current.kind {
             ValueKind::Array(array) => {
-                if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
+                let key = Arc::as_ptr(array) as usize;
+                if let Some(copy) = memo.arrays.get(&key) {
+                    return Ok(Value::array(copy.clone()));
                 }
-                let items = array
-                    .lock().unwrap()
-                    .items
-                    .iter()
-                    .map(|item| self.materialize_value(item))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::array(Arc::new(Mutex::new(Array { items }))))
+                let count = array.lock().unwrap().items.len();
+                let items = self.allocate_array_items(count)?;
+                let copy = Arc::new(Mutex::new(Array { items }));
+                memo.arrays.insert(key, copy.clone());
+                for index in 0..count {
+                    let item = array.lock().unwrap().items[index].clone();
+                    let item = self.materialize_value_memo(&item, memo)?;
+                    copy.lock().unwrap().items.push(item)?;
+                }
+                Ok(Value::array(copy))
             }
             ValueKind::Map(map) => {
-                if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
+                let key = Arc::as_ptr(map) as usize;
+                if let Some(copy) = memo.maps.get(&key) {
+                    return Ok(Value::map(copy.clone()));
                 }
-                let mut copy = Map::new(map.lock().unwrap().entries.len());
-                for entry in &map.lock().unwrap().entries {
-                    let value = self.materialize_value(&entry.value)?;
-                    copy.set(entry.key.clone(), value, true)?;
+                let copy = Arc::new(Mutex::new(Map::new(&self.heap, map.lock().unwrap().entries.len())?));
+                memo.maps.insert(key, copy.clone());
+                let count = map.lock().unwrap().entries.len();
+                for index in 0..count {
+                    let entry = map.lock().unwrap().entries[index].clone();
+                    let value = self.materialize_value_memo(&entry.value, memo)?;
+                    copy.lock().unwrap().set(entry.key.clone(), value, true)?;
                 }
-                Ok(Value::map(Arc::new(Mutex::new(copy))))
+                Ok(Value::map(copy))
             }
             ValueKind::Set(set) => {
-                if self.alloc_bytes(std::mem::size_of::<Set>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
+                let key = Arc::as_ptr(set) as usize;
+                if let Some(copy) = memo.sets.get(&key) {
+                    return Ok(Value::set(copy.clone()));
                 }
-                let items = set
-                    .lock().unwrap()
-                    .items
-                    .iter()
-                    .map(|item| self.materialize_value(item))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::set(Arc::new(Mutex::new(Set { items }))))
+                let count = set.lock().unwrap().items.len();
+                let copy = Arc::new(Mutex::new(Set::new(&self.heap, count)?));
+                memo.sets.insert(key, copy.clone());
+                for index in 0..count {
+                    let item = set.lock().unwrap().items[index].clone();
+                    let item = self.materialize_value_memo(&item, memo)?;
+                    copy.lock().unwrap().items.push(item)?;
+                }
+                Ok(Value::set(copy))
             }
-            _ => self.clone_without_runtime_metadata(&current),
+            _ => self.clone_without_runtime_metadata_memo(&current, memo),
         }
     }
 
@@ -8658,6 +8683,7 @@ impl<'a> Vm<'a> {
         &mut self,
         node: &Arc<Mutex<Reactive>>,
         memo: &mut HashMap<usize, Arc<Mutex<Reactive>>>,
+        containers: &mut DeepCloneMemo,
     ) -> Result<Arc<Mutex<Reactive>>, LanaError> {
         let key = Arc::as_ptr(node) as usize;
         if let Some(existing) = memo.get(&key) {
@@ -8682,17 +8708,22 @@ impl<'a> Vm<'a> {
                 guard.is_training_data,
             )
         };
+        let copy = Arc::new(Mutex::new(Reactive {
+            id, dependency_id, revision, kind, relationship, exactness, operation,
+            inputs: [None, None], constants: [None, None], current: None,
+            history: Vec::new(), is_training_data,
+        }));
+        memo.insert(key, copy.clone());
         let cloned_input0 = match &input0 {
-            Some(input) => Some(self.deep_clone_reactive(input, memo)?),
+            Some(input) => Some(self.deep_clone_reactive(input, memo, containers)?),
             None => None,
         };
         let cloned_input1 = match &input1 {
-            Some(input) => Some(self.deep_clone_reactive(input, memo)?),
+            Some(input) => Some(self.deep_clone_reactive(input, memo, containers)?),
             None => None,
         };
-        let clone_plain = |vm: &mut Self, value: &Value| -> Result<Value, LanaError> {
-            let mut m = DeepCloneMemo::default();
-            vm.deep_clone_value(value, &mut m)
+        let mut clone_plain = |vm: &mut Self, value: &Value| -> Result<Value, LanaError> {
+            vm.clone_without_runtime_metadata_memo(value, containers)
         };
         let cloned_constant0 = match &constant0 {
             Some(value) => Some(clone_plain(self, value)?),
@@ -8716,7 +8747,7 @@ impl<'a> Vm<'a> {
                 },
             });
         }
-        let copy = Arc::new(Mutex::new(Reactive {
+        *copy.lock().unwrap() = Reactive {
             id,
             dependency_id,
             revision,
@@ -8729,8 +8760,7 @@ impl<'a> Vm<'a> {
             current: cloned_current,
             history: cloned_history,
             is_training_data,
-        }));
-        memo.insert(key, copy.clone());
+        };
         Ok(copy)
     }
 
@@ -8742,6 +8772,15 @@ impl<'a> Vm<'a> {
         value: &Value,
         reactive_memo: &mut HashMap<usize, Arc<Mutex<Reactive>>>,
     ) -> Result<Value, LanaError> {
+        self.deep_clone_live_value_memo(value, reactive_memo, &mut DeepCloneMemo::default())
+    }
+
+    fn deep_clone_live_value_memo(
+        &mut self,
+        value: &Value,
+        reactive_memo: &mut HashMap<usize, Arc<Mutex<Reactive>>>,
+        containers: &mut DeepCloneMemo,
+    ) -> Result<Value, LanaError> {
         let mut cloned = Value {
             kind: ValueKind::Null,
             derivation: value.derivation.clone(),
@@ -8750,7 +8789,7 @@ impl<'a> Vm<'a> {
             planned_effect: value.planned_effect.clone(),
         };
         if let Some(reactive) = &value.reactive {
-            cloned.reactive = Some(self.deep_clone_reactive(reactive, reactive_memo)?);
+            cloned.reactive = Some(self.deep_clone_reactive(reactive, reactive_memo, containers)?);
         }
         match &value.kind {
             ValueKind::Null
@@ -8774,30 +8813,46 @@ impl<'a> Vm<'a> {
             | ValueKind::InferenceAlgorithm(_)
             | ValueKind::Posterior(_)
             | ValueKind::Dataset(_) => cloned.kind = value.kind.clone(),
-            ValueKind::String(string) => cloned.kind = ValueKind::String(string.clone()),
+            ValueKind::String(string) => cloned.kind = ValueKind::String(self.clone_string(string, containers)?),
             ValueKind::State(state) => cloned.kind = ValueKind::State(state.clone()),
             ValueKind::Array(array) => {
-                let items = array
-                    .lock().unwrap()
-                    .items
-                    .iter()
-                    .map(|item| self.deep_clone_live_value(item, reactive_memo))
-                    .collect::<Result<Vec<_>, _>>()?;
-                cloned.kind = ValueKind::Array(Arc::new(Mutex::new(Array { items })));
+                let key = Arc::as_ptr(array) as usize;
+                if let Some(copy) = containers.arrays.get(&key) {
+                    cloned.kind = ValueKind::Array(copy.clone());
+                    return Ok(cloned);
+                }
+                let count = array.lock().unwrap().items.len();
+                let items = self.allocate_array_items(count)?;
+                let copy = Arc::new(Mutex::new(Array { items }));
+                containers.arrays.insert(key, copy.clone());
+                for index in 0..count {
+                    let item = array.lock().unwrap().items[index].clone();
+                    let item = self.deep_clone_live_value_memo(&item, reactive_memo, containers)?;
+                    copy.lock().unwrap().items.push(item)?;
+                }
+                cloned.kind = ValueKind::Array(copy);
             }
             ValueKind::Map(map) => {
-                let mut copy = Map::new(map.lock().unwrap().entries.len());
-                for entry in &map.lock().unwrap().entries {
-                    let value = self.deep_clone_live_value(&entry.value, reactive_memo)?;
-                    copy.set(entry.key.clone(), value, true)?;
+                let key = Arc::as_ptr(map) as usize;
+                if let Some(copy) = containers.maps.get(&key) {
+                    cloned.kind = ValueKind::Map(copy.clone());
+                    return Ok(cloned);
                 }
-                cloned.kind = ValueKind::Map(Arc::new(Mutex::new(copy)));
+                let copy = Arc::new(Mutex::new(Map::new(&self.heap, 0)?));
+                containers.maps.insert(key, copy.clone());
+                let count = map.lock().unwrap().entries.len();
+                for index in 0..count {
+                    let entry = map.lock().unwrap().entries[index].clone();
+                    let value = self.deep_clone_live_value_memo(&entry.value, reactive_memo, containers)?;
+                    copy.lock().unwrap().set(entry.key.clone(), value, true)?;
+                }
+                cloned.kind = ValueKind::Map(copy);
             }
             ValueKind::Possibility(possibility) => {
                 let values = possibility
                     .values
                     .iter()
-                    .map(|v| self.deep_clone_live_value(v, reactive_memo))
+                    .map(|v| self.deep_clone_live_value_memo(v, reactive_memo, containers))
                     .collect::<Result<Vec<_>, _>>()?;
                 cloned.kind = ValueKind::Possibility(Arc::new(Possibility {
                     values,
@@ -8811,7 +8866,7 @@ impl<'a> Vm<'a> {
                     alternatives.push(PathAlternative {
                         guard: alternative.guard,
                         weight: alternative.weight,
-                        result: self.deep_clone_live_value(&alternative.result, reactive_memo)?,
+                        result: self.deep_clone_live_value_memo(&alternative.result, reactive_memo, containers)?,
                     });
                 }
                 cloned.kind = ValueKind::PathSet(Arc::new(PathSet {
@@ -8823,22 +8878,28 @@ impl<'a> Vm<'a> {
                 let fields = adt
                     .fields
                     .iter()
-                    .map(|field| self.deep_clone_live_value(field, reactive_memo))
+                    .map(|field| self.deep_clone_live_value_memo(field, reactive_memo, containers))
                     .collect::<Result<Vec<_>, _>>()?;
                 cloned.kind = ValueKind::Adt(Arc::new(Adt { variant: adt.variant, fields }));
             }
             ValueKind::Set(set) => {
-                let items = set
-                    .lock().unwrap()
-                    .items
-                    .iter()
-                    .map(|item| self.deep_clone_live_value(item, reactive_memo))
-                    .collect::<Result<Vec<_>, _>>()?;
-                cloned.kind = ValueKind::Set(Arc::new(Mutex::new(Set { items })));
+                let key = Arc::as_ptr(set) as usize;
+                if let Some(copy) = containers.sets.get(&key) {
+                    cloned.kind = ValueKind::Set(copy.clone());
+                    return Ok(cloned);
+                }
+                let count = set.lock().unwrap().items.len();
+                let copy = Arc::new(Mutex::new(Set::new(&self.heap, count)?));
+                containers.sets.insert(key, copy.clone());
+                for index in 0..count {
+                    let item = set.lock().unwrap().items[index].clone();
+                    let item = self.deep_clone_live_value_memo(&item, reactive_memo, containers)?;
+                    copy.lock().unwrap().items.push(item)?;
+                }
+                cloned.kind = ValueKind::Set(copy);
             }
             ValueKind::Joint(_) | ValueKind::StateDist(_) => {
-                let mut m = DeepCloneMemo::default();
-                cloned.kind = self.deep_clone_value(value, &mut m)?.kind;
+                cloned.kind = self.deep_clone_value(value, containers)?.kind;
             }
             ValueKind::Task(_) => return Err(LanaError::Type),
         }
@@ -8904,9 +8965,10 @@ impl<'a> Vm<'a> {
             node.is_training_data
         };
         let replacement = self.reactive_value(evidence);
-        if self.active_path_count > 1 || self.value_is_unresolved(&replacement) {
+        if self.active_path_count > 1 {
             return Err(LanaError::UnresolvedValue);
         }
+        self.check_resolved(&replacement)?;
         let current = reactive
             .lock()
             .unwrap()
@@ -9019,12 +9081,8 @@ impl<'a> Vm<'a> {
                 }
             }
         }
-        if self.value_is_unresolved(&plan.payload) {
-            return Err(LanaError::UnresolvedValue);
-        }
-        if plan.payload.has_revoked_capability() {
-            return Err(LanaError::ClaimRevoked);
-        }
+        self.check_resolved(&plan.payload)?;
+        plan.payload.check_capabilities(self.memory_limit.saturating_sub(self.allocated_bytes()))?;
         let current = self.reactive_value(&plan.payload);
         let mut memo = DeepCloneMemo::default();
         let result = self.deep_clone_value(&current, &mut memo)?;
@@ -9146,6 +9204,45 @@ impl<'a> Vm<'a> {
         Ok(())
     }
 
+    fn set_host_call(&self, host: u32, arguments: &[Value]) -> Result<Value, LanaError> {
+        if host == LANA_HOST_SET_NEW {
+            if !arguments.is_empty() { return Err(LanaError::Type); }
+            return Ok(Value::set(Arc::new(Mutex::new(Set::new(&self.heap, 0)?))));
+        }
+        if arguments.len() != 2 { return Err(LanaError::Type); }
+        let ValueKind::Set(left) = &arguments[0].kind else { return Err(LanaError::Type); };
+        if host == LANA_HOST_SET_ADD || host == LANA_HOST_SET_CONTAINS {
+            if !value_is_set_member(&arguments[1]) { return Err(LanaError::Type); }
+            let left = left.lock().unwrap();
+            let found = left.items.iter().any(|item| set_value_equal(item, &arguments[1]));
+            if host == LANA_HOST_SET_CONTAINS { return Ok(Value::boolean(found)); }
+            let capacity = left.items.len().checked_add(usize::from(!found)).ok_or(LanaError::Oom)?;
+            let mut result = Set::new(&self.heap, capacity)?;
+            result.items.extend(left.items.iter().cloned())?;
+            if !found { result.items.push(arguments[1].clone())?; }
+            return Ok(Value::set(Arc::new(Mutex::new(result))));
+        }
+        let ValueKind::Set(right) = &arguments[1].kind else { return Err(LanaError::Type); };
+        // Release the left lock before taking the right lock: operands can alias.
+        let left = crate::heap::Buffer::from_slice(&self.heap, &left.lock().unwrap().items)?;
+        let right = right.lock().unwrap();
+        let mut result = Set::new(&self.heap, left.len())?;
+        for item in &left {
+            let present = right.items.iter().any(|other| set_value_equal(item, other));
+            if host == LANA_HOST_SET_UNION || (host == LANA_HOST_SET_INTERSECT) == present {
+                result.items.push(item.clone())?;
+            }
+        }
+        if host == LANA_HOST_SET_UNION {
+            for item in &right.items {
+                if !result.items.iter().any(|other| set_value_equal(item, other)) {
+                    result.items.push(item.clone())?;
+                }
+            }
+        }
+        Ok(Value::set(Arc::new(Mutex::new(result))))
+    }
+
     /// Execute a host call, mirroring `execute_host_call` in `vm/c/vm.c`.
     fn execute_host_call(
         &mut self,
@@ -9160,17 +9257,17 @@ impl<'a> Vm<'a> {
                 if argc != 0 {
                     return LanaError::Type;
                 }
-                if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-                    return LanaError::Oom;
-                }
-                let mut items = Vec::with_capacity(self.program_argc);
+                let mut items = match self.allocate_array_items(self.program_argc) {
+                    Ok(items) => items, Err(error) => return error,
+                };
                 for index in 0..self.program_argc {
                     let source = Value::string(self.program_argv[index].clone());
                     let mut memo = DeepCloneMemo::default();
-                    items.push(match self.deep_clone_value(&source, &mut memo) {
+                    let item = match self.deep_clone_value(&source, &mut memo) {
                         Ok(value) => value,
                         Err(error) => return error,
-                    });
+                    };
+                    if let Err(error) = items.push(item) { return error; }
                 }
                 *out = Value::array(Arc::new(Mutex::new(Array { items })));
                 LanaError::Ok
@@ -9347,12 +9444,12 @@ impl<'a> Vm<'a> {
                     };
                     is_complex = b;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let shape = match tensor::tensor_shape_from_array(&mut alloc, &arguments[0]) {
+                let alloc = self.heap.clone();
+                let shape = match tensor::tensor_shape_from_array(&alloc, &arguments[0]) {
                     Ok(shape) => shape,
                     Err(error) => return error,
                 };
-                let t = match tensor::tensor_new(&mut alloc, shape.len(), &shape, is_complex) {
+                let t = match tensor::tensor_new(&alloc, shape.len(), &shape, is_complex) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9367,12 +9464,12 @@ impl<'a> Vm<'a> {
                     Some(d) => d,
                     None => return LanaError::InvalidParameters,
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let shape = match tensor::tensor_shape_from_array(&mut alloc, &arguments[0]) {
+                let alloc = self.heap.clone();
+                let shape = match tensor::tensor_shape_from_array(&alloc, &arguments[0]) {
                     Ok(shape) => shape,
                     Err(error) => return error,
                 };
-                let mut t = match tensor::tensor_new(&mut alloc, shape.len(), &shape, false) {
+                let mut t = match tensor::tensor_new(&alloc, shape.len(), &shape, false) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9388,12 +9485,12 @@ impl<'a> Vm<'a> {
                     Some(d) => d,
                     None => return LanaError::InvalidParameters,
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let shape = match tensor::tensor_shape_from_array(&mut alloc, &arguments[0]) {
+                let alloc = self.heap.clone();
+                let shape = match tensor::tensor_shape_from_array(&alloc, &arguments[0]) {
                     Ok(shape) => shape,
                     Err(error) => return error,
                 };
-                let mut t = match tensor::tensor_new(&mut alloc, shape.len(), &shape, false) {
+                let mut t = match tensor::tensor_new(&alloc, shape.len(), &shape, false) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9424,8 +9521,8 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 let shape = [n, n];
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let mut t = match tensor::tensor_new(&mut alloc, 2, &shape, false) {
+                let alloc = self.heap.clone();
+                let mut t = match tensor::tensor_new(&alloc, 2, &shape, false) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9459,8 +9556,8 @@ impl<'a> Vm<'a> {
                 let Some(dtype) = TensorDtype::from_str(s) else {
                     return LanaError::InvalidParameters;
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match tensor::tensor_cast(&mut alloc, t, dtype) {
+                let alloc = self.heap.clone();
+                match tensor::tensor_cast(&alloc, t, dtype) {
                     Ok(t) => {
                         *out = Value::tensor(Arc::new(t));
                         LanaError::Ok
@@ -9471,7 +9568,7 @@ impl<'a> Vm<'a> {
             LANA_HOST_TENSOR_RESHAPE => {
                 if argc != 2 { return LanaError::Type; }
                 let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
-                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_reshape(&mut alloc, source, &arguments[1]) };
+                let result = { let alloc = self.heap.clone(); tensor::tensor_reshape(&alloc, source, &arguments[1]) };
                 match result {
                     Ok(value) => {
                         *out = value;
@@ -9483,7 +9580,7 @@ impl<'a> Vm<'a> {
             LANA_HOST_TENSOR_TRANSPOSE => {
                 if argc != 1 { return LanaError::Type; }
                 let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
-                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_transpose(&mut alloc, source) };
+                let result = { let alloc = self.heap.clone(); tensor::tensor_transpose(&alloc, source) };
                 match result {
                     Ok(value) => {
                         *out = value;
@@ -9496,7 +9593,7 @@ impl<'a> Vm<'a> {
                 if argc != 1 { return LanaError::Type; }
                 let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
                 let op = host_id - LANA_HOST_TENSOR_EXP;
-                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_unary_math(&mut alloc, source, op) };
+                let result = { let alloc = self.heap.clone(); tensor::tensor_unary_math(&alloc, source, op) };
                 match result {
                     Ok(value) => {
                         *out = value;
@@ -9509,7 +9606,7 @@ impl<'a> Vm<'a> {
                 if argc != 1 && argc != 2 { return LanaError::Type; }
                 let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
                 let axis_value = if argc == 2 { Some(&arguments[1]) } else { None };
-                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_softmax_like(&mut alloc, source, axis_value, host_id == LANA_HOST_TENSOR_LOGSUMEXP) };
+                let result = { let alloc = self.heap.clone(); tensor::tensor_softmax_like(&alloc, source, axis_value, host_id == LANA_HOST_TENSOR_LOGSUMEXP) };
                 match result {
                     Ok(value) => {
                         *out = value;
@@ -9524,8 +9621,8 @@ impl<'a> Vm<'a> {
             LANA_HOST_TENSOR_ARGMAX => {
                 if argc != 1 && argc != 2 { return LanaError::Type; }
                 let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match tensor::tensor_argmax(&mut alloc, source, if argc == 2 { Some(&arguments[1]) } else { None }) {
+                let alloc = self.heap.clone();
+                match tensor::tensor_argmax(&alloc, source, if argc == 2 { Some(&arguments[1]) } else { None }) {
                     Ok(value) => { *out = value; LanaError::Ok }
                     Err(error) => error,
                 }
@@ -9534,8 +9631,8 @@ impl<'a> Vm<'a> {
                 if argc != 3 { return LanaError::Type; }
                 let (ValueKind::Tensor(a), ValueKind::Tensor(b), ValueKind::String(operation)) =
                     (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind) else { return LanaError::Type; };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match tensor::tensor_compare_values(&mut alloc, a, b, operation) {
+                let alloc = self.heap.clone();
+                match tensor::tensor_compare_values(&alloc, a, b, operation) {
                     Ok(value) => { *out = value; LanaError::Ok }
                     Err(error) => error,
                 }
@@ -9544,25 +9641,25 @@ impl<'a> Vm<'a> {
                 if argc != 3 { return LanaError::Type; }
                 let (ValueKind::Tensor(mask), ValueKind::Tensor(yes), ValueKind::Tensor(no)) =
                     (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind) else { return LanaError::Type; };
-                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_select_values(&mut alloc, mask, yes, no) };
+                let result = { let alloc = self.heap.clone(); tensor::tensor_select_values(&alloc, mask, yes, no) };
                 match result {
                     Ok(value) => {
                         *out = value;
                         if arguments[1].derivation.is_none() && arguments[2].derivation.is_none() { return LanaError::Ok; }
                         let shape = match &out.kind { ValueKind::Tensor(t) => t.shape.clone(), _ => unreachable!() };
-                        let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                        let mut yes_mask = match tensor::tensor_new_dtype(&mut alloc, shape.len(), &shape, yes.dtype) { Ok(t) => t, Err(error) => return error };
-                        let mut no_mask = match tensor::tensor_new_dtype(&mut alloc, shape.len(), &shape, no.dtype) { Ok(t) => t, Err(error) => return error };
+                        let alloc = self.heap.clone();
+                        let mut yes_mask = match tensor::tensor_new_dtype(&alloc, shape.len(), &shape, yes.dtype) { Ok(t) => t, Err(error) => return error };
+                        let mut no_mask = match tensor::tensor_new_dtype(&alloc, shape.len(), &shape, no.dtype) { Ok(t) => t, Err(error) => return error };
                         for i in 0..shape.iter().product() {
                             let selected = if tensor_get_real(mask, tensor::broadcast_index(mask, &shape, i)) != 0.0 { 1.0 } else { 0.0 };
                             tensor_set_real(&mut yes_mask, i, selected); tensor_set_real(&mut no_mask, i, 1.0 - selected);
                         }
                         drop(alloc);
-                        let yes_mask_value = Value::tensor(Arc::new(yes_mask.clone()));
-                        let no_mask_value = Value::tensor(Arc::new(no_mask.clone()));
-                        let mut yes_product = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); match tensor::tensor_elementwise(&mut alloc, yes, &yes_mask, 2) { Ok(t) => Value::tensor(Arc::new(t)), Err(error) => return error } };
+                        let yes_mask_value = Value::tensor(Arc::new(match yes_mask.try_clone(&self.heap) { Ok(t) => t, Err(error) => return error }));
+                        let no_mask_value = Value::tensor(Arc::new(match no_mask.try_clone(&self.heap) { Ok(t) => t, Err(error) => return error }));
+                        let mut yes_product = { let alloc = self.heap.clone(); match tensor::tensor_elementwise(&alloc, yes, &yes_mask, 2) { Ok(t) => Value::tensor(Arc::new(t)), Err(error) => return error } };
                         if arguments[1].derivation.is_some() { let error = self.ad_record(2, &arguments[1], Some(&yes_mask_value), -1, &mut yes_product); if error != LanaError::Ok { return error; } }
-                        let mut no_product = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); match tensor::tensor_elementwise(&mut alloc, no, &no_mask, 2) { Ok(t) => Value::tensor(Arc::new(t)), Err(error) => return error } };
+                        let mut no_product = { let alloc = self.heap.clone(); match tensor::tensor_elementwise(&alloc, no, &no_mask, 2) { Ok(t) => Value::tensor(Arc::new(t)), Err(error) => return error } };
                         if arguments[2].derivation.is_some() { let error = self.ad_record(2, &arguments[2], Some(&no_mask_value), -1, &mut no_product); if error != LanaError::Ok { return error; } }
                         self.ad_record(0, &yes_product, Some(&no_product), -1, out)
                     }
@@ -9573,7 +9670,7 @@ impl<'a> Vm<'a> {
                 if argc != 3 { return LanaError::Type; }
                 let (ValueKind::Tensor(source), ValueKind::Tensor(indices)) =
                     (&arguments[0].kind, &arguments[1].kind) else { return LanaError::Type; };
-                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_gather_values(&mut alloc, source, indices, &arguments[2]) };
+                let result = { let alloc = self.heap.clone(); tensor::tensor_gather_values(&alloc, source, indices, &arguments[2]) };
                 match result {
                     Ok(value) => {
                         *out = value;
@@ -9588,7 +9685,7 @@ impl<'a> Vm<'a> {
                 if argc != 2 { return LanaError::Type; }
                 let (ValueKind::Tensor(matrix), ValueKind::Tensor(rhs)) =
                     (&arguments[0].kind, &arguments[1].kind) else { return LanaError::Type; };
-                let result = { let mut alloc = |bytes: usize| self.alloc_bytes(bytes); tensor::tensor_cholesky_solve(&mut alloc, matrix, rhs) };
+                let result = { let alloc = self.heap.clone(); tensor::tensor_cholesky_solve(&alloc, matrix, rhs) };
                 match result {
                     Ok(value) => {
                         *out = value;
@@ -9599,8 +9696,8 @@ impl<'a> Vm<'a> {
             }
             LANA_HOST_RANDOM_UNIFORM | LANA_HOST_RANDOM_NORMAL => {
                 if argc != 2 { return LanaError::Type; }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match tensor::tensor_random(&mut alloc, &arguments[0], &arguments[1], host_id == LANA_HOST_RANDOM_NORMAL) {
+                let alloc = self.heap.clone();
+                match tensor::tensor_random(&alloc, &arguments[0], &arguments[1], host_id == LANA_HOST_RANDOM_NORMAL) {
                     Ok(value) => { *out = value; LanaError::Ok }
                     Err(error) => error,
                 }
@@ -9625,12 +9722,13 @@ impl<'a> Vm<'a> {
                 let result = self.tensor_copy_contiguous(source);
                 match result { Ok(mut tensor) => {
                     if target == TensorDevice::Metal {
-                        if self.alloc_bytes(source.data.len()) != LanaError::Ok { return LanaError::Oom; }
+                        let charge = match self.heap.reserve(source.data.len()) { Ok(charge) => charge, Err(error) => return error };
                         let Some(buffer) = crate::metal::ResidentBuffer::new(&tensor.data) else { return LanaError::UnsupportedOperation; };
-                        let tensor_mut = Arc::make_mut(&mut tensor);
+                        let tensor_mut = Arc::get_mut(&mut tensor).expect("new tensor is unique");
                         tensor_mut.metal_buffer = Some(Arc::new(buffer));
+                        tensor_mut.metal_charge = Some(Arc::new(charge));
                         tensor_mut.device = target;
-                    } else { Arc::make_mut(&mut tensor).device = target; }
+                    } else { Arc::get_mut(&mut tensor).expect("new tensor is unique").device = target; }
                     *out = Value::tensor(tensor); LanaError::Ok
                 }, Err(error) => error }
             }
@@ -9638,9 +9736,12 @@ impl<'a> Vm<'a> {
                 if argc != 1 { return LanaError::Type; }
                 let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
                 match self.tensor_copy_contiguous(source) { Ok(mut tensor) => {
-                    let tensor_mut = Arc::make_mut(&mut tensor);
-                    if let Some(buffer) = &source.metal_buffer { tensor_mut.data = Arc::new(buffer.copy_bytes()); }
+                    let tensor_mut = Arc::get_mut(&mut tensor).expect("new tensor is unique");
+                    if let Some(buffer) = &source.metal_buffer {
+                        buffer.copy_into(Arc::get_mut(&mut tensor_mut.data).expect("new tensor buffer is unique"));
+                    }
                     tensor_mut.metal_buffer = None;
+                    tensor_mut.metal_charge = None;
                     tensor_mut.device = TensorDevice::Cpu;
                     *out = Value::tensor(tensor); LanaError::Ok
                 }, Err(error) => error }
@@ -9652,10 +9753,10 @@ impl<'a> Vm<'a> {
                 let ValueKind::Tensor(t) = &arguments[0].kind else {
                     return LanaError::Type;
                 };
-                if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-                    return LanaError::Oom;
-                }
-                let items = t.shape.iter().map(|&dim| Value::number(dim as f64)).collect();
+                let mut items = match self.allocate_array_items(t.shape.len()) {
+                    Ok(items) => items, Err(error) => return error,
+                };
+                if let Err(error) = items.extend(t.shape.iter().map(|&dim| Value::number(dim as f64))) { return error; }
                 *out = Value::array(Arc::new(Mutex::new(Array { items })));
                 LanaError::Ok
             }
@@ -9682,24 +9783,24 @@ impl<'a> Vm<'a> {
                     Ok(x) => x,
                     Err(error) => return error,
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                let alloc = self.heap.clone();
                 if a_unc || b_unc {
                     let a_var = match a_var {
                         Some(v) => v,
-                        None => match tensor::tensor_zeros_like(&mut alloc, &a_pred) {
+                        None => match tensor::tensor_zeros_like(&alloc, &a_pred) {
                             Ok(t) => Arc::new(t),
                             Err(error) => return error,
                         },
                     };
                     let b_var = match b_var {
                         Some(v) => v,
-                        None => match tensor::tensor_zeros_like(&mut alloc, &b_pred) {
+                        None => match tensor::tensor_zeros_like(&alloc, &b_pred) {
                             Ok(t) => Arc::new(t),
                             Err(error) => return error,
                         },
                     };
                     return match tensor::tensor_elementwise_uncertain(
-                        &mut alloc, &a_pred, &a_var, &b_pred, &b_var, op,
+                        &alloc, &a_pred, &a_var, &b_pred, &b_var, op,
                     ) {
                         Ok(value) => {
                             *out = value;
@@ -9708,7 +9809,7 @@ impl<'a> Vm<'a> {
                         Err(error) => error,
                     };
                 }
-                let t = match tensor::tensor_elementwise(&mut alloc, &a_pred, &b_pred, op) {
+                let t = match tensor::tensor_elementwise(&alloc, &a_pred, &b_pred, op) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9733,24 +9834,24 @@ impl<'a> Vm<'a> {
                     Ok(x) => x,
                     Err(error) => return error,
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                let alloc = self.heap.clone();
                 if a_unc || b_unc {
                     let a_var = match a_var {
                         Some(v) => v,
-                        None => match tensor::tensor_zeros_like(&mut alloc, &a_pred) {
+                        None => match tensor::tensor_zeros_like(&alloc, &a_pred) {
                             Ok(t) => Arc::new(t),
                             Err(error) => return error,
                         },
                     };
                     let b_var = match b_var {
                         Some(v) => v,
-                        None => match tensor::tensor_zeros_like(&mut alloc, &b_pred) {
+                        None => match tensor::tensor_zeros_like(&alloc, &b_pred) {
                             Ok(t) => Arc::new(t),
                             Err(error) => return error,
                         },
                     };
                     return match tensor::tensor_matmul_uncertain(
-                        &mut alloc, &a_pred, &a_var, &b_pred, &b_var,
+                        &alloc, &a_pred, &a_var, &b_pred, &b_var,
                     ) {
                         Ok(value) => {
                             *out = value;
@@ -9772,7 +9873,7 @@ impl<'a> Vm<'a> {
                 } else {
                     tensor::matmul_default_dtype(&a_pred, &b_pred)
                 };
-                let t = match tensor::tensor_matmul(&mut alloc, &a_pred, &b_pred, out_dtype) {
+                let t = match tensor::tensor_matmul(&alloc, &a_pred, &b_pred, out_dtype) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9794,8 +9895,8 @@ impl<'a> Vm<'a> {
                 if &**precision != "float32" {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let t = match tensor::tensor_gpu_matmul(&mut alloc, a, b) {
+                let alloc = self.heap.clone();
+                let t = match tensor::tensor_gpu_matmul(&alloc, a, b) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9811,14 +9912,14 @@ impl<'a> Vm<'a> {
                     Ok(x) => x,
                     Err(error) => return error,
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                let alloc = self.heap.clone();
                 if unc {
                     if op >= 2 {
                         return LanaError::Type;
                     }
                     let var = var.expect("uncertain tensor has a variance");
                     let axis = if argc == 2 { Some(&arguments[1]) } else { None };
-                    return match tensor::tensor_reduce_uncertain(&mut alloc, &pred, &var, op, axis) {
+                    return match tensor::tensor_reduce_uncertain(&alloc, &pred, &var, op, axis) {
                         Ok(value) => {
                             *out = value;
                             LanaError::Ok
@@ -9827,9 +9928,9 @@ impl<'a> Vm<'a> {
                     };
                 }
                 let result = if argc == 2 {
-                    tensor::tensor_reduce_axis(&mut alloc, &pred, op, &arguments[1])
+                    tensor::tensor_reduce_axis(&alloc, &pred, op, &arguments[1])
                 } else {
-                    tensor::tensor_reduce(&mut alloc, &pred, op)
+                    tensor::tensor_reduce(&alloc, &pred, op)
                 };
                 match result {
                     Ok(value) => {
@@ -9860,12 +9961,12 @@ impl<'a> Vm<'a> {
                     Some(d) => d,
                     None => return LanaError::InvalidParameters,
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let shape = match tensor::tensor_infer_shape(&mut alloc, &arguments[0]) {
+                let alloc = self.heap.clone();
+                let shape = match tensor::tensor_infer_shape(&alloc, &arguments[0]) {
                     Ok(shape) => shape,
                     Err(error) => return error,
                 };
-                let mut t = match tensor::tensor_new(&mut alloc, shape.len(), &shape, false) {
+                let mut t = match tensor::tensor_new(&alloc, shape.len(), &shape, false) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9881,12 +9982,12 @@ impl<'a> Vm<'a> {
                 if argc != 2 {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                let shape = match tensor::tensor_infer_shape(&mut alloc, &arguments[0]) {
+                let alloc = self.heap.clone();
+                let shape = match tensor::tensor_infer_shape(&alloc, &arguments[0]) {
                     Ok(shape) => shape,
                     Err(error) => return error,
                 };
-                let mut t = match tensor::tensor_new(&mut alloc, shape.len(), &shape, true) {
+                let mut t = match tensor::tensor_new(&alloc, shape.len(), &shape, true) {
                     Ok(t) => t,
                     Err(error) => return error,
                 };
@@ -9903,12 +10004,12 @@ impl<'a> Vm<'a> {
                 if argc != 1 {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
+                let alloc = self.heap.clone();
                 match &arguments[0].kind {
                     ValueKind::State(state) => {
-                        linalg_density_from_state(&mut alloc, &state.state)
+                        linalg_density_from_state(&alloc, &state.state)
                     }
-                    ValueKind::Tensor(t) => linalg_density_from_tensor(&mut alloc, t),
+                    ValueKind::Tensor(t) => linalg_density_from_tensor(&alloc, t),
                     _ => Err(LanaError::Type),
                 }
                 .map(|value| {
@@ -9921,8 +10022,8 @@ impl<'a> Vm<'a> {
                 if argc != 1 {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_povm(&mut alloc, &arguments[0]) {
+                let alloc = self.heap.clone();
+                match linalg_povm(&alloc, &arguments[0]) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -9934,8 +10035,8 @@ impl<'a> Vm<'a> {
                 if argc != 1 {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_channel(&mut alloc, &arguments[0]) {
+                let alloc = self.heap.clone();
+                match linalg_channel(&alloc, &arguments[0]) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -9947,8 +10048,8 @@ impl<'a> Vm<'a> {
                 if argc != 1 {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_observable(&mut alloc, &arguments[0]) {
+                let alloc = self.heap.clone();
+                match linalg_observable(&alloc, &arguments[0]) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -9968,8 +10069,8 @@ impl<'a> Vm<'a> {
                 else {
                     unreachable!()
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_tensor_product(&mut alloc, a, b) {
+                let alloc = self.heap.clone();
+                match linalg_tensor_product(&alloc, a, b) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -9990,8 +10091,8 @@ impl<'a> Vm<'a> {
                 let ValueKind::Number(subsystem) = arguments[1].kind else {
                     unreachable!()
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_partial_trace(&mut alloc, ab, subsystem) {
+                let alloc = self.heap.clone();
+                match linalg_partial_trace(&alloc, ab, subsystem) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -10011,8 +10112,8 @@ impl<'a> Vm<'a> {
                 else {
                     unreachable!()
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_measure_with(&mut alloc, rho, povm) {
+                let heap = self.heap.clone();
+                match linalg_measure_with(&heap, rho, povm) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -10032,8 +10133,8 @@ impl<'a> Vm<'a> {
                 else {
                     unreachable!()
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_apply_to(&mut alloc, chan, rho) {
+                let alloc = self.heap.clone();
+                match linalg_apply_to(&alloc, chan, rho) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -10075,8 +10176,8 @@ impl<'a> Vm<'a> {
                 if !w.is_finite() || w < 0.0 || w > 1.0 {
                     return LanaError::InvalidParameters;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_mix(&mut alloc, a, b, w) {
+                let alloc = self.heap.clone();
+                match linalg_mix(&alloc, a, b, w) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -10096,8 +10197,8 @@ impl<'a> Vm<'a> {
                 else {
                     unreachable!()
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_trace_distance(&mut alloc, a, b) {
+                let alloc = self.heap.clone();
+                match linalg_trace_distance(&alloc, a, b) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -10118,8 +10219,8 @@ impl<'a> Vm<'a> {
                 let ValueKind::Number(bipartition) = arguments[1].kind else {
                     unreachable!()
                 };
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_is_separable(&mut alloc, ab, bipartition) {
+                let alloc = self.heap.clone();
+                match linalg_is_separable(&alloc, ab, bipartition) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -10146,8 +10247,8 @@ impl<'a> Vm<'a> {
                 if argc != 1 {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_state_tensor(&mut alloc, &arguments[0]) {
+                let alloc = self.heap.clone();
+                match linalg_state_tensor(&alloc, &arguments[0]) {
                     Ok(value) => {
                         *out = value;
                         LanaError::Ok
@@ -10171,8 +10272,8 @@ impl<'a> Vm<'a> {
                 if !a.is_state || !b.is_state {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_state_append(&mut alloc, a, b) {
+                let alloc = self.heap.clone();
+                match linalg_state_append(&alloc, a, b) {
                     Ok(value) => {
                         *out = value;
                         if self.ad_recording {
@@ -10199,8 +10300,8 @@ impl<'a> Vm<'a> {
                 if !s.is_state {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_state_measure(&mut alloc, s, povm) {
+                let alloc = self.heap.clone();
+                match linalg_state_measure(&alloc, s, povm) {
                     Ok(value) => {
                         *out = value;
                         if self.ad_recording {
@@ -10227,8 +10328,8 @@ impl<'a> Vm<'a> {
                 if !s.is_state {
                     return LanaError::Type;
                 }
-                let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                match linalg_state_transform(&mut alloc, s, chan) {
+                let alloc = self.heap.clone();
+                match linalg_state_transform(&alloc, s, chan) {
                     Ok(value) => {
                         *out = value;
                         if self.ad_recording {
@@ -10256,10 +10357,7 @@ impl<'a> Vm<'a> {
                 if argc % 2 != 0 {
                     return LanaError::Type;
                 }
-                if self.alloc_bytes(std::mem::size_of::<Map>()) != LanaError::Ok {
-                    return LanaError::Oom;
-                }
-                let mut map = Map::new(argc / 2);
+                let mut map = match Map::new(&self.heap, argc / 2) { Ok(map) => map, Err(error) => return error };
                 let mut index = 0;
                 while index < argc {
                     let ValueKind::String(key) = &arguments[index].kind else {
@@ -10334,16 +10432,11 @@ impl<'a> Vm<'a> {
                 let ValueKind::Map(map) = &arguments[0].kind else {
                     unreachable!()
                 };
-                if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-                    return LanaError::Oom;
-                }
-                let items = map
-                    .lock()
-                    .unwrap()
-                    .entries
-                    .iter()
-                    .map(|entry| Value::string(entry.key.clone()))
-                    .collect();
+                let map = map.lock().unwrap();
+                let mut items = match self.allocate_array_items(map.entries.len()) {
+                    Ok(items) => items, Err(error) => return error,
+                };
+                if let Err(error) = items.extend(map.entries.iter().map(|entry| Value::string(entry.key.clone()))) { return error; }
                 *out = Value::array(Arc::new(Mutex::new(Array { items })));
                 LanaError::Ok
             }
@@ -10355,8 +10448,8 @@ impl<'a> Vm<'a> {
                     let ValueKind::Tensor(tensor) = &arguments[0].kind else {
                         unreachable!()
                     };
-                    let mut alloc = |bytes: usize| self.alloc_bytes(bytes);
-                    return match tensor::tensor_index(&mut alloc, tensor, &arguments[1]) {
+                    let alloc = self.heap.clone();
+                    return match tensor::tensor_index(&alloc, tensor, &arguments[1]) {
                         Ok(value) => {
                             *out = value;
                             LanaError::Ok
@@ -10506,8 +10599,7 @@ impl<'a> Vm<'a> {
                 if start > end || end > text.len() {
                     return LanaError::Limit;
                 }
-                *out = Value::string(Arc::from(&text[start..end]));
-                LanaError::Ok
+                self.string_output(&text[start..end], out)
             }
             LANA_HOST_STRING_CONCAT => {
                 let mut total = 0usize;
@@ -10515,21 +10607,23 @@ impl<'a> Vm<'a> {
                     if !matches!(argument.kind, ValueKind::String(_)) {
                         return LanaError::Type;
                     }
-                    total += argument.as_string().len();
+                    total = match total.checked_add(argument.as_string().len()) {
+                        Some(total) => total, None => return LanaError::Oom,
+                    };
                 }
-                let mut joined = String::with_capacity(total);
+                let mut joined = match Buffer::new(&self.heap, total, 0) {
+                    Ok(buffer) => buffer, Err(error) => return error,
+                };
                 for argument in arguments {
-                    joined.push_str(&argument.as_string());
+                    if let Err(error) = joined.extend_from_slice(argument.as_string().as_bytes()) { return error; }
                 }
-                *out = Value::string(Arc::from(joined));
-                LanaError::Ok
+                self.string_output(std::str::from_utf8(&joined).unwrap(), out)
             }
             LANA_HOST_NUMBER_TO_STRING => {
                 if argc != 1 || !matches!(arguments[0].kind, ValueKind::Number(_)) {
                     return LanaError::Type;
                 }
-                *out = Value::string(Arc::from(format_g17(arguments[0].as_number())));
-                LanaError::Ok
+                self.string_output(&format_g17(arguments[0].as_number()), out)
             }
             LANA_HOST_ARRAY_NEW => {
                 if argc != 1
@@ -10540,12 +10634,12 @@ impl<'a> Vm<'a> {
                     return LanaError::Type;
                 }
                 let count = arguments[0].as_number() as usize;
-                if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-                    return LanaError::Oom;
-                }
-                *out = Value::array(Arc::new(Mutex::new(Array {
-                    items: vec![Value::null(); count],
-                })));
+                let mut items = match self.allocate_array_items(count) {
+                    Ok(items) => items,
+                    Err(error) => return error,
+                };
+                if let Err(error) = items.resize(count, Value::null()) { return error; }
+                *out = Value::array(Arc::new(Mutex::new(Array { items })));
                 LanaError::Ok
             }
             LANA_HOST_ARRAY_PUSH => {
@@ -10555,7 +10649,7 @@ impl<'a> Vm<'a> {
                 let ValueKind::Array(array) = &arguments[0].kind else {
                     unreachable!()
                 };
-                array.lock().unwrap().items.push(arguments[1].clone());
+                if let Err(error) = array.lock().unwrap().push(arguments[1].clone()) { return error; }
                 *out = arguments[0].clone();
                 LanaError::Ok
             }
@@ -10565,13 +10659,14 @@ impl<'a> Vm<'a> {
                 }
                 const DIGITS: &[u8; 16] = b"0123456789abcdef";
                 let source = arguments[0].as_string();
-                let mut hex = String::with_capacity(source.len() * 2);
+                let Some(capacity) = source.len().checked_mul(2) else { return LanaError::Oom; };
+                let mut hex = match Buffer::new(&self.heap, capacity, 0) {
+                    Ok(buffer) => buffer, Err(error) => return error,
+                };
                 for byte in source.as_bytes() {
-                    hex.push(DIGITS[(byte >> 4) as usize] as char);
-                    hex.push(DIGITS[(byte & 15) as usize] as char);
+                    if let Err(error) = hex.extend_from_slice(&[DIGITS[(byte >> 4) as usize], DIGITS[(byte & 15) as usize]]) { return error; }
                 }
-                *out = Value::string(Arc::from(hex));
-                LanaError::Ok
+                self.string_output(std::str::from_utf8(&hex).unwrap(), out)
             }
             LANA_HOST_STRING_JOIN => {
                 if argc != 2
@@ -10585,18 +10680,27 @@ impl<'a> Vm<'a> {
                 };
                 let separator = arguments[1].as_string();
                 let array = array.lock().unwrap();
-                let mut joined = String::new();
-                for (index, item) in array.items.iter().enumerate() {
+                let mut total = match separator.len().checked_mul(array.items.len().saturating_sub(1)) {
+                    Some(total) => total, None => return LanaError::Oom,
+                };
+                for item in &array.items {
                     if !matches!(item.kind, ValueKind::String(_)) {
                         return LanaError::Type;
                     }
-                    if index > 0 {
-                        joined.push_str(&separator);
-                    }
-                    joined.push_str(&item.as_string());
+                    total = match total.checked_add(item.as_string().len()) {
+                        Some(total) => total, None => return LanaError::Oom,
+                    };
                 }
-                *out = Value::string(Arc::from(joined));
-                LanaError::Ok
+                let mut joined = match Buffer::new(&self.heap, total, 0) {
+                    Ok(buffer) => buffer, Err(error) => return error,
+                };
+                for (index, item) in array.items.iter().enumerate() {
+                    if index > 0 {
+                        if let Err(error) = joined.extend_from_slice(separator.as_bytes()) { return error; }
+                    }
+                    if let Err(error) = joined.extend_from_slice(item.as_string().as_bytes()) { return error; }
+                }
+                self.string_output(std::str::from_utf8(&joined).unwrap(), out)
             }
             LANA_HOST_ARRAY_LENGTH => {
                 if argc != 1 || !matches!(arguments[0].kind, ValueKind::Array(_)) {
@@ -10614,13 +10718,15 @@ impl<'a> Vm<'a> {
                 }
                 let source = arguments[0].as_string();
                 let bytes = source.as_bytes();
-                let mut decoded = String::with_capacity(bytes.len());
+                let mut decoded = match Buffer::new(&self.heap, bytes.len(), 0) {
+                    Ok(buffer) => buffer, Err(error) => return error,
+                };
                 let mut read = 0;
                 while read < bytes.len() {
                     let value = bytes[read];
                     read += 1;
                     if value != b'\\' {
-                        decoded.push(value as char);
+                        if let Err(error) = decoded.push(value) { return error; }
                         continue;
                     }
                     if read >= bytes.len() {
@@ -10628,16 +10734,16 @@ impl<'a> Vm<'a> {
                     }
                     let value = bytes[read];
                     read += 1;
-                    match value {
-                        b'n' => decoded.push('\n'),
-                        b'r' => decoded.push('\r'),
-                        b't' => decoded.push('\t'),
-                        b'\\' | b'"' => decoded.push(value as char),
+                    let byte = match value {
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'\\' | b'"' => value,
                         _ => return LanaError::Format,
-                    }
+                    };
+                    if let Err(error) = decoded.push(byte) { return error; }
                 }
-                *out = Value::string(Arc::from(decoded));
-                LanaError::Ok
+                self.string_output(std::str::from_utf8(&decoded).unwrap(), out)
             }
             LANA_HOST_PATH_RESOLVE => {
                 if argc != 2
@@ -10655,10 +10761,7 @@ impl<'a> Vm<'a> {
                 {
                     return LanaError::Type;
                 }
-                if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-                    return LanaError::Oom;
-                }
-                let mut metadata = Map::new(5);
+                let mut metadata = match Map::new(&self.heap, 5) { Ok(map) => map, Err(error) => return error };
                 if let Err(error) = metadata.set(
                     Arc::from("source_dependency"),
                     arguments[1].clone(),
@@ -10690,12 +10793,13 @@ impl<'a> Vm<'a> {
                 ) {
                     return error;
                 }
-                *out = Value::array(Arc::new(Mutex::new(Array {
-                    items: vec![
+                *out = match self.array_value(vec![
                         arguments[0].clone(),
                         Value::map(Arc::new(Mutex::new(metadata))),
-                    ],
-                })));
+                    ]) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
                 LanaError::Ok
             }
             LANA_HOST_INFORMATION_NEW => {
@@ -10753,7 +10857,7 @@ impl<'a> Vm<'a> {
                     return LanaError::Type;
                 }
                 let claim = arguments[0].claim.as_ref().unwrap();
-                let mut status = Map::new(3);
+                let mut status = match Map::new(&self.heap, 3) { Ok(map) => map, Err(error) => return error };
                 if let Err(error) = status.set(
                     Arc::from("exactness"),
                     Value::string(Arc::from(derivation::exactness_name(claim.exactness))),
@@ -10804,7 +10908,7 @@ impl<'a> Vm<'a> {
                 }
                 let plan = arguments[0].planned_effect.as_ref().unwrap();
                 let state = plan.state.lock().unwrap();
-                let mut status = Map::new(3);
+                let mut status = match Map::new(&self.heap, 3) { Ok(map) => map, Err(error) => return error };
                 if let Err(error) = status.set(Arc::from("identity"), Value::number(plan.id as f64), true) {
                     return error;
                 }
@@ -10978,117 +11082,12 @@ impl<'a> Vm<'a> {
                 }
                 self.information_inspect(&arguments[0], out)
             }
-            LANA_HOST_SET_NEW => {
-                if argc != 0 {
-                    return LanaError::Type;
+            LANA_HOST_SET_NEW | LANA_HOST_SET_ADD | LANA_HOST_SET_CONTAINS
+            | LANA_HOST_SET_UNION | LANA_HOST_SET_INTERSECT | LANA_HOST_SET_DIFFERENCE => {
+                match self.set_host_call(host_id, arguments) {
+                    Ok(value) => { *out = value; LanaError::Ok }
+                    Err(error) => error,
                 }
-                *out = Value::set(Arc::new(Mutex::new(Set { items: Vec::new() })));
-                LanaError::Ok
-            }
-            LANA_HOST_SET_ADD => {
-                if argc != 2 || !matches!(arguments[0].kind, ValueKind::Set(_)) {
-                    return LanaError::Type;
-                }
-                if !value_is_set_member(&arguments[1]) {
-                    return LanaError::Type;
-                }
-                let ValueKind::Set(source) = &arguments[0].kind else {
-                    unreachable!()
-                };
-                let source = source.lock().unwrap();
-                let mut items = source.items.clone();
-                if !items.iter().any(|item| set_value_equal(item, &arguments[1])) {
-                    items.push(arguments[1].clone());
-                }
-                *out = Value::set(Arc::new(Mutex::new(Set { items })));
-                LanaError::Ok
-            }
-            LANA_HOST_SET_CONTAINS => {
-                if argc != 2 || !matches!(arguments[0].kind, ValueKind::Set(_)) {
-                    return LanaError::Type;
-                }
-                if !value_is_set_member(&arguments[1]) {
-                    return LanaError::Type;
-                }
-                let ValueKind::Set(source) = &arguments[0].kind else {
-                    unreachable!()
-                };
-                let source = source.lock().unwrap();
-                let found = source.items.iter().any(|item| set_value_equal(item, &arguments[1]));
-                *out = Value::boolean(found);
-                LanaError::Ok
-            }
-            LANA_HOST_SET_UNION => {
-                if argc != 2
-                    || !matches!(arguments[0].kind, ValueKind::Set(_))
-                    || !matches!(arguments[1].kind, ValueKind::Set(_))
-                {
-                    return LanaError::Type;
-                }
-                let ValueKind::Set(left) = &arguments[0].kind else {
-                    unreachable!()
-                };
-                let ValueKind::Set(right) = &arguments[1].kind else {
-                    unreachable!()
-                };
-                let left = left.lock().unwrap();
-                let right = right.lock().unwrap();
-                let mut items = left.items.clone();
-                for item in right.items.iter() {
-                    if !items.iter().any(|existing| set_value_equal(existing, item)) {
-                        items.push(item.clone());
-                    }
-                }
-                *out = Value::set(Arc::new(Mutex::new(Set { items })));
-                LanaError::Ok
-            }
-            LANA_HOST_SET_INTERSECT => {
-                if argc != 2
-                    || !matches!(arguments[0].kind, ValueKind::Set(_))
-                    || !matches!(arguments[1].kind, ValueKind::Set(_))
-                {
-                    return LanaError::Type;
-                }
-                let ValueKind::Set(left) = &arguments[0].kind else {
-                    unreachable!()
-                };
-                let ValueKind::Set(right) = &arguments[1].kind else {
-                    unreachable!()
-                };
-                let left = left.lock().unwrap();
-                let right = right.lock().unwrap();
-                let items = left
-                    .items
-                    .iter()
-                    .filter(|item| right.items.iter().any(|r| set_value_equal(item, r)))
-                    .cloned()
-                    .collect();
-                *out = Value::set(Arc::new(Mutex::new(Set { items })));
-                LanaError::Ok
-            }
-            LANA_HOST_SET_DIFFERENCE => {
-                if argc != 2
-                    || !matches!(arguments[0].kind, ValueKind::Set(_))
-                    || !matches!(arguments[1].kind, ValueKind::Set(_))
-                {
-                    return LanaError::Type;
-                }
-                let ValueKind::Set(left) = &arguments[0].kind else {
-                    unreachable!()
-                };
-                let ValueKind::Set(right) = &arguments[1].kind else {
-                    unreachable!()
-                };
-                let left = left.lock().unwrap();
-                let right = right.lock().unwrap();
-                let items = left
-                    .items
-                    .iter()
-                    .filter(|item| !right.items.iter().any(|r| set_value_equal(item, r)))
-                    .cloned()
-                    .collect();
-                *out = Value::set(Arc::new(Mutex::new(Set { items })));
-                LanaError::Ok
             }
             LANA_HOST_GETENV => {
                 if argc != 1 || !matches!(arguments[0].kind, ValueKind::String(_)) {
@@ -11098,8 +11097,7 @@ impl<'a> Vm<'a> {
                     unreachable!()
                 };
                 let value = std::env::var(&**name).unwrap_or_default();
-                *out = Value::string(value.into());
-                LanaError::Ok
+                self.string_output(&value, out)
             }
             LANA_HOST_RANDOM_SEED => {
                 if argc != 1 || !matches!(arguments[0].kind, ValueKind::Number(_)) {
@@ -11131,11 +11129,11 @@ impl<'a> Vm<'a> {
                 };
                 match text.parse::<f64>() {
                     Ok(number) => {
-                        *out = self.make_result(true, Value::number(number));
+                        *out = match self.make_result(true, Value::number(number)) { Ok(value) => value, Err(error) => return error };
                         LanaError::Ok
                     }
                     Err(_) => {
-                        *out = self.make_result(false, Value::string(Arc::from("invalid number")));
+                        *out = match self.make_result(false, Value::string(Arc::from("invalid number"))) { Ok(value) => value, Err(error) => return error };
                         LanaError::Ok
                     }
                 }
@@ -11178,8 +11176,7 @@ impl<'a> Vm<'a> {
                     ValueKind::Posterior(_) => "posterior",
                     ValueKind::Dataset(_) => "dataset",
                 };
-                *out = Value::string(Arc::from(name));
-                LanaError::Ok
+                self.string_output(name, out)
             }
             LANA_HOST_FORMAT => {
                 if argc < 1 || !matches!(arguments[0].kind, ValueKind::String(_)) {
@@ -11187,23 +11184,23 @@ impl<'a> Vm<'a> {
                 }
                 let format = arguments[0].as_string();
                 let bytes = format.as_bytes();
-                let mut result = String::new();
+                let mut result = match Buffer::new(&self.heap, 0, 0) {
+                    Ok(buffer) => buffer, Err(error) => return error,
+                };
                 let mut arg_index = 1usize;
                 let mut i = 0usize;
                 let mut last = 0usize;
                 while i < bytes.len() {
                     if bytes[i] == b'{' && i + 1 < bytes.len() && bytes[i + 1] == b'}' {
-                        result.push_str(&format[last..i]);
+                        if let Err(error) = result.extend_from_slice(&bytes[last..i]) { return error; }
                         if arg_index >= argc {
                             return LanaError::Format;
                         }
-                        match &arguments[arg_index].kind {
-                            ValueKind::Null => result.push_str("null"),
-                            ValueKind::Bool(value) => {
-                                result.push_str(if *value { "true" } else { "false" })
-                            }
-                            ValueKind::Number(value) => result.push_str(&format_g17(*value)),
-                            ValueKind::String(value) => result.push_str(value),
+                        let append = match &arguments[arg_index].kind {
+                            ValueKind::Null => result.extend_from_slice(b"null"),
+                            ValueKind::Bool(value) => result.extend_from_slice(if *value { b"true" } else { b"false" }),
+                            ValueKind::Number(value) => result.extend_from_slice(format_g17(*value).as_bytes()),
+                            ValueKind::String(value) => result.extend_from_slice(value.as_bytes()),
                             ValueKind::Array(_) | ValueKind::Map(_) => {
                                 let mut stringified = Value::null();
                                 let error =
@@ -11211,10 +11208,11 @@ impl<'a> Vm<'a> {
                                 if error != LanaError::Ok {
                                     return error;
                                 }
-                                result.push_str(&stringified.as_string());
+                                result.extend_from_slice(stringified.as_string().as_bytes())
                             }
                             _ => return LanaError::Type,
-                        }
+                        };
+                        if let Err(error) = append { return error; }
                         arg_index += 1;
                         i += 2;
                         last = i;
@@ -11222,12 +11220,11 @@ impl<'a> Vm<'a> {
                         i += 1;
                     }
                 }
-                result.push_str(&format[last..]);
+                if let Err(error) = result.extend_from_slice(&bytes[last..]) { return error; }
                 if arg_index != argc {
                     return LanaError::Format;
                 }
-                *out = Value::string(Arc::from(result));
-                LanaError::Ok
+                self.string_output(std::str::from_utf8(&result).unwrap(), out)
             }
             LANA_HOST_FORMAT_NUMBER => {
                 let text = match argc {
@@ -11252,8 +11249,7 @@ impl<'a> Vm<'a> {
                     }
                     _ => return LanaError::Type,
                 };
-                *out = Value::string(Arc::from(text));
-                LanaError::Ok
+                self.string_output(&text, out)
             }
             LANA_HOST_CHAR_LENGTH => {
                 if argc != 1 || !matches!(arguments[0].kind, ValueKind::String(_)) {
@@ -11317,8 +11313,7 @@ impl<'a> Vm<'a> {
                     i += consumed;
                     cp_index += 1;
                 }
-                *out = Value::string(Arc::from(&text[start_byte..end_byte]));
-                LanaError::Ok
+                self.string_output(&text[start_byte..end_byte], out)
             }
             LANA_HOST_TO_UPPER | LANA_HOST_TO_LOWER => {
                 if argc != 1 || !matches!(arguments[0].kind, ValueKind::String(_)) {
@@ -11327,7 +11322,9 @@ impl<'a> Vm<'a> {
                 let upper = host_id == LANA_HOST_TO_UPPER;
                 let text = arguments[0].as_string();
                 let bytes = text.as_bytes();
-                let mut result = Vec::with_capacity(bytes.len());
+                let mut result = match Buffer::new(&self.heap, bytes.len(), 0) {
+                    Ok(buffer) => buffer, Err(error) => return error,
+                };
                 let mut i = 0usize;
                 while i < bytes.len() {
                     let Some((cp, consumed)) = utf8_decode(&bytes[i..]) else {
@@ -11338,11 +11335,10 @@ impl<'a> Vm<'a> {
                     } else {
                         crate::unicode_case::unicode_lower(cp)
                     };
-                    result.extend_from_slice(&utf8_encode(mapped));
+                    if let Err(error) = result.extend_from_slice(&utf8_encode(mapped)) { return error; }
                     i += consumed;
                 }
-                *out = Value::string(Arc::from(String::from_utf8(result).unwrap()));
-                LanaError::Ok
+                self.string_output(std::str::from_utf8(&result).unwrap(), out)
             }
             LANA_HOST_REGEX_COMPILE => {
                 if argc != 1 || !matches!(arguments[0].kind, ValueKind::String(_)) {
@@ -11350,8 +11346,8 @@ impl<'a> Vm<'a> {
                 }
                 let pattern = arguments[0].as_string();
                 match regex_compile(pattern.as_bytes()) {
-                    Ok(re) => *out = self.make_result(true, Value::regex(Arc::new(re))),
-                    Err(msg) => *out = self.make_result(false, Value::string(Arc::from(msg))),
+                    Ok(re) => *out = match self.make_result(true, Value::regex(Arc::new(re))) { Ok(value) => value, Err(error) => return error },
+                    Err(msg) => *out = match self.make_result(false, Value::string(Arc::from(msg))) { Ok(value) => value, Err(error) => return error },
                 }
                 LanaError::Ok
             }
@@ -11377,17 +11373,18 @@ impl<'a> Vm<'a> {
                 };
                 match matched {
                     Some((start, end)) => {
-                        let mut map = Map::new(3);
-                        map.set(Arc::from("start"), Value::number(start as f64), false).ok();
-                        map.set(Arc::from("end"), Value::number(end as f64), false).ok();
-                        let matched_text =
-                            String::from_utf8_lossy(&bytes[start..end]).into_owned();
-                        map.set(Arc::from("text"), Value::string(Arc::from(matched_text)), false)
-                            .ok();
-                        *out = self.make_result(true, Value::map(Arc::new(Mutex::new(map))));
+                        let mut map = match Map::new(&self.heap, 3) { Ok(map) => map, Err(error) => return error };
+                        let matched_text = match self.heap.lossy_string(&bytes[start..end]) {
+                            Ok(text) => Value::string(text), Err(error) => return error,
+                        };
+                        for (key, value) in [("start", Value::number(start as f64)),
+                            ("end", Value::number(end as f64)), ("text", matched_text)] {
+                            if let Err(error) = map.set(Arc::from(key), value, false) { return error; }
+                        }
+                        *out = match self.make_result(true, Value::map(Arc::new(Mutex::new(map)))) { Ok(value) => value, Err(error) => return error };
                     }
                     None => {
-                        *out = self.make_result(false, Value::string(Arc::from("no match")))
+                        *out = match self.make_result(false, Value::string(Arc::from("no match"))) { Ok(value) => value, Err(error) => return error }
                     }
                 }
                 LanaError::Ok
@@ -11406,17 +11403,19 @@ impl<'a> Vm<'a> {
                 let text = arguments[1].as_string();
                 let replacement = arguments[2].as_string();
                 let bytes = text.as_bytes();
-                let mut result: Vec<u8> = Vec::new();
+                let mut result = match Buffer::new(&self.heap, 0, 0) {
+                    Ok(buffer) => buffer, Err(error) => return error,
+                };
                 let mut pos = 0usize;
                 while pos <= bytes.len() {
                     match regex_search(re, bytes, pos) {
                         Some((start, end)) => {
-                            result.extend_from_slice(&bytes[pos..start]);
-                            result.extend_from_slice(replacement.as_bytes());
+                            if let Err(error) = result.extend_from_slice(&bytes[pos..start]) { return error; }
+                            if let Err(error) = result.extend_from_slice(replacement.as_bytes()) { return error; }
                             pos = end;
                             if start == end {
                                 if pos < bytes.len() {
-                                    result.extend_from_slice(&bytes[pos..pos + 1]);
+                                    if let Err(error) = result.push(bytes[pos]) { return error; }
                                     pos += 1;
                                 } else {
                                     break;
@@ -11424,12 +11423,14 @@ impl<'a> Vm<'a> {
                             }
                         }
                         None => {
-                            result.extend_from_slice(&bytes[pos..]);
+                            if let Err(error) = result.extend_from_slice(&bytes[pos..]) { return error; }
                             break;
                         }
                     }
                 }
-                *out = Value::string(Arc::from(String::from_utf8_lossy(&result).into_owned()));
+                *out = match self.heap.lossy_string(&result) {
+                    Ok(text) => Value::string(text), Err(error) => return error,
+                };
                 LanaError::Ok
             }
             LANA_HOST_SGD => self.host_sgd(arguments, out),
@@ -11543,7 +11544,7 @@ impl<'a> Vm<'a> {
             Some(sig) => sig,
             None => return LanaError::External,
         };
-        let arg_values: Vec<Value> = args.lock().unwrap().items.clone();
+        let arg_values: Vec<Value> = args.lock().unwrap().items.to_vec();
         /* Validate the argument types before the library check so a bad
          * argument is reported as a Result error even with no library loaded
          * (deterministic across both VMs). */
@@ -11575,7 +11576,7 @@ impl<'a> Vm<'a> {
     }
 
     fn ffi_result_map(&self, key: &str, value: &Value, out: &mut Value) -> LanaError {
-        let mut map = Map::new(1);
+        let mut map = match Map::new(&self.heap, 1) { Ok(map) => map, Err(error) => return error };
         if map.set(Arc::from(key), value.clone(), false).is_err() {
             return LanaError::Oom;
         }
@@ -11586,7 +11587,8 @@ impl<'a> Vm<'a> {
     /// LIP-019 networking: error result `[false, reason]`, mirroring the
     /// language `Result` tagged-pair that `result_error` and json_parse emit.
     fn net_error_result(&self, reason: &str, out: &mut Value) -> LanaError {
-        *out = self.make_result(false, Value::string(Arc::from(reason)));
+        let reason = match self.string_value(reason) { Ok(value) => value, Err(error) => return error };
+        *out = match self.make_result(false, reason) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
     }
 
@@ -11607,6 +11609,11 @@ impl<'a> Vm<'a> {
             Some(x) => x,
             None => return self.net_error_result("url", out),
         };
+        #[cfg(not(feature = "net-tls"))]
+        {
+            let _ = verify;
+            if scheme == "https" { return self.net_error_result("tls", out); }
+        }
         let stream = match net_connect(&host, port, timeout) {
             Ok(s) => s,
             Err(NetError::Timeout) => return self.net_error_result("timeout", out),
@@ -11623,7 +11630,7 @@ impl<'a> Vm<'a> {
             }
             #[cfg(not(feature = "net-tls"))]
             {
-                NetSocket::Plain(stream)
+                unreachable!("HTTPS requires TLS support")
             }
         } else {
             NetSocket::Plain(stream)
@@ -11639,17 +11646,31 @@ impl<'a> Vm<'a> {
         if sock.write_all(request.as_bytes()).is_err() {
             return self.net_error_result("send", out);
         }
-        let mut response = Vec::new();
+        let mut response = match Buffer::new(&self.heap, 0, 0) {
+            Ok(buffer) => buffer, Err(error) => return error,
+        };
+        let mut expected_length = None;
         let mut buf = [0u8; 4096];
         loop {
             match sock.read(&mut buf, timeout) {
                 Ok(0) => break,
-                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Ok(n) => if let Err(error) = response.extend_from_slice(&buf[..n]) { return error; },
                 Err(NetError::Timeout) => return self.net_error_result("timeout", out),
-                Err(_) => break,
+                Err(_) => return self.net_error_result("recv", out),
+            }
+            expected_length = match net_response_length(&response) {
+                Ok(length) => length, Err(_) => return self.net_error_result("response", out),
+            };
+            if let Some(length) = expected_length {
+                if response.len() >= length { response.truncate(length); break; }
             }
         }
-        let text = String::from_utf8_lossy(&response).to_string();
+        if expected_length.is_some_and(|length| response.len() < length) {
+            return self.net_error_result("response", out);
+        }
+        let text = match self.heap.lossy_string(&response) {
+            Ok(text) => text, Err(error) => return error,
+        };
         let header_end = match text.find("\r\n\r\n") {
             Some(i) => i,
             None => return self.net_error_result("response", out),
@@ -11661,11 +11682,11 @@ impl<'a> Vm<'a> {
             0.0
         };
         let body_text = &text[header_end + 4..];
-        let mut resp = Map::new(3);
+        let mut resp = match Map::new(&self.heap, 3) { Ok(map) => map, Err(error) => return error };
         let status_value = Value::number(status);
-        let body_value = Value::string(Arc::from(body_text));
+        let body_value = match self.string_value(body_text) { Ok(value) => value, Err(error) => return error };
         if resp.set(Arc::from("status"), status_value, false).is_err()
-            || resp.set(Arc::from("headers"), Value::map(Arc::new(Mutex::new(Map::new(0)))), false).is_err()
+            || resp.set(Arc::from("headers"), Value::map(Arc::new(Mutex::new(match Map::new(&self.heap, 0) { Ok(map) => map, Err(error) => return error }))), false).is_err()
             || resp.set(Arc::from("body"), body_value, false).is_err()
         {
             return LanaError::Oom;
@@ -11689,7 +11710,7 @@ impl<'a> Vm<'a> {
             DerivationOutcome::Success,
             "none",
         );
-        *out = self.make_result(true, rooted);
+        *out = match self.make_result(true, rooted) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
     }
 
@@ -11771,7 +11792,7 @@ impl<'a> Vm<'a> {
         };
         let handle = self.sockets.len();
         self.sockets.push(NetSocket::Plain(stream));
-        *out = self.make_result(true, Value::number(handle as f64));
+        *out = match self.make_result(true, Value::number(handle as f64)) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
     }
 
@@ -11795,7 +11816,7 @@ impl<'a> Vm<'a> {
         };
         match sock.write_all(bytes.as_bytes()) {
             Ok(()) => {
-                *out = self.make_result(true, Value::number(bytes.len() as f64));
+                *out = match self.make_result(true, Value::number(bytes.len() as f64)) { Ok(value) => value, Err(error) => return error };
                 LanaError::Ok
             }
             Err(_) => self.net_error_result("send", out),
@@ -11820,17 +11841,15 @@ impl<'a> Vm<'a> {
         let Some(sock) = self.sockets.get_mut(index) else {
             return LanaError::InvalidState;
         };
-        let mut buf = vec![0u8; (*max_bytes as usize).min(65535)];
+        let mut buf = match Buffer::filled(&self.heap, (*max_bytes as usize).min(65535), 0u8) {
+            Ok(buffer) => buffer, Err(error) => return error,
+        };
         match sock.read(&mut buf, 5000) {
-            Ok(0) => {
-                *out = self.make_result(true, Value::string(Arc::from("")));
-                LanaError::Ok
-            }
             Ok(n) => {
-                *out = self.make_result(
-                    true,
-                    Value::string(Arc::from(String::from_utf8_lossy(&buf[..n]).to_string())),
-                );
+                let text = match self.heap.lossy_string(&buf[..n]) {
+                    Ok(text) => text, Err(error) => return error,
+                };
+                *out = match self.make_result(true, Value::string(text)) { Ok(value) => value, Err(error) => return error };
                 LanaError::Ok
             }
             Err(NetError::Timeout) => self.net_error_result("timeout", out),
@@ -11898,7 +11917,7 @@ impl<'a> Vm<'a> {
         let ValueKind::Array(array) = &arguments[0].kind else {
             return LanaError::Type;
         };
-        let items = array.lock().unwrap().items.clone();
+        let items = array.lock().unwrap().items.to_vec();
         for item in &items {
             if !matches!(item.kind, ValueKind::Future(_)) {
                 return LanaError::Type;
@@ -11940,7 +11959,7 @@ impl<'a> Vm<'a> {
         let ValueKind::Array(array) = &arguments[0].kind else {
             return LanaError::Type;
         };
-        let items = array.lock().unwrap().items.clone();
+        let items = array.lock().unwrap().items.to_vec();
         for item in &items {
             if !matches!(item.kind, ValueKind::Future(_)) {
                 return LanaError::Type;
@@ -12236,7 +12255,7 @@ impl<'a> Vm<'a> {
             Ok(rows) => rows,
             Err(error) => return error,
         };
-        *out = Value::array(Arc::new(Mutex::new(Array { items: rows })));
+        *out = match self.array_value(rows) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
     }
 
@@ -12261,7 +12280,7 @@ impl<'a> Vm<'a> {
     fn dataset_materialize_source(&mut self, lazy: &Value, scratch: u32) -> Result<Vec<Value>, LanaError> {
         /* LIP-015 §3: an in-memory array source is returned as-is. */
         if let ValueKind::Array(array) = &lazy.kind {
-            return Ok(array.lock().unwrap().items.clone());
+            return Ok(array.lock().unwrap().items.to_vec());
         }
         let ValueKind::Lazy { function, bound } = lazy.kind else {
             return Err(LanaError::Type);
@@ -12355,7 +12374,7 @@ impl<'a> Vm<'a> {
                         return Err(LanaError::Type);
                     };
                     let row_map = row_map.lock().unwrap();
-                    let mut projected = Map::new(columns.items.len());
+                    let mut projected = Map::new(&self.heap, columns.items.len())?;
                     for col in &columns.items {
                         let ValueKind::String(col_name) = &col.kind else {
                             return Err(LanaError::Type);
@@ -12431,10 +12450,10 @@ impl<'a> Vm<'a> {
                         };
                         group_rows = rows;
                         drop(guard);
-                        group_rows.lock().unwrap().items.push(row);
+                        group_rows.lock().unwrap().items.push(row)?;
                     } else {
-                        let mut new_map = Map::new(2);
-                        let new_rows = Arc::new(Mutex::new(Array { items: vec![row] }));
+                        let mut new_map = Map::new(&self.heap, 2)?;
+                        let new_rows = Arc::new(Mutex::new(Array::from_items(&self.heap, vec![row])?));
                         new_map.set(Arc::from("key"), key_value, false)?;
                         new_map.set(Arc::from("rows"), Value::array(new_rows.clone()), false)?;
                         result.push(Value::map(Arc::new(Mutex::new(new_map))));
@@ -12515,7 +12534,7 @@ impl<'a> Vm<'a> {
                             }
                         }
                     }
-                    let mut out_row = Map::new(2);
+                    let mut out_row = Map::new(&self.heap, 2)?;
                     out_row.set(key_name, key_value, false)?;
                     out_row.set(agg_op.clone(), agg_value, false)?;
                     result.push(Value::map(Arc::new(Mutex::new(out_row))));
@@ -12548,7 +12567,7 @@ impl<'a> Vm<'a> {
                         };
                         let left_guard = left_map.lock().unwrap();
                         let right_guard = right_map.lock().unwrap();
-                        let mut merged = Map::new(left_guard.entries.len() + right_guard.entries.len());
+                        let mut merged = Map::new(&self.heap, left_guard.entries.len() + right_guard.entries.len())?;
                         for entry in &left_guard.entries {
                             merged.set(entry.key.clone(), entry.value.clone(), false)?;
                         }
@@ -12576,7 +12595,7 @@ impl<'a> Vm<'a> {
     fn dataset_explain(&self, dataset: &Dataset) -> Result<Value, LanaError> {
         let op_names = ["source", "filter", "map", "select", "limit", "sort",
                         "group_by", "aggregate", "join"];
-        let mut map = Map::new(4);
+        let mut map = Map::new(&self.heap, 4)?;
         let op_name = op_names[dataset.op as usize];
         map.set(Arc::from("op"), Value::string(Arc::from(op_name)), false)?;
         if dataset.op == DatasetOp::Source {
@@ -12629,7 +12648,7 @@ impl<'a> Vm<'a> {
     /// completion. When done, marks it complete, stores its result, and
     /// re-queues any futures awaiting it. When not done, leaves it suspended;
     /// it is re-queued when an input future completes.
-    fn poll_composite_future(&mut self, future: Arc<Mutex<Future>>) {
+    fn poll_composite_future(&mut self, future: Arc<Mutex<Future>>) -> Result<(), LanaError> {
         let (kind, inputs) = {
             let guard = future.lock().unwrap();
             let kind = guard.registers[0].clone();
@@ -12637,7 +12656,7 @@ impl<'a> Vm<'a> {
             (kind, inputs)
         };
         let ValueKind::String(kind) = kind.kind else {
-            return;
+            return Ok(());
         };
         let mut done = false;
         let mut result = Value::null();
@@ -12650,16 +12669,16 @@ impl<'a> Vm<'a> {
                 let mut items = Vec::with_capacity(inputs.len());
                 for item in &inputs {
                     let ValueKind::Future(f) = &item.kind else {
-                        return;
+                        return Ok(());
                     };
                     items.push(f.lock().unwrap().registers[0].clone());
                 }
-                result = Value::array(Arc::new(Mutex::new(Array { items })));
+                result = self.array_value(items)?;
             }
         } else if &*kind == "race" {
             for item in &inputs {
                 let ValueKind::Future(f) = &item.kind else {
-                    return;
+                    return Ok(());
                 };
                 let f = f.lock().unwrap();
                 if f.exhausted {
@@ -12692,33 +12711,37 @@ impl<'a> Vm<'a> {
                 }
             }
         }
+        Ok(())
     }
 
     fn host_read_text(&mut self, argument: &Value, out: &mut Value) -> LanaError {
         let ValueKind::String(path) = &argument.kind else {
             return LanaError::Type;
         };
-        let text = if let Some(fs) = &self.virtual_fs {
-            match fs.get(&**path) {
-                Some(text) => text.clone(),
-                None => return LanaError::Io,
-            }
-        } else {
-            let bytes = match std::fs::read(&**path) {
-                Ok(bytes) => bytes,
-                Err(_) => return LanaError::Io,
+        if let Some(fs) = &self.virtual_fs {
+            return match fs.get(&**path) {
+                Some(text) => self.string_output(text, out), None => LanaError::Io,
             };
-            String::from_utf8_lossy(&bytes).into_owned()
+        }
+        use std::io::Read;
+        let mut file = match std::fs::File::open(&**path) {
+            Ok(file) => file, Err(_) => return LanaError::Io,
         };
-        if self.allocated_bytes > self.memory_limit
-            || text.len() > self.memory_limit - self.allocated_bytes
-        {
-            return LanaError::Limit;
+        let mut bytes = match Buffer::new(&self.heap, 0, 0) {
+            Ok(buffer) => buffer, Err(error) => return error,
+        };
+        let mut block = [0u8; 8192];
+        loop {
+            match file.read(&mut block) {
+                Ok(0) => break,
+                Ok(count) => if let Err(error) = bytes.extend_from_slice(&block[..count]) { return error; },
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return LanaError::Io,
+            }
         }
-        if self.alloc_bytes(text.len() + 1) != LanaError::Ok {
-            return LanaError::Oom;
-        }
-        *out = Value::string(Arc::from(text));
+        *out = match self.heap.lossy_string(&bytes) {
+            Ok(text) => Value::string(text), Err(error) => return error,
+        };
         LanaError::Ok
     }
 
@@ -12743,9 +12766,6 @@ impl<'a> Vm<'a> {
             names.push(name);
         }
         names.sort();
-        if self.alloc_bytes(std::mem::size_of::<Array>()) != LanaError::Ok {
-            return LanaError::Oom;
-        }
         let mut items = Vec::with_capacity(names.len());
         for name in &names {
             let full = format!("{path}/{name}");
@@ -12754,7 +12774,7 @@ impl<'a> Vm<'a> {
                 Err(_) => return LanaError::Io,
             };
             let kind = if metadata.is_dir() { "directory" } else { "file" };
-            let mut map = Map::new(2);
+            let mut map = match Map::new(&self.heap, 2) { Ok(map) => map, Err(error) => return error };
             if let Err(error) = map.set(Arc::from("name"), Value::string(Arc::from(name.clone())), true) {
                 return error;
             }
@@ -12763,7 +12783,7 @@ impl<'a> Vm<'a> {
             }
             items.push(Value::map(Arc::new(Mutex::new(map))));
         }
-        *out = Value::array(Arc::new(Mutex::new(Array { items })));
+        *out = match self.array_value(items) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
     }
 
@@ -12846,8 +12866,7 @@ impl<'a> Vm<'a> {
             hash ^= *byte as u64;
             hash = hash.wrapping_mul(1099511628211);
         }
-        *out = Value::string(Arc::from(hex16(hash)));
-        LanaError::Ok
+        self.string_output(&hex16(hash), out)
     }
 
     fn host_hash_xor(&mut self, left: &Value, right: &Value, out: &mut Value) -> LanaError {
@@ -12866,8 +12885,7 @@ impl<'a> Vm<'a> {
             }
             result.push(b"0123456789abcdef"[(l ^ r) as usize] as char);
         }
-        *out = Value::string(Arc::from(result));
-        LanaError::Ok
+        self.string_output(&result, out)
     }
 
     fn host_path_resolve(&mut self, base: &str, relative: &str, out: &mut Value) -> LanaError {
@@ -12885,16 +12903,14 @@ impl<'a> Vm<'a> {
                 };
                 normalize_virtual_path(&candidate)
             };
-            *out = Value::string(Arc::from(resolved));
-            return LanaError::Ok;
+            return self.string_output(&resolved, out);
         }
         if relative.is_empty() {
             let resolved = match std::fs::canonicalize(base) {
                 Ok(resolved) => resolved,
                 Err(_) => return LanaError::Io,
             };
-            *out = Value::string(Arc::from(resolved.to_string_lossy().into_owned()));
-            return LanaError::Ok;
+            return self.string_output(&resolved.to_string_lossy(), out);
         }
         let candidate = match base.rfind('/') {
             Some(index) => format!("{}/{relative}", &base[..index]),
@@ -12904,14 +12920,13 @@ impl<'a> Vm<'a> {
             Ok(resolved) => resolved,
             Err(_) => return LanaError::Io,
         };
-        *out = Value::string(Arc::from(resolved.to_string_lossy().into_owned()));
-        LanaError::Ok
+        self.string_output(&resolved.to_string_lossy(), out)
     }
 
     fn json_parse(&mut self, text: &str, out: &mut Value) -> LanaError {
         let bytes = text.as_bytes();
         if !utf8_valid(bytes) {
-            *out = self.make_result(false, Value::string(Arc::from("invalid JSON at byte 0")));
+            *out = match self.make_result(false, Value::string(Arc::from("invalid JSON at byte 0"))) { Ok(value) => value, Err(error) => return error };
             return LanaError::Ok;
         }
         let mut pos = 0;
@@ -12919,11 +12934,12 @@ impl<'a> Vm<'a> {
         json_space(bytes, &mut pos);
         let value = match result {
             Ok(value) if pos == bytes.len() => value,
+            Err(error @ (LanaError::Oom | LanaError::Limit)) => return error,
             _ => {
-                *out = self.make_result(
+                *out = match self.make_result(
                     false,
                     Value::string(Arc::from(format!("invalid JSON at byte {pos}"))),
-                );
+                ) { Ok(value) => value, Err(error) => return error };
                 return LanaError::Ok;
             }
         };
@@ -12946,7 +12962,7 @@ impl<'a> Vm<'a> {
             DerivationOutcome::Success,
             "none",
         );
-        *out = self.make_result(true, rooted);
+        *out = match self.make_result(true, rooted) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
     }
 
@@ -12961,15 +12977,15 @@ impl<'a> Vm<'a> {
         match bytes[*pos] {
             b'"' => {
                 let string = self.json_string(bytes, pos)?;
-                Ok(Value::string(Arc::from(string)))
+                Ok(Value::string(string))
             }
             b'[' => {
                 *pos += 1;
                 json_space(bytes, pos);
-                let mut items = Vec::new();
+                let mut array = Array::new(&self.heap, 0)?;
                 while *pos < bytes.len() && bytes[*pos] != b']' {
                     let item = self.json_value(bytes, pos, depth + 1)?;
-                    items.push(item);
+                    array.push(item)?;
                     json_space(bytes, pos);
                     if *pos < bytes.len() && bytes[*pos] == b',' {
                         *pos += 1;
@@ -12985,12 +13001,12 @@ impl<'a> Vm<'a> {
                     return Err(LanaError::Parse);
                 }
                 *pos += 1;
-                Ok(Value::array(Arc::new(Mutex::new(Array { items }))))
+                Ok(Value::array(Arc::new(Mutex::new(array))))
             }
             b'{' => {
                 *pos += 1;
                 json_space(bytes, pos);
-                let mut map = Map::new(4);
+                let mut map = Map::new(&self.heap, 4)?;
                 while *pos < bytes.len() && bytes[*pos] != b'}' {
                     let key = self.json_string(bytes, pos)?;
                     json_space(bytes, pos);
@@ -12999,9 +13015,7 @@ impl<'a> Vm<'a> {
                     }
                     *pos += 1;
                     let item = self.json_value(bytes, pos, depth + 1)?;
-                    if map.set(Arc::from(key), item, false).is_err() {
-                        return Err(LanaError::Parse);
-                    }
+                    map.set(key, item, false)?;
                     json_space(bytes, pos);
                     if *pos < bytes.len() && bytes[*pos] == b',' {
                         *pos += 1;
@@ -13048,7 +13062,7 @@ impl<'a> Vm<'a> {
                 let number = json_number(bytes, pos)?;
                 if json_large_integer(&bytes[start..*pos]) {
                     let text = std::str::from_utf8(&bytes[start..*pos]).map_err(|_| LanaError::Parse)?;
-                    Ok(Value::string(Arc::from(text)))
+                    self.string_value(text)
                 } else {
                     Ok(Value::number(number))
                 }
@@ -13056,12 +13070,12 @@ impl<'a> Vm<'a> {
         }
     }
 
-    fn json_string(&self, bytes: &[u8], pos: &mut usize) -> Result<String, LanaError> {
+    fn json_string(&self, bytes: &[u8], pos: &mut usize) -> Result<Arc<str>, LanaError> {
         if *pos >= bytes.len() || bytes[*pos] != b'"' {
             return Err(LanaError::Parse);
         }
         *pos += 1;
-        let mut out = String::new();
+        let mut out = Buffer::new(&self.heap, 0, 0)?;
         while *pos < bytes.len() && bytes[*pos] != b'"' {
             let c = bytes[*pos];
             *pos += 1;
@@ -13069,7 +13083,7 @@ impl<'a> Vm<'a> {
                 return Err(LanaError::Parse);
             }
             if c != b'\\' {
-                out.push(c as char);
+                out.push(c)?;
                 continue;
             }
             if *pos >= bytes.len() {
@@ -13078,12 +13092,12 @@ impl<'a> Vm<'a> {
             let esc = bytes[*pos];
             *pos += 1;
             match esc {
-                b'"' | b'\\' | b'/' => out.push(esc as char),
-                b'b' => out.push('\u{0008}'),
-                b'f' => out.push('\u{000C}'),
-                b'n' => out.push('\n'),
-                b'r' => out.push('\r'),
-                b't' => out.push('\t'),
+                b'"' | b'\\' | b'/' => out.push(esc)?,
+                b'b' => out.push(8)?,
+                b'f' => out.push(12)?,
+                b'n' => out.push(b'\n')?,
+                b'r' => out.push(b'\r')?,
+                b't' => out.push(b'\t')?,
                 b'u' => {
                     if *pos + 4 > bytes.len() {
                         return Err(LanaError::Parse);
@@ -13123,7 +13137,7 @@ impl<'a> Vm<'a> {
                         return Err(LanaError::Parse);
                     }
                     match char::from_u32(code) {
-                        Some(ch) => out.push(ch),
+                        Some(ch) => out.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes())?,
                         None => return Err(LanaError::Parse),
                     }
                 }
@@ -13134,27 +13148,28 @@ impl<'a> Vm<'a> {
             return Err(LanaError::Parse);
         }
         *pos += 1;
-        if !utf8_valid(out.as_bytes()) {
-            return Err(LanaError::Parse);
-        }
-        Ok(out)
+        let text = std::str::from_utf8(&out).map_err(|_| LanaError::Parse)?;
+        self.heap.string(text)
     }
 
     fn json_stringify(&mut self, value: &Value, out: &mut Value) -> LanaError {
-        let mut buffer = String::new();
-        let mut stack: Vec<usize> = Vec::new();
+        let mut buffer = match Buffer::new(&self.heap, 0, 0) {
+            Ok(buffer) => buffer, Err(error) => return error,
+        };
+        let mut stack = match Buffer::new(&self.heap, 0, 0) {
+            Ok(buffer) => buffer, Err(error) => return error,
+        };
         if let Err(error) = self.json_emit(value, &mut buffer, &mut stack, 0) {
             return error;
         }
-        *out = Value::string(Arc::from(buffer));
-        LanaError::Ok
+        self.string_output(std::str::from_utf8(&buffer).unwrap(), out)
     }
 
     fn json_emit(
         &self,
         value: &Value,
-        buffer: &mut String,
-        stack: &mut Vec<usize>,
+        buffer: &mut Buffer<u8>,
+        stack: &mut Buffer<usize>,
         depth: usize,
     ) -> Result<(), LanaError> {
         if depth > 128 {
@@ -13166,18 +13181,18 @@ impl<'a> Vm<'a> {
             _ => None,
         };
         if let Some(id) = identity {
-            if stack[..depth].contains(&id) {
+            if stack.contains(&id) {
                 return Err(LanaError::UnsupportedOperation);
             }
-            stack.push(id);
+            stack.push(id)?;
         }
         let result = match &value.kind {
             ValueKind::Null => {
-                buffer.push_str("null");
+                buffer.extend_from_slice(b"null")?;
                 Ok(())
             }
             ValueKind::Bool(boolean) => {
-                buffer.push_str(if *boolean { "true" } else { "false" });
+                buffer.extend_from_slice(if *boolean { b"true" } else { b"false" })?;
                 Ok(())
             }
             ValueKind::Number(number) => {
@@ -13185,39 +13200,40 @@ impl<'a> Vm<'a> {
                     return Err(LanaError::UnsupportedOperation);
                 }
                 if *number == 0.0 {
-                    buffer.push('0');
+                    buffer.push(b'0')?;
                 } else {
-                    buffer.push_str(&format_g17(*number));
+                    buffer.extend_from_slice(format_g17(*number).as_bytes())?;
                 }
                 Ok(())
             }
             ValueKind::String(string) => self.json_escape(string, buffer),
             ValueKind::Array(array) => {
-                buffer.push('[');
+                buffer.push(b'[')?;
                 let array = array.lock().unwrap();
                 for (index, item) in array.items.iter().enumerate() {
                     if index > 0 {
-                        buffer.push(',');
+                        buffer.push(b',')?;
                     }
                     self.json_emit(item, buffer, stack, depth + 1)?;
                 }
-                buffer.push(']');
+                buffer.push(b']')?;
                 Ok(())
             }
             ValueKind::Map(map) => {
-                buffer.push('{');
+                buffer.push(b'{')?;
                 let map = map.lock().unwrap();
-                let mut entries: Vec<&MapEntry> = map.entries.iter().collect();
-                entries.sort_by(|a, b| a.key.cmp(&b.key));
+                let mut entries = Buffer::new(&self.heap, map.entries.len(), 0)?;
+                entries.extend(map.entries.iter())?;
+                entries.sort_unstable_by(|a, b| a.key.cmp(&b.key));
                 for (index, entry) in entries.iter().enumerate() {
                     if index > 0 {
-                        buffer.push(',');
+                        buffer.push(b',')?;
                     }
                     self.json_escape(&entry.key, buffer)?;
-                    buffer.push(':');
+                    buffer.push(b':')?;
                     self.json_emit(&entry.value, buffer, stack, depth + 1)?;
                 }
-                buffer.push('}');
+                buffer.push(b'}')?;
                 Ok(())
             }
             _ => Err(LanaError::UnsupportedOperation),
@@ -13228,22 +13244,21 @@ impl<'a> Vm<'a> {
         result
     }
 
-    fn json_escape(&self, text: &str, buffer: &mut String) -> Result<(), LanaError> {
+    fn json_escape(&self, text: &str, buffer: &mut Buffer<u8>) -> Result<(), LanaError> {
         if !utf8_valid(text.as_bytes()) {
             return Err(LanaError::Parse);
         }
-        buffer.push('"');
-        for &c in text.as_bytes() {
-            if c == b'"' || c == b'\\' {
-                buffer.push('\\');
-                buffer.push(c as char);
-            } else if c < 0x20 {
-                buffer.push_str(&format!("\\u{:04x}", c));
+        buffer.push(b'"')?;
+        for c in text.chars() {
+            if c == '"' || c == '\\' {
+                buffer.extend_from_slice(&[b'\\', c as u8])?;
+            } else if c < '\u{20}' {
+                buffer.extend_from_slice(format!("\\u{:04x}", c as u32).as_bytes())?;
             } else {
-                buffer.push(c as char);
+                buffer.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes())?;
             }
         }
-        buffer.push('"');
+        buffer.push(b'"')?;
         Ok(())
     }
 
@@ -13282,7 +13297,7 @@ impl<'a> Vm<'a> {
             if records[row].len() != records[0].len() {
                 return LanaError::Parse;
             }
-            let mut map = Map::new(records[0].len());
+            let mut map = match Map::new(&self.heap, records[0].len()) { Ok(map) => map, Err(error) => return error };
             for column in 0..records[0].len() {
                 if let Err(error) = map.set(
                     Arc::from(records[0][column].clone()),
@@ -13294,7 +13309,7 @@ impl<'a> Vm<'a> {
             }
             items.push(Value::map(Arc::new(Mutex::new(map))));
         }
-        *out = Value::array(Arc::new(Mutex::new(Array { items })));
+        *out = match self.array_value(items) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
     }
 
@@ -13698,7 +13713,7 @@ impl<'a> Vm<'a> {
     }
 
     fn information_inspect(&mut self, argument: &Value, out: &mut Value) -> LanaError {
-        let mut inspection = Map::new(10);
+        let mut inspection = match Map::new(&self.heap, 10) { Ok(map) => map, Err(error) => return error };
         if let ValueKind::Capability(capability) = &argument.kind {
             let shared = capability.shared.clone();
             let state = shared.state.lock().unwrap();
@@ -14931,7 +14946,7 @@ fn linalg_get3(t: &Tensor, k: usize, i: usize, j: usize) -> (f64, f64) {
 
 /// Copy a 2-D tensor (real or complex) into a fresh complex tensor.
 fn linalg_copy_complex2(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     t: &Tensor,
 ) -> Result<Tensor, LanaError> {
     let shape = [t.shape[0], t.shape[1]];
@@ -15062,17 +15077,11 @@ fn linalg_trace(t: &Tensor) -> f64 {
 
 /// Eigenvalues of a 2-D tensor (assumed Hermitian), in accounted scratch.
 fn linalg_eigenvalues(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     t: &Tensor,
-) -> Result<Vec<f64>, LanaError> {
+) -> Result<crate::heap::Buffer<f64>, LanaError> {
     let d = t.shape[0];
-    if alloc(d * d * 2 * std::mem::size_of::<f64>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    if alloc(d * std::mem::size_of::<f64>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut a = vec![0.0; d * d * 2];
+    let mut a = crate::heap::Buffer::filled(alloc, d * d * 2, 0.0)?;
     for i in 0..d {
         for j in 0..d {
             let (re, im) = linalg_get2(t, i, j);
@@ -15080,14 +15089,14 @@ fn linalg_eigenvalues(
             a[(i * d + j) * 2 + 1] = im;
         }
     }
-    let mut eig = vec![0.0; d];
+    let mut eig = crate::heap::Buffer::filled(alloc, d, 0.0)?;
     linalg_jacobi(&mut a, d, &mut eig);
     Ok(eig)
 }
 
 /// Whether a 2-D tensor is positive semidefinite (all eigenvalues >= -1e-9).
 fn linalg_is_psd(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     t: &Tensor,
 ) -> Result<bool, LanaError> {
     let eig = linalg_eigenvalues(alloc, t)?;
@@ -15096,7 +15105,7 @@ fn linalg_is_psd(
 
 /// density_operator from an N=1 STATE: the 2×2 matrix [[p, c], [c*, 1-p]].
 fn linalg_density_from_state(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     state: &State,
 ) -> Result<Value, LanaError> {
     let shape = [2usize, 2usize];
@@ -15118,7 +15127,7 @@ fn linalg_density_from_state(
 /// density_operator from a tensor: validate Hermitian, PSD, unit trace, and
 /// that d = 2^N with N <= 10.
 fn linalg_density_from_tensor(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     t: &Tensor,
 ) -> Result<Value, LanaError> {
     if t.ndim != 2 || t.shape[0] != t.shape[1] {
@@ -15147,7 +15156,7 @@ fn linalg_density_from_tensor(
 
 /// povm([E...]): stack the operators and validate each PSD and Σ E_i = I.
 fn linalg_povm(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     arg: &Value,
 ) -> Result<Value, LanaError> {
     let ValueKind::Array(arr) = &arg.kind else {
@@ -15206,7 +15215,7 @@ fn linalg_povm(
 
 /// channel([K...]): stack the Kraus operators and validate Σ K_k† K_k = I.
 fn linalg_channel(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     arg: &Value,
 ) -> Result<Value, LanaError> {
     let ValueKind::Array(arr) = &arg.kind else {
@@ -15266,7 +15275,7 @@ fn linalg_channel(
 
 /// observable(A): validate Hermitian.
 fn linalg_observable(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     arg: &Value,
 ) -> Result<Value, LanaError> {
     let ValueKind::Tensor(t) = &arg.kind else {
@@ -15284,7 +15293,7 @@ fn linalg_observable(
 
 /// tensor_product(a, b): the Kronecker product ρ_A ⊗ ρ_B.
 fn linalg_tensor_product(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     a: &Tensor,
     b: &Tensor,
 ) -> Result<Value, LanaError> {
@@ -15312,7 +15321,7 @@ fn linalg_tensor_product(
 /// first `subsystem` qubits. `subsystem` is the qubit count of the kept
 /// subsystem A (1 <= subsystem < N).
 fn linalg_partial_trace(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     ab: &Tensor,
     subsystem: f64,
 ) -> Result<Value, LanaError> {
@@ -15348,16 +15357,13 @@ fn linalg_partial_trace(
 
 /// measure_with(rho, povm): the outcome distribution p(i) = Tr(ρ E_i).
 fn linalg_measure_with(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    heap: &Heap,
     rho: &Tensor,
     povm: &Tensor,
 ) -> Result<Value, LanaError> {
     let k = povm.shape[0];
     let d = povm.shape[1];
-    if alloc(std::mem::size_of::<Array>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut items = Vec::with_capacity(k);
+    let mut array = Array::new(heap, k)?;
     for i in 0..k {
         let mut re = 0.0;
         for r in 0..d {
@@ -15367,14 +15373,14 @@ fn linalg_measure_with(
                 re += rho_re * e_re - rho_im * e_im;
             }
         }
-        items.push(Value::number(re));
+        array.push(Value::number(re))?;
     }
-    Ok(Value::array(Arc::new(Mutex::new(Array { items }))))
+    Ok(Value::array(Arc::new(Mutex::new(array))))
 }
 
 /// apply_to(chan, rho): Φ(ρ) = Σ_k K_k ρ K_k†.
 fn linalg_apply_to(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     chan: &Tensor,
     rho: &Tensor,
 ) -> Result<Value, LanaError> {
@@ -15426,7 +15432,7 @@ fn linalg_expect(rho: &Tensor, obs: &Tensor) -> Value {
 
 /// mix(a, b, w): the convex mixture w·a + (1-w)·b.
 fn linalg_mix(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     a: &Tensor,
     b: &Tensor,
     w: f64,
@@ -15448,18 +15454,12 @@ fn linalg_mix(
 
 /// trace_distance(a, b): ½‖ρ − σ‖₁ = ½ Σ |λ_i(ρ − σ)|.
 fn linalg_trace_distance(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     a: &Tensor,
     b: &Tensor,
 ) -> Result<Value, LanaError> {
     let d = a.shape[0];
-    if alloc(d * d * 2 * std::mem::size_of::<f64>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    if alloc(d * std::mem::size_of::<f64>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut diff = vec![0.0; d * d * 2];
+    let mut diff = crate::heap::Buffer::filled(alloc, d * d * 2, 0.0)?;
     for i in 0..d {
         for j in 0..d {
             let (a_re, a_im) = linalg_get2(a, i, j);
@@ -15468,7 +15468,7 @@ fn linalg_trace_distance(
             diff[(i * d + j) * 2 + 1] = a_im - b_im;
         }
     }
-    let mut eig = vec![0.0; d];
+    let mut eig = crate::heap::Buffer::filled(alloc, d, 0.0)?;
     linalg_jacobi(&mut diff, d, &mut eig);
     let sum: f64 = eig.iter().map(|&e| e.abs()).sum();
     Ok(Value::number(0.5 * sum))
@@ -15479,7 +15479,7 @@ fn linalg_trace_distance(
 /// transpose proves separability for 2×2 and 2×3 systems and is otherwise
 /// inconclusive. `bipartition` is the qubit count of the first subsystem.
 fn linalg_is_separable(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     ab: &Tensor,
     bipartition: f64,
 ) -> Result<Value, LanaError> {
@@ -15494,13 +15494,7 @@ fn linalg_is_separable(
     }
     let da = 1usize << k;
     let db = d / da;
-    if alloc(d * d * 2 * std::mem::size_of::<f64>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    if alloc(d * std::mem::size_of::<f64>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut pt = vec![0.0; d * d * 2];
+    let mut pt = crate::heap::Buffer::filled(alloc, d * d * 2, 0.0)?;
     for i1 in 0..da {
         for i2 in 0..da {
             for j1 in 0..db {
@@ -15513,7 +15507,7 @@ fn linalg_is_separable(
             }
         }
     }
-    let mut eig = vec![0.0; d];
+    let mut eig = crate::heap::Buffer::filled(alloc, d, 0.0)?;
     linalg_jacobi(&mut pt, d, &mut eig);
     let negative = eig.iter().any(|&e| e < -1e-9);
     let provably_separable = da == 1
@@ -15573,7 +15567,7 @@ fn value_tensor(value: &Value) -> Option<&Arc<Tensor>> {
 /// Validate a d×d density matrix stored as interleaved `[re, im]` row-major
 /// data. Checks Hermitian, PSD, and unit trace (LIP-005 §1.2).
 fn linalg_validate_density_data(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     data: &[f64],
     d: usize,
 ) -> Result<(), LanaError> {
@@ -15588,14 +15582,8 @@ fn linalg_validate_density_data(
             }
         }
     }
-    if alloc(d * d * 2 * std::mem::size_of::<f64>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    if alloc(d * std::mem::size_of::<f64>()) != LanaError::Ok {
-        return Err(LanaError::Oom);
-    }
-    let mut a = data[..d * d * 2].to_vec();
-    let mut eig = vec![0.0; d];
+    let mut a = crate::heap::Buffer::from_slice(alloc, &data[..d * d * 2])?;
+    let mut eig = crate::heap::Buffer::filled(alloc, d, 0.0)?;
     linalg_jacobi(&mut a, d, &mut eig);
     for i in 0..d {
         if eig[i] < -1e-9 {
@@ -15638,7 +15626,7 @@ fn tensor_fill_state(v: &Value, data: &mut [f64], offset: &mut usize) -> Result<
 /// is `[s_1, ..., s_k, d, d]`; each d×d element is validated as a density
 /// operator.
 fn linalg_state_tensor(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     arg: &Value,
 ) -> Result<Value, LanaError> {
     if !matches!(arg.kind, ValueKind::Array(_)) {
@@ -15680,7 +15668,7 @@ fn linalg_state_tensor(
 /// append(a, b): element-wise distribution-valued APPEND (mean state). N=1
 /// (single-qubit) only.
 fn linalg_state_append(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     a: &Tensor,
     b: &Tensor,
 ) -> Result<Value, LanaError> {
@@ -15745,7 +15733,7 @@ fn linalg_state_append(
 
 /// measure(s, povm): element-wise outcome probability q[..., i] = Tr(ρ E_i).
 fn linalg_state_measure(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     s: &Tensor,
     povm: &Tensor,
 ) -> Result<Value, LanaError> {
@@ -15788,7 +15776,7 @@ fn linalg_state_measure(
 
 /// transform(s, chan): element-wise channel application Φ(ρ) = Σ_k K_k ρ K_k†.
 fn linalg_state_transform(
-    alloc: &mut dyn FnMut(usize) -> LanaError,
+    alloc: &Heap,
     s: &Tensor,
     chan: &Tensor,
 ) -> Result<Value, LanaError> {
@@ -15898,6 +15886,253 @@ mod tests {
         let mut vm = Vm::new(&chunk);
         let error = vm.run();
         (error, vm.result().print())
+    }
+
+    #[test]
+    fn cyclic_container_clone_and_materialization_preserve_identity() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let array = Arc::new(Mutex::new(Array::new(&vm.heap, 0).unwrap()));
+        let source = Value::array(array.clone());
+        array.lock().unwrap().items.push(source.clone()).unwrap();
+        for copy in [
+            vm.deep_clone_value(&source, &mut DeepCloneMemo::default()).unwrap(),
+            vm.materialize_value(&source).unwrap(),
+            vm.deep_clone_live_value(&source, &mut HashMap::new()).unwrap(),
+        ] {
+            let ValueKind::Array(cloned) = &copy.kind else { panic!("array expected") };
+            assert!(!Arc::ptr_eq(&array, cloned));
+            let child = cloned.lock().unwrap().items[0].clone();
+            let ValueKind::Array(back_edge) = child.kind else { panic!("array expected") };
+            assert!(Arc::ptr_eq(cloned, &back_edge));
+            assert_eq!(copy.print(), "[<cycle>]");
+            cloned.lock().unwrap().items.clear();
+        }
+        array.lock().unwrap().items.clear();
+    }
+
+    #[test]
+    fn clone_memos_survive_immutable_wrappers_and_reactive_history() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let array = Arc::new(Mutex::new(Array::new(&vm.heap, 1).unwrap()));
+        let source = Value::array(array.clone());
+        array.lock().unwrap().push(Value::adt(Arc::new(Adt { variant: 1, fields: vec![source.clone()] }))).unwrap();
+        for copy in [vm.deep_clone_value(&source, &mut DeepCloneMemo::default()).unwrap(),
+            vm.materialize_value(&source).unwrap(), vm.deep_clone_live_value(&source, &mut HashMap::new()).unwrap()] {
+            let ValueKind::Array(cloned) = copy.kind else { panic!("array expected") };
+            let wrapper = cloned.lock().unwrap().items[0].clone();
+            let ValueKind::Adt(wrapper) = wrapper.kind else { panic!("ADT expected") };
+            let ValueKind::Array(back_edge) = &wrapper.fields[0].kind else { panic!("array expected") };
+            assert!(Arc::ptr_eq(&cloned, back_edge));
+            cloned.lock().unwrap().items.clear();
+        }
+        array.lock().unwrap().items.clear();
+        let root = vm.reactive_root(&source, DerivationExactness::Exact).unwrap();
+        let reactive = root.reactive.as_ref().unwrap();
+        let current = reactive.lock().unwrap().current.clone();
+        reactive.lock().unwrap().history.push(ReactiveVersion { revision: 0, value: current });
+        let copy = vm.deep_clone_live_value(&root, &mut HashMap::new()).unwrap();
+        let cloned_reactive = copy.reactive.unwrap();
+        assert!(!Arc::ptr_eq(reactive, &cloned_reactive));
+        let cloned_reactive = cloned_reactive.lock().unwrap();
+        let ValueKind::Array(current) = &cloned_reactive.current.as_ref().unwrap().kind else { panic!("array expected") };
+        let ValueKind::Array(history) = &cloned_reactive.history[0].value.as_ref().unwrap().kind else { panic!("array expected") };
+        assert!(Arc::ptr_eq(current, history));
+    }
+
+    #[test]
+    fn cross_heap_string_clones_are_charged_once_per_source() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let source = Value::string(Arc::from("abc"));
+        vm.set_memory_limit(3);
+        assert!(matches!(vm.deep_clone_value(&source, &mut DeepCloneMemo::default()), Err(LanaError::Oom)));
+        vm.set_memory_limit(4);
+        let mut memo = DeepCloneMemo::default();
+        let first = vm.deep_clone_value(&source, &mut memo).unwrap().as_string();
+        let second = vm.deep_clone_value(&source, &mut memo).unwrap().as_string();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &source.as_string()));
+        assert_eq!(vm.heap.live_bytes(), 4);
+    }
+
+    #[test]
+    fn json_rejects_cyclic_materialized_argument() {
+        let (error, _) = run_chunk(
+            "LOAD_CONST R0 0\nARRAY_NEW R1 R0 1\nARRAY_SET R1 R0 R1\nHOST_CALL json_stringify R1 1 R2\nRETURN R2\n",
+        );
+        assert_eq!(error, LanaError::UnsupportedOperation);
+    }
+
+    #[test]
+    fn array_budget_rejects_payload_before_allocation() {
+        let chunk = assembler::assemble(
+            "LOAD_CONST R0 1000000\nHOST_CALL array_new R0 1 R1\nRETURN R1\n",
+        ).unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(1024 * 1024);
+        assert_eq!(vm.run(), LanaError::Oom);
+        assert!(matches!(vm.result().kind, ValueKind::Null));
+        assert_eq!(vm.allocated_bytes(), 0);
+        assert_eq!(vm.alloc_bytes(usize::MAX), LanaError::Oom);
+        assert_eq!(vm.allocated_bytes(), 0);
+    }
+
+    #[test]
+    fn dynamic_strings_obey_the_heap_budget() {
+        let source = "LOAD_CONST R0 \"abcdefgh\"\nMOVE R1 R0\nHOST_CALL string_concat R0 2 R2\nRETURN R2\n";
+        let chunk = assembler::assemble(source).unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(8);
+        assert_eq!(vm.run(), LanaError::Oom);
+        assert!(matches!(vm.result().kind, ValueKind::Null));
+        for (host, arguments) in [
+            (LANA_HOST_STRING_HEX, vec![Value::string(Arc::from("abc"))]),
+            (LANA_HOST_STRING_UNESCAPE, vec![Value::string(Arc::from("abc"))]),
+            (LANA_HOST_TO_UPPER, vec![Value::string(Arc::from("abc"))]),
+            (LANA_HOST_TO_LOWER, vec![Value::string(Arc::from("abc"))]),
+            (LANA_HOST_STRING_SLICE, vec![Value::string(Arc::from("abc")), Value::number(0.), Value::number(3.)]),
+            (LANA_HOST_FORMAT, vec![Value::string(Arc::from("{}")), Value::string(Arc::from("abc"))]),
+            (LANA_HOST_JSON_PARSE, vec![Value::string(Arc::from("\"abc\""))]),
+            (LANA_HOST_JSON_STRINGIFY, vec![Value::string(Arc::from("abc"))]),
+        ] {
+            let mut vm = Vm::new(&chunk);
+            vm.set_memory_limit(2);
+            let mut out = Value::number(99.);
+            assert_eq!(vm.execute_host_call(host, &arguments, &mut out), LanaError::Oom, "host {host}");
+            assert!(matches!(out.kind, ValueKind::Null));
+            vm.heap.collect_strings();
+            assert_eq!(vm.heap.live_bytes(), 0);
+        }
+    }
+
+    #[test]
+    fn repeated_string_allocation_keeps_live_aliases_without_cumulative_exhaustion() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(16);
+        let arguments = [Value::string(Arc::from("abc")), Value::number(0.), Value::number(3.)];
+        let mut first = Value::null();
+        assert_eq!(vm.execute_host_call(LANA_HOST_STRING_SLICE, &arguments, &mut first), LanaError::Ok);
+        let alias = first.as_string();
+        drop(first);
+        for _ in 0..1000 {
+            let mut next = Value::null();
+            assert_eq!(vm.execute_host_call(LANA_HOST_STRING_SLICE, &arguments, &mut next), LanaError::Ok);
+        }
+        let heap = vm.heap();
+        drop(vm);
+        heap.collect_strings();
+        assert_eq!(heap.live_bytes(), 4);
+        assert_eq!(&*alias, "abc");
+        drop(alias);
+        heap.collect_strings();
+        assert_eq!(heap.live_bytes(), 0);
+    }
+
+    #[cfg(not(feature = "net-tls"))]
+    #[test]
+    fn https_without_tls_never_falls_back_to_plaintext() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let mut out = Value::null();
+        assert_eq!(vm.net_http_request("GET", "https://127.0.0.1:9/", None, 1., true, &mut out), LanaError::Ok);
+        assert_eq!(out.print(), "[false, tls]");
+    }
+
+    #[test]
+    fn http_lengths_are_checked_without_waiting_for_tls_eof() {
+        assert!(net_response_length(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n").unwrap().is_none());
+        let header = b"HTTP/1.1 200 OK\r\ncOnTeNt-LeNgTh: 3\r\n\r\n";
+        assert_eq!(net_response_length(header).unwrap(), Some(header.len() + 3));
+        assert!(net_response_length(b"HTTP/1.1 200 OK\r\n\r\n").unwrap().is_none());
+        for fields in ["Content-Length: 1\r\nContent-Length: 2", "Content-Length: -1",
+            "Content-Length: +1", "Content-Length: 2junk", "Content-Length: 18446744073709551615",
+            "Content-Length:", "Transfer-Encoding: chunked"] {
+            let header = format!("HTTP/1.1 200 OK\r\n{fields}\r\n\r\n");
+            assert!(net_response_length(header.as_bytes()).is_err(), "{fields}");
+        }
+    }
+
+    #[test]
+    fn json_and_unescape_preserve_literal_unicode() {
+        let (error, result) = run_chunk(
+            "LOAD_STRING R0 636166c3a9f09f8c8a5c6e\nHOST_CALL string_unescape R0 1 R1\nRETURN R1\n",
+        );
+        assert_eq!(error, LanaError::Ok);
+        assert_eq!(result, "café🌊\n");
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let mut pos = 0;
+        assert_eq!(vm.json_value("\"café🌊\"".as_bytes(), &mut pos, 0).unwrap().as_string().as_ref(), "café🌊");
+    }
+
+    #[test]
+    fn array_growth_failure_preserves_existing_items() {
+        let chunk = assembler::assemble(
+            "LOAD_CONST R0 1\nARRAY_NEW R1 R0 1\nMOVE R2 R0\nHOST_CALL array_push R1 2 R3\nRETURN R3\n",
+        ).unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(std::mem::size_of::<Array>() + std::mem::size_of::<Value>());
+        assert_eq!(vm.run(), LanaError::Oom);
+        let ValueKind::Array(array) = &vm.frames[0].registers[1].kind else { panic!("array expected") };
+        assert_eq!(array.lock().unwrap().items.len(), 1);
+        assert!(matches!(vm.frames[0].registers[3].kind, ValueKind::Null));
+    }
+
+    #[test]
+    fn fork_argument_payload_is_charged_to_child() {
+        for (body, expected) in [
+            ("LOAD_CONST R1 7\nRETURN R1\n", LanaError::Ok),
+            ("LOAD_CONST R1 6000\nHOST_CALL array_new R1 1 R2\nRETURN R2\n", LanaError::Oom),
+        ] {
+            let chunk = assembler::assemble(&format!(
+                ".function main 0 8\nLOAD_CONST R0 6000\nHOST_CALL array_new R0 1 R1\nFORK worker R1 1 R2\nJOIN R2 R3\nRETURN R3\n.function worker 1 4\n{body}"
+            )).unwrap();
+            let mut vm = Vm::new(&chunk);
+            vm.set_memory_limit(6000 * std::mem::size_of::<Value>() + 32768);
+            assert_eq!(vm.run(), expected);
+        }
+    }
+
+    #[test]
+    fn repeated_array_allocation_tracks_live_owners_not_total_work() {
+        let chunk = assembler::assemble(
+            "LOAD_CONST R0 1000\nLOAD_CONST R1 16\nLOAD_CONST R2 1\nloop:\nHOST_CALL array_new R1 1 R3\nBINARY R0 sub R2 R0\nLOAD_CONST R4 0\nCOMPARE R0 > R4 R5\nJUMP_IF_TRUE R5 loop\nRETURN R3\n",
+        ).unwrap();
+        let array_bytes = std::mem::size_of::<Array>() + 16 * std::mem::size_of::<Value>();
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(array_bytes * 2);
+        assert_eq!(vm.run(), LanaError::Ok);
+        assert_eq!(vm.allocated_bytes(), array_bytes);
+        let heap = vm.heap();
+        let external_root = vm.result().clone();
+        drop(vm);
+        assert_eq!(heap.live_bytes(), array_bytes);
+        drop(external_root);
+        assert_eq!(heap.live_bytes(), 0);
+        assert!(heap.peak_bytes() <= array_bytes * 2);
+    }
+
+    #[test]
+    fn set_allocation_is_fallible_and_releases_its_payload() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(1);
+        assert!(matches!(vm.set_host_call(LANA_HOST_SET_NEW, &[]), Err(LanaError::Oom)));
+        assert_eq!(vm.allocated_bytes(), 0);
+        let bytes = 3 * (std::mem::size_of::<Set>() + 2 * std::mem::size_of::<Value>());
+        vm.set_memory_limit(bytes);
+        for _ in 0..1000 {
+            let empty = vm.set_host_call(LANA_HOST_SET_NEW, &[]).unwrap();
+            let single = vm.set_host_call(LANA_HOST_SET_ADD, &[empty, Value::number(7.)]).unwrap();
+            let same = vm.set_host_call(LANA_HOST_SET_UNION, &[single.clone(), single.clone()]).unwrap();
+            assert_eq!(same.print(), "set{7}");
+            drop((single, same));
+            assert_eq!(vm.allocated_bytes(), 0);
+        }
+        assert!(vm.heap.peak_bytes() <= bytes);
     }
 
     #[test]
@@ -16606,6 +16841,21 @@ mod tests {
     }
 
     #[test]
+    fn nested_definite_path_join_does_not_consume_outer_split() {
+        for (condition, expected) in [
+            ("LOAD_CONST R5 true\n", 10),
+            ("LOAD_CONST R5 false\n", 30),
+            ("LOAD_CONST R6 true\nARRAY_NEW R7 R6 1\nPOSSIBILITY_BUILD R7 R5\n", 10),
+            ("LOAD_CONST R6 false\nARRAY_NEW R7 R6 1\nPOSSIBILITY_BUILD R7 R5\n", 30),
+        ] {
+            let source = format!("LOAD_CONST R0 true\nLOAD_CONST R1 false\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nPATH_SPLIT R3 outer_else\n{condition}PATH_SPLIT R5 inner_else\nLOAD_CONST R4 10\nJUMP inner_join\ninner_else:\nLOAD_CONST R4 30\ninner_join:\nPATH_JOIN\nJUMP outer_join\nouter_else:\nLOAD_CONST R4 20\nouter_join:\nPATH_JOIN\nRETURN R4\n");
+            let (error, result) = run_chunk(&source);
+            assert_eq!(error, LanaError::Ok);
+            assert_eq!(result, format!("paths{{true => {expected}, false => 20}}"));
+        }
+    }
+
+    #[test]
     fn path_split_join_builds_path_set() {
         let (error, result) = run_chunk(
             "LOAD_CONST R0 true\nLOAD_CONST R1 false\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nPATH_SPLIT R3 join\nLOAD_CONST R4 10\nPATH_JOIN\njoin:\nPATH_JOIN\nRETURN R4\n",
@@ -16718,10 +16968,39 @@ mod tests {
 
     #[test]
     fn cancel_task_returns_cancelled() {
+        // The child cannot finish normally before CANCEL wins the race.
         let (error, _) = run_chunk(
-            ".function main 0 8\nFORK worker R1 0 R0\nCANCEL R0\nJOIN R0 R1\nHALT\n.function worker 0 4\nLOAD_CONST R0 1\nRETURN R0\n",
+            ".function main 0 8\nFORK worker R1 0 R0\nCANCEL R0\nJOIN R0 R1\nHALT\n.function worker 0 4\nloop:\nJUMP loop\n",
         );
         assert_eq!(error, LanaError::Cancelled);
+    }
+
+    #[test]
+    fn cancellation_after_execution_has_started() {
+        use std::time::Duration;
+        let chunk = assembler::assemble(
+            "LOAD_STRING R0 78\nHOST_CALL store_open R0 1 R1\nloop:\nJUMP loop\n",
+        ).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let flag = cancelled.clone();
+            let worker = scope.spawn(move || {
+                let mut vm = Vm::new(&chunk);
+                vm.cancelled = flag;
+                vm.set_host_call_extension(Box::new(move |_, _, _| {
+                    ready_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    LanaError::Ok
+                }));
+                vm.run()
+            });
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            cancelled.store(true, Ordering::Release);
+            resume_tx.send(()).unwrap();
+            assert_eq!(worker.join().unwrap(), LanaError::Cancelled);
+        });
     }
 
     #[test]

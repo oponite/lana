@@ -229,7 +229,6 @@ static int load_command(int argc, char **argv, bool execute) {
         (void)timespec_get(&finished, TIME_UTC);
         elapsed_ns = (uint64_t)(finished.tv_sec - started.tv_sec) * UINT64_C(1000000000) +
                      (uint64_t)(finished.tv_nsec - started.tv_nsec);
-        if (result != LANA_OK) { error = vm.error; lana_vm_free(&vm); lana_chunk_free(&chunk); return report_error(&error); }
         if (stats) {
             size_t opcode;
             (void)fprintf(stderr,
@@ -246,6 +245,7 @@ static int load_command(int argc, char **argv, bool execute) {
             }
             (void)fprintf(stderr, "}}\n");
         }
+        if (result != LANA_OK) { error = vm.error; lana_vm_free(&vm); lana_chunk_free(&chunk); return report_error(&error); }
         lana_vm_free(&vm);
     }
     lana_chunk_free(&chunk); return 0;

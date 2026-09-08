@@ -104,7 +104,7 @@ fn validate_policy(policy: &Policy) -> Result<(), LanaError> {
     }
     if (policy.rule.kind == PolicyRuleKind::ProbabilityAtLeast
         || policy.rule.kind == PolicyRuleKind::OrderLessThan)
-        && (policy.rule.threshold < 0.0 || policy.rule.threshold > 1.0)
+        && (!policy.rule.threshold.is_finite() || policy.rule.threshold < 0.0 || policy.rule.threshold > 1.0)
     {
         return Err(LanaError::InvalidProbability);
     }
@@ -314,9 +314,21 @@ mod tests {
     }
 
     #[test]
+    fn nonfinite_thresholds_are_rejected_before_versioning() {
+        let mut policy = sample_policy();
+        for kind in [PolicyRuleKind::ProbabilityAtLeast, PolicyRuleKind::OrderLessThan] {
+            policy.rule.kind = kind;
+            for threshold in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
+                policy.rule.threshold = threshold;
+                assert_eq!(policy_version(&policy), Err(LanaError::InvalidProbability));
+            }
+        }
+    }
+
+    #[test]
     fn evaluate_authorizes_when_above_threshold() {
         let policy = sample_policy();
-        let mut map = lana_vm::value::Map::new(1);
+        let mut map = lana_vm::value::Map::new(&lana_vm::heap::Heap::default(), 1).unwrap();
         map.set(Arc::from("p"), Value::number(0.75), false).unwrap();
         let input = Value::map(Arc::new(std::sync::Mutex::new(map)));
         let evaluation = PolicyEvaluation {

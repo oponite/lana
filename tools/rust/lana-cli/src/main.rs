@@ -441,15 +441,11 @@ fn run_command(args: &[String]) -> ExitCode {
         vm.set_instruction_limit(limit);
     }
     vm.set_program_args(&program_args);
-    let mut store_host = lana_runtime::host_calls::StoreHost::new();
+    let mut store_host = lana_runtime::host_calls::StoreHost::with_heap(vm.heap());
     vm.set_host_call_extension(Box::new(move |host_id, args, out| {
         store_host.dispatch(host_id, args, out)
     }));
     let result = vm.run();
-    if result != LanaError::Ok {
-        report_error(vm.error());
-        return ExitCode::from(1);
-    }
     if stats {
         let mut opcodes = String::new();
         for (opcode, count) in vm.opcode_counts().iter().enumerate() {
@@ -467,6 +463,10 @@ fn run_command(args: &[String]) -> ExitCode {
             vm.allocated_bytes(),
             opcodes,
         );
+    }
+    if result != LanaError::Ok {
+        report_error(vm.error());
+        return ExitCode::from(1);
     }
     ExitCode::SUCCESS
 }

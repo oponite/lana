@@ -3,10 +3,9 @@
 //!
 //! The C11 VM uses a tagged union with heap pointers and a mark-sweep GC. The
 //! Rust VM uses an owned/shared representation: `Arc` for shared heap objects,
-//! `Mutex` where the C code mutates in place (arrays, maps). The value graph
-//! is acyclic — derivations are immutable records forming a DAG, state dists
-//! form a tree, reactives form a dependency DAG — so `Arc` without cycle
-//! collection is sound. `Arc`/`Mutex` (rather than `Rc`/`RefCell`) keep every
+//! `Mutex` where the C code mutates in place (arrays, maps). Mutable containers
+//! and reactive histories can form cycles; Arc alone does not reclaim them.
+//! `Arc`/`Mutex` (rather than `Rc`/`RefCell`) keep every
 //! value `Send`, so a child VM's value graph can cross a task boundary.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,6 +16,41 @@ use lana_bytecode::{LanaError, ValueType};
 use crate::derivation::{Derivation, DerivationExactness};
 use crate::state::StateValue;
 use crate::tensor::{tensor_get_imag, tensor_get_real};
+
+struct PrintOutput {
+    text: String,
+    limit: usize,
+    failed: bool,
+}
+
+impl std::fmt::Write for PrintOutput {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if self.failed || text.len() > self.limit.saturating_sub(self.text.len())
+            || self.text.try_reserve_exact(text.len()).is_err()
+        {
+            self.failed = true;
+            return Err(std::fmt::Error);
+        }
+        self.text.push_str(text);
+        Ok(())
+    }
+}
+
+impl PrintOutput {
+    fn push_str(&mut self, text: &str) {
+        let _ = std::fmt::Write::write_str(self, text);
+    }
+
+    fn push(&mut self, character: char) {
+        self.push_str(character.encode_utf8(&mut [0; 4]));
+    }
+}
+
+struct PrintFrame {
+    value: Value,
+    next: usize,
+    identity: Option<usize>,
+}
 
 /// A runtime failure, mirroring the fields `lana_vm_run` records before
 /// returning an error code. Defined here (rather than in `vm`) so the shared
@@ -143,15 +177,29 @@ pub enum DistOperand {
 }
 
 /// A mutable array of values.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct Array {
-    pub items: Vec<Value>,
+    pub(crate) items: crate::heap::Buffer<Value>,
+}
+
+impl Array {
+    pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
+        Ok(Self { items: crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())? })
+    }
+
+    pub fn from_items(heap: &crate::heap::Heap, items: Vec<Value>) -> Result<Self, LanaError> {
+        Ok(Self { items: crate::heap::Buffer::from_vec(heap, items, std::mem::size_of::<Self>())? })
+    }
+
+    pub fn items(&self) -> &[Value] { &self.items }
+
+    pub fn push(&mut self, item: Value) -> Result<(), LanaError> { self.items.push(item) }
 }
 
 /// A key/value map (increment 2).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct Map {
-    pub entries: Vec<MapEntry>,
+    pub(crate) entries: crate::heap::Buffer<MapEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,9 +210,11 @@ pub struct MapEntry {
 
 impl Map {
     /// Create an empty map, mirroring `lana_map_new`.
-    pub fn new(capacity: usize) -> Self {
-        Self { entries: Vec::with_capacity(capacity) }
+    pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
+        Ok(Self { entries: crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())? })
     }
+
+    pub fn entries(&self) -> &[MapEntry] { &self.entries }
 
     /// Look up a key, mirroring `lana_map_get`. Returns `None` when absent.
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -186,8 +236,11 @@ impl Map {
             entry.value = value;
             return Ok(());
         }
-        self.entries.push(MapEntry { key, value });
-        Ok(())
+        let heap = self.entries.heap().clone();
+        let key = heap.string(&key)?;
+        let result = self.entries.push(MapEntry { key, value });
+        if result.is_err() { heap.collect_strings(); }
+        result
     }
 }
 
@@ -257,9 +310,17 @@ pub struct Future {
 /// in `vm/include/value.h`. Membership is linear over `items` (no hash
 /// function), matching the C11 VM. `STATE`, `STATE_DIST`, and `Information` are
 /// not set members.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct Set {
-    pub items: Vec<Value>,
+    pub(crate) items: crate::heap::Buffer<Value>,
+}
+
+impl Set {
+    pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
+        Ok(Self { items: crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())? })
+    }
+
+    pub fn items(&self) -> &[Value] { &self.items }
 }
 
 /// A compiled regular expression (LIP-021 §2), mirroring `struct LanaRegex` in
@@ -445,23 +506,35 @@ pub enum TensorDevice {
     Metal,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Tensor {
-    pub ndim: usize,
-    pub shape: Vec<usize>,
-    pub strides: Vec<usize>,
-    pub is_complex: bool,
+    pub(crate) ndim: usize,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) strides: Vec<usize>,
+    pub(crate) is_complex: bool,
     /// LIP-027: numeric dtype (F64 default).
-    pub dtype: TensorDtype,
-    pub device: TensorDevice,
-    pub metal_buffer: Option<Arc<crate::metal::ResidentBuffer>>,
+    pub(crate) dtype: TensorDtype,
+    pub(crate) device: TensorDevice,
+    pub(crate) metal_buffer: Option<Arc<crate::metal::ResidentBuffer>>,
     /// LIP-027: compact byte buffer, `prod(shape) * element_width` bytes.
     /// Element access goes through the `tensor_get_*`/`tensor_set_*` helpers
     /// in `tensor.rs`, which convert between the storage dtype and f64.
-    pub data: Arc<Vec<u8>>,
-    pub offset: usize,
+    pub(crate) data: Arc<crate::heap::Buffer<u8>>,
+    pub(crate) offset: usize,
     /// LIP-007: a STATE tensor (each element is a density matrix).
-    pub is_state: bool,
+    pub(crate) is_state: bool,
+    pub(crate) _owner: crate::heap::Reservation,
+    pub(crate) metal_charge: Option<Arc<crate::heap::Reservation>>,
+}
+
+impl Tensor {
+    pub fn shape(&self) -> &[usize] { &self.shape }
+    pub fn strides(&self) -> &[usize] { &self.strides }
+    pub fn ndim(&self) -> usize { self.ndim }
+    pub fn dtype(&self) -> TensorDtype { self.dtype }
+    pub fn device(&self) -> TensorDevice { self.device }
+    pub fn is_complex(&self) -> bool { self.is_complex }
+    pub fn is_state(&self) -> bool { self.is_state }
 }
 
 /// The reserved `unknown` variant tag, matching the C11 `0xFFFFFFFF`.
@@ -547,8 +620,8 @@ pub struct ReactiveVersion {
 }
 
 /// A reactive dependency node, matching `struct LanaReactive` in
-/// `vm/include/value.h`. Nodes form a DAG (`inputs` reference pre-existing
-/// nodes), so `Arc` without cycle collection is sound. The node is wrapped in a
+/// `vm/include/value.h`. Inputs reference pre-existing nodes, but captured
+/// values and history can contain cyclic containers. The node is wrapped in a
 /// `Mutex` because `reactive_recompute_transaction` mutates `current`,
 /// `history`, and `revision` in place, and a value graph carrying a reactive
 /// node can cross a task boundary.
@@ -963,70 +1036,203 @@ impl Value {
         }
     }
 
-    /// Whether the value is unresolved, mirroring `value_is_unresolved` in
-    /// `vm/c/vm.c`. Possibilities and path sets are always unresolved; arrays
-    /// and maps are unresolved if any element is.
+    /// Conservative convenience query. VM boundaries use the fallible check.
     pub fn is_unresolved(&self) -> bool {
-        self.is_unresolved_at(&mut std::collections::HashSet::new())
+        self.check_resolved(256 * 1024 * 1024).is_err()
     }
 
-    fn is_unresolved_at(&self, seen: &mut std::collections::HashSet<usize>) -> bool {
-        let current = self.reactive.as_ref().and_then(|r| r.lock().unwrap().current.clone());
-        let value = current.as_ref().unwrap_or(self);
-        match &value.kind {
-            ValueKind::Possibility(_) | ValueKind::PathSet(_) => true,
-            ValueKind::Array(array) => {
-                seen.insert(Arc::as_ptr(array) as usize) &&
-                    array.lock().unwrap().items.iter().any(|item| item.is_unresolved_at(seen))
-            }
-            ValueKind::Map(map) => {
-                seen.insert(Arc::as_ptr(map) as usize) &&
-                    map.lock().unwrap().entries.iter().any(|entry| entry.value.is_unresolved_at(seen))
-            }
-            ValueKind::Set(set) => {
-                seen.insert(Arc::as_ptr(set) as usize) &&
-                    set.lock().unwrap().items.iter().any(|item| item.is_unresolved_at(seen))
-            }
-            _ => false,
-        }
-    }
-
-    /// Whether the value contains a revoked capability token, mirroring
-    /// `value_has_revoked_capability` in `vm/c/vm.c`. A capability is revoked
-    /// when its `revoked` flag is set; arrays and maps are checked recursively.
     pub fn has_revoked_capability(&self) -> bool {
-        self.has_revoked_capability_at(&mut std::collections::HashSet::new())
+        self.check_capabilities(256 * 1024 * 1024).is_err()
     }
 
-    fn has_revoked_capability_at(&self, seen: &mut std::collections::HashSet<usize>) -> bool {
-        let current = self.reactive.as_ref().and_then(|r| r.lock().unwrap().current.clone());
-        let value = current.as_ref().unwrap_or(self);
-        match &value.kind {
-            ValueKind::Capability(capability) => capability.revoked.load(Ordering::Acquire),
-            ValueKind::Array(array) => {
-                seen.insert(Arc::as_ptr(array) as usize) &&
-                    array.lock().unwrap().items.iter().any(|item| item.has_revoked_capability_at(seen))
-            }
-            ValueKind::Map(map) => {
-                seen.insert(Arc::as_ptr(map) as usize) &&
-                    map.lock().unwrap().entries.iter().any(|entry| entry.value.has_revoked_capability_at(seen))
-            }
-            ValueKind::Set(set) => {
-                seen.insert(Arc::as_ptr(set) as usize) &&
-                    set.lock().unwrap().items.iter().any(|item| item.has_revoked_capability_at(seen))
-            }
-            _ => false,
+    pub fn check_resolved(&self, limit: usize) -> Result<(), LanaError> {
+        self.check_graph(limit, LanaError::UnresolvedValue)
+    }
+
+    pub fn check_capabilities(&self, limit: usize) -> Result<(), LanaError> {
+        self.check_graph(limit, LanaError::ClaimRevoked)
+    }
+
+    fn container_identity(&self) -> Option<usize> {
+        match &self.kind {
+            ValueKind::Array(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Map(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Set(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Joint(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Possibility(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::PathSet(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Adt(v) => Some(Arc::as_ptr(v) as usize),
+            _ => None,
         }
+    }
+
+    fn inspection_child(&self, index: usize) -> Option<Value> {
+        match &self.kind {
+            ValueKind::Array(v) => v.lock().unwrap().items.get(index).cloned(),
+            ValueKind::Map(v) => v.lock().unwrap().entries.get(index).map(|e| e.value.clone()),
+            ValueKind::Set(v) => v.lock().unwrap().items.get(index).cloned(),
+            ValueKind::Adt(v) => v.fields.get(index).cloned(),
+            ValueKind::Possibility(v) => v.values.get(index).cloned(),
+            ValueKind::PathSet(v) => v.alternatives.get(index).map(|a| a.result.clone()),
+            ValueKind::Joint(v) => {
+                if let Some(value) = v.values.get(index) { return Some(value.clone()); }
+                let index = index - v.values.len();
+                let width = v.names.len();
+                if width == 0 { return None; }
+                v.rows.get(index / width).and_then(|r| r.values.get(index % width)).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    fn check_graph(&self, limit: usize, rejected: LanaError) -> Result<(), LanaError> {
+        fn resolved(value: &Value) -> Value {
+            value.reactive.as_ref().and_then(|r| r.lock().unwrap().current.clone())
+                .unwrap_or_else(|| value.clone())
+        }
+        fn check(value: &Value, rejected: LanaError) -> Result<(), LanaError> {
+            let bad = match &value.kind {
+                ValueKind::Possibility(_) | ValueKind::PathSet(_) => rejected == LanaError::UnresolvedValue,
+                ValueKind::Capability(v) => rejected == LanaError::ClaimRevoked && v.revoked.load(Ordering::Acquire),
+                _ => false,
+            };
+            if bad { Err(rejected) } else { Ok(()) }
+        }
+        let root = resolved(self);
+        check(&root, rejected)?;
+        if root.container_identity().is_none() { return Ok(()); }
+        let budget = crate::heap::Heap::new(limit);
+        let mut stack = crate::heap::Buffer::new(&budget, 1, 0)?;
+        let mut seen = crate::heap::Buffer::new(&budget, 0, 0)?;
+        stack.push(PrintFrame { value: root, next: 0, identity: None })?;
+        while let Some(frame) = stack.last_mut() {
+            if frame.identity.is_none() {
+                check(&frame.value, rejected)?;
+                let Some(identity) = frame.value.container_identity() else { stack.pop(); continue; };
+                // ponytail: bounded linear identity lookup; use a budgeted hash
+                // table if graph inspection becomes a measured bottleneck.
+                if seen.contains(&identity) { stack.pop(); continue; }
+                seen.push(identity)?;
+                frame.identity = Some(identity);
+            }
+            if let Some(child) = frame.value.inspection_child(frame.next) {
+                frame.next += 1;
+                stack.push(PrintFrame { value: resolved(&child), next: 0, identity: None })?;
+            } else {
+                stack.pop();
+            }
+        }
+        Ok(())
     }
 
     /// Render the value exactly as `lana_value_print` in `vm/c/value.c`.
     pub fn print(&self) -> String {
-        let mut out = String::new();
-        self.print_into(&mut out);
-        out
+        self.try_print(usize::MAX).unwrap_or_else(|_| "<out-of-memory>".into())
     }
 
-    fn print_into(&self, out: &mut String) {
+    /// Render without recursively locking containers or traversing cycles.
+    pub fn try_print(&self, limit: usize) -> Result<String, LanaError> {
+        let mut out = PrintOutput { text: String::new(), limit, failed: false };
+        let mut stack = Vec::new();
+        let frame_size = std::mem::size_of::<PrintFrame>();
+        if frame_size > limit { return Err(LanaError::Oom); }
+        stack.try_reserve_exact(1).map_err(|_| LanaError::Oom)?;
+        stack.push(PrintFrame { value: self.clone(), next: 0, identity: None });
+        while !stack.is_empty() {
+            out.limit = limit.saturating_sub(stack.capacity() * frame_size);
+            if out.failed { return Err(LanaError::Oom); }
+            let frame_index = stack.len() - 1;
+            let identity = match &stack[frame_index].value.kind {
+                ValueKind::Array(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Map(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Set(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Joint(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Possibility(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::PathSet(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Adt(value) => Some(Arc::as_ptr(value) as usize),
+                _ => None,
+            };
+            let Some(identity) = identity else {
+                stack[frame_index].value.print_into(&mut out);
+                stack.pop();
+                continue;
+            };
+            // ponytail: linear ancestor scan; replace with a budgeted index if
+            // deep-graph rendering becomes a measured performance bottleneck.
+            if stack[frame_index].identity.is_none()
+                && stack[..frame_index].iter().any(|frame| frame.identity == Some(identity))
+            {
+                out.push_str("<cycle>");
+                stack.pop();
+                continue;
+            }
+            let frame = &mut stack[frame_index];
+            if frame.identity.is_none() {
+                frame.identity = Some(identity);
+                match &frame.value.kind {
+                    ValueKind::Array(_) => out.push('['),
+                    ValueKind::Map(_) => out.push('{'),
+                    ValueKind::Set(_) => out.push_str("set{"),
+                    ValueKind::Joint(_) => out.push_str("joint_state{"),
+                    ValueKind::Possibility(_) => out.push_str("possibility{"),
+                    ValueKind::PathSet(_) => out.push_str("paths{"),
+                    ValueKind::Adt(adt) => {
+                        use std::fmt::Write;
+                        let _ = write!(out, "adt(variant={}){{", adt.variant);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let index = frame.next;
+            let (child, key, guard) = match &frame.value.kind {
+                ValueKind::Array(value) => (value.lock().unwrap().items.get(index).cloned(), None, None),
+                ValueKind::Set(value) => (value.lock().unwrap().items.get(index).cloned(), None, None),
+                ValueKind::Map(value) => {
+                    let value = value.lock().unwrap();
+                    match value.entries.get(index) {
+                        Some(entry) => (Some(entry.value.clone()), Some(entry.key.clone()), None),
+                        None => (None, None, None),
+                    }
+                }
+                ValueKind::Joint(value) => match value.names.get(index) {
+                    Some(key) => (Some(value.values.get(index).cloned().unwrap_or_else(|| Value::string(Arc::from("<finite-law>")))), Some(key.clone()), None),
+                    None => (None, None, None),
+                },
+                ValueKind::Possibility(value) => (value.values.get(index).cloned(), None, None),
+                ValueKind::PathSet(value) => match value.alternatives.get(index) {
+                    Some(alternative) => (Some(alternative.result.clone()), None, Some(alternative.guard)),
+                    None => (None, None, None),
+                },
+                ValueKind::Adt(value) => (value.fields.get(index).cloned(), None, None),
+                _ => unreachable!(),
+            };
+            if let Some(child) = child {
+                if index != 0 { out.push_str(", "); }
+                if let Some(key) = key {
+                    let quoted = matches!(frame.value.kind, ValueKind::Map(_));
+                    if quoted { out.push('"'); }
+                    out.push_str(&key);
+                    if quoted { out.push('"'); }
+                    out.push_str(": ");
+                }
+                if let Some(guard) = guard { out.push_str(if guard { "true => " } else { "false => " }); }
+                frame.next += 1;
+                if stack.len() == stack.capacity() {
+                    let capacity = stack.capacity().checked_mul(2).ok_or(LanaError::Oom)?;
+                    let bytes = capacity.checked_mul(frame_size).ok_or(LanaError::Oom)?;
+                    if bytes > limit.saturating_sub(out.text.capacity()) { return Err(LanaError::Oom); }
+                    stack.try_reserve_exact(capacity - stack.len()).map_err(|_| LanaError::Oom)?;
+                }
+                stack.push(PrintFrame { value: child, next: 0, identity: None });
+            } else {
+                out.push(if matches!(frame.value.kind, ValueKind::Array(_)) { ']' } else { '}' });
+                stack.pop();
+            }
+        }
+        if out.failed { Err(LanaError::Oom) } else { Ok(out.text) }
+    }
+
+    fn print_into(&self, out: &mut PrintOutput) {
         use std::fmt::Write;
         match &self.kind {
             ValueKind::Null => out.push_str("null"),
@@ -1051,32 +1257,8 @@ impl Value {
             ValueKind::Sample(sample) => {
                 let _ = write!(out, "{sample}");
             }
-            ValueKind::Joint(joint) => {
-                out.push_str("joint_state{");
-                for (index, name) in joint.names.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    let _ = write!(out, "{name}: ");
-                    if let Some(value) = joint.values.get(index) {
-                        value.print_into(out);
-                    } else {
-                        out.push_str("<finite-law>");
-                    }
-                }
-                out.push('}');
-            }
-            ValueKind::Array(array) => {
-                out.push('[');
-                let array = array.lock().unwrap();
-                for (index, item) in array.items.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    item.print_into(out);
-                }
-                out.push(']');
-            }
+            ValueKind::Joint(_) => unreachable!("container handled by iterative renderer"),
+            ValueKind::Array(_) => unreachable!("container handled by iterative renderer"),
             ValueKind::Function(function) => {
                 let _ = write!(out, "function({function})");
             }
@@ -1084,50 +1266,11 @@ impl Value {
                 let _ = write!(out, "task({})", task.id);
             }
             ValueKind::StateDist(_) => out.push_str("state_dist"),
-            ValueKind::Map(map) => {
-                out.push('{');
-                let map = map.lock().unwrap();
-                for (index, entry) in map.entries.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    let _ = write!(out, "\"{}\": ", entry.key);
-                    entry.value.print_into(out);
-                }
-                out.push('}');
-            }
-            ValueKind::Possibility(possibility) => {
-                out.push_str("possibility{");
-                for (index, value) in possibility.values.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    value.print_into(out);
-                }
-                out.push('}');
-            }
-            ValueKind::PathSet(paths) => {
-                out.push_str("paths{");
-                for (index, alternative) in paths.alternatives.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    let _ = write!(out, "{} => ", if alternative.guard { "true" } else { "false" });
-                    alternative.result.print_into(out);
-                }
-                out.push('}');
-            }
+            ValueKind::Map(_) => unreachable!("container handled by iterative renderer"),
+            ValueKind::Possibility(_) => unreachable!("container handled by iterative renderer"),
+            ValueKind::PathSet(_) => unreachable!("container handled by iterative renderer"),
             ValueKind::Capability(_) => out.push_str("shared_capability"),
-            ValueKind::Adt(adt) => {
-                let _ = write!(out, "adt(variant={}){{", adt.variant);
-                for (index, field) in adt.fields.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    field.print_into(out);
-                }
-                out.push('}');
-            }
+            ValueKind::Adt(_) => unreachable!("container handled by iterative renderer"),
             ValueKind::Tensor(tensor) => {
                 tensor_print_rec(tensor, 0, tensor.offset, out);
             }
@@ -1165,17 +1308,7 @@ impl Value {
                     future.ready
                 );
             }
-            ValueKind::Set(set) => {
-                out.push_str("set{");
-                let set = set.lock().unwrap();
-                for (index, item) in set.items.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    item.print_into(out);
-                }
-                out.push('}');
-            }
+            ValueKind::Set(_) => unreachable!("container handled by iterative renderer"),
             ValueKind::Regex(regex) => {
                 let _ = write!(out, "regex(insts={})", regex.insts.len());
             }
@@ -1231,7 +1364,8 @@ impl From<&lana_bytecode::Value> for Value {
 /// Nested `[...]` with `, ` separators; real elements use `%.12g`, complex
 /// elements render as `[re, im]` with `%.12g` each. A 0-d tensor prints its
 /// single scalar (or `[re, im]` pair) with no brackets.
-fn tensor_print_rec(tensor: &Tensor, dim: usize, offset: usize, out: &mut String) {
+fn tensor_print_rec(tensor: &Tensor, dim: usize, offset: usize, out: &mut PrintOutput) {
+    if out.failed { return; }
     use std::fmt::Write;
     if dim == tensor.ndim {
         if tensor.is_complex {
@@ -1259,6 +1393,63 @@ fn tensor_print_rec(tensor: &Tensor, dim: usize, offset: usize, out: &mut String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_keys_cannot_bypass_the_heap_budget() {
+        let heap = crate::heap::Heap::new(std::mem::size_of::<Map>() + std::mem::size_of::<MapEntry>());
+        let mut map = Map::new(&heap, 1).unwrap();
+        let before = heap.live_bytes();
+        assert_eq!(map.set(Arc::from("retained key"), Value::number(1.0), false), Err(LanaError::Oom));
+        assert!(map.entries().is_empty());
+        assert_eq!(heap.live_bytes(), before);
+    }
+
+    #[test]
+    fn map_key_alias_owns_its_string_after_the_map_dies() {
+        let heap = crate::heap::Heap::new(4096);
+        let mut map = Map::new(&heap, 1).unwrap();
+        map.set(Arc::from("key"), Value::null(), false).unwrap();
+        let alias = map.entries()[0].key.clone();
+        drop(map);
+        heap.collect_strings();
+        assert_eq!(heap.live_bytes(), 4);
+        assert_eq!(&*alias, "key");
+        drop(alias);
+        heap.collect_strings();
+        assert_eq!(heap.live_bytes(), 0);
+    }
+
+    #[test]
+    fn print_cycles_aliases_and_deep_graphs() {
+        let heap = crate::heap::Heap::new(4 * 1024 * 1024);
+        let array = Arc::new(Mutex::new(Array::new(&heap, 0).unwrap()));
+        let value = Value::array(array.clone());
+        array.lock().unwrap().items.push(value.clone()).unwrap();
+        assert_eq!(value.print(), "[<cycle>]");
+        assert_eq!(value.check_resolved(4096), Ok(()));
+        assert_eq!(value.check_capabilities(4096), Ok(()));
+        array.lock().unwrap().items.clear();
+        array.lock().unwrap().items.push(Value::number(1.0)).unwrap();
+        let aliases = Value::array(Arc::new(Mutex::new(Array::from_items(&heap, vec![value.clone(), value]).unwrap())));
+        assert_eq!(aliases.print(), "[[1], [1]]");
+        assert_eq!(aliases.try_print(4).unwrap_err(), LanaError::Oom);
+        let mut roots = vec![Arc::new(Mutex::new(Array::from_items(&heap, vec![Value::number(1.0)]).unwrap()))];
+        for _ in 0..5000 {
+            roots.push(Arc::new(Mutex::new(Array::from_items(&heap, vec![Value::array(roots.last().unwrap().clone())]).unwrap())));
+        }
+        let root = Value::array(roots.last().unwrap().clone());
+        let rendered = root.try_print(4 * 1024 * 1024).unwrap();
+        assert_eq!(rendered.len(), 10003);
+        assert_eq!(root.check_resolved(4 * 1024 * 1024), Ok(()));
+        assert_eq!(root.check_capabilities(4 * 1024 * 1024), Ok(()));
+        assert_eq!(root.check_resolved(16), Err(LanaError::Oom));
+        let unknown = Value::possibility(Arc::new(Possibility {
+            values: vec![Value::number(1.), Value::number(2.)], weights: None, dependency_id: 1,
+        }));
+        roots[0].lock().unwrap().items[0] = Value::adt(Arc::new(Adt { variant: 0, fields: vec![unknown] }));
+        assert_eq!(root.check_resolved(4 * 1024 * 1024), Err(LanaError::UnresolvedValue));
+        for root in &roots { root.lock().unwrap().items.clear(); }
+    }
 
     #[test]
     fn type_names_match_c11() {
@@ -1313,9 +1504,9 @@ mod tests {
 
     #[test]
     fn print_matches_c11_array() {
-        let array = Arc::new(Mutex::new(Array {
-            items: vec![Value::number(1.0), Value::boolean(true)],
-        }));
+        let heap = crate::heap::Heap::new(4096);
+        let array = Arc::new(Mutex::new(Array::from_items(&heap,
+            vec![Value::number(1.0), Value::boolean(true)]).unwrap()));
         assert_eq!(Value::array(array).print(), "[1, true]");
     }
 }

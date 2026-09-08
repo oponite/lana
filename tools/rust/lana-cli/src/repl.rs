@@ -168,7 +168,7 @@ fn compile_and_run(compiler: &Path, source: &str) -> Result<Value, ReplError> {
 fn run_chunk(chunk: &Chunk) -> Result<Value, lana_vm::VmError> {
     let mut vm = Vm::new(chunk);
     vm.seed(REPL_SEED);
-    let mut store_host = lana_runtime::host_calls::StoreHost::new();
+    let mut store_host = lana_runtime::host_calls::StoreHost::with_heap(vm.heap());
     vm.set_host_call_extension(Box::new(move |host_id, args, out| {
         store_host.dispatch(host_id, args, out)
     }));

@@ -99,6 +99,7 @@ struct LanaPathExecution {
     double false_weight;
     size_t previous_path_count;
     bool running_false;
+    bool split;
     struct LanaPathExecution *next;
 };
 
@@ -112,8 +113,7 @@ static uint64_t mix64(uint64_t value) {
 static LanaFrame *current_frame(LanaVM *vm) { return &vm->frames[vm->frame_count - 1u]; }
 static LanaError consume_sampling_budget(LanaVM *vm);
 static bool joint_value_is_definite(const Value *value);
-static bool value_is_unresolved(const Value *value);
-static bool value_has_revoked_capability(const Value *value);
+static LanaError value_check(LanaVM *vm, const Value *value, LanaError rejected);
 static LanaError reactive_recompute_transaction(LanaVM *vm, LanaReactive *root,
                                                 const Value *replacement,
                                                 uint32_t scratch_register);
@@ -1639,26 +1639,33 @@ static LanaError clone_value_memo(LanaVM *destination, const Value *source, Valu
     return LANA_OK;
 }
 
-static LanaError clone_value(LanaVM *destination, const Value *source, Value *out) {
+static LanaError clone_value_with_containers(LanaVM *destination,
+                                             const Value *source, Value *out,
+                                             LanaContainerCloneMemo **containers) {
     LanaDistCloneMemo *memo = NULL;
-    LanaContainerCloneMemo *containers = NULL;
     LanaDerivationCloneMemo *derivations = NULL;
     LanaDistCloneMemo *entry;
-    LanaError error = clone_value_memo(destination, source, out, &memo, &containers,
+    LanaError error = clone_value_memo(destination, source, out, &memo, containers,
                                        &derivations);
     while (memo != NULL) {
         entry = memo;
         memo = memo->next;
         free(entry);
     }
-    while (containers != NULL) {
-        LanaContainerCloneMemo *entry = containers;
-        containers = containers->next;
-        free(entry);
-    }
     while (derivations != NULL) {
         LanaDerivationCloneMemo *entry = derivations;
         derivations = derivations->next;
+        free(entry);
+    }
+    return error;
+}
+
+static LanaError clone_value(LanaVM *destination, const Value *source, Value *out) {
+    LanaContainerCloneMemo *containers = NULL;
+    LanaError error = clone_value_with_containers(destination, source, out, &containers);
+    while (containers != NULL) {
+        LanaContainerCloneMemo *entry = containers;
+        containers = containers->next;
         free(entry);
     }
     return error;
@@ -1783,10 +1790,20 @@ static LanaError clone_live_reactive_node(LanaVM *destination,
 
 static LanaError attach_live_reactive_values(LanaVM *destination,
                                              const Value *source, Value *copy,
-                                             LanaReactiveCloneMemo **memo) {
+                                             LanaReactiveCloneMemo **memo,
+                                             LanaContainerCloneMemo **visited) {
     const Value *contents = reactive_value(source);
+    LanaContainerCloneMemo *entry;
     size_t index;
     LanaError error;
+    for (entry = *visited; entry != NULL; entry = entry->next)
+        if (entry->source == source && entry->copy == copy) return LANA_OK;
+    entry = malloc(sizeof(*entry));
+    if (entry == NULL) return LANA_ERR_OOM;
+    entry->source = source;
+    entry->copy = copy;
+    entry->next = *visited;
+    *visited = entry;
     if (source->reactive != NULL) {
         error = clone_live_reactive_node(destination, source->reactive,
                                          &copy->reactive, memo);
@@ -1797,7 +1814,7 @@ static LanaError attach_live_reactive_values(LanaVM *destination,
         for (index = 0u; index < contents->as.array->count; ++index) {
             error = attach_live_reactive_values(destination,
                 &contents->as.array->items[index],
-                &copy->as.array->items[index], memo);
+                &copy->as.array->items[index], memo, visited);
             if (error != LANA_OK) return error;
         }
     } else if (contents->type == VAL_MAP && contents->as.map != NULL &&
@@ -1805,7 +1822,7 @@ static LanaError attach_live_reactive_values(LanaVM *destination,
         for (index = 0u; index < contents->as.map->count; ++index) {
             error = attach_live_reactive_values(destination,
                 contents->as.map->entries[index].value,
-                copy->as.map->entries[index].value, memo);
+                copy->as.map->entries[index].value, memo, visited);
             if (error != LANA_OK) return error;
         }
     } else if (contents->type == VAL_POSSIBILITY &&
@@ -1814,7 +1831,7 @@ static LanaError attach_live_reactive_values(LanaVM *destination,
         for (index = 0u; index < contents->as.possibility->count; ++index) {
             error = attach_live_reactive_values(destination,
                 &contents->as.possibility->values[index],
-                &copy->as.possibility->values[index], memo);
+                &copy->as.possibility->values[index], memo, visited);
             if (error != LANA_OK) return error;
         }
     } else if (contents->type == VAL_PATH_SET && contents->as.paths != NULL &&
@@ -1822,7 +1839,7 @@ static LanaError attach_live_reactive_values(LanaVM *destination,
         for (index = 0u; index < contents->as.paths->count; ++index) {
             error = attach_live_reactive_values(destination,
                 contents->as.paths->alternatives[index].result,
-                copy->as.paths->alternatives[index].result, memo);
+                copy->as.paths->alternatives[index].result, memo, visited);
             if (error != LANA_OK) return error;
         }
     }
@@ -1839,15 +1856,21 @@ LanaError lana_vm_clone_value(LanaVM *destination, const Value *source,
 LanaError lana_vm_clone_live_value(LanaVM *destination, const Value *source,
                                    Value *out) {
     LanaReactiveCloneMemo *memo = NULL;
+    LanaContainerCloneMemo *visited = NULL;
     LanaError error;
     if (destination == NULL || source == NULL || out == NULL)
         return LANA_ERR_FORMAT;
     error = clone_value(destination, source, out);
     if (error == LANA_OK)
-        error = attach_live_reactive_values(destination, source, out, &memo);
+        error = attach_live_reactive_values(destination, source, out, &memo, &visited);
     while (memo != NULL) {
         LanaReactiveCloneMemo *entry = memo;
         memo = memo->next;
+        free(entry);
+    }
+    while (visited != NULL) {
+        LanaContainerCloneMemo *entry = visited;
+        visited = visited->next;
         free(entry);
     }
     return error;
@@ -1965,17 +1988,13 @@ LanaError lana_vm_possibility_build(LanaVM *vm, const Value *values, size_t coun
 
 static LanaError snapshot_frames(LanaVM *vm, LanaFrame **out) {
     LanaFrame *frames;
-    size_t frame_index, register_index, history_index;
+    size_t frame_index, history_index;
     LanaError error;
     frames = lana_vm_alloc(vm, vm->frame_count * sizeof(*frames));
     if (frames == NULL) return LANA_ERR_OOM;
     memcpy(frames, vm->frames, vm->frame_count * sizeof(*frames));
+    /* Preserve heap identity; guarded execution cannot mutate shared values. */
     for (frame_index = 0; frame_index < vm->frame_count; ++frame_index) {
-        for (register_index = 0; register_index < LANA_MAX_REGISTERS; ++register_index) {
-            error = clone_value(vm, &vm->frames[frame_index].registers[register_index],
-                                &frames[frame_index].registers[register_index]);
-            if (error != LANA_OK) return error;
-        }
         for (history_index = 0; history_index < LANA_MAX_REGISTERS; ++history_index) {
             LanaHistory *history = &frames[frame_index].histories[history_index];
             const LanaHistory *source = &vm->frames[frame_index].histories[history_index];
@@ -1994,6 +2013,15 @@ static LanaError snapshot_frames(LanaVM *vm, LanaFrame **out) {
     *out = frames; return LANA_OK;
 }
 
+static LanaError path_single(LanaVM *vm) {
+    LanaPathExecution *execution = lana_vm_alloc(vm, sizeof(*execution));
+    if (execution == NULL) return LANA_ERR_OOM;
+    memset(execution, 0, sizeof(*execution));
+    execution->next = vm->path_execution;
+    vm->path_execution = execution;
+    return LANA_OK;
+}
+
 static LanaError path_split(LanaVM *vm, const Value *condition, size_t false_ip) {
     const LanaPossibility *possibility;
     bool has_true = false, has_false = false;
@@ -2003,7 +2031,7 @@ static LanaError path_split(LanaVM *vm, const Value *condition, size_t false_ip)
     LanaError error;
     if (condition->type == VAL_BOOL) {
         if (!condition->as.boolean) vm->ip = false_ip;
-        return LANA_OK;
+        return path_single(vm);
     }
     if (condition->type != VAL_POSSIBILITY) return LANA_ERR_TYPE;
     possibility = condition->as.possibility;
@@ -2017,8 +2045,8 @@ static LanaError path_split(LanaVM *vm, const Value *condition, size_t false_ip)
             has_false = true; false_weight += weight;
         }
     }
-    if (!has_true) { vm->ip = false_ip; return LANA_OK; }
-    if (!has_false) return LANA_OK;
+    if (!has_true) { vm->ip = false_ip; return path_single(vm); }
+    if (!has_false) return path_single(vm);
     if (vm->active_path_count > vm->path_limit / 2u) return LANA_ERR_PATH_LIMIT;
     execution = lana_vm_alloc(vm, sizeof(*execution));
     if (execution == NULL) return LANA_ERR_OOM;
@@ -2031,6 +2059,7 @@ static LanaError path_split(LanaVM *vm, const Value *condition, size_t false_ip)
     execution->false_weight = false_weight;
     execution->previous_path_count = vm->active_path_count;
     execution->running_false = false;
+    execution->split = true;
     execution->next = vm->path_execution;
     vm->path_execution = execution;
     vm->active_path_count *= 2u;
@@ -2042,6 +2071,7 @@ static LanaError path_join(LanaVM *vm, uint32_t line) {
     size_t frame_index, register_index, index;
     LanaError error;
     if (execution == NULL) return LANA_OK;
+    if (!execution->split) { vm->path_execution = execution->next; return LANA_OK; }
     if (!execution->running_false) {
         error = snapshot_frames(vm, &execution->true_frames);
         if (error != LANA_OK) return error;
@@ -2638,20 +2668,43 @@ static LanaError allocate_plain_value(LanaVM *vm, const Value *source,
     return LANA_OK;
 }
 
-static LanaError materialize_value(LanaVM *vm, const Value *source, Value *out) {
+static LanaError materialize_value_memo(LanaVM *vm, const Value *source, Value *out,
+                                       LanaContainerCloneMemo **memo) {
     const Value *current = reactive_value(source);
+    const void *identity = NULL;
+    LanaContainerCloneMemo *entry;
     size_t index;
     LanaError error;
+    if (current->type == VAL_ARRAY) identity = current->as.array;
+    else if (current->type == VAL_MAP) identity = current->as.map;
+    else if (current->type == VAL_SET) identity = current->as.set;
+    if (identity != NULL) {
+        for (entry = *memo; entry != NULL; entry = entry->next) {
+            if (entry->source != identity || entry->type != current->type) continue;
+            if (current->type == VAL_ARRAY) *out = lana_value_array(entry->copy);
+            else if (current->type == VAL_MAP) *out = lana_value_map(entry->copy);
+            else *out = lana_value_set(entry->copy);
+            return LANA_OK;
+        }
+        entry = malloc(sizeof(*entry));
+        if (entry == NULL) return LANA_ERR_OOM;
+        entry->source = identity;
+        entry->type = current->type;
+        entry->copy = NULL;
+        entry->next = *memo;
+        *memo = entry;
+    }
     if (current->type == VAL_ARRAY && current->as.array != NULL) {
         LanaArray *array = lana_vm_alloc(vm, sizeof(*array));
         if (array == NULL) return LANA_ERR_OOM;
+        (*memo)->copy = array;
         array->count = current->as.array->count;
         array->capacity = array->count;
         array->items = lana_vm_alloc(vm, array->count * sizeof(*array->items));
         if (array->items == NULL && array->count > 0u) return LANA_ERR_OOM;
         for (index = 0u; index < array->count; ++index) {
-            error = materialize_value(vm, &current->as.array->items[index],
-                                      &array->items[index]);
+            error = materialize_value_memo(vm, &current->as.array->items[index],
+                                           &array->items[index], memo);
             if (error != LANA_OK) return error;
         }
         *out = lana_value_array(array);
@@ -2661,10 +2714,11 @@ static LanaError materialize_value(LanaVM *vm, const Value *source, Value *out) 
         LanaMap *map;
         error = lana_map_new(vm, current->as.map->count, &map);
         if (error != LANA_OK) return error;
+        (*memo)->copy = map;
         for (index = 0u; index < current->as.map->count; ++index) {
             Value item;
-            error = materialize_value(vm, current->as.map->entries[index].value,
-                                      &item);
+            error = materialize_value_memo(vm, current->as.map->entries[index].value,
+                                           &item, memo);
             if (error != LANA_OK) return error;
             error = lana_map_set(vm, map, current->as.map->entries[index].key,
                                  &item, true);
@@ -2676,19 +2730,37 @@ static LanaError materialize_value(LanaVM *vm, const Value *source, Value *out) 
     if (current->type == VAL_SET && current->as.set != NULL) {
         LanaSet *set = lana_vm_alloc(vm, sizeof(*set));
         if (set == NULL) return LANA_ERR_OOM;
+        (*memo)->copy = set;
         set->count = current->as.set->count;
         set->capacity = set->count;
         set->items = lana_vm_alloc(vm, set->count * sizeof(*set->items));
         if (set->items == NULL && set->count > 0u) return LANA_ERR_OOM;
         for (index = 0u; index < set->count; ++index) {
-            error = materialize_value(vm, &current->as.set->items[index],
-                                      &set->items[index]);
+            error = materialize_value_memo(vm, &current->as.set->items[index],
+                                           &set->items[index], memo);
             if (error != LANA_OK) return error;
         }
         *out = lana_value_set(set);
         return LANA_OK;
     }
-    return clone_without_runtime_metadata(vm, current, out);
+    {
+        Value plain = *current;
+        plain.reactive = NULL;
+        plain.claim = NULL;
+        plain.planned_effect = NULL;
+        return clone_value_with_containers(vm, &plain, out, memo);
+    }
+}
+
+static LanaError materialize_value(LanaVM *vm, const Value *source, Value *out) {
+    LanaContainerCloneMemo *memo = NULL;
+    LanaError error = materialize_value_memo(vm, source, out, &memo);
+    while (memo != NULL) {
+        LanaContainerCloneMemo *entry = memo;
+        memo = entry->next;
+        free(entry);
+    }
+    return error;
 }
 
 LanaError lana_vm_reactive_root(LanaVM *vm, const Value *source,
@@ -2730,8 +2802,9 @@ static LanaError reactive_observe_scratch(LanaVM *vm, const Value *source,
     if (vm == NULL || source == NULL || evidence == NULL || out == NULL ||
         source->reactive == NULL || source->reactive->kind != LANA_REACTIVE_ROOT)
         return LANA_ERR_FORMAT;
-    if (vm->active_path_count > 1u || value_is_unresolved(replacement))
+    if (vm->active_path_count > 1u)
         return LANA_ERR_UNRESOLVED_VALUE;
+    if ((error = value_check(vm, replacement, LANA_ERR_UNRESOLVED_VALUE)) != LANA_OK) return error;
     root = source->reactive;
     current = root->current;
     if (current->type == VAL_POSSIBILITY && current->as.possibility != NULL) {
@@ -2842,8 +2915,8 @@ LanaError lana_vm_execute_planned_effect(LanaVM *vm, const Value *plan_value,
     for (receipt = plan->receipts; receipt != NULL; receipt = receipt->next)
         if (receipt->revision == vm->revision)
             return clone_value(vm, receipt->result, out);
-    if (value_is_unresolved(plan->payload)) return LANA_ERR_UNRESOLVED_VALUE;
-    if (value_has_revoked_capability(plan->payload)) return LANA_ERR_CLAIM_REVOKED;
+    if ((error = value_check(vm, plan->payload, LANA_ERR_UNRESOLVED_VALUE)) != LANA_OK) return error;
+    if ((error = value_check(vm, plan->payload, LANA_ERR_CLAIM_REVOKED)) != LANA_OK) return error;
     error = executor(vm, plan->kind, reactive_value(plan->payload), context, &result);
     if (error != LANA_OK) return error;
     receipt = lana_vm_alloc(vm, sizeof(*receipt));
@@ -2858,81 +2931,119 @@ LanaError lana_vm_execute_planned_effect(LanaVM *vm, const Value *plan_value,
     return clone_value(vm, receipt->result, out);
 }
 
-typedef struct LanaValuePath {
-    const void *container;
-    const struct LanaValuePath *parent;
-} LanaValuePath;
+typedef struct {
+    const Value *value;
+    size_t next;
+    bool entered;
+} LanaValueWalkFrame;
 
-static bool value_is_unresolved_at(const Value *value, const LanaValuePath *parent) {
-    size_t index;
-    if (value == NULL) return false;
+static const void *value_walk_identity(const Value *value) {
+    switch (value->type) {
+        case VAL_ARRAY: return value->as.array;
+        case VAL_MAP: return value->as.map;
+        case VAL_SET: return value->as.set;
+        case VAL_ADT: return value->as.adt;
+        case VAL_JOINT_STATE: return value->as.joint;
+        case VAL_POSSIBILITY: return value->as.possibility;
+        case VAL_PATH_SET: return value->as.paths;
+        default: return NULL;
+    }
+}
+
+static const Value *value_walk_child(const Value *value, size_t index) {
+    switch (value->type) {
+        case VAL_ARRAY:
+            return index < value->as.array->count ? &value->as.array->items[index] : NULL;
+        case VAL_MAP:
+            return index < value->as.map->count ? value->as.map->entries[index].value : NULL;
+        case VAL_SET:
+            return index < value->as.set->count ? &value->as.set->items[index] : NULL;
+        case VAL_ADT:
+            return index < value->as.adt->field_count ? &value->as.adt->fields[index] : NULL;
+        case VAL_POSSIBILITY:
+            return index < value->as.possibility->count ? &value->as.possibility->values[index] : NULL;
+        case VAL_PATH_SET:
+            return index < value->as.paths->count ? value->as.paths->alternatives[index].result : NULL;
+        case VAL_JOINT_STATE: {
+            const LanaJointState *joint = value->as.joint;
+            if (joint->values != NULL) {
+                if (index < joint->count) return &joint->values[index];
+                index -= joint->count;
+            }
+            if (joint->count == 0u || index / joint->count >= joint->row_count) return NULL;
+            return &joint->rows[index / joint->count].values[index % joint->count];
+        }
+        default: return NULL;
+    }
+}
+
+static void *value_walk_grow(void *buffer, size_t *capacity, size_t width,
+                             size_t *used, size_t limit) {
+    size_t grown_capacity, bytes, growth;
+    void *grown;
+    if (*capacity > SIZE_MAX / 2u) return NULL;
+    grown_capacity = *capacity == 0u ? 1u : *capacity * 2u;
+    if (grown_capacity > SIZE_MAX / width) return NULL;
+    bytes = grown_capacity * width;
+    growth = bytes - *capacity * width;
+    if (growth > limit - *used) return NULL;
+    grown = realloc(buffer, bytes);
+    if (grown == NULL) return NULL;
+    *capacity = grown_capacity;
+    *used += growth;
+    return grown;
+}
+
+static LanaError value_check(LanaVM *vm, const Value *value, LanaError rejected) {
+    LanaValueWalkFrame *stack = NULL;
+    const void **seen = NULL;
+    size_t count = 0u, capacity = 0u, seen_count = 0u, seen_capacity = 0u, used = 0u;
+    size_t limit = vm->allocated_bytes >= vm->memory_limit ? 0u : vm->memory_limit - vm->allocated_bytes;
+    LanaError result = LANA_OK;
     value = reactive_value(value);
-    if (value->type == VAL_POSSIBILITY || value->type == VAL_PATH_SET)
-        return true;
-    const void *container = value->type == VAL_ARRAY ? (const void *)value->as.array :
-                            value->type == VAL_MAP ? (const void *)value->as.map :
-                            value->type == VAL_SET ? (const void *)value->as.set : NULL;
-    if (container == NULL) return false;
-    /* A back edge adds no new unresolved leaves. Keep checking its siblings.
-     * ponytail: O(depth^2) ancestor checks; use an iterative visited set if
-     * deeply nested general value traversal becomes a supported workload. */
-    for (const LanaValuePath *p = parent; p != NULL; p = p->parent)
-        if (p->container == container) return false;
-    LanaValuePath path = {container, parent};
-    if (value->type == VAL_ARRAY && value->as.array != NULL) {
-        for (index = 0; index < value->as.array->count; ++index)
-            if (value_is_unresolved_at(&value->as.array->items[index], &path)) return true;
+    if (value == NULL) return LANA_OK;
+    if (rejected == LANA_ERR_UNRESOLVED_VALUE &&
+        (value->type == VAL_POSSIBILITY || value->type == VAL_PATH_SET)) return rejected;
+    if (rejected == LANA_ERR_CLAIM_REVOKED && value->type == VAL_SHARED_CAPABILITY &&
+        !lana_shared_capability_allows(value->as.capability, 0u)) return rejected;
+    if (value_walk_identity(value) == NULL) return LANA_OK;
+    stack = value_walk_grow(stack, &capacity, sizeof(*stack), &used, limit);
+    if (stack == NULL) return LANA_ERR_OOM;
+    stack[count++] = (LanaValueWalkFrame){value, 0u, false};
+    while (count > 0u) {
+        LanaValueWalkFrame *frame = &stack[count - 1u];
+        const Value *current = reactive_value(frame->value), *child;
+        const void *identity = value_walk_identity(current);
+        if (!frame->entered) {
+            size_t index;
+            if (rejected == LANA_ERR_UNRESOLVED_VALUE &&
+                (current->type == VAL_POSSIBILITY || current->type == VAL_PATH_SET)) { result = rejected; break; }
+            if (rejected == LANA_ERR_CLAIM_REVOKED && current->type == VAL_SHARED_CAPABILITY &&
+                !lana_shared_capability_allows(current->as.capability, 0u)) { result = rejected; break; }
+            if (identity == NULL) { --count; continue; }
+            /* ponytail: bounded linear lookup; use a budgeted hash table if graph scans dominate. */
+            for (index = 0u; index < seen_count; ++index) if (seen[index] == identity) break;
+            if (index != seen_count) { --count; continue; }
+            if (seen_count == seen_capacity) {
+                const void **grown = value_walk_grow(seen, &seen_capacity, sizeof(*seen), &used, limit);
+                if (grown == NULL) { result = LANA_ERR_OOM; break; }
+                seen = grown;
+            }
+            seen[seen_count++] = identity;
+            frame->entered = true;
+        }
+        child = value_walk_child(current, frame->next++);
+        if (child == NULL) { --count; continue; }
+        if (count == capacity) {
+            LanaValueWalkFrame *grown = value_walk_grow(stack, &capacity, sizeof(*stack), &used, limit);
+            if (grown == NULL) { result = LANA_ERR_OOM; break; }
+            stack = grown;
+        }
+        stack[count++] = (LanaValueWalkFrame){child, 0u, false};
     }
-    if (value->type == VAL_MAP && value->as.map != NULL) {
-        for (index = 0; index < value->as.map->count; ++index)
-            if (value_is_unresolved_at(value->as.map->entries[index].value, &path)) return true;
-    }
-    if (value->type == VAL_SET && value->as.set != NULL) {
-        for (index = 0; index < value->as.set->count; ++index)
-            if (value_is_unresolved_at(&value->as.set->items[index], &path)) return true;
-    }
-    return false;
-}
-
-static bool value_is_unresolved(const Value *value) {
-    return value_is_unresolved_at(value, NULL);
-}
-
-static bool value_has_revoked_capability_at(const Value *value,
-                                            const LanaValuePath *parent) {
-    size_t index;
-    if (value == NULL) return false;
-    value = reactive_value(value);
-    if (value->type == VAL_SHARED_CAPABILITY &&
-        !lana_shared_capability_allows(value->as.capability, 0u))
-        return true;
-    const void *container = value->type == VAL_ARRAY ? (const void *)value->as.array :
-                            value->type == VAL_MAP ? (const void *)value->as.map :
-                            value->type == VAL_SET ? (const void *)value->as.set : NULL;
-    if (container == NULL) return false;
-    for (const LanaValuePath *p = parent; p != NULL; p = p->parent)
-        if (p->container == container) return false;
-    LanaValuePath path = {container, parent};
-    if (value->type == VAL_ARRAY && value->as.array != NULL) {
-        for (index = 0; index < value->as.array->count; ++index)
-            if (value_has_revoked_capability_at(&value->as.array->items[index], &path))
-                return true;
-    }
-    if (value->type == VAL_MAP && value->as.map != NULL) {
-        for (index = 0; index < value->as.map->count; ++index)
-            if (value_has_revoked_capability_at(value->as.map->entries[index].value, &path))
-                return true;
-    }
-    if (value->type == VAL_SET && value->as.set != NULL) {
-        for (index = 0; index < value->as.set->count; ++index)
-            if (value_has_revoked_capability_at(&value->as.set->items[index], &path))
-                return true;
-    }
-    return false;
-}
-
-static bool value_has_revoked_capability(const Value *value) {
-    return value_has_revoked_capability_at(value, NULL);
+    free(stack);
+    free(seen);
+    return result;
 }
 
 LanaError lana_vm_joint_rename(LanaVM *vm, const LanaJointState *source,
@@ -7595,6 +7706,14 @@ static SSL *net_tls_wrap(int fd, const char *host, bool verify) {
     ssl = SSL_new(ctx);
     SSL_CTX_free(ctx);
     if (ssl == NULL) return NULL;
+    if (verify) {
+        unsigned char address[16];
+        bool is_ip = inet_pton(AF_INET, host, address) == 1 ||
+                     inet_pton(AF_INET6, host, address) == 1;
+        int configured = is_ip ? X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(ssl), host) :
+                                 SSL_set1_host(ssl, host);
+        if (configured != 1) { SSL_free(ssl); return NULL; }
+    }
     SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, host);
     if (SSL_connect(ssl) != 1) {
@@ -7631,6 +7750,53 @@ static ssize_t net_write_all(LanaSocket *sock, const char *buf, size_t len) {
     return (ssize_t)off;
 }
 
+static bool net_header_name(const char *text, size_t length, const char *name) {
+    size_t index;
+    if (length != strlen(name)) return false;
+    for (index = 0u; index < length; ++index)
+        if (tolower((unsigned char)text[index]) != name[index]) return false;
+    return true;
+}
+
+/* RFC 9112 section 6.3: framing, not TLS EOF, determines completeness. */
+static bool net_response_length(const char *response, size_t *total) {
+    const char *end = strstr(response, "\r\n\r\n"), *line, *next, *colon, *value;
+    size_t length = SIZE_MAX, parsed;
+    bool has_length = false;
+    *total = SIZE_MAX;
+    if (end == NULL) return true;
+    line = strstr(response, "\r\n");
+    while (line != NULL && line < end) {
+        line += 2;
+        next = strstr(line, "\r\n");
+        colon = strchr(line, ':');
+        if (next == NULL || colon == NULL || colon >= next) return false;
+        /* ponytail: reject transfer coding until a body decoder is implemented. */
+        if (net_header_name(line, (size_t)(colon - line), "transfer-encoding")) return false;
+        if (net_header_name(line, (size_t)(colon - line), "content-length")) {
+            value = colon + 1;
+            while (value < next && (*value == ' ' || *value == '\t')) ++value;
+            if (value == next || *value < '0' || *value > '9') return false;
+            parsed = 0u;
+            while (value < next && *value >= '0' && *value <= '9') {
+                if (parsed > (SIZE_MAX - (size_t)(*value - '0')) / 10u) return false;
+                parsed = parsed * 10u + (size_t)(*value++ - '0');
+            }
+            while (value < next && (*value == ' ' || *value == '\t')) ++value;
+            if (value != next || (has_length && length != parsed)) return false;
+            length = parsed;
+            has_length = true;
+        }
+        line = next;
+    }
+    if (has_length) {
+        size_t headers = (size_t)(end - response) + 4u;
+        if (length > SIZE_MAX - headers) return false;
+        *total = headers + length;
+    }
+    return true;
+}
+
 /* Perform an HTTP request and build the Result map. */
 static LanaError net_http_request(LanaVM *vm, const char *method, const char *url,
                                   const char *body, double timeout_ms, bool verify, Value *out) {
@@ -7642,8 +7808,8 @@ static LanaError net_http_request(LanaVM *vm, const char *method, const char *ur
     bool timed_out = false, is_tls;
     SSL *ssl = NULL;
     LanaSocket sock;
-    size_t req_len = 0, resp_len = 0;
-    ssize_t n;
+    size_t req_len = 0, resp_len = 0, expected_length = SIZE_MAX;
+    ssize_t n = 0;
     LanaError error;
     Value status_value, body_value, headers_map, resp_map;
     LanaMap *header_map, *headers_map_ptr;
@@ -7679,9 +7845,21 @@ static LanaError net_http_request(LanaVM *vm, const char *method, const char *ur
         if (n < 0) break;
         if (n == 0) break;
         resp_len += (size_t)n;
+        response[resp_len] = '\0';
+        if (!net_response_length(response, &expected_length)) {
+            net_socket_close(&sock); return net_error_result(vm, "response", out);
+        }
+        if (expected_length != SIZE_MAX && resp_len >= expected_length) {
+            resp_len = expected_length;
+            break;
+        }
     }
     net_socket_close(&sock);
     if (timed_out) return net_error_result(vm, "timeout", out);
+    if (n < 0) return net_error_result(vm, "recv", out);
+    if ((expected_length != SIZE_MAX && resp_len < expected_length) ||
+        (expected_length == SIZE_MAX && resp_len == sizeof(response) - 1u))
+        return net_error_result(vm, "response", out);
     if (resp_len == 0) return net_error_result(vm, "response", out);
     response[resp_len] = '\0';
     status_line = response;
@@ -7699,7 +7877,13 @@ static LanaError net_http_request(LanaVM *vm, const char *method, const char *ur
     if (error != LANA_OK) return error;
     headers_map = lana_value_map(headers_map_ptr);
     status_value = lana_value_number((double)http_status);
-    body_value = lana_value_string(body_start);
+    {
+        size_t length = strlen(body_start);
+        char *copy = lana_vm_alloc(vm, length + 1u);
+        if (copy == NULL) return LANA_ERR_OOM;
+        memcpy(copy, body_start, length + 1u);
+        body_value = lana_value_string(copy);
+    }
     error = lana_map_set(vm, header_map, "status", &status_value, true);
     if (error != LANA_OK) return error;
     error = lana_map_set(vm, header_map, "headers", &headers_map, true);
@@ -7745,6 +7929,196 @@ static LanaSocket *net_socket_get(LanaVM *vm, double handle) {
     size_t index = (size_t)handle;
     if (handle < 0 || index >= vm->socket_count) return NULL;
     return &vm->sockets[index];
+}
+
+static LanaError host_text(const LanaMap *map, const char *key, bool optional, const char **out) {
+    Value value;
+    LanaError error = lana_map_get(map, key, &value);
+    if (optional && (error == LANA_ERR_KEY || (error == LANA_OK && value.type == VAL_NULL))) {
+        *out = NULL; return LANA_OK;
+    }
+    if (error != LANA_OK || value.type != VAL_STRING) return LANA_ERR_TYPE;
+    *out = value.as.string; return LANA_OK;
+}
+
+static LanaError host_number(const LanaMap *map, const char *key, double *out) {
+    Value value;
+    if (lana_map_get(map, key, &value) != LANA_OK || value.type != VAL_NUMBER) return LANA_ERR_TYPE;
+    *out = value.as.number; return LANA_OK;
+}
+
+static LanaError host_number_as_u64(double number, uint64_t *out) {
+    if (!isfinite(number) || number < 0.0 || number >= 18446744073709551616.0 || floor(number) != number)
+        return LANA_ERR_INVALID_PARAMETERS;
+    *out = (uint64_t)number; return LANA_OK;
+}
+
+static LanaError host_u64(const LanaMap *map, const char *key, uint64_t *out) {
+    double number;
+    LanaError error = host_number(map, key, &number);
+    return error == LANA_OK ? host_number_as_u64(number, out) : error;
+}
+
+static LanaError host_record(LanaVM *vm, const char *const *keys, const Value *values,
+                             size_t count, Value *out) {
+    LanaMap *map;
+    LanaError error = lana_map_new(vm, count, &map);
+    if (error != LANA_OK) return error;
+    for (size_t i = 0u; i < count; ++i) {
+        if (values[i].type == VAL_STRING && values[i].as.string == NULL) continue;
+        Value value = values[i];
+        if (value.type == VAL_STRING) {
+            char *copy = host_string_copy(vm, value.as.string);
+            if (copy == NULL) return LANA_ERR_OOM;
+            value = lana_value_string(copy);
+        }
+        if ((error = map_put(vm, map, keys[i], value)) != LANA_OK) return error;
+    }
+    *out = lana_value_map(map); return LANA_OK;
+}
+
+static LanaError host_evaluation(const LanaMap *map, LanaPolicyEvaluation *out) {
+    LanaError error;
+    memset(out, 0, sizeof(*out)); out->struct_size = sizeof(*out); out->schema_version = 1u;
+    if ((error = host_u64(map, "decision_id", &out->decision_id)) != LANA_OK ||
+        (error = host_text(map, "target", false, &out->target)) != LANA_OK ||
+        (error = host_text(map, "scope", false, &out->scope)) != LANA_OK ||
+        (error = host_u64(map, "input_revision", &out->input_revision)) != LANA_OK ||
+        (error = host_text(map, "evidence_ids", true, &out->evidence_ids)) != LANA_OK ||
+        (error = host_text(map, "derivation_ids", true, &out->derivation_ids)) != LANA_OK ||
+        (error = host_text(map, "relationship_resolution", true, &out->relationship_resolution)) != LANA_OK ||
+        (error = host_u64(map, "evaluation_time", &out->evaluation_time)) != LANA_OK ||
+        (error = host_text(map, "reason", false, &out->reason)) != LANA_OK ||
+        (error = host_text(map, "requested_evidence", true, &out->requested_evidence)) != LANA_OK) return error;
+    return LANA_OK;
+}
+
+static LanaError host_decision_value(LanaVM *vm, const LanaDecision *d, Value *out) {
+    char version[65];
+    static const char hex[] = "0123456789abcdef";
+    const char *keys[] = {"decision_id", "policy_id", "policy_version", "target", "scope",
+                         "input_revision", "evidence_ids", "derivation_ids", "relationship_resolution",
+                         "outcome", "effect", "evaluation_time", "reason", "requested_evidence"};
+    for (size_t i = 0u; i < 32u; ++i) {
+        version[2u * i] = hex[d->policy_version[i] >> 4u];
+        version[2u * i + 1u] = hex[d->policy_version[i] & 15u];
+    }
+    version[64] = '\0';
+    Value values[] = {lana_value_number((double)d->decision_id), lana_value_string(d->policy_id),
+        lana_value_string(version), lana_value_string(d->target), lana_value_string(d->scope),
+        lana_value_number((double)d->input_revision), lana_value_string(d->evidence_ids),
+        lana_value_string(d->derivation_ids), lana_value_string(d->relationship_resolution),
+        lana_value_number((double)d->outcome), lana_value_string(d->effect),
+        lana_value_number((double)d->evaluation_time), lana_value_string(d->reason),
+        lana_value_string(d->requested_evidence)};
+    return host_record(vm, keys, values, sizeof(values) / sizeof(values[0]), out);
+}
+
+static LanaError host_policy(LanaVM *vm, uint32_t host_id, const Value *args, size_t argc, Value *out) {
+    LanaError error;
+    LanaPolicyEvaluation evaluation;
+    LanaDecision decision = {0};
+    if (host_id == LANA_HOST_POLICY_EVALUATE) {
+        LanaPolicy policy = {0};
+        uint64_t kind;
+        if (argc != 3u || args[0].type != VAL_MAP || args[2].type != VAL_MAP) return LANA_ERR_TYPE;
+        const LanaMap *map = args[0].as.map;
+        policy.struct_size = sizeof(policy); policy.schema_version = 1u;
+        policy.rule.struct_size = sizeof(policy.rule); policy.rule.schema_version = 1u;
+        if ((error = host_u64(map, "rule_kind", &kind)) != LANA_OK) return error;
+        if (kind > LANA_POLICY_PRESENT) return LANA_ERR_SCHEMA;
+        policy.rule.kind = (LanaPolicyRuleKind)kind;
+        if ((error = host_text(map, "policy_id", false, &policy.policy_id)) != LANA_OK ||
+            (error = host_text(map, "rule_field", false, &policy.rule.field)) != LANA_OK ||
+            (error = host_number(map, "rule_threshold", &policy.rule.threshold)) != LANA_OK ||
+            (error = host_text(map, "rule_expected", true, &policy.rule.expected)) != LANA_OK ||
+            (error = host_text(map, "rule_effect", false, &policy.rule.effect)) != LANA_OK ||
+            (error = host_evaluation(args[2].as.map, &evaluation)) != LANA_OK) return error;
+        error = lana_policy_evaluate(&policy, &args[1], &evaluation, &decision);
+        if (error != LANA_OK) return error;
+        return host_decision_value(vm, &decision, out);
+    }
+    if (argc != 1u || args[0].type != VAL_MAP) return LANA_ERR_TYPE;
+    const LanaMap *map = args[0].as.map;
+    const char *version;
+    uint64_t outcome;
+    if ((error = host_evaluation(map, &evaluation)) != LANA_OK ||
+        (error = host_text(map, "policy_id", false, &decision.policy_id)) != LANA_OK ||
+        (error = host_text(map, "policy_version", false, &version)) != LANA_OK ||
+        (error = host_u64(map, "outcome", &outcome)) != LANA_OK ||
+        (error = host_text(map, "effect", true, &decision.effect)) != LANA_OK) return error;
+    if (outcome > POLICY_OUTCOME_REQUEST_MORE_EVIDENCE) return LANA_ERR_SCHEMA;
+    if (strlen(version) != 64u || strspn(version, "0123456789abcdefABCDEF") != 64u) return LANA_ERR_CORRUPTION;
+    for (size_t i = 0u; i < 32u; ++i) {
+        char pair[] = {version[i * 2u], version[i * 2u + 1u], '\0'};
+        decision.policy_version[i] = (unsigned char)strtoul(pair, NULL, 16);
+    }
+    decision.struct_size = sizeof(decision); decision.schema_version = 1u;
+    decision.outcome = (PolicyOutcome)outcome;
+    decision.decision_id = evaluation.decision_id; decision.target = evaluation.target;
+    decision.scope = evaluation.scope; decision.input_revision = evaluation.input_revision;
+    decision.evidence_ids = evaluation.evidence_ids; decision.derivation_ids = evaluation.derivation_ids;
+    decision.relationship_resolution = evaluation.relationship_resolution;
+    decision.evaluation_time = evaluation.evaluation_time; decision.reason = evaluation.reason;
+    decision.requested_evidence = evaluation.requested_evidence;
+    if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+    return lana_policy_store_decision(vm->store, vm, &decision);
+}
+
+static LanaError host_event_value(LanaVM *vm, const LanaEvent *event, Value *out) {
+    const char *keys[] = {"event_id", "entity", "actor", "action", "reason", "timestamp", "revision", "correction_of"};
+    Value values[] = {lana_value_number((double)event->event_id), lana_value_string(event->entity),
+        lana_value_string(event->actor), lana_value_string(event->action), lana_value_string(event->reason),
+        lana_value_number((double)event->timestamp), lana_value_number((double)event->revision),
+        lana_value_number((double)event->correction_of)};
+    return host_record(vm, keys, values, sizeof(values) / sizeof(values[0]), out);
+}
+
+static LanaError host_ledger(LanaVM *vm, uint32_t host_id, const Value *args, size_t argc, Value *out) {
+    LanaError error;
+    LanaLedger *ledger;
+    LanaEventInput input = {0};
+    LanaLedgerQuery query = {0};
+    if (argc != 1u || args[0].type != VAL_MAP) return LANA_ERR_TYPE;
+    const LanaMap *map = args[0].as.map;
+    if (host_id == LANA_HOST_LEDGER_APPEND) {
+        input.struct_size = sizeof(input); input.schema_version = 1u;
+        if ((error = host_text(map, "entity", false, &input.entity)) != LANA_OK ||
+            (error = host_text(map, "actor", false, &input.actor)) != LANA_OK ||
+            (error = host_text(map, "action", false, &input.action)) != LANA_OK ||
+            (error = host_text(map, "reason", true, &input.reason)) != LANA_OK ||
+            (error = host_u64(map, "timestamp", &input.timestamp)) != LANA_OK ||
+            (error = host_u64(map, "correction_of", &input.correction_of)) != LANA_OK) return error;
+    } else {
+        query.struct_size = sizeof(query); query.schema_version = 1u;
+        if ((error = host_text(map, "entity", true, &query.entity)) != LANA_OK ||
+            (error = host_text(map, "actor", true, &query.actor)) != LANA_OK ||
+            (error = host_text(map, "action", true, &query.action)) != LANA_OK ||
+            (error = host_u64(map, "start_timestamp", &query.start_timestamp)) != LANA_OK ||
+            (error = host_u64(map, "end_timestamp", &query.end_timestamp)) != LANA_OK) return error;
+    }
+    if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
+    if ((error = lana_ledger_open(vm->store, &ledger)) != LANA_OK) return error;
+    if (host_id == LANA_HOST_LEDGER_APPEND) {
+        LanaEvent event;
+        error = lana_ledger_append(ledger, &input, &event);
+        if (error == LANA_OK) error = host_event_value(vm, &event, out);
+    } else {
+        LanaEvent *events = NULL;
+        size_t count = 0u;
+        LanaArray *array;
+        error = lana_ledger_query(ledger, vm, &query, &events, &count);
+        if (error == LANA_OK) error = dataset_array_new(vm, &array);
+        for (size_t i = 0u; error == LANA_OK && i < count; ++i) {
+            Value value;
+            error = host_event_value(vm, &events[i], &value);
+            if (error == LANA_OK) error = dataset_array_push(vm, array, &value);
+        }
+        if (error == LANA_OK) *out = lana_value_array(array);
+        lana_ledger_events_free(events, count);
+    }
+    lana_ledger_close(ledger);
+    return error;
 }
 
 static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *arguments,
@@ -9499,9 +9873,16 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             *out = plan;
             return LANA_OK;
         }
+        case LANA_HOST_POLICY_EVALUATE:
+        case LANA_HOST_POLICY_STORE_DECISION:
+            return host_policy(vm, host_id, arguments, argc, out);
+        case LANA_HOST_LEDGER_APPEND:
+        case LANA_HOST_LEDGER_QUERY:
+            return host_ledger(vm, host_id, arguments, argc, out);
         case LANA_HOST_STORE_OPEN: {
             LanaStoreOptions options;
             LanaStore *store;
+            LanaError error;
             if (argc != 1u || arguments[0].type != VAL_STRING) return LANA_ERR_TYPE;
             if (vm->store != NULL) return LANA_ERR_CONFLICT;
             memset(&options, 0, sizeof(options));
@@ -9509,7 +9890,7 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
             options.schema_version = 1u;
             options.path = arguments[0].as.string;
             options.timeout_ms = 0u;
-            if (lana_store_open(&options, &store) != LANA_OK) return LANA_ERR_IO;
+            if ((error = lana_store_open(&options, &store)) != LANA_OK) return error;
             vm->store = store;
             *out = lana_value_null();
             return LANA_OK;
@@ -9536,9 +9917,10 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
         }
         case LANA_HOST_STORE_COMMIT: {
             LanaStoreRevisionInfo info;
+            LanaError error;
             if (argc != 0u) return LANA_ERR_TYPE;
             if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
-            if (lana_store_commit(vm->store, &info) != LANA_OK) return LANA_ERR_UNSUPPORTED_OPERATION;
+            if ((error = lana_store_commit(vm->store, &info)) != LANA_OK) return error;
             *out = lana_value_number((double)info.revision_id);
             return LANA_OK;
         }
@@ -9585,10 +9967,13 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
         case LANA_HOST_STORE_GET_AT: {
             Value value;
             LanaError error;
+            uint64_t revision;
             if (argc != 2u || arguments[0].type != VAL_NUMBER ||
                 arguments[1].type != VAL_STRING) return LANA_ERR_TYPE;
             if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
-            error = lana_store_get_at(vm->store, vm, (uint64_t)arguments[0].as.number,
+            error = host_number_as_u64(arguments[0].as.number, &revision);
+            if (error != LANA_OK) return error;
+            error = lana_store_get_at(vm->store, vm, revision,
                                       arguments[1].as.string, &value);
             if (error != LANA_OK) return error;
             *out = value;
@@ -9605,11 +9990,15 @@ static LanaError execute_host_call(LanaVM *vm, uint32_t host_id, const Value *ar
         }
         case LANA_HOST_STORE_COMMIT_IF: {
             LanaStoreRevisionInfo current, info;
+            uint64_t revision;
+            LanaError error;
             if (argc != 1u || arguments[0].type != VAL_NUMBER) return LANA_ERR_TYPE;
             if (vm->store == NULL) return LANA_ERR_INVALID_STATE;
             if (lana_store_current_revision(vm->store, &current) != LANA_OK) return LANA_ERR_IO;
-            if (current.revision_id != (uint64_t)arguments[0].as.number) return LANA_ERR_CONFLICT;
-            if (lana_store_commit(vm->store, &info) != LANA_OK) return LANA_ERR_UNSUPPORTED_OPERATION;
+            error = host_number_as_u64(arguments[0].as.number, &revision);
+            if (error != LANA_OK) return error;
+            if (current.revision_id != revision) return LANA_ERR_CONFLICT;
+            if ((error = lana_store_commit(vm->store, &info)) != LANA_OK) return error;
             *out = lana_value_number((double)info.revision_id);
             return LANA_OK;
         }
@@ -12199,6 +12588,7 @@ static LanaError vm_step(LanaVM *vm) {
                 frame->registers[ins->a] = lana_value_array(array); break;
             }
             case OP_ARRAY_GET: case OP_ARRAY_SET: {
+                if (ins->opcode == OP_ARRAY_SET && vm->active_path_count > 1u) { error = LANA_ERR_UNSUPPORTED_OPERATION; break; }
                 Value *array_value = &frame->registers[ins->a];
                 const Value *index_value = &frame->registers[ins->b];
                 size_t index;
@@ -12347,9 +12737,7 @@ static LanaError vm_step(LanaVM *vm) {
                 size_t argument;
                 if (vm->active_path_count > 1u) { error = LANA_ERR_UNSUPPORTED_OPERATION; break; }
                 for (argument = 0; argument < ins->imm; ++argument)
-                    if (value_is_unresolved(&frame->registers[ins->c + argument])) {
-                        error = LANA_ERR_UNRESOLVED_VALUE; break;
-                    }
+                    if ((error = value_check(vm, &frame->registers[ins->c + argument], LANA_ERR_UNRESOLVED_VALUE)) != LANA_OK) break;
                 if (error != LANA_OK) break;
                 error = start_task(vm, ins->b, &frame->registers[ins->c],
                                    &frame->histories[ins->c], ins->imm, &task);
@@ -12474,9 +12862,7 @@ static LanaError vm_step(LanaVM *vm) {
                 if (vm->active_path_count > 1u) { error = LANA_ERR_UNSUPPORTED_OPERATION; break; }
                 for (argument = 0; argument < ins->imm; ++argument)
                     if (!accepts_unresolved &&
-                        value_is_unresolved(&frame->registers[ins->c + argument])) {
-                        error = LANA_ERR_UNRESOLVED_VALUE; break;
-                    }
+                        (error = value_check(vm, &frame->registers[ins->c + argument], LANA_ERR_UNRESOLVED_VALUE)) != LANA_OK) break;
                 if (error == LANA_OK && materialize && ins->imm > 0u) {
                     arguments = lana_vm_alloc(vm, ins->imm * sizeof(*arguments));
                     if (arguments == NULL) error = LANA_ERR_OOM;
@@ -12542,6 +12928,7 @@ static LanaError vm_step(LanaVM *vm) {
                 break;
             }
             case OP_YIELD: {
+                if (vm->active_path_count > 1u) { error = LANA_ERR_UNSUPPORTED_OPERATION; break; }
                 Value *gen_value = &frame->registers[ins->a];
                 LanaGenerator *generator;
                 Value yielded = frame->registers[ins->b];
@@ -12564,6 +12951,7 @@ static LanaError vm_step(LanaVM *vm) {
                 break;
             }
             case OP_NEXT: {
+                if (vm->active_path_count > 1u) { error = LANA_ERR_UNSUPPORTED_OPERATION; break; }
                 Value *gen_value = &frame->registers[ins->a];
                 LanaGenerator *generator;
                 LanaFrame *callee;
@@ -12621,6 +13009,7 @@ static LanaError vm_step(LanaVM *vm) {
                 break;
             }
             case OP_AWAIT: {
+                if (vm->active_path_count > 1u) { error = LANA_ERR_UNSUPPORTED_OPERATION; break; }
                 /* Suspend the current async frame until the awaited future
                  * completes, then store its result and yield to the loop. */
                 Value *future_value = &frame->registers[ins->a];
@@ -12700,9 +13089,13 @@ static LanaError vm_step(LanaVM *vm) {
             }
             case OP_PRINT:
                 if (vm->active_path_count > 1u) error = LANA_ERR_UNSUPPORTED_OPERATION;
-                else if (value_is_unresolved(&frame->registers[ins->a]))
-                    error = LANA_ERR_UNRESOLVED_VALUE;
-                else { lana_value_print(reactive_value(&frame->registers[ins->a])); (void)printf("\n"); }
+                else {
+                    char *text = NULL;
+                    size_t remaining = vm->allocated_bytes >= vm->memory_limit ? 0u : vm->memory_limit - vm->allocated_bytes;
+                    error = value_check(vm, &frame->registers[ins->a], LANA_ERR_UNRESOLVED_VALUE);
+                    if (error == LANA_OK) error = lana_value_format(reactive_value(&frame->registers[ins->a]), remaining, &text);
+                    if (error == LANA_OK) { (void)printf("%s\n", text); free(text); }
+                }
                 break;
             case OP_HALT:
                 if (vm->path_execution != NULL) error = LANA_ERR_UNSUPPORTED_OPERATION;
