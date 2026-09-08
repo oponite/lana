@@ -12,7 +12,7 @@ use lana_bytecode::LanaError;
 
 use crate::backend;
 use crate::metal;
-use crate::value::{Map, Tensor, TensorDtype, Value, ValueKind};
+use crate::value::{Map, Tensor, TensorDevice, TensorDtype, Value, ValueKind};
 
 pub const TENSOR_MAX_RANK: usize = 32;
 
@@ -312,6 +312,8 @@ pub fn tensor_new_dtype(
         strides,
         is_complex,
         dtype,
+        device: TensorDevice::Cpu,
+        metal_buffer: None,
         data: Arc::new(data),
         offset: 0,
         is_state: false,
@@ -335,6 +337,18 @@ pub fn tensor_new(
     )
 }
 
+fn promote_metal(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    tensor: &mut Tensor,
+) -> Result<(), LanaError> {
+    if tensor.device != TensorDevice::Metal || tensor.metal_buffer.is_some() { return Ok(()); }
+    if alloc(tensor.data.len()) != LanaError::Ok { return Err(LanaError::Oom); }
+    tensor.metal_buffer = Some(Arc::new(
+        metal::ResidentBuffer::new(&tensor.data).ok_or(LanaError::UnsupportedOperation)?
+    ));
+    Ok(())
+}
+
 /// LIP-027: cast a tensor to another real dtype. Same-dtype is a no-op
 /// (returns the same tensor). Cast to/from complex is out of scope (`Type`).
 /// The result is a fresh base tensor; a view is never mutated.
@@ -350,6 +364,7 @@ pub fn tensor_cast(
         return Ok(t.clone());
     }
     let mut r = tensor_new_dtype(alloc, t.ndim, &t.shape, dtype)?;
+    r.device = t.device;
     let total: usize = t.shape.iter().product();
     let mut idx = vec![0usize; t.ndim];
     for lin in 0..total {
@@ -364,6 +379,7 @@ pub fn tensor_cast(
         }
         tensor_set_real(&mut r, lin, tensor_get_real(t, t.offset + src));
     }
+    promote_metal(alloc, &mut r)?;
     Ok(r)
 }
 
@@ -397,6 +413,363 @@ pub fn tensor_shape_from_array(
     Ok(shape)
 }
 
+pub fn tensor_reshape(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    source: &Tensor,
+    shape_value: &Value,
+) -> Result<Value, LanaError> {
+    let shape = tensor_shape_from_array(alloc, shape_value)?;
+    let count = shape.iter().try_fold(1usize, |n, d| n.checked_mul(*d))
+        .ok_or(LanaError::InvalidParameters)?;
+    if count != tensor_element_count(source) {
+        return Err(LanaError::InvalidParameters);
+    }
+    let mut result = tensor_new_dtype(alloc, shape.len(), &shape, source.dtype)?;
+    result.is_state = source.is_state;
+    result.device = source.device;
+    for linear in 0..count {
+        let mut remainder = linear;
+        let mut index = source.offset;
+        for axis in (0..source.ndim).rev() {
+            index += (if source.shape[axis] == 0 { 0 } else { remainder % source.shape[axis] }) * source.strides[axis];
+            remainder /= source.shape[axis];
+        }
+        tensor_set_real(&mut result, linear, tensor_get_real(source, index));
+        tensor_set_imag(&mut result, linear, tensor_get_imag(source, index));
+    }
+    promote_metal(alloc, &mut result)?;
+    Ok(Value::tensor(Arc::new(result)))
+}
+
+pub fn tensor_transpose(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    source: &Tensor,
+) -> Result<Value, LanaError> {
+    if source.ndim < 2 {
+        return Err(LanaError::InvalidParameters);
+    }
+    if alloc(std::mem::size_of::<Tensor>() + 2 * source.ndim * std::mem::size_of::<usize>()) != LanaError::Ok {
+        return Err(LanaError::Oom);
+    }
+    let mut result = source.clone();
+    result.shape.swap(source.ndim - 2, source.ndim - 1);
+    result.strides.swap(source.ndim - 2, source.ndim - 1);
+    promote_metal(alloc, &mut result)?;
+    Ok(Value::tensor(Arc::new(result)))
+}
+
+pub fn logical_index(tensor: &Tensor, mut linear: usize) -> usize {
+    let mut index = tensor.offset;
+    for axis in (0..tensor.ndim).rev() {
+        index += (if tensor.shape[axis] == 0 { 0 } else { linear % tensor.shape[axis] }) * tensor.strides[axis];
+        linear /= tensor.shape[axis];
+    }
+    index
+}
+
+pub fn tensor_unary_math(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    source: &Tensor,
+    operation: u32,
+) -> Result<Value, LanaError> {
+    if source.is_complex { return Err(LanaError::Type); }
+    let mut result = tensor_new_dtype(alloc, source.ndim, &source.shape, source.dtype)?;
+    result.device = source.device;
+    for i in 0..tensor_element_count(source) {
+        let value = tensor_get_real(source, logical_index(source, i));
+        if (operation == 1 && value <= 0.0) || (operation == 2 && value < 0.0) {
+            return Err(LanaError::InvalidParameters);
+        }
+        let computed = match operation { 0 => value.exp(), 1 => value.ln(), 2 => value.sqrt(), _ => value.max(0.0) };
+        if !computed.is_finite() { return Err(LanaError::InvalidParameters); }
+        tensor_set_real(&mut result, i, computed);
+    }
+    promote_metal(alloc, &mut result)?;
+    Ok(Value::tensor(Arc::new(result)))
+}
+
+pub fn tensor_softmax_like(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    source: &Tensor,
+    axis_value: Option<&Value>,
+    logsumexp: bool,
+) -> Result<Value, LanaError> {
+    if source.is_complex { return Err(LanaError::Type); }
+    if source.ndim == 0 { return Err(LanaError::InvalidParameters); }
+    let mut axis_number = match axis_value { None => -1.0, Some(v) => match v.kind { ValueKind::Number(n) => n, _ => return Err(LanaError::Type) } };
+    if !axis_number.is_finite() || axis_number.floor() != axis_number { return Err(LanaError::InvalidParameters); }
+    if axis_number < 0.0 { axis_number += source.ndim as f64; }
+    if axis_number < 0.0 || axis_number >= source.ndim as f64 { return Err(LanaError::InvalidParameters); }
+    let axis = axis_number as usize;
+    let width = source.shape[axis];
+    if width == 0 { return Err(LanaError::InvalidParameters); }
+    let inner = source.shape[axis + 1..].iter().product::<usize>();
+    let outer = source.shape[..axis].iter().product::<usize>();
+    let shape = if logsumexp { source.shape.iter().enumerate().filter_map(|(i, n)| (i != axis).then_some(*n)).collect::<Vec<_>>() } else { source.shape.clone() };
+    let mut result = tensor_new_dtype(alloc, shape.len(), &shape, source.dtype)?;
+    result.device = source.device;
+    for o in 0..outer { for inner_index in 0..inner {
+        let base = o * width * inner + inner_index;
+        let mut maximum = f64::NEG_INFINITY;
+        for k in 0..width { maximum = maximum.max(tensor_get_real(source, logical_index(source, base + k * inner))); }
+        let mut total = 0.0;
+        for k in 0..width { total += (tensor_get_real(source, logical_index(source, base + k * inner)) - maximum).exp(); }
+        if !total.is_finite() || total <= 0.0 { return Err(LanaError::InvalidParameters); }
+        if logsumexp { tensor_set_real(&mut result, o * inner + inner_index, maximum + total.ln()); }
+        else { for k in 0..width { tensor_set_real(&mut result, base + k * inner, (tensor_get_real(source, logical_index(source, base + k * inner)) - maximum).exp() / total); } }
+    } }
+    promote_metal(alloc, &mut result)?;
+    Ok(Value::tensor(Arc::new(result)))
+}
+
+pub fn tensor_argmax(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    source: &Tensor,
+    axis_value: Option<&Value>,
+) -> Result<Value, LanaError> {
+    let count = tensor_element_count(source);
+    if source.is_complex || count == 0 { return Err(LanaError::InvalidParameters); }
+    if axis_value.is_none() {
+        let mut best = 0usize;
+        let mut maximum = tensor_get_real(source, logical_index(source, 0));
+        for i in 1..count {
+            let value = tensor_get_real(source, logical_index(source, i));
+            if value > maximum { maximum = value; best = i; }
+        }
+        return Ok(Value::number(best as f64));
+    }
+    let mut axis_number = match axis_value.unwrap().kind { ValueKind::Number(n) => n, _ => return Err(LanaError::Type) };
+    if !axis_number.is_finite() || axis_number.floor() != axis_number { return Err(LanaError::InvalidParameters); }
+    if axis_number < 0.0 { axis_number += source.ndim as f64; }
+    if axis_number < 0.0 || axis_number >= source.ndim as f64 { return Err(LanaError::InvalidParameters); }
+    let axis = axis_number as usize;
+    let width = source.shape[axis];
+    if width == 0 { return Err(LanaError::InvalidParameters); }
+    let inner = source.shape[axis + 1..].iter().product::<usize>();
+    let outer = source.shape[..axis].iter().product::<usize>();
+    let shape = source.shape.iter().enumerate().filter_map(|(i, n)| (i != axis).then_some(*n)).collect::<Vec<_>>();
+    let mut result = tensor_new_dtype(alloc, shape.len(), &shape, TensorDtype::F64)?;
+    result.device = source.device;
+    for o in 0..outer { for inner_index in 0..inner {
+        let base = o * width * inner + inner_index;
+        let mut best = 0usize;
+        let mut maximum = tensor_get_real(source, logical_index(source, base));
+        for k in 1..width {
+            let value = tensor_get_real(source, logical_index(source, base + k * inner));
+            if value > maximum { maximum = value; best = k; }
+        }
+        tensor_set_real(&mut result, o * inner + inner_index, best as f64);
+    } }
+    promote_metal(alloc, &mut result)?;
+    Ok(Value::tensor(Arc::new(result)))
+}
+
+fn broadcast_shape(a: &Tensor, b: &Tensor) -> Result<Vec<usize>, LanaError> {
+    let ndim = a.ndim.max(b.ndim);
+    let mut shape = vec![0; ndim];
+    for (i, item) in shape.iter_mut().enumerate() {
+        let ai = if i < ndim - a.ndim { 1 } else { a.shape[i - (ndim - a.ndim)] };
+        let bi = if i < ndim - b.ndim { 1 } else { b.shape[i - (ndim - b.ndim)] };
+        *item = if ai == bi { ai } else if ai == 1 { bi } else if bi == 1 { ai }
+            else { return Err(LanaError::InvalidParameters); };
+    }
+    Ok(shape)
+}
+
+fn broadcast_compatible(tensor: &Tensor, shape: &[usize]) -> bool {
+    tensor.ndim <= shape.len() && tensor.shape.iter().enumerate().all(|(i, n)| {
+        *n == 1 || *n == shape[shape.len() - tensor.ndim + i]
+    })
+}
+
+pub fn broadcast_index(tensor: &Tensor, shape: &[usize], mut linear: usize) -> usize {
+    let mut coordinates = [0; TENSOR_MAX_RANK];
+    for i in (0..shape.len()).rev() {
+        coordinates[i] = if shape[i] == 0 { 0 } else { linear % shape[i] };
+        linear /= shape[i];
+    }
+    let offset = shape.len() - tensor.ndim;
+    tensor.shape.iter().enumerate().fold(tensor.offset, |index, (i, n)| {
+        index + if *n == 1 { 0 } else { coordinates[offset + i] * tensor.strides[i] }
+    })
+}
+
+pub fn tensor_compare_values(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    a: &Tensor,
+    b: &Tensor,
+    operation: &str,
+) -> Result<Value, LanaError> {
+    if a.dtype != b.dtype || a.is_complex || b.is_complex { return Err(LanaError::Type); }
+    if a.device != b.device { return Err(LanaError::InvalidParameters); }
+    let op = match operation { "eq" => 0, "ne" => 1, "lt" => 2, "le" => 3, "gt" => 4, "ge" => 5, _ => return Err(LanaError::InvalidParameters) };
+    let shape = broadcast_shape(a, b)?;
+    let mut result = tensor_new_dtype(alloc, shape.len(), &shape, a.dtype)?;
+    result.device = a.device;
+    for i in 0..tensor_element_count(&result) {
+        let av = tensor_get_real(a, broadcast_index(a, &shape, i));
+        let bv = tensor_get_real(b, broadcast_index(b, &shape, i));
+        let selected = match op { 0 => av == bv, 1 => av != bv, 2 => av < bv, 3 => av <= bv, 4 => av > bv, _ => av >= bv };
+        tensor_set_real(&mut result, i, if selected { 1.0 } else { 0.0 });
+    }
+    promote_metal(alloc, &mut result)?;
+    Ok(Value::tensor(Arc::new(result)))
+}
+
+pub fn tensor_select_values(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    mask: &Tensor,
+    yes: &Tensor,
+    no: &Tensor,
+) -> Result<Value, LanaError> {
+    if mask.is_complex || yes.dtype != no.dtype { return Err(LanaError::Type); }
+    if mask.device != yes.device || yes.device != no.device { return Err(LanaError::InvalidParameters); }
+    let shape = broadcast_shape(yes, no)?;
+    if !broadcast_compatible(mask, &shape) { return Err(LanaError::InvalidParameters); }
+    let mut result = tensor_new_dtype(alloc, shape.len(), &shape, yes.dtype)?;
+    result.device = yes.device;
+    for i in 0..tensor_element_count(&result) {
+        let source = if tensor_get_real(mask, broadcast_index(mask, &shape, i)) != 0.0 { yes } else { no };
+        let index = broadcast_index(source, &shape, i);
+        tensor_set_real(&mut result, i, tensor_get_real(source, index));
+        tensor_set_imag(&mut result, i, tensor_get_imag(source, index));
+    }
+    promote_metal(alloc, &mut result)?;
+    Ok(Value::tensor(Arc::new(result)))
+}
+
+pub fn tensor_gather_values(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    source: &Tensor,
+    indices: &Tensor,
+    axis_value: &Value,
+) -> Result<Value, LanaError> {
+    if indices.is_complex { return Err(LanaError::Type); }
+    if source.device != indices.device { return Err(LanaError::InvalidParameters); }
+    let ValueKind::Number(mut axis_number) = axis_value.kind else { return Err(LanaError::Type); };
+    if !axis_number.is_finite() || axis_number.floor() != axis_number { return Err(LanaError::InvalidParameters); }
+    if axis_number < 0.0 { axis_number += source.ndim as f64; }
+    if axis_number < 0.0 || axis_number >= source.ndim as f64 { return Err(LanaError::InvalidParameters); }
+    let axis = axis_number as usize;
+    if source.ndim - 1 + indices.ndim > TENSOR_MAX_RANK { return Err(LanaError::InvalidParameters); }
+    let mut shape = source.shape[..axis].to_vec();
+    shape.extend_from_slice(&indices.shape);
+    shape.extend_from_slice(&source.shape[axis + 1..]);
+    let mut result = tensor_new_dtype(alloc, shape.len(), &shape, source.dtype)?;
+    result.device = source.device;
+    let mut coordinates = [0; TENSOR_MAX_RANK];
+    for linear in 0..tensor_element_count(&result) {
+        let mut rem = linear;
+        for i in (0..shape.len()).rev() { coordinates[i] = if shape[i] == 0 { 0 } else { rem % shape[i] }; rem /= shape[i]; }
+        let index_linear = indices.shape.iter().enumerate().fold(0, |n, (i, width)| n * width + coordinates[axis + i]);
+        let mut requested = tensor_get_real(indices, logical_index(indices, index_linear));
+        if !requested.is_finite() || requested.floor() != requested { return Err(LanaError::InvalidParameters); }
+        if requested < 0.0 { requested += source.shape[axis] as f64; }
+        if requested < 0.0 || requested >= source.shape[axis] as f64 { return Err(LanaError::Key); }
+        let mut source_index = source.offset;
+        for (i, coordinate) in coordinates.iter().take(axis).enumerate() { source_index += coordinate * source.strides[i]; }
+        source_index += requested as usize * source.strides[axis];
+        for i in axis + 1..source.ndim { source_index += coordinates[i - 1 + indices.ndim] * source.strides[i]; }
+        tensor_set_real(&mut result, linear, tensor_get_real(source, source_index));
+        tensor_set_imag(&mut result, linear, tensor_get_imag(source, source_index));
+    }
+    promote_metal(alloc, &mut result)?;
+    Ok(Value::tensor(Arc::new(result)))
+}
+
+fn random_next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e3779b97f4a7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+fn random_unit(state: &mut u64) -> f64 {
+    (random_next(state) >> 11) as f64 * (1.0 / 9007199254740992.0)
+}
+
+pub fn tensor_random(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    shape_value: &Value,
+    seed_value: &Value,
+    normal: bool,
+) -> Result<Value, LanaError> {
+    let ValueKind::Number(seed) = seed_value.kind else { return Err(LanaError::InvalidParameters); };
+    if !seed.is_finite() || seed < 0.0 || seed >= 9007199254740992.0 || seed.floor() != seed {
+        return Err(LanaError::InvalidParameters);
+    }
+    let shape = tensor_shape_from_array(alloc, shape_value)?;
+    let mut result = tensor_new_dtype(alloc, shape.len(), &shape, TensorDtype::F64)?;
+    let mut state = seed as u64;
+    let count = tensor_element_count(&result);
+    let mut i = 0;
+    while i < count {
+        if !normal {
+            tensor_set_real(&mut result, i, random_unit(&mut state));
+            i += 1;
+            continue;
+        }
+        let mut u1 = random_unit(&mut state);
+        let u2 = random_unit(&mut state);
+        if u1 == 0.0 { u1 = 1.0 / 9007199254740992.0; }
+        let radius = (-2.0 * u1.ln()).sqrt();
+        let angle = 6.283185307179586476925286766559 * u2;
+        tensor_set_real(&mut result, i, radius * angle.cos());
+        i += 1;
+        if i < count { tensor_set_real(&mut result, i, radius * angle.sin()); i += 1; }
+    }
+    promote_metal(alloc, &mut result)?;
+    Ok(Value::tensor(Arc::new(result)))
+}
+
+pub fn tensor_cholesky_solve(
+    alloc: &mut dyn FnMut(usize) -> LanaError,
+    matrix: &Tensor,
+    rhs: &Tensor,
+) -> Result<Value, LanaError> {
+    if matrix.is_complex || rhs.is_complex || matrix.dtype != rhs.dtype { return Err(LanaError::Type); }
+    if matrix.device != rhs.device { return Err(LanaError::InvalidParameters); }
+    if matrix.ndim != 2 || matrix.shape[0] != matrix.shape[1] ||
+        (rhs.ndim != 1 && rhs.ndim != 2) || rhs.shape[0] != matrix.shape[0] {
+        return Err(LanaError::InvalidParameters);
+    }
+    let n = matrix.shape[0];
+    let columns = if rhs.ndim == 1 { 1 } else { rhs.shape[1] };
+    let scratch = (n * n + n * columns) * std::mem::size_of::<f64>();
+    if alloc(scratch) != LanaError::Ok { return Err(LanaError::Oom); }
+    let mut lower = vec![0.0; n * n];
+    let mut work = vec![0.0; n * columns];
+    for i in 0..n { for j in 0..=i {
+        let aij = tensor_get_real(matrix, logical_index(matrix, i * n + j));
+        let aji = tensor_get_real(matrix, logical_index(matrix, j * n + i));
+        if !aij.is_finite() || !aji.is_finite() || aij != aji { return Err(LanaError::InvalidParameters); }
+        let mut value = aij;
+        for k in 0..j { value -= lower[i * n + k] * lower[j * n + k]; }
+        if i == j {
+            if !(value > 0.0) || !value.is_finite() { return Err(LanaError::InvalidParameters); }
+            lower[i * n + j] = value.sqrt();
+        } else { lower[i * n + j] = value / lower[j * n + j]; }
+    } }
+    for column in 0..columns {
+        for i in 0..n {
+            let mut value = tensor_get_real(rhs, logical_index(rhs, i * columns + column));
+            if !value.is_finite() { return Err(LanaError::InvalidParameters); }
+            for k in 0..i { value -= lower[i * n + k] * work[k * columns + column]; }
+            work[i * columns + column] = value / lower[i * n + i];
+        }
+        for i in (0..n).rev() {
+            let mut value = work[i * columns + column];
+            for k in i + 1..n { value -= lower[k * n + i] * work[k * columns + column]; }
+            work[i * columns + column] = value / lower[i * n + i];
+        }
+    }
+    let mut result = tensor_new_dtype(alloc, rhs.ndim, &rhs.shape, rhs.dtype)?;
+    result.device = rhs.device;
+    for (i, value) in work.into_iter().enumerate() { tensor_set_real(&mut result, i, value); }
+    Ok(Value::tensor(Arc::new(result)))
+}
+
 /// Compute the row-major broadcast strides of `t` against an output shape of
 /// `out_ndim` dims, mirroring `tensor_broadcast_strides`.
 fn tensor_broadcast_strides(t: &Tensor, out_ndim: usize, out_shape: &[usize], strides: &mut [usize]) {
@@ -424,6 +797,7 @@ pub fn tensor_elementwise(
     op: u32,
 ) -> Result<Tensor, LanaError> {
     // LIP-027: element-wise requires the same dtype; no silent promotion.
+    if a.device != b.device { return Err(LanaError::InvalidParameters); }
     if a.dtype != b.dtype {
         return Err(LanaError::Type);
     }
@@ -456,6 +830,7 @@ pub fn tensor_elementwise(
         }
     }
     let mut r = tensor_new_dtype(alloc, out_ndim, &out_shape, a.dtype)?;
+    r.device = a.device;
     if out_ndim > 0
         && alloc(out_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
     {
@@ -528,6 +903,7 @@ pub fn tensor_elementwise(
             });
         }
     }
+    promote_metal(alloc, &mut r)?;
     Ok(r)
 }
 
@@ -540,6 +916,7 @@ pub fn tensor_elementwise_scalar(
     op: u32,
 ) -> Result<Tensor, LanaError> {
     let mut r = tensor_new_dtype(alloc, t.ndim, &t.shape, t.dtype)?;
+    r.device = t.device;
     let total: usize = t.shape.iter().product();
     let mut idx = vec![0usize; t.ndim];
     for lin in 0..total {
@@ -583,6 +960,7 @@ pub fn tensor_elementwise_scalar(
             });
         }
     }
+    promote_metal(alloc, &mut r)?;
     Ok(r)
 }
 
@@ -632,6 +1010,7 @@ pub fn tensor_matmul(
     b: &Tensor,
     out_dtype: TensorDtype,
 ) -> Result<Tensor, LanaError> {
+    if a.device != b.device { return Err(LanaError::InvalidParameters); }
     if a.is_complex != b.is_complex {
         return Err(LanaError::Type);
     }
@@ -705,6 +1084,7 @@ pub fn tensor_matmul(
         out_shape[pos] = b_cols;
     }
     let mut r = tensor_new_dtype(alloc, out_ndim, &out_shape, out_dtype)?;
+    r.device = a.device;
     if batch_ndim > 0
         && alloc(batch_ndim * std::mem::size_of::<usize>()) != LanaError::Ok
     {
@@ -860,6 +1240,7 @@ pub fn tensor_matmul(
             }
         }
     }
+    promote_metal(alloc, &mut r)?;
     Ok(r)
 }
 
@@ -1120,6 +1501,7 @@ pub fn tensor_reduce(
     let mut r = tensor_new(alloc, 0, &[], true)?;
     tensor_set_real(&mut r, 0, re);
     tensor_set_imag(&mut r, 0, im);
+    promote_metal(alloc, &mut r)?;
     Ok(Value::tensor(Arc::new(r)))
 }
 
@@ -1141,6 +1523,7 @@ pub fn tensor_reduce_axis(
         if i != axis { shape[j] = dim; j += 1; }
     }
     let mut r = tensor_new_dtype(alloc, t.ndim - 1, &shape[..j], t.dtype)?;
+    r.device = t.device;
     let total = r.shape.iter().product();
     let fp32 = reduction_accumulation_fp32(t);
     for i in 0..total {
@@ -1155,6 +1538,7 @@ pub fn tensor_reduce_axis(
         tensor_set_real(&mut r, i, re);
         if t.is_complex { tensor_set_imag(&mut r, i, im); }
     }
+    promote_metal(alloc, &mut r)?;
     Ok(Value::tensor(Arc::new(r)))
 }
 
@@ -1395,6 +1779,8 @@ pub fn tensor_transpose_last_two(t: &Tensor) -> Tensor {
         strides,
         is_complex: t.is_complex,
         dtype: t.dtype,
+        device: t.device.clone(),
+        metal_buffer: t.metal_buffer.clone(),
         data: Arc::clone(&t.data),
         offset: t.offset,
         is_state: t.is_state,
@@ -1765,6 +2151,8 @@ pub fn tensor_index(
         strides: view_strides[..view_ndim].to_vec(),
         is_complex: t.is_complex,
         dtype: t.dtype,
+        device: t.device,
+        metal_buffer: t.metal_buffer.clone(),
         data: Arc::clone(&t.data),
         offset: view_offset,
         is_state: t.is_state,
@@ -1964,6 +2352,47 @@ mod tests {
     }
 
     #[test]
+    fn compare_select_and_gather_match_cpu_contract() {
+        let a = tensor(&[2], &[1., 3.]);
+        let b = tensor(&[2], &[2., 3.]);
+        let compared = tensor_compare_values(&mut ok_alloc, &a, &b, "lt").unwrap();
+        let ValueKind::Tensor(mask) = compared.kind else { panic!("expected tensor"); };
+        assert_eq!(tensor_f64(&mask), [1., 0.]);
+        let yes = tensor(&[2], &[10., 10.]);
+        let no = tensor(&[2], &[20., 20.]);
+        let selected = tensor_select_values(&mut ok_alloc, &mask, &yes, &no).unwrap();
+        let ValueKind::Tensor(selected) = selected.kind else { panic!("expected tensor"); };
+        assert_eq!(tensor_f64(&selected), [10., 20.]);
+        let source = tensor(&[2, 3], &[1., 2., 3., 4., 5., 6.]);
+        let indices = tensor(&[2], &[2., 0.]);
+        let gathered = tensor_gather_values(&mut ok_alloc, &source, &indices, &Value::number(1.)).unwrap();
+        let ValueKind::Tensor(gathered) = gathered.kind else { panic!("expected tensor"); };
+        assert_eq!(gathered.shape, [2, 2]);
+        assert_eq!(tensor_f64(&gathered), [3., 1., 6., 4.]);
+    }
+
+    #[test]
+    fn cholesky_and_seeded_random_match_cpu_contract() {
+        let matrix = tensor(&[2, 2], &[4., 1., 1., 3.]);
+        let rhs = tensor(&[2], &[1., 2.]);
+        let solved = tensor_cholesky_solve(&mut ok_alloc, &matrix, &rhs).unwrap();
+        let ValueKind::Tensor(solved) = solved.kind else { panic!("expected tensor"); };
+        assert!((tensor_get_real(&solved, 0) - 1. / 11.).abs() < 1e-12);
+        assert!((tensor_get_real(&solved, 1) - 7. / 11.).abs() < 1e-12);
+        let shape = array(vec![Value::number(2.), Value::number(2.)]);
+        let first = tensor_random(&mut ok_alloc, &shape, &Value::number(42.), false).unwrap();
+        let second = tensor_random(&mut ok_alloc, &shape, &Value::number(42.), false).unwrap();
+        let (ValueKind::Tensor(first), ValueKind::Tensor(second)) = (first.kind, second.kind) else { panic!("expected tensors"); };
+        assert_eq!(first.data, second.data);
+        assert_eq!(tensor_get_real(&first, 0), 0.7415648787718233);
+        let normal = tensor_random(&mut ok_alloc, &shape, &Value::number(42.), true).unwrap();
+        let ValueKind::Tensor(normal) = normal.kind else { panic!("expected tensor"); };
+        assert_eq!(tensor_get_real(&normal, 0), 0.4147197504315306);
+        assert!(matches!(tensor_cholesky_solve(&mut ok_alloc, &tensor(&[2, 2], &[1., 2., 2., 1.]), &rhs), Err(LanaError::InvalidParameters)));
+        assert!(matches!(tensor_random(&mut ok_alloc, &shape, &Value::number(-1.), false), Err(LanaError::InvalidParameters)));
+    }
+
+    #[test]
     fn construction_rejects_invalid_dimensions_rank_and_cycles() {
         for n in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.5,
                   18446744073709551616.0] {
@@ -2146,6 +2575,8 @@ mod tests {
             strides: strides.to_vec(),
             is_complex: base.is_complex,
             dtype: base.dtype,
+            device: base.device,
+            metal_buffer: base.metal_buffer.clone(),
             data: Arc::clone(&base.data),
             offset,
             is_state: base.is_state,

@@ -2,7 +2,7 @@
   "name": "lana-language-support",
   "displayName": "Lana Language Support",
   "description": "Language Server Protocol support for Lana 2.0",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "publisher": "lana-language",
   "license": "Apache-2.0",
   "engines": {

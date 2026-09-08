@@ -1,0 +1,12 @@
+let gpu_admin = capability("gpu");
+let gpu_use = grant(gpu_admin, "use");
+let cpu_values = tensor([[1.0, 2.0], [3.0, 4.0]], "f32");
+assert(device(cpu_values) == "cpu", "new tensor device");
+let metal_values = to_device(cpu_values, "metal", gpu_use);
+assert(device(metal_values) == "metal", "Metal transfer device");
+assert(device(transpose(metal_values)) == "metal", "view device preservation");
+let returned = to_cpu(relu(metal_values));
+assert(device(returned) == "cpu", "CPU transfer device");
+assert(returned[1, 1] == 4.0, "transfer value");
+
+print("ML_TENSOR_DEVICE_PASS");

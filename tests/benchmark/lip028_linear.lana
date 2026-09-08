@@ -1,0 +1,21 @@
+import "std/ml" as ml;
+import "std/datetime" as datetime;
+
+let x = cast(ones([128, 32]), "f32");
+let y = cast(ones([128]), "f32");
+let gpu_admin = capability("gpu");
+let gpu_use = grant(gpu_admin, "use");
+
+fn elapsed(device_name, x, y, gpu_use) {
+    let start = datetime.now();
+    let fitted = ml.fit("linear", {x: x, y: y},
+        {device: device_name, gpu_token: gpu_use, epochs: 5});
+    assert(fitted[0], "benchmark fit");
+    return datetime.now() - start;
+}
+
+elapsed("cpu", x, y, gpu_use);
+elapsed("metal", x, y, gpu_use);
+let cpu = [elapsed("cpu", x, y, gpu_use), elapsed("cpu", x, y, gpu_use), elapsed("cpu", x, y, gpu_use)];
+let metal = [elapsed("metal", x, y, gpu_use), elapsed("metal", x, y, gpu_use), elapsed("metal", x, y, gpu_use)];
+print({cpu: cpu, metal: metal});

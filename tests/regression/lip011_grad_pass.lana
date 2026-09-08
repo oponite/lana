@@ -44,4 +44,71 @@ assert(j[0] == 2.0, "vjp[0]");
 assert(j[1] == 4.0, "vjp[1]");
 assert(j[2] == 6.0, "vjp[2]");
 
+fn reshape_sum(x) { return sum(reshape(x, [3, 2])); }
+let shaped = tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+let gr = grad(reshape_sum, shaped);
+assert(gr[0, 0] == 1.0, "reshape grad first");
+assert(gr[1, 2] == 1.0, "reshape grad last");
+
+fn transpose_weighted(x) {
+    return sum(transpose(x) * tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]));
+}
+let gt = grad(transpose_weighted, shaped);
+assert(gt[0, 0] == 1.0, "transpose grad 00");
+assert(gt[0, 2] == 5.0, "transpose grad 02");
+assert(gt[1, 0] == 2.0, "transpose grad 10");
+assert(gt[1, 2] == 6.0, "transpose grad 12");
+
+fn exp_sum(x) { return sum(exp(x)); }
+let ge = grad(exp_sum, tensor([0.0, 1.0]));
+assert(ge[0] == 1.0, "exp grad");
+
+fn log_sum(x) { return sum(log(x)); }
+let gl = grad(log_sum, tensor([1.0, 2.0]));
+assert(gl[0] == 1.0, "log grad first");
+assert(gl[1] == 0.5, "log grad second");
+
+fn sqrt_sum(x) { return sum(sqrt(x)); }
+let gq = grad(sqrt_sum, tensor([1.0, 4.0]));
+assert(gq[0] == 0.5, "sqrt grad first");
+assert(gq[1] == 0.25, "sqrt grad second");
+
+fn relu_sum(x) { return sum(relu(x)); }
+let gu = grad(relu_sum, tensor([-1.0, 0.0, 2.0]));
+assert(gu[0] == 0.0, "relu grad negative");
+assert(gu[1] == 0.0, "relu grad zero");
+assert(gu[2] == 1.0, "relu grad positive");
+
+fn softmax_weighted(x) { return sum(softmax(x) * tensor([1.0, 3.0])); }
+let gf = grad(softmax_weighted, tensor([0.0, 0.0]));
+assert(gf[0] == -0.5, "softmax grad first");
+assert(gf[1] == 0.5, "softmax grad second");
+
+fn logsumexp_sum(x) { return sum(logsumexp(x)); }
+let gx = grad(logsumexp_sum, tensor([0.0, 0.0]));
+assert(gx[0] == 0.5, "logsumexp grad first");
+assert(gx[1] == 0.5, "logsumexp grad second");
+
+fn select_sum(x) {
+    return sum(tensor_select(tensor([1.0, 0.0]), x, x * tensor([2.0, 2.0])));
+}
+let gc = grad(select_sum, tensor([3.0, 4.0]));
+assert(gc[0] == 1.0, "select chosen grad");
+assert(gc[1] == 2.0, "select alternate grad");
+
+fn gather_sum(x) { return sum(gather(x, tensor([2.0, 0.0, 2.0]), 0)); }
+let gg = grad(gather_sum, tensor([1.0, 2.0, 3.0]));
+assert(gg[0] == 1.0, "gather grad first");
+assert(gg[1] == 0.0, "gather grad unused");
+assert(gg[2] == 2.0, "gather grad repeated");
+
+fn solve_sum(rhs) {
+    return sum(cholesky_solve(tensor([[4.0, 1.0], [1.0, 3.0]]), rhs));
+}
+let gh = grad(solve_sum, tensor([1.0, 2.0]));
+assert(gh[0] > 0.1818, "cholesky rhs grad first");
+assert(gh[0] < 0.1819, "cholesky rhs grad first tolerance");
+assert(gh[1] > 0.2727, "cholesky rhs grad second");
+assert(gh[1] < 0.2728, "cholesky rhs grad second tolerance");
+
 print("LIP011_GRAD_PASS");

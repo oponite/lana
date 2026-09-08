@@ -167,10 +167,15 @@ fn run_gates_read_text_when_not_wired() {
 #[test]
 fn run_wires_directory_list() {
     // When the capability is wired, the gate is lifted and the call behaves as
-    // native: directory_list("/tmp") succeeds on the host.
-    let source = "let e = directory_list(\"/tmp\");\nreturn e;\n";
-    let result = run(source, "", "{\"directory_list\":true}");
+    // native. Use a private directory: shared /tmp entries may disappear
+    // between read_dir and metadata while other tests are running.
+    let directory = std::env::temp_dir().join(format!("lana-wasm-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("entry"), b"").unwrap();
+    let source = format!("let e = directory_list(\"{}\");\nreturn e;\n", directory.display());
+    let result = run(&source, "", "{\"directory_list\":true}");
     assert!(result.starts_with("{\"ok\":true"), "expected ok, got {result}");
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]

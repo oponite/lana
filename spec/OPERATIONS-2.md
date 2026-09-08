@@ -6,8 +6,9 @@
 ## Authority
 
 This spec is the committed, implementation-ready follow-up to the mathematics
-in `papers/semantics-2.md` §9. It sits below `papers/semantics-2.md` and above
-`spec/SPEC.md` / `spec/BYTECODE.md` / `spec/VM.md` in the authority order. All
+in `papers/semantics-2.md` §9. It sits below `papers/semantics-2.md` and
+`../lip/archive/LIP-026.md`, and above `SPEC.md` / `BYTECODE.md` / `VM.md` in
+the authority order. All
 new syntax satisfies `spec/SYNTAX.md` (SYNTAX-1..12 + Acceptance Principle).
 
 ## Scope

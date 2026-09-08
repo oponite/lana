@@ -1,0 +1,28 @@
+import "std/ml" as ml;
+
+let observations = tensor([[1.0], [2.1], [2.9], [4.2]]);
+let options = {
+    f: tensor([[1.0, 1.0], [0.0, 1.0]]),
+    h: tensor([[1.0, 0.0]]),
+    q: tensor([[0.01, 0.0], [0.0, 0.01]]),
+    r: tensor([[0.1]]),
+    x0: tensor([0.0, 1.0]),
+    p0: tensor([[1.0, 0.0], [0.0, 1.0]])
+};
+
+let fitted = ml.fit("kalman", {observations: observations}, options);
+assert(fitted[0], "multivariate Kalman fit");
+assert(shape(fitted[1].prediction)[0] == 4, "Kalman time dimension");
+assert(shape(fitted[1].prediction)[1] == 2, "Kalman state dimension");
+assert(shape(fitted[1].uncertainty)[1] == 2, "Kalman covariance rows");
+assert(shape(fitted[1].uncertainty)[2] == 2, "Kalman covariance columns");
+assert(fitted[1].prediction[3, 0] > 3.8, "Kalman tracked position");
+assert(fitted[1].uncertainty[3, 0, 0] >= 0, "Kalman position variance");
+
+let filtered = ml.filter(fitted[1].model, observations, {});
+let smoothed = ml.smooth(fitted[1].model, observations, {});
+assert(filtered[0], "multivariate filter API");
+assert(smoothed[0], "multivariate smoother API");
+assert(shape(smoothed[1].uncertainty)[2] == 2, "smoothed covariance shape");
+
+print("ML_KALMAN_MULTIVARIATE_PASS");

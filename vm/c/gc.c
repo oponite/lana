@@ -10,6 +10,7 @@ struct LanaGCAllocation {
     LanaGCObjectKind kind;
     LanaGCOwnership ownership;
     LanaGCTraceFn trace;
+    LanaGCFinalizeFn finalize;
     size_t size;
     bool marked;
     bool initialized;
@@ -34,6 +35,12 @@ static size_t payload_hash(const void *payload) {
 
 static void *allocation_payload(LanaGCAllocation *allocation) {
     return (void *)(allocation + 1);
+}
+
+static void allocation_destroy(LanaGCAllocation *allocation) {
+    if (allocation->finalize != NULL) allocation->finalize(allocation_payload(allocation));
+    allocation->magic = 0u;
+    free(allocation);
 }
 
 static const void *allocation_const_payload(const LanaGCAllocation *allocation) {
@@ -227,8 +234,7 @@ void lana_gc_free(LanaGC *gc) {
     allocation = gc->allocations;
     while (allocation != NULL) {
         LanaGCAllocation *next = allocation->next;
-        allocation->magic = 0u;
-        free(allocation);
+        allocation_destroy(allocation);
         allocation = next;
     }
     free(gc->native_roots);
@@ -311,8 +317,7 @@ bool lana_gc_collect(LanaGC *gc) {
         gc->allocated_bytes -= allocation->size;
         gc->last_reclaimed_bytes += allocation->size;
         ++gc->last_reclaimed_objects;
-        allocation->magic = 0u;
-        free(allocation);
+        allocation_destroy(allocation);
     }
     ++gc->collection_count;
     gc->reclaimed_bytes += gc->last_reclaimed_bytes;
@@ -350,7 +355,7 @@ bool lana_gc_collect_young(LanaGC *gc) {
         gc->allocated_bytes -= allocation->size;
         gc->last_reclaimed_bytes += allocation->size;
         ++gc->last_reclaimed_objects;
-        allocation->magic = 0u; free(allocation);
+        allocation_destroy(allocation);
     }
     ++gc->minor_collection_count;
     gc->reclaimed_bytes += gc->last_reclaimed_bytes;
@@ -388,7 +393,7 @@ bool lana_gc_incremental_step(LanaGC *gc, size_t budget, bool *complete) {
         native_remove(gc, allocation); index_remove(gc, allocation);
         gc->allocated_bytes -= allocation->size;
         ++gc->reclaimed_objects; gc->reclaimed_bytes += allocation->size;
-        allocation->magic = 0u; free(allocation);
+        allocation_destroy(allocation);
     }
     ++gc->collection_count;
     gc->collecting = false;
@@ -483,6 +488,13 @@ bool lana_gc_configure(LanaGC *gc, void *payload, LanaGCObjectKind kind,
     allocation->kind = kind;
     allocation->ownership = ownership;
     allocation->trace = trace;
+    return true;
+}
+
+bool lana_gc_set_finalizer(LanaGC *gc, void *payload, LanaGCFinalizeFn finalize) {
+    LanaGCAllocation *allocation = payload_allocation(gc, payload);
+    if (allocation == NULL) return false;
+    allocation->finalize = finalize;
     return true;
 }
 

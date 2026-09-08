@@ -1,0 +1,7 @@
+import "std/ml" as ml;
+import "std/datetime" as datetime;
+let x = cast(ones([96, 24]), "f32"); let y = cast(zeros([96]), "f32");
+let admin = capability("gpu"); let token = grant(admin, "use");
+fn elapsed(device_name, x, y, token) { let start = datetime.now(); let fitted = ml.fit("logistic_multiclass", {x: x, y: y}, {device: device_name, gpu_token: token, epochs: 3, class_count: 3}); assert(fitted[0], "multiclass benchmark"); return datetime.now() - start; }
+elapsed("cpu", x, y, token); elapsed("metal", x, y, token);
+print({cpu: [elapsed("cpu", x, y, token), elapsed("cpu", x, y, token), elapsed("cpu", x, y, token)], metal: [elapsed("metal", x, y, token), elapsed("metal", x, y, token), elapsed("metal", x, y, token)]});

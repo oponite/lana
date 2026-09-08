@@ -1,0 +1,9 @@
+import "std/decision" as decision;
+
+decision.value_of_information(
+    [{state: "s1", probability: 0.8}],
+    [],
+    ["a"],
+    [{action: "a", state: "s1", value: 1}],
+    []
+);

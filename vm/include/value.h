@@ -123,7 +123,9 @@ struct LanaDerivation {
     /* LIP-011 reverse-mode autodiff fields. `ad_op` is -1 for a non-
      * differentiable node (including the input leaf); otherwise it is the
      * differentiable primitive: 0=add 1=sub 2=mul 3=div 4=matmul 5=sum
-     * 6=mean. `ad_a`/`ad_b` are the saved forward-pass operands (the input
+     * 6=mean 10=reshape 11=transpose 12=exp 13=log 14=sqrt 15=relu
+     * 16=softmax 17=logsumexp 18=gather 19=cholesky_solve.
+     * `ad_a`/`ad_b` are the saved forward-pass operands (the input
      * tensor for reductions, NULL for the absent right operand). The input
      * derivations are stored separately from `inputs[]` so a constant operand
      * (no derivation) still maps to its saved tensor. `ad_grad` is the

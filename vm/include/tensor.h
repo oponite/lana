@@ -18,6 +18,11 @@ typedef enum LanaTensorDtype {
     LANA_TENSOR_COMPLEX = 4
 } LanaTensorDtype;
 
+typedef enum LanaTensorDevice {
+    LANA_TENSOR_CPU = 0,
+    LANA_TENSOR_METAL
+} LanaTensorDevice;
+
 /* LIP‑004: First‑class tensor.
  *   ndim   – number of dimensions (0 for scalar).
  *   shape  – array of dimension lengths.
@@ -49,6 +54,9 @@ typedef struct LanaTensor {
     size_t offset;      // first element, in elements (0 for a base tensor)
     struct LanaTensor *base; // source tensor for a view, NULL for a base tensor
     bool is_state;      // LIP-007: a STATE tensor (each element is a density matrix)
+    LanaTensorDevice device;
+    void *metal_buffer;
+    uint8_t *metal_accounting;
 } LanaTensor;
 
 /* Helper to compute row‑major strides from shape. Caller must allocate

@@ -1,14 +1,14 @@
-name: Release Lana 2.0.1
+name: Release Lana 2.1.0
 
 on:
   push:
-    tags: ["v2.0.1"]
+    tags: ["v2.1.0"]
 
 permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION: "2.0.1"
+  EXPECTED_VERSION: "2.1.0"
 
 jobs:
   linux:
@@ -29,6 +29,8 @@ jobs:
           cmake --build build --parallel
           ctest --test-dir build --output-on-failure
           build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          cargo test --workspace
+          cargo run --quiet -p lana-cli -- version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           git diff --check
       - name: Address and undefined behavior sanitizers
         run: |
@@ -86,8 +88,8 @@ jobs:
         with:
           name: lana-macos-universal
           path: |
-            ${{ runner.temp }}/lana-2.0.1-macos-universal.tar.gz
-            ${{ runner.temp }}/lana-2.0.1-macos-universal.tar.gz.sha256
+            ${{ runner.temp }}/lana-2.1.0-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-2.1.0-macos-universal.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -158,6 +160,9 @@ jobs:
             license "Apache-2.0"
 
             depends_on "cmake" => :build
+            depends_on "pkgconf" => :build
+            depends_on "libffi"
+            depends_on "openssl@3"
 
             def install
               system "cmake", "-S", ".", "-B", "build", *std_cmake_args
@@ -168,7 +173,7 @@ jobs:
               (bin/"lana").write <<~EOS
                 #!/bin/sh
                 export LANA_COMPILER_LABC="#{libexec}/lana-compiler.labc"
-                exec "#{bin}/lana-bin" "$@"
+                exec "#{bin}/lana-bin" "\$@"
               EOS
             end
 

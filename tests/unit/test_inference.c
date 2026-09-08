@@ -156,7 +156,7 @@ static void test_infer_errors(void) {
     static size_t shape[1] = {1}, strides[1] = {1};
     /* LIP-027: tensor data is a byte buffer; store the f64 bit pattern of 1.0. */
     static union { double d; uint8_t b[8]; } prior_data = { .d = 1.0 };
-    LanaTensor prior = {1, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)prior_data.b, 0, NULL, false};
+    LanaTensor prior = {1, shape, strides, false, LANA_TENSOR_F64, (uint8_t *)prior_data.b, 0, NULL, false, LANA_TENSOR_CPU, NULL, NULL};
 
     /* Create a live algorithm value in its own VM. Its GC heap must stay alive
      * until the infer calls below have consumed it, so alg_vm is freed last. */

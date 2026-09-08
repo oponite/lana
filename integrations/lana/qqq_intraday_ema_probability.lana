@@ -1,0 +1,79 @@
+import "./bridge.lana" as bridge;
+
+fn probability(value) {
+    assert(value >= 0, "probability below zero");
+    assert(value <= 1, "probability above one");
+    return value;
+}
+
+fn validate_model(model, order) {
+    assert(array_length(order) == array_length(model["feature_order"]), "feature count mismatch");
+    assert(array_length(order) == array_length(model["center"]), "model center mismatch");
+    assert(array_length(order) == array_length(model["scale"]), "model scale mismatch");
+    assert(array_length(order) == array_length(model["coefficients"]), "model coefficient mismatch");
+    let index = 0;
+    while (index < array_length(order)) {
+        assert(order[index] == model["feature_order"][index], "feature order mismatch");
+        assert(model["scale"][index] > 0, "model scale must be positive");
+        index = index + 1;
+    }
+    assert(array_length(model["calibration_breakpoints"]) > 0, "calibration is empty");
+    assert(array_length(model["calibration_breakpoints"]) == array_length(model["calibration_probabilities"]), "calibration mismatch");
+    return true;
+}
+
+fn calibrated(score, points, values) {
+    if (score <= points[0]) { return probability(values[0]); }
+    let index = 1;
+    while (index < array_length(points)) {
+        assert(points[index] > points[index - 1], "calibration breakpoints must increase");
+        assert(values[index] >= values[index - 1], "calibration probabilities must increase");
+        if (score <= points[index]) {
+            let fraction = (score - points[index - 1]) / (points[index] - points[index - 1]);
+            return probability(values[index - 1] + fraction * (values[index] - values[index - 1]));
+        }
+        index = index + 1;
+    }
+    return probability(values[array_length(values) - 1]);
+}
+
+fn infer(request, target) {
+    let model = request["models"][target];
+    let order = request["feature_order"];
+    validate_model(model, order);
+    let score = model["intercept"];
+    let index = 0;
+    while (index < array_length(order)) {
+        let value = request["features"][order[index]];
+        assert(value == value, "feature is not a number");
+        score = score + ((value - model["center"][index]) / model["scale"][index]) * model["coefficients"][index];
+        index = index + 1;
+    }
+    return calibrated(score, model["calibration_breakpoints"], model["calibration_probabilities"]);
+}
+
+fn forecast(request) {
+    assert(request["schema"] == 1, "unsupported schema");
+    assert(request["kind"] == "qqq_intraday_ema_probability_request", "invalid request kind");
+    assert(request["symbol"] == "QQQ", "request symbol must be QQQ");
+    assert(request["historical_provider"] == "massive", "historical provider must be Massive");
+    assert(request["live_provider"] == "yfinance", "live provider must be yfinance");
+    assert(request["advisory_only"] == true, "forecast must be advisory-only");
+    let prior = infer(request, "close_above_prior");
+    let open = infer(request, "close_above_open");
+    return {
+        "schema": 1,
+        "kind": "qqq_intraday_ema_probability_forecast",
+        "symbol": "QQQ",
+        "session_date": request["session_date"],
+        "slot": request["slot"],
+        "probability_close_above_prior_close": prior,
+        "probability_close_above_today_open": open,
+        "historical_provider": "massive",
+        "live_provider": "yfinance",
+        "advisory_only": true
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(forecast(request));

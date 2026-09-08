@@ -34,6 +34,34 @@ static void trace_node_root(LanaGC *gc, void *payload) {
     (void)lana_gc_mark(gc, payload);
 }
 
+static Node *node_new(LanaGC *gc, size_t value);
+
+static size_t finalized_count;
+
+static void count_finalized(void *payload) {
+    (void)payload;
+    ++finalized_count;
+}
+
+static int test_finalizers_run_on_collection_and_free(void) {
+    LanaGC gc;
+    Roots roots = {0};
+    finalized_count = 0u;
+    lana_gc_init(&gc, 1024u, 1024u, trace_roots, &roots);
+    Node *collected = node_new(&gc, 1u);
+    CHECK(collected != NULL);
+    CHECK(lana_gc_set_finalizer(&gc, collected, count_finalized));
+    lana_gc_release_native(&gc);
+    CHECK(lana_gc_collect(&gc));
+    CHECK(finalized_count == 1u);
+    Node *freed = node_new(&gc, 2u);
+    CHECK(freed != NULL);
+    CHECK(lana_gc_set_finalizer(&gc, freed, count_finalized));
+    lana_gc_free(&gc);
+    CHECK(finalized_count == 2u);
+    return 0;
+}
+
 static Node *node_new(LanaGC *gc, size_t value) {
     Node *node = lana_gc_alloc(gc, sizeof(*node), LANA_GC_RUNTIME_INTERNAL,
                               LANA_GC_OWNER_NATIVE, trace_node);
@@ -214,6 +242,7 @@ static int test_incremental_pause_target(void) {
 }
 
 int main(void) {
+    CHECK(test_finalizers_run_on_collection_and_free() == 0);
     CHECK(test_cycle_and_reachable_preservation() == 0);
     CHECK(test_deep_graph_and_native_root() == 0);
     CHECK(test_unpublished_and_limit_retry() == 0);

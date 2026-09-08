@@ -12,7 +12,9 @@ Lana takes this premise literally as a computational design principle: informati
 
 This document is the normative Lana 1.0 definition of `STATE`, `STATE_DIST`, and the core state operations `MEASURE`, `TRANSFORM`, and `APPEND`. It also specifies how those values and operations compose, their mathematical guarantees and boundary behavior, and the minimum obligations of a conforming runtime.
 
-The other Lana documents have narrower roles:
+The other Lana documents have narrower roles. `../lip/archive/LIP-026.md`
+constrains the shape of the source surface without redefining these
+mathematical objects.
 
 1. `VM.md` describes execution architecture.
 2. `BYTECODE.md` describes LABC representation and instruction encoding.

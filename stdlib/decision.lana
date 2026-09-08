@@ -1,0 +1,434 @@
+// std/decision — pure, advisory decision helpers.
+
+fn finite_number(value) {
+    if (type_of(value) != "number") { return false; }
+    return value - value == 0;
+}
+
+fn close_probability(actual, expected) {
+    let difference = actual - expected;
+    if (difference < 0) { difference = -difference; }
+    return difference <= 0.000000000001;
+}
+
+fn string_in(values, wanted) {
+    let index = 0;
+    while (index < array_length(values)) {
+        if (values[index] == wanted) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn prior_has_state(current_information, state) {
+    let index = 0;
+    while (index < array_length(current_information)) {
+        if (current_information[index].state == state) { return true; }
+        index = index + 1;
+    }
+    return false;
+}
+
+fn utility_value(utility, action, state) {
+    let found = 0;
+    let value = 0;
+    let index = 0;
+    while (index < array_length(utility)) {
+        let row = utility[index];
+        if (row.action == action) {
+            if (row.state == state) {
+                found = found + 1;
+                value = row.value;
+            }
+        }
+        index = index + 1;
+    }
+    assert(found == 1, "utility must contain each action/state pair exactly once");
+    return value;
+}
+
+fn observation_cost(costs, observation) {
+    let found = 0;
+    let value = 0;
+    let index = 0;
+    while (index < array_length(costs)) {
+        let row = costs[index];
+        if (row.observation == observation) {
+            found = found + 1;
+            value = row.value;
+        }
+        index = index + 1;
+    }
+    assert(found == 1, "costs must contain each observation exactly once");
+    return value;
+}
+
+fn validate_prior(current_information) {
+    assert(type_of(current_information) == "array", "current_information must be an array");
+    assert(array_length(current_information) > 0, "current_information must not be empty");
+    let names = array_new(0);
+    let total = 0;
+    let index = 0;
+    while (index < array_length(current_information)) {
+        let row = current_information[index];
+        assert(type_of(row) == "map", "current_information rows must be maps");
+        assert(map_has(row, "state"), "current_information state is required");
+        assert(map_has(row, "probability"), "current_information probability is required");
+        assert(type_of(row.state) == "string", "state names must be strings");
+        assert(!string_in(names, row.state), "state names must be unique");
+        assert(finite_number(row.probability), "prior probabilities must be finite numbers");
+        assert(row.probability >= 0, "prior probabilities must be nonnegative");
+        array_push(names, row.state);
+        total = total + row.probability;
+        index = index + 1;
+    }
+    assert(close_probability(total, 1), "prior probabilities must sum to one");
+    return null;
+}
+
+fn validate_actions(actions) {
+    assert(type_of(actions) == "array", "actions must be an array");
+    assert(array_length(actions) > 0, "actions must not be empty");
+    let seen = array_new(0);
+    let index = 0;
+    while (index < array_length(actions)) {
+        assert(type_of(actions[index]) == "string", "action names must be strings");
+        assert(!string_in(seen, actions[index]), "action names must be unique");
+        array_push(seen, actions[index]);
+        index = index + 1;
+    }
+    return null;
+}
+
+fn validate_utility(current_information, actions, utility) {
+    assert(type_of(utility) == "array", "utility must be an array");
+    let index = 0;
+    while (index < array_length(utility)) {
+        let row = utility[index];
+        assert(type_of(row) == "map", "utility rows must be maps");
+        assert(map_has(row, "action"), "utility action is required");
+        assert(map_has(row, "state"), "utility state is required");
+        assert(map_has(row, "value"), "utility value is required");
+        assert(string_in(actions, row.action), "utility contains an unknown action");
+        assert(prior_has_state(current_information, row.state), "utility contains an unknown state");
+        assert(finite_number(row.value), "utility values must be finite numbers");
+        index = index + 1;
+    }
+    let action_index = 0;
+    while (action_index < array_length(actions)) {
+        let state_index = 0;
+        while (state_index < array_length(current_information)) {
+            utility_value(utility, actions[action_index], current_information[state_index].state);
+            state_index = state_index + 1;
+        }
+        action_index = action_index + 1;
+    }
+    return null;
+}
+
+fn validate_observations(candidate_observations) {
+    assert(type_of(candidate_observations) == "array", "candidate_observations must be an array");
+    let names = array_new(0);
+    let index = 0;
+    while (index < array_length(candidate_observations)) {
+        let candidate = candidate_observations[index];
+        assert(type_of(candidate) == "map", "candidate observations must be maps");
+        assert(map_has(candidate, "name"), "candidate observation name is required");
+        assert(map_has(candidate, "joint"), "candidate observation joint is required");
+        assert(type_of(candidate.name) == "string", "observation names must be strings");
+        assert(!string_in(names, candidate.name), "observation names must be unique");
+        if (candidate["joint"] != null) {
+            assert(type_of(candidate["joint"]) == "array", "observation joint must be an array or null");
+        }
+        array_push(names, candidate.name);
+        index = index + 1;
+    }
+    return names;
+}
+
+fn validate_costs(observation_names, costs) {
+    assert(type_of(costs) == "array", "costs must be an array");
+    let index = 0;
+    while (index < array_length(costs)) {
+        let row = costs[index];
+        assert(type_of(row) == "map", "cost rows must be maps");
+        assert(map_has(row, "observation"), "cost observation is required");
+        assert(map_has(row, "value"), "cost value is required");
+        assert(string_in(observation_names, row.observation), "costs contain an unknown observation");
+        assert(finite_number(row.value), "cost values must be finite numbers");
+        assert(row.value >= 0, "cost values must be nonnegative");
+        index = index + 1;
+    }
+    index = 0;
+    while (index < array_length(observation_names)) {
+        observation_cost(costs, observation_names[index]);
+        index = index + 1;
+    }
+    return null;
+}
+
+fn expected_utility(current_information, utility, action) {
+    let total = 0;
+    let index = 0;
+    while (index < array_length(current_information)) {
+        let prior = current_information[index];
+        total = total + prior.probability * utility_value(utility, action, prior.state);
+        index = index + 1;
+    }
+    return total;
+}
+
+fn baseline_result(current_information, actions, utility) {
+    let best = null;
+    let best_actions = array_new(0);
+    let index = 0;
+    while (index < array_length(actions)) {
+        let value = expected_utility(current_information, utility, actions[index]);
+        if (best == null) {
+            best = value;
+            array_push(best_actions, actions[index]);
+        } else {
+            if (value > best) {
+                best = value;
+                best_actions = [actions[index]];
+            } else {
+                if (value == best) { array_push(best_actions, actions[index]); }
+            }
+        }
+        index = index + 1;
+    }
+    return {actions: best_actions, expected_utility: best};
+}
+
+fn validate_joint(current_information, relationship) {
+    let total = 0;
+    let pairs = array_new(0);
+    let index = 0;
+    while (index < array_length(relationship)) {
+        let row = relationship[index];
+        assert(type_of(row) == "map", "joint rows must be maps");
+        assert(map_has(row, "state"), "joint state is required");
+        assert(map_has(row, "outcome"), "joint outcome is required");
+        assert(map_has(row, "probability"), "joint probability is required");
+        assert(type_of(row.state) == "string", "joint state names must be strings");
+        assert(type_of(row.outcome) == "string", "joint outcome names must be strings");
+        assert(prior_has_state(current_information, row.state), "joint contains an unknown state");
+        assert(finite_number(row.probability), "joint probabilities must be finite numbers");
+        assert(row.probability >= 0, "joint probabilities must be nonnegative");
+        let pair = string_concat(row.state, string_concat("\n", row.outcome));
+        assert(!string_in(pairs, pair), "joint state/outcome pairs must be unique");
+        array_push(pairs, pair);
+        total = total + row.probability;
+        index = index + 1;
+    }
+    assert(close_probability(total, 1), "joint probabilities must sum to one");
+    index = 0;
+    while (index < array_length(current_information)) {
+        let prior = current_information[index];
+        let marginal = 0;
+        let row_index = 0;
+        while (row_index < array_length(relationship)) {
+            if (relationship[row_index].state == prior.state) {
+                marginal = marginal + relationship[row_index].probability;
+            }
+            row_index = row_index + 1;
+        }
+        assert(close_probability(marginal, prior.probability), "joint state marginals must match current_information");
+        index = index + 1;
+    }
+    return null;
+}
+
+fn joint_outcomes(relationship) {
+    let outcomes = array_new(0);
+    let index = 0;
+    while (index < array_length(relationship)) {
+        if (!string_in(outcomes, relationship[index].outcome)) {
+            array_push(outcomes, relationship[index].outcome);
+        }
+        index = index + 1;
+    }
+    return outcomes;
+}
+
+fn outcome_probability(relationship, outcome) {
+    let probability = 0;
+    let index = 0;
+    while (index < array_length(relationship)) {
+        if (relationship[index].outcome == outcome) {
+            probability = probability + relationship[index].probability;
+        }
+        index = index + 1;
+    }
+    return probability;
+}
+
+fn outcome_utility(relationship, utility, action, outcome, probability) {
+    let total = 0;
+    let index = 0;
+    while (index < array_length(relationship)) {
+        let row = relationship[index];
+        if (row.outcome == outcome) {
+            total = total + row.probability * utility_value(utility, action, row.state);
+        }
+        index = index + 1;
+    }
+    return total / probability;
+}
+
+fn outcome_policy(relationship, actions, utility, outcome, probability) {
+    let best = null;
+    let best_actions = array_new(0);
+    let index = 0;
+    while (index < array_length(actions)) {
+        let value = outcome_utility(relationship, utility, actions[index], outcome, probability);
+        if (best == null) {
+            best = value;
+            array_push(best_actions, actions[index]);
+        } else {
+            if (value > best) {
+                best = value;
+                best_actions = [actions[index]];
+            } else {
+                if (value == best) { array_push(best_actions, actions[index]); }
+            }
+        }
+        index = index + 1;
+    }
+    return {outcome: outcome, actions: best_actions, expected_utility: best};
+}
+
+fn score_candidate(current_information, candidate, actions, utility, cost, baseline) {
+    let relationship = candidate["joint"];
+    validate_joint(current_information, relationship);
+    let outcomes = joint_outcomes(relationship);
+    let policy = array_new(0);
+    let impossible = array_new(0);
+    let informed = 0;
+    let index = 0;
+    while (index < array_length(outcomes)) {
+        let outcome = outcomes[index];
+        let probability = outcome_probability(relationship, outcome);
+        if (probability == 0) {
+            array_push(impossible, outcome);
+        } else {
+            let choice = outcome_policy(relationship, actions, utility, outcome, probability);
+            array_push(policy, choice);
+            informed = informed + probability * choice.expected_utility;
+        }
+        index = index + 1;
+    }
+    let expected_value = informed - baseline.expected_utility;
+    return {
+        observation: candidate.name,
+        status: "ranked",
+        rank: null,
+        policy: policy,
+        expected_value: expected_value,
+        cost: cost,
+        net_value: expected_value - cost,
+        exactness: "exact",
+        assumptions: [
+            "finite exhaustive state space",
+            "declared joint relationship",
+            "utilities and costs use the same scale"
+        ],
+        impossible_outcomes: impossible
+    };
+}
+
+fn unscorable_candidate(candidate, cost, status, reason) {
+    return {
+        observation: candidate.name,
+        status: status,
+        rank: null,
+        policy: [],
+        expected_value: null,
+        cost: cost,
+        net_value: null,
+        exactness: "unknown",
+        assumptions: [reason],
+        impossible_outcomes: []
+    };
+}
+
+fn rank_candidates(candidates) {
+    // ponytail: stable insertion ranking is O(n^2); use a shared stable sort
+    // primitive if decision plans grow beyond small human-reviewable lists.
+    let index = 1;
+    while (index < array_length(candidates)) {
+        let position = index;
+        while (position > 0) {
+            if (candidates[position - 1].net_value < candidates[position].net_value) {
+                let displaced = candidates[position - 1];
+                index_set(candidates, position - 1, candidates[position]);
+                index_set(candidates, position, displaced);
+                position = position - 1;
+            } else {
+                position = 0;
+            }
+        }
+        index = index + 1;
+    }
+    index = 0;
+    let rank = 0;
+    let previous_value = null;
+    while (index < array_length(candidates)) {
+        if (previous_value == null) {
+            rank = 1;
+        } else {
+            if (candidates[index].net_value != previous_value) { rank = index + 1; }
+        }
+        map_set(candidates[index], "rank", rank);
+        previous_value = candidates[index].net_value;
+        index = index + 1;
+    }
+    return candidates;
+}
+
+fn value_of_information(current_information, candidate_observations, actions, utility, costs) {
+    validate_prior(current_information);
+    validate_actions(actions);
+    validate_utility(current_information, actions, utility);
+    let observation_names = validate_observations(candidate_observations);
+    validate_costs(observation_names, costs);
+
+    let baseline = baseline_result(current_information, actions, utility);
+    let ranked = array_new(0);
+    let unscorable = array_new(0);
+    let exactness = "exact";
+    let index = 0;
+    while (index < array_length(candidate_observations)) {
+        let candidate = candidate_observations[index];
+        let cost = observation_cost(costs, candidate.name);
+        if (candidate["joint"] == null) {
+            array_push(unscorable, unscorable_candidate(candidate, cost, "unknown_relationship", "no declared joint relationship"));
+            exactness = "unknown";
+        } else {
+            if (array_length(candidate["joint"]) == 0) {
+                array_push(unscorable, unscorable_candidate(candidate, cost, "impossible_observation", "observation has no possible outcomes"));
+                exactness = "unknown";
+            } else {
+                array_push(ranked, score_candidate(current_information, candidate, actions, utility, cost, baseline));
+            }
+        }
+        index = index + 1;
+    }
+
+    ranked = rank_candidates(ranked);
+    let recommended = array_new(0);
+    index = 0;
+    while (index < array_length(ranked)) {
+        if (ranked[index].rank == 1) {
+            if (ranked[index].net_value > 0) { array_push(recommended, ranked[index].observation); }
+        }
+        index = index + 1;
+    }
+    index = 0;
+    while (index < array_length(unscorable)) {
+        array_push(ranked, unscorable[index]);
+        index = index + 1;
+    }
+    let result = {baseline: baseline, candidates: ranked, recommended: recommended, exactness: exactness};
+    return evidence(result, "std/decision.value_of_information");
+}

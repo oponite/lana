@@ -1,0 +1,10 @@
+let source = tensor([[1.0, 2.0], [3.0, 4.0]]);
+let flat = reshape(source, [4]);
+assert(array_length(shape(flat)) == 1, "reshape rank");
+assert(shape(flat)[0] == 4, "reshape shape");
+assert(flat[2] == 3.0, "reshape values");
+let transposed = transpose(source);
+assert(shape(transposed)[0] == 2, "transpose rows");
+assert(shape(transposed)[1] == 2, "transpose columns");
+assert(transposed[0, 1] == 3.0, "transpose values");
+print("ML_TENSOR_SHAPES_PASS");

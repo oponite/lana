@@ -1,0 +1,4 @@
+let gpu_admin = capability("gpu");
+let gpu_use = grant(gpu_admin, "use");
+revoke(gpu_use);
+to_device(tensor([1.0], "f32"), "metal", gpu_use);

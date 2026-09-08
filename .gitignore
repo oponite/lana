@@ -19,6 +19,10 @@ target/
 benchmark/results/
 vijay-docs/
 archive
+!lip/archive/
+!lip/archive/**
 TODO.md
 REQUIREMENTS.md
 ghost_*/
+.claude/worktrees/
+.cache/

@@ -23,6 +23,8 @@ path.
 | `std/random` | `random_seed`, `random_float`, `random_int`, `random_choice` |
 | `std/datetime` | `now`, `add_duration` |
 | `std/testing` | `assert_eq`, `assert_true`, `assert_false` |
+| `std/decision` | `value_of_information` (pure finite-table advisory ranking) |
+| `std/ml` | uncertainty-aware linear, logistic, neural, Kalman/HMM, boosted-tree, and jump models |
 | `std/json` | `parse`, `stringify` |
 | `std/http` | `get`, `post` (io effect; return `Result<Information<HttpResponse>, E>`) |
 | `std/csv` | `read`, `write` |
@@ -40,3 +42,34 @@ draws a random value (`random_*`) declares its effect explicitly.
 
 Nothing in this directory is part of the language contract until it is
 specified and accepted through the LIP process (`../lip/`).
+
+## Value of information
+
+`std/decision.value_of_information(current_information,
+candidate_observations, actions, utility, costs)` ranks finite candidate
+observations by expected utility improvement minus cost. Priors, observation
+joint laws, utilities, and costs are ordinary arrays of maps; the returned plan
+contains the baseline action, outcome-specific policy, gross expected value,
+cost, net value, exactness, assumptions, and recommendations. Unknown or empty
+joint laws remain visible but unranked. The result carries normal Lana
+provenance and is advisory: it does not acquire information or execute an
+action.
+
+Opaque joint values and function-valued utilities are not accepted because the
+current stdlib cannot enumerate joints or receive general function values.
+
+## Machine learning
+
+`std/ml.fit(kind, {x, y}, options)` and `fit_dataset` return a schema-1 Result
+containing the fitted model, prediction, uncertainty, diagnostics, method, and
+assumptions. `predict` returns the corresponding rich record;
+`predict_tensors` returns `[prediction, uncertainty]`. An explicit unavailable
+Metal request is an error and never silently falls back or downcasts f64.
+
+The current reference implementation is CPU-only. Its neural model has one
+hidden ReLU layer, and boosted trees use configurable-depth histogram CART.
+Categorical and diagonal-Gaussian HMMs use Baum-Welch fitting and Viterbi
+decoding. Kalman filtering and RTS smoothing support both the original scalar
+options and explicit multivariate `f`, `h`, `q`, `r`, `x0`, and `p0` tensors.
+These are the behavioral oracle for the resident-Metal LIP-028 implementation,
+not evidence that the Metal acceptance gates have passed.

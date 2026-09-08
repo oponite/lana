@@ -1,0 +1,91 @@
+import "std/ml" as ml;
+
+fn test_f32(gpu_use) {
+let cpu = ml.fit("linear",
+    {x: tensor([[1.0], [2.0]], "f32"), y: tensor([3.0, 5.0], "f32")},
+    {device: "cpu", epochs: 5});
+let fitted = ml.fit("linear",
+    {x: tensor([[1.0], [2.0]], "f32"), y: tensor([3.0, 5.0], "f32")},
+    {device: "metal", gpu_token: gpu_use, epochs: 5});
+assert(fitted[0], "Metal ML fit");
+assert(fitted[1].model.device == "metal", "Metal model device");
+assert(device(fitted[1].model.parameters.weights) == "metal", "resident weights");
+let predicted = ml.predict_tensors(fitted[1].model, tensor([[3.0]], "f32"),
+    {gpu_token: gpu_use});
+assert(predicted[0], "Metal tensor prediction");
+assert(device(predicted[1][0]) == "metal", "Metal prediction device");
+let replay = ml.fit("linear",
+    {x: tensor([[1.0], [2.0]], "f32"), y: tensor([3.0, 5.0], "f32")},
+    {device: "metal", gpu_token: gpu_use, epochs: 5});
+let replay_difference = fitted[1].model.parameters.weights[0] - replay[1].model.parameters.weights[0];
+if (replay_difference < 0) { replay_difference = -replay_difference; }
+assert(replay_difference <= 0.00001, "f32 Metal replay");
+let cpu_difference = fitted[1].model.parameters.weights[0] - cpu[1].model.parameters.weights[0];
+if (cpu_difference < 0) { cpu_difference = -cpu_difference; }
+assert(cpu_difference <= 0.00001, "f32 CPU and Metal agreement");
+}
+
+fn test_f16(gpu_use) {
+let cpu16 = ml.fit("linear",
+    {x: tensor([[1.0], [2.0]], "f16"), y: tensor([3.0, 5.0], "f16")},
+    {device: "cpu", epochs: 5});
+let fitted16 = ml.fit("linear",
+    {x: tensor([[1.0], [2.0]], "f16"), y: tensor([3.0, 5.0], "f16")},
+    {device: "metal", gpu_token: gpu_use, epochs: 5});
+assert(fitted16[0], "f16 Metal fit");
+assert(device(fitted16[1].model.parameters.weights) == "metal", "f16 resident weights");
+let difference16 = fitted16[1].model.parameters.weights[0] - cpu16[1].model.parameters.weights[0];
+if (difference16 < 0) { difference16 = -difference16; }
+assert(difference16 <= 0.001, "f16 CPU and Metal agreement");
+}
+
+fn test_bf16(gpu_use) {
+let cpu_bf16 = ml.fit("linear",
+    {x: tensor([[1.0], [2.0]], "bf16"), y: tensor([3.0, 5.0], "bf16")},
+    {device: "cpu", epochs: 5});
+let fitted_bf16 = ml.fit("linear",
+    {x: tensor([[1.0], [2.0]], "bf16"), y: tensor([3.0, 5.0], "bf16")},
+    {device: "metal", gpu_token: gpu_use, epochs: 5});
+assert(fitted_bf16[0], "bf16 Metal fit");
+assert(device(fitted_bf16[1].model.parameters.weights) == "metal", "bf16 resident weights");
+let difference_bf16 = fitted_bf16[1].model.parameters.weights[0] - cpu_bf16[1].model.parameters.weights[0];
+if (difference_bf16 < 0) { difference_bf16 = -difference_bf16; }
+assert(difference_bf16 <= 0.01, "bf16 CPU and Metal agreement");
+}
+
+fn test_logistic(gpu_use) {
+let fitted = ml.fit("logistic_binary",
+    {x: tensor([[-1.0], [1.0]], "f32"), y: tensor([0.0, 1.0], "f32")},
+    {device: "metal", gpu_token: gpu_use, epochs: 5});
+assert(fitted[0], "Metal logistic fit");
+assert(device(fitted[1].model.parameters.weights) == "metal", "resident logistic weights");
+assert(fitted[1].uncertainty[0] >= 0, "Metal logistic uncertainty");
+}
+
+fn test_multiclass(gpu_use) {
+let fitted = ml.fit("logistic_multiclass",
+    {x: tensor([[-1.0], [0.0], [1.0]], "f32"), y: tensor([0.0, 1.0, 2.0], "f32")},
+    {device: "metal", gpu_token: gpu_use, epochs: 3, class_count: 3});
+assert(fitted[0], "Metal multiclass fit");
+assert(device(fitted[1].model.parameters.weights) == "metal", "resident multiclass weights");
+assert(fitted[1].uncertainty[0, 0] >= 0, "Metal multiclass uncertainty");
+}
+
+fn test_neural(gpu_use) {
+let fitted = ml.fit("neural_dense",
+    {x: tensor([[-1.0], [1.0]], "f32"), y: tensor([-1.0, 1.0], "f32")},
+    {device: "metal", gpu_token: gpu_use, epochs: 3, hidden: 2});
+assert(fitted[0], "Metal neural fit");
+assert(device(fitted[1].model.parameters.w1) == "metal", "resident neural weights");
+assert(fitted[1].uncertainty[0] >= 0, "Metal neural uncertainty");
+}
+
+let gpu_admin = capability("gpu");
+let gpu_use = grant(gpu_admin, "use");
+test_f32(gpu_use);
+test_f16(gpu_use);
+test_bf16(gpu_use);
+test_logistic(gpu_use);
+test_multiclass(gpu_use);
+test_neural(gpu_use);
+print("ML_METAL_FIT_PASS");

@@ -8,9 +8,9 @@ core with an N-qubit density-operator substrate. It is a new substrate, not an
 extension: the 1.0 core is recovered as the N=1 special case, but the source
 language, bytecode, and VM are redefined around this document.
 
-The authority order is unchanged: this document, then `SPEC.md`, `BYTECODE.md`,
-`VM.md`. Where this document and `semantics.md` (1.0) disagree, this document is
-authoritative for Lana 2.0.
+The authority order is this document, then `../lip/archive/LIP-026.md`, `SPEC.md`,
+`BYTECODE.md`, and `VM.md`. Where this document and `semantics.md` (1.0)
+disagree, this document is authoritative for Lana 2.0.
 
 Decisions fixed by this substrate:
 

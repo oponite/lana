@@ -17,7 +17,7 @@ function compatibleVersion(command: string): string | undefined {
     return undefined;
   }
   const output = completed.stdout.trim();
-  return /^Lana 1\.\d+\.\d+ \(LABC v2,/.test(output) ? output : undefined;
+  return /^Lana 2\.\d+\.\d+ \(LABC v2,/.test(output) ? output : undefined;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
