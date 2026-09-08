@@ -209,20 +209,24 @@ set_tests_properties(native_lip008_uncertainty_pass PROPERTIES PASS_REGULAR_EXPR
 add_native_compile_failure(native_lip008_uncertain_as_tensor tests/regression/lip008_uncertain_as_tensor.lana "requires a certain Tensor")
 add_native_compile_failure(native_lip008_uncertainty_on_certain tests/regression/lip008_uncertainty_on_certain.lana "uncertainty on a certain Tensor")
 add_native_compile_failure(native_lip008_max_uncertain tests/regression/lip008_max_uncertain.lana "requires a certain Tensor")
-add_test(NAME native_m4_gpu_matmul_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m4_gpu_matmul_pass.lana")
-set_tests_properties(native_m4_gpu_matmul_pass PROPERTIES
-    PASS_REGULAR_EXPRESSION "GPU_MATMUL_PASS" TIMEOUT 15
-    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+if(APPLE)
+    add_test(NAME native_m4_gpu_matmul_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m4_gpu_matmul_pass.lana")
+    set_tests_properties(native_m4_gpu_matmul_pass PROPERTIES
+        PASS_REGULAR_EXPRESSION "GPU_MATMUL_PASS" TIMEOUT 15
+        ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+endif()
 add_test(NAME native_ml_tensor_shapes_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_tensor_shapes_pass.lana")
 set_tests_properties(native_ml_tensor_shapes_pass PROPERTIES PASS_REGULAR_EXPRESSION "ML_TENSOR_SHAPES_PASS")
 add_test(NAME native_ml_tensor_math_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_tensor_math_pass.lana")
 set_tests_properties(native_ml_tensor_math_pass PROPERTIES PASS_REGULAR_EXPRESSION "ML_TENSOR_MATH_PASS")
-add_test(NAME native_ml_tensor_device_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_tensor_device_pass.lana")
-set_tests_properties(native_ml_tensor_device_pass PROPERTIES PASS_REGULAR_EXPRESSION "ML_TENSOR_DEVICE_PASS")
-add_test(NAME native_ml_metal_fit_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_metal_fit_pass.lana")
-set_tests_properties(native_ml_metal_fit_pass PROPERTIES
-    PASS_REGULAR_EXPRESSION "ML_METAL_FIT_PASS"
-    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+if(APPLE)
+    add_test(NAME native_ml_tensor_device_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_tensor_device_pass.lana")
+    set_tests_properties(native_ml_tensor_device_pass PROPERTIES PASS_REGULAR_EXPRESSION "ML_TENSOR_DEVICE_PASS")
+    add_test(NAME native_ml_metal_fit_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_metal_fit_pass.lana")
+    set_tests_properties(native_ml_metal_fit_pass PROPERTIES
+        PASS_REGULAR_EXPRESSION "ML_METAL_FIT_PASS"
+        ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+endif()
 add_test(NAME native_ml_metal_revoked COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_metal_revoked.lana")
 set_tests_properties(native_ml_metal_revoked PROPERTIES WILL_FAIL TRUE)
 add_test(NAME native_ml_metal_mixed_device COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_metal_mixed_device.lana")

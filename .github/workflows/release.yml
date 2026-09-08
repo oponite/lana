@@ -25,6 +25,7 @@ jobs:
           test "${{ github.ref_protected }}" = "true"
       - name: Debug build and tests
         run: |
+          rustup target add wasm32-unknown-unknown
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
           cmake --build build --parallel
           ctest --test-dir build --output-on-failure
