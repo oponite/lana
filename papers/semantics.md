@@ -512,7 +512,7 @@ q_{\mathrm{computational}}(\rho)=p,
 \qquad
 q_x(\rho)=\frac12-\mathrm{Re}(c),
 \qquad
-q_y(\rho)=\frac12-\mathrm{Im}(c).
+q_y(\rho)=\frac12+\mathrm{Im}(c).
 ```
 
 The basis-aware result is always the existing binary distribution shape
