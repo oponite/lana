@@ -139,7 +139,7 @@ static int test_vm_append_relationship_opcodes(void) {
     lana_vm_init(&vm, &chunk);
     CHECK(lana_vm_run(&vm) == LANA_OK);
     CHECK(vm.frames[0].registers[2].type == VAL_STATE_DIST);
-    CHECK(lana_vm_state_dist_expected_probability(vm.frames[0].registers[2].as.state_dist,
+    CHECK(lana_vm_state_dist_expected_probability(&vm, vm.frames[0].registers[2].as.state_dist,
                                                   &expected) == LANA_OK);
     CHECK(fabs(expected - 0.816) < LANA_STATE_EPSILON);
     lana_vm_free(&vm);
@@ -161,7 +161,7 @@ static int test_vm_append_relationship_opcodes(void) {
     lana_vm_init(&vm, &chunk);
     CHECK(lana_vm_run(&vm) == LANA_OK);
     CHECK(vm.frames[0].registers[2].type == VAL_STATE_DIST);
-    CHECK(lana_vm_state_dist_expected_probability(vm.frames[0].registers[2].as.state_dist,
+    CHECK(lana_vm_state_dist_expected_probability(&vm, vm.frames[0].registers[2].as.state_dist,
                                                   &expected) == LANA_OK);
     CHECK(fabs(expected - 0.916) < LANA_STATE_EPSILON);
     lana_vm_free(&vm);
@@ -181,7 +181,7 @@ static int test_vm_append_relationship_opcodes(void) {
     lana_vm_init(&vm, &chunk);
     CHECK(lana_vm_run(&vm) == LANA_OK);
     CHECK(vm.frames[0].registers[2].type == VAL_STATE_DIST);
-    CHECK(lana_vm_state_dist_expected_probability(vm.frames[0].registers[2].as.state_dist,
+    CHECK(lana_vm_state_dist_expected_probability(&vm, vm.frames[0].registers[2].as.state_dist,
                                                   &expected) == LANA_OK);
     CHECK(fabs(expected - 0.5) < LANA_STATE_EPSILON);
     lana_vm_free(&vm);

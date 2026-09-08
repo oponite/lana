@@ -189,7 +189,7 @@ LanaError lana_vm_state_dist_attenuate(LanaVM *vm, LanaStateDist *child, double 
 LanaError lana_vm_state_dist_append_relationship(LanaVM *vm, const Value *left,
                                    const Value *right, uint32_t mode, double strength,
                                    LanaStateDist **out);
-LanaError lana_vm_state_dist_expected_probability(const LanaStateDist *distribution,
+LanaError lana_vm_state_dist_expected_probability(LanaVM *vm, const LanaStateDist *distribution,
                                               double *out);
 LanaError lana_vm_state_dist_sample(LanaVM *vm, const LanaStateDist *distribution,
                                 LanaStateValue *out);

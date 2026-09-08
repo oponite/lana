@@ -392,20 +392,22 @@ static int test_distribution_sharing_metadata_and_budget(void) {
     CHECK(!outer->as.append.left.is_inline && !outer->as.append.right.is_inline &&
           outer->as.append.left.as.node == shared_append &&
           outer->as.append.right.as.node == shared_append);
-    CHECK(lana_vm_state_dist_expected_probability(outer, &expectation) == LANA_OK);
+    CHECK(lana_vm_state_dist_expected_probability(&vm, outer, &expectation) == LANA_OK);
     CHECK(fabs(expectation - (1.0 - 0.56 * 0.56)) < LANA_STATE_EPSILON);
     vm.instruction_count = vm.instruction_limit;
     CHECK(lana_vm_state_dist_sample(&vm, shared_append, &sampled) == LANA_ERR_BUDGET_EXHAUSTED);
+    CHECK(lana_vm_state_dist_expected_probability(&vm, outer, &expectation) ==
+          LANA_ERR_BUDGET_EXHAUSTED);
     vm.instruction_count = 0u;
     deep_value = state_value_a;
     for (depth = 0u; depth < LANA_STATE_DIST_DEPTH_LIMIT; ++depth) {
         CHECK(lana_vm_state_dist_append(&vm, &deep_value, &state_value_b, &deep_value.as.state_dist) == LANA_OK);
         deep_value.type = VAL_STATE_DIST;
     }
-    CHECK(lana_vm_state_dist_expected_probability(deep_value.as.state_dist, &expectation) == LANA_OK);
+    CHECK(lana_vm_state_dist_expected_probability(&vm, deep_value.as.state_dist, &expectation) == LANA_OK);
     CHECK(lana_vm_state_dist_append(&vm, &deep_value, &state_value_b, &deep_value.as.state_dist) == LANA_OK);
     CHECK(lana_vm_state_dist_append(&vm, &deep_value, &state_value_b, &deep_value.as.state_dist) == LANA_OK);
-    CHECK(lana_vm_state_dist_expected_probability(deep_value.as.state_dist, &expectation) ==
+    CHECK(lana_vm_state_dist_expected_probability(&vm, deep_value.as.state_dist, &expectation) ==
           LANA_ERR_INVALID_DISTRIBUTION);
     lana_vm_free(&vm);
     lana_chunk_free(&empty);
