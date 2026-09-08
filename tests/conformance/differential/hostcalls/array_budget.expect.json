@@ -1,0 +1,6 @@
+{
+  "exit": 1,
+  "stdout": "",
+  "stderr": "<bytecode>:2:1-2:1: error[resource-limit/LANA_ERR_OOM]: LANA_ERR_OOM (operation HOST_CALL) (instruction 1, opcode HOST_CALL)\n  resource: memory limit 1048576, observed <implementation-specific> bytes\n",
+  "no_files": true
+}

@@ -8,8 +8,7 @@
 #   brew install wasmtime   (or cargo install wasmtime-cli)
 #   cmake --build build     # produces build/lana-compiler.labc
 #
-# If `wasmtime` is not on PATH, this script prints a warning and exits 0 (it is
-# a soft gate: the node conformance and the native VM still cover the path).
+# Missing prerequisites exit 77. CTest records a skip, not a passing test.
 
 set -euo pipefail
 
@@ -19,7 +18,7 @@ export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 
 if ! command -v wasmtime >/dev/null 2>&1; then
     echo "SKIP: wasmtime not installed (brew install wasmtime); WASI conformance not run" >&2
-    exit 0
+    exit 77
 fi
 
 if [[ -z "${LANA_COMPILER_LABC:-}" ]]; then

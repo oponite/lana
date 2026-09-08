@@ -1,9 +1,6 @@
-// Durable-pipeline host-call fixture: exercises the store, policy engine, and
-// event ledger end-to-end on the Rust VM. These host calls are Rust-only (the
-// C11 VM is frozen at 52 host calls), so this fixture is not part of the
-// differential conformance suite.
+// Store, policy, and ledger workflow. The runner gives each VM its own cwd.
 
-let path = "/tmp/lana_durable_pipeline";
+let path = "pipeline.db";
 store_open(path);
 store_put("answer", 42);
 store_commit();
@@ -30,12 +27,18 @@ map_set(evaluation, "reason", "r");
 
 let decision = policy_evaluate(policy, input, evaluation);
 assert(map_get(decision, "outcome") == 0, "policy authorizes");
+assert(map_get(decision, "effect") == "grant", "policy effect");
+policy_store_decision(decision);
+store_commit();
+let saved = result_value(json_parse(store_get("decision/1")));
+assert(map_get(saved, "reason") == "r", "stored decision reason");
+assert(map_get(saved, "policy_version") == map_get(decision, "policy_version"), "stored policy hash");
 
 let event = map_new();
 map_set(event, "entity", "e1");
 map_set(event, "actor", "a1");
 map_set(event, "action", "grant");
-map_set(event, "reason", "approved");
+map_set(event, "reason", "approved \"東京\"\n");
 map_set(event, "timestamp", 100);
 map_set(event, "correction_of", 0);
 
@@ -49,3 +52,6 @@ map_set(query, "end_timestamp", 0);
 
 let events = ledger_query(query);
 assert(array_length(events) == 1, "ledger query");
+assert(map_get(events[0], "reason") == map_get(event, "reason"), "ledger reason roundtrip");
+assert(map_get(events[0], "event_id") == 3, "ledger committed revision");
+print("DURABLE_PIPELINE_PASS");

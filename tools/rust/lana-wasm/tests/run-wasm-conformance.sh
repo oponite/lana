@@ -37,15 +37,15 @@ if [[ ! -f "$LANA_COMPILER_LABC" ]]; then
 fi
 if ! command -v "$WASM_BINDGEN" >/dev/null 2>&1; then
     echo "SKIP: wasm-bindgen is not installed"
-    exit 0
+    exit 77
 fi
 if ! command -v cargo >/dev/null 2>&1 || ! command -v rustup >/dev/null 2>&1; then
     echo "SKIP: Rust toolchain is not installed"
-    exit 0
+    exit 77
 fi
 if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
     echo "SKIP: wasm32-unknown-unknown target is not installed"
-    exit 0
+    exit 77
 fi
 
 cargo build -p lana-wasm --target wasm32-unknown-unknown

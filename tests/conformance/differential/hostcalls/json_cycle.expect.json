@@ -1,0 +1,6 @@
+{
+  "exit": 1,
+  "stdout": "",
+  "stderr": "<bytecode>:4:1-4:1: error[unsupported/LANA_ERR_UNSUPPORTED_OPERATION]: LANA_ERR_UNSUPPORTED_OPERATION (operation HOST_CALL) (instruction 3, opcode HOST_CALL)\n",
+  "no_files": true
+}

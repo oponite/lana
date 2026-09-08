@@ -1,0 +1,10 @@
+import "std/http" as http;
+
+let admin = capability("net");
+let use = grant(admin, "use");
+for path in ["truncated", "conflict", "overflow", "invalid", "encoded"] {
+    let r = http.get(string_concat("http://127.0.0.1:18100/", path), {}, 5000);
+    assert(r[0] == false, "incomplete or invalid responses must fail");
+    assert(r[1] == "response", "no partial body may become a successful response");
+}
+print("NET_HTTP_FRAMING_OK");

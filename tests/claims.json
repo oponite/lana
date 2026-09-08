@@ -1,0 +1,255 @@
+{
+  "schema": 1,
+  "scope": "Executable evidence for bounded claims. Passing tests are not a proof for all programs or environments.",
+  "claims": [
+    {
+      "id": "http-tls-boundary",
+      "claim": "The checked HTTP responses retain provenance, invalid framing fails, self-signed TLS requires an explicit opt-out, and C rejects a trusted certificate for the wrong hostname.",
+      "authority": ["stdlib/http.lana", "spec/SPEC.md"],
+      "evidence": ["tests/test_net_live.py", "tests/conformance/differential/net_live/http_pass.lana"],
+      "ctest": ["net_live_conformance"],
+      "requires": ["native", "net-live", "rust-no-tls"],
+      "limitation": "These are loopback tests, not a guarantee for every remote server, certificate chain, or network failure. Transfer-coded responses are currently rejected, not decoded."
+    },
+    {
+      "id": "state-semantics",
+      "claim": "Construction, measurement, invert, neutralize, and independent append obey the checked numerical cases.",
+      "authority": [
+        "papers/semantics.md",
+        "spec/SPEC.md"
+      ],
+      "evidence": [
+        "tests/test_oracles.py",
+        "tests/unit/test_runtime.c",
+        "vm/rust/lana-vm/src/state.rs"
+      ],
+      "ctest": [
+        "lana_independent_oracles",
+        "lana_runtime_tests",
+        "lana_mix_tests"
+      ],
+      "requires": [
+        "native",
+        "rust",
+        "oracles-rust"
+      ]
+    },
+    {
+      "id": "tensor-numerics",
+      "claim": "The checked tensor dtypes, shapes, matmul, and reductions agree with independent scalar arithmetic.",
+      "authority": [
+        "spec/SPEC.md",
+        "spec/VM.md"
+      ],
+      "evidence": [
+        "tests/test_oracles.py",
+        "tests/unit/test_tensor.c",
+        "tests/unit/test_linalg.c",
+        "vm/rust/lana-vm/src/tensor.rs"
+      ],
+      "ctest": [
+        "lana_tensor_tests",
+        "lana_linalg_tests",
+        "lana_independent_oracles"
+      ],
+      "requires": [
+        "native",
+        "rust",
+        "differential",
+        "oracles-rust"
+      ]
+    },
+    {
+      "id": "compiler-self-hosting",
+      "claim": "Both VMs regenerate the checked compiler assembly twice within the fixed compiler budgets.",
+      "authority": [
+        "AGENTS.md",
+        "spec/SYNTAX.md"
+      ],
+      "evidence": [
+        "cmake/VerifyNativeBootstrap.cmake",
+        "compiler/bootstrap/compiler.lasm"
+      ],
+      "ctest": [
+        "native_compiler_bootstrap",
+        "native_array_type_consistency_pass",
+        "native_guarded_rebinding_pass"
+      ],
+      "requires": [
+        "native",
+        "bootstrap-rust"
+      ]
+    },
+    {
+      "id": "guarded-effects",
+      "claim": "The checked unresolved branches reject mutation and effects without publishing partial output.",
+      "authority": [
+        "papers/semantics.md",
+        "spec/SPEC.md"
+      ],
+      "evidence": [
+        "tests/test_guarded_source.py",
+        "tests/source_contract.py",
+        "tests/unit/test_runtime.c"
+      ],
+      "ctest": [
+        "lana_guarded_source_errors",
+        "native_guarded_rebinding_pass"
+      ],
+      "requires": [
+        "native",
+        "rust",
+        "differential"
+      ]
+    },
+    {
+      "id": "durable-records",
+      "claim": "Checked store recovery, revision, decision, and ledger cases preserve their data and error contracts.",
+      "authority": [
+        "spec/VM.md"
+      ],
+      "evidence": [
+        "tests/unit/test_store.c",
+        "tests/test_store_process.py",
+        "tests/unit/test_ledger_coverage.c",
+        "tests/conformance/durable/durable_pipeline.lana"
+      ],
+      "ctest": [
+        "lana_store_tests",
+        "lana_store_process",
+        "lana_policy_ledger_tests",
+        "lana_ledger_coverage_tests",
+        "lana_source_inputs"
+      ],
+      "requires": [
+        "native",
+        "rust",
+        "differential",
+        "store-process"
+      ]
+    },
+    {
+      "id": "container-budgets",
+      "claim": "Array, Map, Set, and Tensor payloads use checked lifetime reservations in the tested Rust paths.",
+      "authority": [
+        "spec/VM.md"
+      ],
+      "evidence": [
+        "vm/rust/lana-vm/src/heap.rs",
+        "vm/rust/lana-vm/src/value.rs",
+        "vm/rust/lana-vm/src/tensor.rs"
+      ],
+      "ctest": [
+        "lana_runtime_tests",
+        "lana_gc_tests"
+      ],
+      "requires": [
+        "native",
+        "rust",
+        "asan"
+      ],
+      "limitation": "Other Rust metadata allocations and cycle collection still require separate coverage. This is not a whole-VM heap guarantee."
+    },
+    {
+      "id": "tasks",
+      "claim": "The checked fork, join, cancellation, timeout, generator, and async cases preserve their contracts.",
+      "authority": [
+        "spec/SPEC.md",
+        "spec/VM.md"
+      ],
+      "evidence": [
+        "tests/conformance/differential/run.py",
+        "tests/unit/test_shared.c",
+        "vm/rust/lana-vm/src/vm.rs"
+      ],
+      "ctest": [
+        "lana_shared_tests",
+        "native_async_determinism_pass",
+        "native_m22_generator_pass"
+      ],
+      "requires": [
+        "native",
+        "rust",
+        "differential",
+        "tsan"
+      ]
+    },
+    {
+      "id": "malformed-bytecode",
+      "claim": "Known malformed files are rejected; seeded mutations agree across both verifier commands without process crashes.",
+      "authority": [
+        "spec/BYTECODE.md"
+      ],
+      "evidence": [
+        "tests/test_bytecode.py",
+        "tests/unit/fuzz_bytecode.c"
+      ],
+      "ctest": [
+        "lana_runtime_tests",
+        "lana_error_tests"
+      ],
+      "requires": [
+        "bytecode",
+        "fuzz"
+      ],
+      "limitation": "The libFuzzer target runs only allowlisted instructions within 1 MiB and 1,000 instructions. It does not execute arbitrary host calls."
+    },
+    {
+      "id": "developer-workflow",
+      "claim": "The generated project, import, debugger, REPL, LSP, and local-install tests succeed.",
+      "authority": [
+        "spec/SPEC.md"
+      ],
+      "evidence": [
+        "cmake/CTestTargets.cmake",
+        "tests/test_lsp.py",
+        "tests/test_repl.py"
+      ],
+      "ctest": [
+        "lana_project_workflow",
+        "lana_source_debugger",
+        "lana_lsp_roundtrip",
+        "lana_repl_session",
+        "lana_local_install"
+      ],
+      "requires": [
+        "native"
+      ]
+    },
+    {
+      "id": "wasm",
+      "claim": "Node and WASI execute their conformance tests with the candidate compiler artifact.",
+      "authority": [
+        "spec/SPEC.md"
+      ],
+      "evidence": [
+        "tools/rust/lana-wasm/tests/run-wasm-conformance.sh",
+        "tools/rust/lana-wasm/tests/run-wasi-conformance.sh"
+      ],
+      "ctest": [
+        "lana_wasm_node_conformance",
+        "lana_wasm_wasi_conformance"
+      ],
+      "requires": [
+        "native"
+      ]
+    },
+    {
+      "id": "release-integrations",
+      "claim": "Both installed macOS slices and the native/Python bridges pass their candidate checks.",
+      "authority": [
+        "AGENTS.md"
+      ],
+      "evidence": [
+        "tests/verify_install.py",
+        "cmake/IntegrationTargets.cmake",
+        "integrations/python/pyproject.toml"
+      ],
+      "requires": [
+        "universal",
+        "integrations",
+        "python-integrations"
+      ]
+    }
+  ]
+}

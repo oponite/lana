@@ -16,7 +16,7 @@ static void test_basic_values(void) {
         lana_value_null(),
         lana_value_number(3.14),
         lana_value_bool(true),
-        lana_value_string("hello lana")
+        lana_value_string("café 🦀\x01\n")
     };
 
     for (int i = 0; i < 4; i++) {
