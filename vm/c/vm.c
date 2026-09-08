@@ -10391,7 +10391,7 @@ static LanaError expected_probability_operand(const LanaDistOperand *operand,
     return LANA_OK;
 }
 
-LanaError lana_vm_state_dist_expected_probability(const LanaStateDist *distribution,
+LanaError lana_vm_state_dist_expected_probability(LanaVM *vm, const LanaStateDist *distribution,
                                               double *out) {
     LanaDistEvalFrame stack[LANA_STATE_DIST_DEPTH_LIMIT + 1u];
     size_t top = 0u;
@@ -10402,6 +10402,13 @@ LanaError lana_vm_state_dist_expected_probability(const LanaStateDist *distribut
         LanaDistEvalFrame *frame = &stack[top - 1u];
         LanaError error;
         if (frame->node == NULL) return LANA_ERR_INVALID_DISTRIBUTION;
+        /* A distribution DAG can share subtrees exponentially (each append
+         * references its operands twice), so the walk below is not bounded by
+         * the tree's node count. Charge each visited node against the sampling
+         * budget so a crafted bytecode cannot make a single evaluation take
+         * unbounded time. */
+        error = consume_sampling_budget(vm);
+        if (error != LANA_OK) return error;
         if (frame->stage == 0u) {
             if (frame->node->kind == LANA_DIST_DIRAC) {
                 if (!lana_state_valid(&frame->node->as.dirac.state))
@@ -10524,6 +10531,13 @@ static LanaError sample_distribution_recursive(LanaVM *vm, const LanaStateDist *
         LanaDistEvalFrame *frame = &stack[top - 1u];
         LanaError error;
         if (frame->node == NULL) return LANA_ERR_INVALID_DISTRIBUTION;
+        /* A distribution DAG can share subtrees exponentially (each append
+         * references its operands twice), so the walk below is not bounded by
+         * the tree's node count. Charge each visited node against the sampling
+         * budget so a crafted bytecode cannot make a single sample take
+         * unbounded time. */
+        error = consume_sampling_budget(vm);
+        if (error != LANA_OK) return error;
         if (frame->stage == 0u) {
             if (frame->node->kind == LANA_DIST_DIRAC) {
                 if (!lana_state_valid(&frame->node->as.dirac.state))
@@ -11981,7 +11995,7 @@ static LanaError vm_step(LanaVM *vm) {
                 else {
                     double expected;
                     LanaMap *result;
-                    error = lana_vm_state_dist_expected_probability(source->as.state_dist,
+                    error = lana_vm_state_dist_expected_probability(vm, source->as.state_dist,
                                                                     &expected);
                     if (error == LANA_OK)
                         error = build_statistical_result(vm, "exact", expected,
@@ -12373,7 +12387,7 @@ static LanaError vm_step(LanaVM *vm) {
                 double probability;
                 if (source->type == VAL_STATE) probability = source->as.state.state.p;
                 else if (source->type == VAL_STATE_DIST)
-                    error = lana_vm_state_dist_expected_probability(source->as.state_dist,
+                    error = lana_vm_state_dist_expected_probability(vm, source->as.state_dist,
                                                                  &probability);
                 else error = LANA_ERR_TYPE;
                 if (error == LANA_OK && ins->c == LANA_MEASURE_PROBABILITY)

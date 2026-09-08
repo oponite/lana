@@ -5307,7 +5307,7 @@ impl<'a> Vm<'a> {
                 let probability = match &source.kind {
                     ValueKind::State(state_value) => state_value.state.p,
                     ValueKind::StateDist(distribution) => {
-                        match state_dist::expected_probability(distribution) {
+                        match self.state_dist_expected_probability(distribution) {
                             Ok(probability) => probability,
                             Err(error) => return error,
                         }
@@ -6201,7 +6201,7 @@ impl<'a> Vm<'a> {
                     ValueKind::StateDist(distribution) => distribution.clone(),
                     _ => unreachable!("checked above"),
                 };
-                let expected = match state_dist::expected_probability(&distribution) {
+                let expected = match self.state_dist_expected_probability(&distribution) {
                     Ok(expected) => expected,
                     Err(error) => return error,
                 };
@@ -7006,6 +7006,148 @@ impl<'a> Vm<'a> {
         self.sample_append_parameters(p, m_re, m_im, sigma, out)
     }
 
+    /// The expected probability of a state distribution, mirroring
+    /// `lana_vm_state_dist_expected_probability`. Iterative to bound the stack;
+    /// each visited node is charged against the sampling budget so a DAG that
+    /// shares subtrees exponentially cannot make one evaluation unbounded.
+    fn state_dist_expected_probability(
+        &mut self,
+        distribution: &Arc<StateDist>,
+    ) -> Result<f64, LanaError> {
+        let mut stack: Vec<DistEvalFrame> = Vec::new();
+        let mut result = 0.0;
+        stack.push(DistEvalFrame::new(distribution.clone()));
+        loop {
+            if stack.is_empty() {
+                break;
+            }
+            let error = self.consume_sampling_budget();
+            if error != LanaError::Ok {
+                return Err(error);
+            }
+            let top = stack.len() - 1;
+            let stage = stack[top].stage;
+            if stage == 0 {
+                let action = {
+                    let frame = &mut stack[top];
+                    match &frame.node.kind {
+                        StateDistKind::Dirac(state) => {
+                            if !state::state_valid(&state.state) {
+                                return Err(LanaError::InvalidDistribution);
+                            }
+                            result = state.state.p;
+                            EvalAction::Pop
+                        }
+                        StateDistKind::Append { left, has_cached_parameters, p, .. } => {
+                            if *has_cached_parameters {
+                                result = *p;
+                                EvalAction::Pop
+                            } else if let DistOperand::Inline(state) = left {
+                                if !state::state_valid(&state.state) {
+                                    return Err(LanaError::InvalidDistribution);
+                                }
+                                frame.left = state.state.p;
+                                frame.stage = 2;
+                                EvalAction::Continue
+                            } else {
+                                let DistOperand::Node(node) = left else {
+                                    return Err(LanaError::InvalidDistribution);
+                                };
+                                frame.stage = 1;
+                                EvalAction::Push(node.clone())
+                            }
+                        }
+                        StateDistKind::Transform { child, .. } => {
+                            frame.stage = 4;
+                            EvalAction::Push(child.clone())
+                        }
+                        StateDistKind::Attenuate { child, .. } => {
+                            frame.stage = 5;
+                            EvalAction::Push(child.clone())
+                        }
+                    }
+                };
+                match action {
+                    EvalAction::Pop => {
+                        stack.pop();
+                    }
+                    EvalAction::Push(node) => {
+                        if stack.len() >= LANA_STATE_DIST_DEPTH_LIMIT + 1 {
+                            return Err(LanaError::InvalidDistribution);
+                        }
+                        stack.push(DistEvalFrame::new(node));
+                    }
+                    EvalAction::Continue => {}
+                }
+            } else if stage == 1 {
+                stack[top].left = result;
+                stack[top].stage = 2;
+            } else if stage == 2 {
+                let action = {
+                    let frame = &mut stack[top];
+                    let right = match &frame.node.kind {
+                        StateDistKind::Append { right, .. } => right,
+                        _ => return Err(LanaError::InvalidDistribution),
+                    };
+                    if let DistOperand::Inline(state) = right {
+                        if !state::state_valid(&state.state) {
+                            return Err(LanaError::InvalidDistribution);
+                        }
+                        frame.right = state.state.p;
+                        frame.stage = 3;
+                        EvalAction::Continue
+                    } else {
+                        let DistOperand::Node(node) = right else {
+                            return Err(LanaError::InvalidDistribution);
+                        };
+                        frame.stage = 3;
+                        EvalAction::Push(node.clone())
+                    }
+                };
+                match action {
+                    EvalAction::Pop => unreachable!("stage 2 never pops"),
+                    EvalAction::Push(node) => {
+                        if stack.len() >= LANA_STATE_DIST_DEPTH_LIMIT + 1 {
+                            return Err(LanaError::InvalidDistribution);
+                        }
+                        stack.push(DistEvalFrame::new(node));
+                    }
+                    EvalAction::Continue => {}
+                }
+            } else if stage == 3 {
+                let right_is_node = matches!(
+                    &stack[top].node.kind,
+                    StateDistKind::Append { right: DistOperand::Node(_), .. }
+                );
+                if right_is_node {
+                    stack[top].right = result;
+                }
+                result = 1.0 - (1.0 - stack[top].left) * (1.0 - stack[top].right);
+                if !result.is_finite() || result < 0.0 || result > 1.0 {
+                    return Err(LanaError::InvalidDistribution);
+                }
+                stack.pop();
+            } else if stage == 4 {
+                let transform_id = match &stack[top].node.kind {
+                    StateDistKind::Transform { transform_id, .. } => *transform_id,
+                    _ => return Err(LanaError::InvalidDistribution),
+                };
+                let mut out = 0.0;
+                let error = state::transform_expected_probability(transform_id, result, &mut out);
+                if error != LanaError::Ok {
+                    return Err(error);
+                }
+                result = out;
+                stack.pop();
+            } else {
+                // ATTENUATE is the identity on probability: the child's result is
+                // already the expected probability.
+                stack.pop();
+            }
+        }
+        Ok(result)
+    }
+
     /// Sample a state distribution, mirroring `lana_vm_state_dist_sample`.
     fn state_dist_sample(&mut self, distribution: &Arc<StateDist>) -> Result<StateValue, LanaError> {
         let mut stack: Vec<DistEvalFrame> = Vec::new();
@@ -7014,6 +7156,10 @@ impl<'a> Vm<'a> {
         loop {
             if stack.is_empty() {
                 break;
+            }
+            let error = self.consume_sampling_budget();
+            if error != LanaError::Ok {
+                return Err(error);
             }
             let top = stack.len() - 1;
             let stage = stack[top].stage;
@@ -16736,6 +16882,56 @@ mod tests {
         );
         assert_eq!(error, LanaError::Ok);
         assert!(result.starts_with("state(p="), "expected a state, got {result}");
+    }
+
+    #[test]
+    fn state_dist_walks_are_budget_bounded() {
+        // append(shared, shared) references the same subtree twice, so a naive
+        // walk visits exponentially many nodes. Both the sample and expected-
+        // probability walks must charge each visited node against the sampling
+        // budget and return BudgetExhausted rather than running unbounded.
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let dirac = |p: f64| {
+            Arc::new(StateDist {
+                kind: StateDistKind::Dirac(StateValue {
+                    state: State { p, d_re: 0.0, d_im: 0.0 },
+                    indexes: Default::default(),
+                }),
+            })
+        };
+        let shared = Arc::new(StateDist {
+            kind: StateDistKind::Append {
+                left: DistOperand::Node(dirac(0.2)),
+                right: DistOperand::Node(dirac(0.3)),
+                has_cached_parameters: false,
+                p: 0.0,
+                m_re: 0.0,
+                m_im: 0.0,
+                sigma: 0.0,
+            },
+        });
+        let outer = Arc::new(StateDist {
+            kind: StateDistKind::Append {
+                left: DistOperand::Node(shared.clone()),
+                right: DistOperand::Node(shared),
+                has_cached_parameters: false,
+                p: 0.0,
+                m_re: 0.0,
+                m_im: 0.0,
+                sigma: 0.0,
+            },
+        });
+
+        let mut vm = Vm::new(&chunk);
+        vm.set_instruction_limit(10);
+        assert_eq!(vm.state_dist_sample(&outer), Err(LanaError::BudgetExhausted));
+
+        let mut vm = Vm::new(&chunk);
+        vm.set_instruction_limit(10);
+        assert_eq!(
+            vm.state_dist_expected_probability(&outer),
+            Err(LanaError::BudgetExhausted)
+        );
     }
 
     #[test]

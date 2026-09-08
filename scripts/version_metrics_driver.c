@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
                 im = value->as.state.state.d_im;
             } else if (value->type == VAL_STATE_DIST && !sample) {
                 /* Force only for validation, outside both measured intervals. */
-                valid = lana_vm_state_dist_expected_probability(value->as.state_dist, &p) == LANA_OK;
+                valid = lana_vm_state_dist_expected_probability(vm, value->as.state_dist, &p) == LANA_OK;
             } else valid = false;
             valid = valid && (int)value->type == types[i] && isfinite(p) && isfinite(re) && isfinite(im) &&
                 fabs(p - expected[i][0]) <= 1e-12 &&
