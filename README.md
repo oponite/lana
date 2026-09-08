@@ -212,12 +212,20 @@ Source: [`examples/tutorials/03_combined_evidence.lana`](examples/tutorials/03_c
 - `papers/` — `semantics.md` (1.0) and `semantics-2.md` (2.0), the mathematical
   authorities.
 - `lip/` — Lana Improvement Proposals.
-- `stdlib/` — future Lana standard library.
+- `stdlib/` — Lana standard library.
 - `tests/` — unit, regression, and conformance suites.
 - `integrations/` — Python, editors, native ABI.
 
 Project governance: [GOVERNANCE.md](GOVERNANCE.md), [VERSIONING.md](VERSIONING.md),
 [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md).
+
+## Test evidence
+
+Run `python3 tests/run.py quick` for the daily checks. The runner records the
+candidate hash, commands, results, and known coverage limits. The
+[test guide](tests/README.md) describes the full, sanitizer, hardware, and
+release profiles. Passing tests establish specific behavior, not a guarantee
+for every program or environment.
 
 ## Optional integrations
 
