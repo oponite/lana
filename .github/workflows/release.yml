@@ -56,9 +56,16 @@ jobs:
           "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test]'
           "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pytest -q integrations/python/tests
 
-  macos:
-    name: Release gates (macOS universal)
-    runs-on: macos-14
+  macos-slices:
+    name: Release gate (macOS ${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -67,17 +74,48 @@ jobs:
           version="$(tr -d '\n' < VERSION)"
           test "$version" = "$EXPECTED_VERSION"
           test "$GITHUB_REF_NAME" = "v$version"
-      - name: Build and install universal binaries
+      - name: Build and install ${{ matrix.arch }} binaries
         run: |
-          cmake -S . -B build-universal -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64'
-          cmake --build build-universal --parallel
+          cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES='${{ matrix.arch }}'
+          cmake --build build-release --parallel
+          prefix="$RUNNER_TEMP/lana-install-${{ matrix.arch }}"
+          cmake --install build-release --prefix "$prefix"
+          lipo "$prefix/bin/lana" -verify_arch '${{ matrix.arch }}'
+          lipo "$prefix/bin/lanavm" -verify_arch '${{ matrix.arch }}'
+          "$prefix/bin/lana" run examples/belief.lana
+          tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${{ matrix.arch }}.tar.gz" .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lana-macos-${{ matrix.arch }}
+          path: ${{ runner.temp }}/lana-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: Assemble macOS universal artifact
+    needs: macos-slices
+    runs-on: macos-15
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: lana-macos-*
+          path: ${{ runner.temp }}/lana-slices
+      - name: Assemble universal installed prefix
+        run: |
+          arm="$RUNNER_TEMP/lana-arm64"
+          intel="$RUNNER_TEMP/lana-x86_64"
+          mkdir "$arm" "$intel"
+          tar -C "$arm" -xzf "$RUNNER_TEMP/lana-slices/lana-macos-arm64/lana-arm64.tar.gz"
+          tar -C "$intel" -xzf "$RUNNER_TEMP/lana-slices/lana-macos-x86_64/lana-x86_64.tar.gz"
           prefix="$RUNNER_TEMP/lana-install"
-          cmake --install build-universal --prefix "$prefix"
+          cp -R "$arm" "$prefix"
+          for file in bin/lana bin/lanavm lib/liblanaruntime.a; do
+            lipo -create "$arm/$file" "$intel/$file" -output "$prefix/$file"
+          done
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
           lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
           arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          "$prefix/bin/lana" run examples/belief.lana
           tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${EXPECTED_VERSION}-macos-universal.tar.gz" .
           (
             cd "$RUNNER_TEMP"
@@ -96,7 +134,7 @@ jobs:
   verify-macos-artifact:
     name: Verify macOS release artifact
     needs: macos
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
