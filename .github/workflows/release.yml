@@ -23,40 +23,22 @@ jobs:
           test "$version" = "$EXPECTED_VERSION"
           test "$GITHUB_REF_NAME" = "v$version"
           test "${{ github.ref_protected }}" = "true"
-      - name: Debug build and tests
-        run: |
-          rustup target add wasm32-unknown-unknown
-          cargo install wasm-bindgen-cli --version 0.2.100 --locked
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build --parallel
-          ctest --test-dir build --output-on-failure
-          build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          cargo test --workspace
-          cargo run --quiet -p lana-cli -- version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          git diff --check
-      - name: Address and undefined behavior sanitizers
-        run: |
-          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_SANITIZERS=ON
-          cmake --build build-asan --parallel
-          ctest --test-dir build-asan --output-on-failure
-      - name: Thread sanitizer
-        run: |
-          cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_TSAN=ON
-          cmake --build build-tsan --parallel
-          ctest --test-dir build-tsan --output-on-failure
-      - name: Ten-minute malformed-bytecode fuzz test
-        run: |
-          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
-          cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
-          build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5
-      - name: Optional integrations
-        run: |
-          cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release -DLANA_BUILD_INTEGRATIONS=ON
-          cmake --build build-integrations --parallel
-          ctest --test-dir build-integrations --output-on-failure
-          python3 -m venv "$RUNNER_TEMP/lana-integrations-venv"
-          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test]'
-          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pytest -q integrations/python/tests
+      - uses: ./.github/actions/test-tools
+      - name: Exact-candidate correctness, sanitizers, and ten-minute fuzz test
+        run: python3 tests/run.py nightly --cc gcc --fuzz-cc clang
+      - name: Native and Python integration gates
+        run: python3 tests/run.py integrations --build-dir build-integrations
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: release-gate-evidence
+          path: |
+            build/test-evidence/**/report.json
+            build/test-evidence/**/*.log
+            build/test-evidence/**/*.xml
+            build/test-evidence/**/fuzz-corpus/
+            build/test-evidence/**/bytecode-failures/
+          if-no-files-found: error
 
   macos-slices:
     name: Release gate (macOS ${{ matrix.arch }})
@@ -82,9 +64,7 @@ jobs:
           cmake --build build-release --parallel
           prefix="$RUNNER_TEMP/lana-install-${{ matrix.arch }}"
           cmake --install build-release --prefix "$prefix"
-          lipo "$prefix/bin/lana" -verify_arch '${{ matrix.arch }}'
-          lipo "$prefix/bin/lanavm" -verify_arch '${{ matrix.arch }}'
-          "$prefix/bin/lana" run examples/belief.lana
+          python3 -E tests/verify_install.py --prefix "$prefix" --architecture '${{ matrix.arch }}'
           tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${{ matrix.arch }}.tar.gz" .
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -111,6 +91,7 @@ jobs:
           tar -C "$intel" -xzf "$RUNNER_TEMP/lana-slices/lana-macos-x86_64/lana-x86_64.tar.gz"
           prefix="$RUNNER_TEMP/lana-install"
           cp -R "$arm" "$prefix"
+          cmp "$arm/bin/lana-compiler.labc" "$intel/bin/lana-compiler.labc"
           for file in bin/lana bin/lanavm lib/liblanaruntime.a; do
             lipo -create "$arm/$file" "$intel/$file" -output "$prefix/$file"
           done
@@ -162,9 +143,7 @@ jobs:
           tar -C "$prefix" -xzf "$artifact_dir/$archive"
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
           lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
-          arch -${{ matrix.arch }} "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          cp examples/belief.lana "$prefix/belief.lana"
-          arch -${{ matrix.arch }} "$prefix/bin/lana" run "$prefix/belief.lana"
+          python3 -E tests/verify_install.py --prefix "$prefix" --architecture '${{ matrix.arch }}'
 
   publish:
     name: Publish GitHub Release

@@ -1,37 +1,44 @@
-from pathlib import Path
+"""Check benchmark accounting, not a machine-specific speed threshold."""
 import importlib.util
-import sys
+import math
+from pathlib import Path
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("metrics", ROOT / "scripts/version_metrics.py")
+metrics = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(metrics)
 
 
-ROOT = Path(__file__).parents[1]
-sys.path.insert(0, str(ROOT / "benchmark"))
+class BenchmarkAccountingTests(unittest.TestCase):
+    def test_missing_hardware_counts_are_not_estimated(self):
+        scores = metrics.scores(dict(units=20, elapsed_ns=100, allocations=4, retained_bytes=16))
+        self.assertIsNone(scores["units_per_cycle"])
+        self.assertIsNone(scores["units_per_bit"])
+        self.assertEqual(scores["units_per_allocation"], 5)
+        self.assertEqual(scores["units_per_retained_byte"], 1.25)
+        self.assertEqual(scores["units_per_second"], 200_000_000)
+
+    def test_invalid_denominators_are_unavailable(self):
+        for value in (0, -1, float("inf"), float("nan"), None):
+            with self.subTest(value=value):
+                scores = metrics.scores(dict(units=1, elapsed_ns=1, cycles=value, memory_bits=value))
+                self.assertIsNone(scores["units_per_cycle"])
+                self.assertIsNone(scores["units_per_bit"])
+
+    def test_incomplete_trials_are_rejected(self):
+        for units, elapsed in ((0, 1), (-1, 1), (1.5, 1), (1, 0), (1, -1)):
+            with self.assertRaises(ValueError):
+                metrics.scores(dict(units=units, elapsed_ns=elapsed))
+
+    def test_corpus_obeys_state_invariants(self):
+        for index in range(256):
+            for p, re, im in metrics.inputs(index):
+                self.assertTrue(0 <= p <= 1)
+                self.assertLessEqual(math.hypot(re, im), 1)
+                if p in (0, 1):
+                    self.assertEqual((re, im), (0, 0))
 
 
-def load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_python_baselines_have_identical_dynamic_behavior() -> None:
-    runner = load("benchmark_runner_test", ROOT / "benchmark" / "run_benchmark.py")
-    steps = runner.load_steps("B", 24)
-
-    plain = runner.PLAIN.predict(steps, "B", "dynamic")
-    state_class = runner.STATE_CLASS.predict(steps, "B", "dynamic")
-
-    assert max(abs(left - right) for left, right in zip(plain, state_class)) < 1e-12
-
-
-def test_lana_benchmark_generation_uses_native_operations() -> None:
-    runner = load("benchmark_runner_generation_test", ROOT / "benchmark" / "run_benchmark.py")
-    assembly = runner.LANA_GENERATOR.generate(runner.load_steps("C", 2), "C")
-
-    assert "APPLY_MANY" in assembly
-    assert "TRANSFORM" in assembly
-    assert "HISTORY" in assembly
-    assert "MEASURE" in assembly
-    assert "JUMP_IF_FALSE" in assembly
+if __name__ == "__main__":
+    unittest.main()

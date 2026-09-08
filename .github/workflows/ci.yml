@@ -2,11 +2,12 @@ name: CI
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
     branches: [main, dev]
     tags: ["v*"]
   schedule:
-    - cron: "23 4 * * 6"
+    - cron: "23 4 * * *"
 
 permissions:
   contents: read
@@ -38,58 +39,59 @@ jobs:
         compiler: [gcc, clang]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: rustup target add wasm32-unknown-unknown
-      - run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
-      - name: Configure
-        env:
-          CC: ${{ matrix.compiler }}
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-      - name: Build
-        run: cmake --build build --parallel
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-      - name: Test Rust workspace
-        run: cargo test --workspace
-      - name: Check version and whitespace
-        run: |
-          build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          cargo run --quiet -p lana-cli -- version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          git diff --check
+      - uses: ./.github/actions/test-tools
+      - run: python3 tests/run.py full --cc '${{ matrix.compiler }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: native-${{ matrix.compiler }}-evidence
+          path: build/test-evidence/
+          if-no-files-found: error
 
   asan:
     name: Address and undefined behavior sanitizers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: rustup target add wasm32-unknown-unknown
-      - run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_SANITIZERS=ON
-      - run: cmake --build build-asan --parallel
-      - run: ctest --test-dir build-asan --output-on-failure
+      - uses: ./.github/actions/test-tools
+      - run: python3 tests/run.py asan --cc clang --build-dir build-asan
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: asan-evidence
+          path: build/test-evidence/
+          if-no-files-found: error
 
   tsan:
     name: Thread sanitizer
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: rustup target add wasm32-unknown-unknown
-      - run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_TSAN=ON
-      - run: cmake --build build-tsan --parallel
-      - run: ctest --test-dir build-tsan --output-on-failure
+      - uses: ./.github/actions/test-tools
+      - run: python3 tests/run.py tsan --cc gcc --build-dir build-tsan
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: tsan-evidence
+          path: build/test-evidence/
+          if-no-files-found: error
 
   integrations:
     name: Optional integrations
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: rustup target add wasm32-unknown-unknown
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLANA_BUILD_INTEGRATIONS=ON
-      - run: cmake --build build --parallel
-      - run: ctest --test-dir build --output-on-failure
-      - name: Test Python bridge and evidence contracts
-        run: |
-          python3 -m venv "$RUNNER_TEMP/lana-integrations-venv"
-          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test]'
-          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pytest -q integrations/python/tests
+      - uses: ./.github/actions/test-tools
+      - run: python3 tests/run.py integrations --build-dir build-integrations
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: integrations-evidence
+          path: |
+            build/test-evidence/**/report.json
+            build/test-evidence/**/*.log
+            build/test-evidence/**/*.xml
+          if-no-files-found: error
 
   fuzz-pr:
     name: Fuzz smoke test
@@ -98,17 +100,48 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: sudo apt-get update && sudo apt-get install -y libffi-dev libssl-dev pkg-config clang
       - run: cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
-      - run: cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
-      - run: build-fuzz/lana_bytecode_fuzz -max_total_time=30 -timeout=5
+      - run: cmake --build build-fuzz --target lana_bytecode_fuzz lanavm --parallel
+      - run: |
+          mkdir -p build/fuzz-evidence/corpus
+          build-fuzz/lanavm asm tests/conformance/fuzz/state.lasm -o build/fuzz-evidence/corpus/state.labc
+          build-fuzz/lana_bytecode_fuzz -seed=42 -max_total_time=30 -timeout=5 -artifact_prefix=build/fuzz-evidence/ build/fuzz-evidence/corpus 2>&1 | tee build/fuzz-evidence/fuzz.log
+        shell: bash
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: fuzz-smoke-evidence
+          path: build/fuzz-evidence/
+          if-no-files-found: error
 
   fuzz-scheduled:
-    name: Full fuzz test
-    if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')
+    name: Nightly correctness and ten-minute fuzz test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - run: cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
-      - run: cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
-      - run: build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5
+      - uses: ./.github/actions/test-tools
+      - run: python3 tests/run.py nightly --cc gcc --fuzz-cc clang
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: nightly-evidence
+          path: build/test-evidence/
+          if-no-files-found: error
+
+  metal:
+    name: macOS Metal and native conformance
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: ./.github/actions/test-tools
+      - run: python3 tests/run.py full --cc clang
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: macos-metal-evidence
+          path: build/test-evidence/
+          if-no-files-found: error

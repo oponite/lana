@@ -1,18 +1,9 @@
-"""Cross-language differential test: Lana (quantum) vs Python/Java (classical).
+"""Compare scalar-probability and density-matrix models, not language power.
 
-Runs the same five decision experiments in three implementations and asserts
-three properties:
-
-1. parity    — the two classical models (Python, Java) agree with each other.
-2. recovery  — Lana's classical projection matches the classical model exactly
-               (when the disposition is ignored, quantum reduces to classical).
-3. divergence— Lana's quantum result differs from the classical result only
-               where the disposition `d` carries information — the exact spots
-               Python/Java cannot express.
-
-The comparison is model-vs-model: Python and Java stand in for the classical
-probability model (one scalar `p`); Lana stands in for the density-operator
-model (`p` + `d`).
+Python and Java run the deliberately scalar baseline. Both languages can also
+represent density matrices; test_oracles.py supplies an independent Python
+matrix oracle. This test checks projection parity and the information lost
+when a model retains only p.
 """
 
 import json
@@ -21,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIR = os.path.join(ROOT, "tests", "quantum_vs_classical")
@@ -37,7 +29,7 @@ EXPERIMENTS = ["distinguish", "invert", "distance", "neutralize", "agreement"]
 
 def run(cmd, cwd=None):
     return subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, check=True
+        cmd, cwd=cwd, capture_output=True, text=True, check=True, timeout=30
     ).stdout.strip()
 
 
@@ -54,13 +46,11 @@ def close(a, b, tol=1e-9):
 
 
 def test_quantum_vs_classical():
-    # Compile the Java baseline once.
-    subprocess.run(
-        [JAVAC, os.path.join(DIR, "Classical.java")], check=True, capture_output=True
-    )
-
+    # Keep generated Java classes out of the checkout.
+    with tempfile.TemporaryDirectory(prefix="lana-model-comparison-") as directory:
+        run([JAVAC, "-d", directory, os.path.join(DIR, "Classical.java")])
+        java = json.loads(run([JAVA, "-cp", directory, "Classical"]))
     py = json.loads(run([sys.executable, os.path.join(DIR, "classical.py")]))
-    java = json.loads(run([JAVA, "-cp", DIR, "Classical"]))
     lana = json.loads(run([LANA, "run", os.path.join(DIR, "quantum.lana")]))
 
     # 1. parity: the two classical implementations agree.
@@ -108,3 +98,12 @@ def test_quantum_vs_classical():
     assert not math.isclose(
         lana["agreement"]["quantum"]["opposed_sample_d_re"], 0.6, abs_tol=1e-9
     )
+
+
+if __name__ == "__main__":
+    if not JAVAC or not JAVA or subprocess.run(
+        [JAVAC, "-version"], capture_output=True, timeout=10).returncode != 0:
+        print("SKIP: a working Java Development Kit is required", file=sys.stderr)
+        raise SystemExit(77)
+    test_quantum_vs_classical()
+    print("MODEL_COMPARISON_PASS")

@@ -1,0 +1,10 @@
+import "std/http" as http;
+
+let admin = capability("net");
+let use = grant(admin, "use");
+let matched = http.get("https://127.0.0.1:18101/", {}, 5000);
+assert(matched[0] == true, "trusted certificate must match its IP subject alternative name");
+let mismatched = http.get("https://localhost:18101/", {}, 5000);
+assert(mismatched[0] == false, "a trusted certificate for a different host must be rejected");
+assert(mismatched[1] == "tls", "hostname mismatch must fail in the TLS handshake");
+print("NET_TLS_TRUSTED_HOST_OK");

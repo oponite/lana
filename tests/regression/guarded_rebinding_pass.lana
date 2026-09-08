@@ -1,0 +1,13 @@
+let guard = possibility([true, false]);
+let result = 0;
+if (guard) { result = 10; } else { result = 20; }
+let selected = sample_value(sample(result));
+if (selected != 10) { assert(selected == 20, "guarded local rebinding"); }
+let nested = 0;
+if (guard) {
+    let certain = possibility([true]);
+    if (certain) { nested = 30; } else { nested = 99; }
+} else { nested = 40; }
+let nested_value = sample_value(sample(nested));
+if (nested_value != 30) { assert(nested_value == 40, "nested singleton guard"); }
+print("GUARDED_REBINDING_PASS");

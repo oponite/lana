@@ -1,0 +1,38 @@
+name: Lana test tools
+description: Install the native and real WASM prerequisites for strict test profiles.
+runs:
+  using: composite
+  steps:
+    - name: Native dependencies
+      shell: bash
+      run: |
+        if [[ "$RUNNER_OS" == Linux ]]; then
+          sudo apt-get update
+          sudo apt-get install -y libffi-dev libssl-dev pkg-config clang
+        else
+          brew install libffi openssl@3 pkg-config
+        fi
+        node --version
+        javac -version
+    - name: WASM toolchain
+      shell: bash
+      run: |
+        rustup target add wasm32-unknown-unknown wasm32-wasip1
+        cargo install wasm-bindgen-cli --version 0.2.100 --locked
+        case "$RUNNER_OS/$RUNNER_ARCH" in
+          Linux/X64)
+            target=x86_64-linux
+            digest=4c2e31b68ad99e0a519f225a261fda099eb15f056d4a24fdb3c2a46517bde1df
+            ;;
+          macOS/ARM64)
+            target=aarch64-macos
+            digest=88cc08b395fbfb960b99f355a81224af975679b8a5f4b74a51d59e5e34b20dcd
+            ;;
+          *) echo "Unsupported test runner: $RUNNER_OS/$RUNNER_ARCH" >&2; exit 1 ;;
+        esac
+        tool_dir="$(mktemp -d "$RUNNER_TEMP/lana-wasmtime.XXXXXX")"
+        archive="wasmtime-v48.0.1-$target.tar.xz"
+        curl --fail --location --retry 3 "https://github.com/bytecodealliance/wasmtime/releases/download/v48.0.1/$archive" -o "$tool_dir/$archive"
+        (cd "$tool_dir" && printf '%s  %s\n' "$digest" "$archive" | shasum -a 256 -c -)
+        tar -xJf "$tool_dir/$archive" -C "$tool_dir"
+        echo "$tool_dir/wasmtime-v48.0.1-$target" >> "$GITHUB_PATH"

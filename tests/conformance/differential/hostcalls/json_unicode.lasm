@@ -1,0 +1,5 @@
+.function main 0 4
+LOAD_STRING R0 c3a920e69db1e4baac20f09f98800a225c
+HOST_CALL json_stringify R0 1 R1
+PRINT R1
+RETURN R1

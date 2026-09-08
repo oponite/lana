@@ -59,6 +59,7 @@ static void test_recovery_and_history(void) {
     assert(lana_store_snapshot(store, &vm, &value, &revision) == LANA_OK);
     assert(value.type == VAL_MAP && revision.revision_id == 2u);
     assert(lana_store_compact(store, 0u, &revision) == LANA_OK);
+    assert(lana_store_compact(store, 100u, &revision) == LANA_OK);
     {
         char journal[512];
         struct stat status;
@@ -319,7 +320,71 @@ static void test_mvcc_get_at_and_commit_if(void) {
     printf("Pass.\n");
 }
 
-int main(void) {
+/* Pipe-driven public-API probe for tests/test_store_process.py. */
+static int store_probe(const char *path, const char *timeout) {
+    LanaStoreOptions options = {sizeof(options), 1u, path, (uint32_t)strtoul(timeout, NULL, 10)};
+    LanaStore *store = NULL;
+    LanaVM vm;
+    LanaError result;
+    char command[4096];
+    (void)setvbuf(stdout, NULL, _IONBF, 0);
+    puts("ATTEMPT");
+    result = lana_store_open(&options, &store);
+    if (result != LANA_OK) {
+        printf("ERR %s\n", lana_error_name(result));
+        return 1;
+    }
+    puts("OPEN");
+    lana_vm_init(&vm, NULL);
+    while (fgets(command, sizeof(command), stdin) != NULL) {
+        LanaStoreRevisionInfo revision;
+        Value value = lana_value_null();
+        double number;
+        command[strcspn(command, "\r\n")] = '\0';
+        if (strcmp(command, "exit") == 0) break;
+        result = LANA_ERR_INVALID_STATE;
+        if (store == NULL && strncmp(command, "open ", 5u) == 0) {
+            options.path = command + 5;
+            result = lana_store_open(&options, &store);
+            if (result == LANA_OK) { puts("OPEN"); continue; }
+        }
+        if (store != NULL) {
+            if (sscanf(command, "put %lf", &number) == 1) {
+                result = lana_store_put(store, "key", lana_value_number(number));
+            } else if (strcmp(command, "stage") == 0) {
+                result = lana_store_put(store, "staged", lana_value_number(99.0));
+            } else if (strcmp(command, "get") == 0 || strcmp(command, "staged") == 0) {
+                result = lana_store_get(store, &vm, strcmp(command, "get") == 0 ? "key" : "staged", &value);
+                if (result == LANA_OK) {
+                    assert(value.type == VAL_NUMBER);
+                    printf("VALUE %.0f\n", value.as.number);
+                    continue;
+                }
+            } else if (strcmp(command, "commit") == 0 || strcmp(command, "snapshot") == 0 ||
+                       strcmp(command, "compact") == 0) {
+                result = strcmp(command, "commit") == 0 ? lana_store_commit(store, &revision) :
+                    strcmp(command, "snapshot") == 0 ? lana_store_snapshot(store, &vm, &value, &revision) :
+                    lana_store_compact(store, 0u, &revision);
+                if (result == LANA_OK) {
+                    printf("REV %llu\n", (unsigned long long)revision.revision_id);
+                    continue;
+                }
+            } else if (strcmp(command, "close") == 0) {
+                result = lana_store_close(store);
+                store = NULL;
+            }
+        }
+        if (result == LANA_OK) puts("OK");
+        else printf("ERR %s\n", lana_error_name(result));
+    }
+    if (store != NULL) assert(lana_store_close(store) == LANA_OK);
+    lana_vm_free(&vm);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 4 && strcmp(argv[1], "--probe") == 0) return store_probe(argv[2], argv[3]);
+    assert(argc == 1);
     test_recovery_and_history();
     test_trailing_partial_revision_is_ignored();
     test_lock_timeout_and_acknowledged_truncation();

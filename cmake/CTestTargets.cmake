@@ -1,4 +1,5 @@
 enable_testing()
+find_program(LANA_PYTHON3 NAMES python3 REQUIRED)
 
 function(add_lana_c_test target source)
     add_executable(${target} ${source})
@@ -9,6 +10,8 @@ function(add_lana_c_test target source)
 endfunction()
 
 add_lana_c_test(lana_runtime_tests tests/unit/test_runtime.c)
+add_lana_c_test(lana_fuzz_guard_tests tests/unit/fuzz_bytecode.c)
+target_compile_definitions(lana_fuzz_guard_tests PRIVATE LANA_FUZZ_SELF_TEST)
 target_compile_definitions(lana_runtime_tests PRIVATE LANA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 add_lana_c_test(lana_mix_tests tests/unit/test_mix.c)
 add_lana_c_test(lana_operations2_tests tests/unit/test_operations2.c)
@@ -52,17 +55,31 @@ add_test(
     NAME net_live_conformance
     COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance/differential/run_net_live.sh")
 set_tests_properties(net_live_conformance PROPERTIES
+    TIMEOUT 90 SKIP_RETURN_CODE 77
     ENVIRONMENT "LANA=$<TARGET_FILE:lana>;LANAVM=$<TARGET_FILE:lanavm>")
 
 function(add_native_compile_failure name source expected)
+    set(code "LANA_ERR_TYPE")
+    if(ARGC GREATER 3)
+        set(code "${ARGV3}")
+    endif()
     add_test(
         NAME ${name}
-        COMMAND "${CMAKE_COMMAND}"
-            -DLANA=$<TARGET_FILE:lana>
-            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/${source}
-            -DEXPECT=${expected}
-            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ExpectCompileFailure.cmake"
+        COMMAND "${LANA_PYTHON3}" -E "${CMAKE_CURRENT_SOURCE_DIR}/tests/source_contract.py"
+            --lana $<TARGET_FILE:lana>
+            --source "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+            --code "${code}" --expect "${expected}"
     )
+    set_tests_properties(${name} PROPERTIES TIMEOUT 40)
+endfunction()
+
+function(add_native_runtime_failure name source code)
+    add_test(NAME ${name}
+        COMMAND "${LANA_PYTHON3}" -E "${CMAKE_CURRENT_SOURCE_DIR}/tests/source_contract.py"
+            --lana $<TARGET_FILE:lana> --mode run
+            --source "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+            --code "${code}" --expect "${code}")
+    set_tests_properties(${name} PROPERTIES TIMEOUT 40)
 endfunction()
 
 if(LANA_BUILD_FUZZERS)
@@ -90,8 +107,8 @@ if(LANA_BUILD_FUZZERS)
     target_link_options(lana_bytecode_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
 endif()
 
-add_native_compile_failure(native_import_cycle_rejected_a tests/regression/import_cycle_a.lana "LANA_ERR_ASSERTION")
-add_native_compile_failure(native_import_cycle_rejected_b tests/regression/import_cycle_b.lana "LANA_ERR_ASSERTION")
+add_native_compile_failure(native_import_cycle_rejected_a tests/regression/import_cycle_a.lana "import cycle detected" "LANA_ERR_ASSERTION")
+add_native_compile_failure(native_import_cycle_rejected_b tests/regression/import_cycle_b.lana "import cycle detected" "LANA_ERR_ASSERTION")
 add_test(NAME native_import_math COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/import_math.lana")
 add_test(NAME native_compile_density COMMAND lana check "${CMAKE_CURRENT_SOURCE_DIR}/examples/belief.lana")
 add_test(NAME native_compile_information COMMAND lana check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/information.lana")
@@ -112,15 +129,12 @@ add_test(NAME native_m7_shared_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR
 set_tests_properties(native_m7_shared_pass PROPERTIES PASS_REGULAR_EXPRESSION "M7_SHARED_PASS")
 add_test(NAME native_m12_capability_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m12_capability_pass.lana")
 set_tests_properties(native_m12_capability_pass PROPERTIES PASS_REGULAR_EXPRESSION "M12_CAPABILITY_PASS")
-add_test(NAME native_m12_capability_revoked COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m12_capability_revoked.lana")
-set_tests_properties(native_m12_capability_revoked PROPERTIES WILL_FAIL TRUE)
+add_native_runtime_failure(native_m12_capability_revoked tests/regression/m12_capability_revoked.lana "LANA_ERR_CLAIM_REVOKED")
 add_test(NAME native_m10_inspector_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m10_inspector_pass.lana")
 set_tests_properties(native_m10_inspector_pass PROPERTIES PASS_REGULAR_EXPRESSION "M10_INSPECTOR_PASS")
-add_test(NAME native_m6_unrelated_rejected COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m6_unrelated_rejected.lana")
-set_tests_properties(native_m6_unrelated_rejected PROPERTIES WILL_FAIL TRUE)
-add_test(NAME native_m6_uncertain_effect_rejected COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m6_uncertain_effect_rejected.lana")
-set_tests_properties(native_m6_uncertain_effect_rejected PROPERTIES WILL_FAIL TRUE)
-add_native_compile_failure(native_m4_parse_span tests/regression/m4_invalid_source.lana "error\\[parse/LANA_ERR_PARSE\\]")
+add_native_runtime_failure(native_m6_unrelated_rejected tests/regression/m6_unrelated_rejected.lana "LANA_ERR_TYPE")
+add_native_runtime_failure(native_m6_uncertain_effect_rejected tests/regression/m6_uncertain_effect_rejected.lana "LANA_ERR_TYPE")
+add_native_compile_failure(native_m4_parse_span tests/regression/m4_invalid_source.lana "expected ;, got let" "LANA_ERR_PARSE")
 add_native_compile_failure(native_m4_sample_unwrap tests/regression/m4_sample_requires_unwrap.lana "requires explicit sample_value")
 add_native_compile_failure(native_m4_claim_match tests/regression/m4_claim_requires_match.lana "requires explicit claim_value")
 add_native_compile_failure(native_m4_information_effect tests/regression/m4_information_effect_rejected.lana "unresolved Information branches cannot perform effects")
@@ -152,11 +166,14 @@ add_test(NAME native_run_source COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/ex
 add_test(NAME native_datasets_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/datasets_pass.lana")
 set_tests_properties(native_datasets_pass PROPERTIES PASS_REGULAR_EXPRESSION "DATASETS_PASS")
 add_test(NAME native_bootstrap_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/bootstrap_pass.lana")
+add_test(NAME native_array_type_consistency_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/array_type_consistency_pass.lana")
+set_tests_properties(native_array_type_consistency_pass PROPERTIES PASS_REGULAR_EXPRESSION "ARRAY_TYPE_CONSISTENCY_PASS")
+add_test(NAME native_guarded_rebinding_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/guarded_rebinding_pass.lana")
+set_tests_properties(native_guarded_rebinding_pass PROPERTIES PASS_REGULAR_EXPRESSION "GUARDED_REBINDING_PASS")
 set_tests_properties(native_bootstrap_pass PROPERTIES PASS_REGULAR_EXPRESSION "BOOTSTRAP_PASS")
 add_test(NAME native_surprisal_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/surprisal_pass.lana")
 set_tests_properties(native_surprisal_pass PROPERTIES PASS_REGULAR_EXPRESSION "SURPRISAL_PASS")
-add_test(NAME native_surprisal_negative_rejected COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/surprisal_negative_rejected.lana")
-set_tests_properties(native_surprisal_negative_rejected PROPERTIES WILL_FAIL TRUE)
+add_native_runtime_failure(native_surprisal_negative_rejected tests/regression/surprisal_negative_rejected.lana "LANA_ERR_INVALID_PARAMETERS")
 add_test(NAME native_tensor_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_pass.lana")
 set_tests_properties(native_tensor_pass PROPERTIES PASS_REGULAR_EXPRESSION "TENSOR_PASS")
 add_test(NAME native_tensor_dtype_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_dtype_pass.lana")
@@ -169,12 +186,9 @@ add_test(NAME native_tensor_reduce_dtype_pass COMMAND lana run "${CMAKE_CURRENT_
 set_tests_properties(native_tensor_reduce_dtype_pass PROPERTIES PASS_REGULAR_EXPRESSION "TENSOR_REDUCE_DTYPE_PASS")
 add_test(NAME native_tensor_f16_overflow_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_f16_overflow_pass.lana")
 set_tests_properties(native_tensor_f16_overflow_pass PROPERTIES PASS_REGULAR_EXPRESSION "TENSOR_F16_OVERFLOW_PASS")
-add_test(NAME native_tensor_dtype_unknown_rejected COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_dtype_unknown_rejected.lana")
-set_tests_properties(native_tensor_dtype_unknown_rejected PROPERTIES WILL_FAIL TRUE)
-add_test(NAME native_tensor_dtype_non_tensor_rejected COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_dtype_non_tensor_rejected.lana")
-set_tests_properties(native_tensor_dtype_non_tensor_rejected PROPERTIES WILL_FAIL TRUE)
-add_test(NAME native_tensor_dtype_named_arg_rejected COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_dtype_named_arg_rejected.lana")
-set_tests_properties(native_tensor_dtype_named_arg_rejected PROPERTIES WILL_FAIL TRUE)
+add_native_runtime_failure(native_tensor_dtype_unknown_rejected tests/regression/tensor_dtype_unknown_rejected.lana "LANA_ERR_INVALID_PARAMETERS")
+add_native_runtime_failure(native_tensor_dtype_non_tensor_rejected tests/regression/tensor_dtype_non_tensor_rejected.lana "LANA_ERR_TYPE")
+add_native_runtime_failure(native_tensor_dtype_named_arg_rejected tests/regression/tensor_dtype_named_arg_rejected.lana "LANA_ERR_PARSE")
 add_test(NAME native_tensor_boundaries_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_boundaries_pass.lana")
 set_tests_properties(native_tensor_boundaries_pass PROPERTIES PASS_REGULAR_EXPRESSION "TENSOR_BOUNDARIES_PASS" TIMEOUT 15)
 add_test(NAME native_tensor_index_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_index_pass.lana")
@@ -188,14 +202,12 @@ set_tests_properties(native_lip007_state_tensor_pass PROPERTIES PASS_REGULAR_EXP
 add_native_compile_failure(native_lip011_grad_impure tests/regression/lip011_grad_impure.lana "requires a pure function")
 add_test(NAME native_lip006_train_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/lip006_train_pass.lana")
 set_tests_properties(native_lip006_train_pass PROPERTIES PASS_REGULAR_EXPRESSION "LIP006_TRAIN_PASS" TIMEOUT 15)
-add_test(NAME native_lip006_train_capability COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/lip006_train_capability.lana")
-set_tests_properties(native_lip006_train_capability PROPERTIES WILL_FAIL TRUE)
+add_native_runtime_failure(native_lip006_train_capability tests/regression/lip006_train_capability.lana "LANA_ERR_CAPABILITY")
 add_test(NAME native_lip014_resume_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/lip014_resume_pass.lana")
 set_tests_properties(native_lip014_resume_pass PROPERTIES PASS_REGULAR_EXPRESSION "LIP014_RESUME_PASS" TIMEOUT 15)
 add_test(NAME native_lip009_infer_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/lip009_infer_pass.lana")
 set_tests_properties(native_lip009_infer_pass PROPERTIES PASS_REGULAR_EXPRESSION "LIP009_INFER_PASS" TIMEOUT 15)
-add_test(NAME native_lip009_infer_capability COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/lip009_infer_capability.lana")
-set_tests_properties(native_lip009_infer_capability PROPERTIES WILL_FAIL TRUE)
+add_native_runtime_failure(native_lip009_infer_capability tests/regression/lip009_infer_capability.lana "LANA_ERR_CAPABILITY")
 add_native_compile_failure(native_lip006_grad_nondiff tests/regression/lip006_grad_nondiff.lana "requires a differentiable function")
 add_test(NAME native_lip013_model_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/lip013_model_pass.lana")
 set_tests_properties(native_lip013_model_pass PROPERTIES PASS_REGULAR_EXPRESSION "LIP013_MODEL_PASS" TIMEOUT 15)
@@ -227,12 +239,12 @@ if(APPLE)
         PASS_REGULAR_EXPRESSION "ML_METAL_FIT_PASS"
         ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
 endif()
-add_test(NAME native_ml_metal_revoked COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_metal_revoked.lana")
-set_tests_properties(native_ml_metal_revoked PROPERTIES WILL_FAIL TRUE)
-add_test(NAME native_ml_metal_mixed_device COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_metal_mixed_device.lana")
-set_tests_properties(native_ml_metal_mixed_device PROPERTIES WILL_FAIL TRUE)
-add_test(NAME native_tensor_ragged_rejected COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/tensor_ragged_rejected.lana")
-set_tests_properties(native_tensor_ragged_rejected PROPERTIES WILL_FAIL TRUE)
+add_native_runtime_failure(native_ml_metal_revoked tests/regression/ml_metal_revoked.lana "LANA_ERR_CAPABILITY")
+if(APPLE)
+    add_native_runtime_failure(native_ml_metal_mixed_device tests/regression/ml_metal_mixed_device.lana "LANA_ERR_INVALID_PARAMETERS")
+    set_tests_properties(native_ml_metal_mixed_device PROPERTIES LABELS hardware)
+endif()
+add_native_runtime_failure(native_tensor_ragged_rejected tests/regression/tensor_ragged_rejected.lana "LANA_ERR_INVALID_PARAMETERS")
 add_test(NAME native_inspect_json COMMAND lana inspect "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/inspect_state_dist.lana")
 set_tests_properties(native_inspect_json PROPERTIES PASS_REGULAR_EXPRESSION "\"node_count\":3.*\"transform_count\":1")
 add_test(NAME native_inspect_dot COMMAND lana inspect "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/inspect_state_dist.lana" --format dot)
@@ -255,8 +267,7 @@ add_test(NAME native_async_sleep_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_D
 set_tests_properties(native_async_sleep_pass PROPERTIES PASS_REGULAR_EXPRESSION "ASYNC_SLEEP_PASS")
 add_test(NAME native_m22_set_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_set_pass.lana")
 set_tests_properties(native_m22_set_pass PROPERTIES PASS_REGULAR_EXPRESSION "M22_SET_PASS")
-add_test(NAME native_m22_set_state_rejected COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_set_state_rejected.lana")
-set_tests_properties(native_m22_set_state_rejected PROPERTIES WILL_FAIL TRUE)
+add_native_runtime_failure(native_m22_set_state_rejected tests/regression/m22_set_state_rejected.lana "LANA_ERR_TYPE")
 add_test(NAME native_m22_iter_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_iter_pass.lana")
 set_tests_properties(native_m22_iter_pass PROPERTIES PASS_REGULAR_EXPRESSION "M22_ITER_PASS")
 add_test(NAME native_m22_map_filter_reduce_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_map_filter_reduce_pass.lana")
@@ -295,10 +306,7 @@ add_test(NAME native_decision_voi_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_
 set_tests_properties(native_decision_voi_pass PROPERTIES
     PASS_REGULAR_EXPRESSION "DECISION_VOI_PASS"
     ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
-add_test(NAME native_decision_voi_invalid COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/decision_voi_invalid.lana")
-set_tests_properties(native_decision_voi_invalid PROPERTIES
-    WILL_FAIL TRUE
-    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_native_runtime_failure(native_decision_voi_invalid tests/regression/decision_voi_invalid.lana "LANA_ERR_ASSERTION")
 add_test(NAME native_ml_regression_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_regression_pass.lana")
 set_tests_properties(native_ml_regression_pass PROPERTIES
     PASS_REGULAR_EXPRESSION "ML_REGRESSION_PASS"
@@ -332,73 +340,106 @@ add_test(NAME lana_lsp_protocol
     COMMAND "${CMAKE_COMMAND}" -DLANA=$<TARGET_FILE:lana>
         -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/lsp-test-output.txt
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLsp.cmake")
-find_program(LANA_PYTHON3 NAMES python3)
 if(LANA_PYTHON3)
+    add_test(NAME lana_test_registry
+        COMMAND ${LANA_PYTHON3} -E "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_run.py")
+    set_tests_properties(lana_test_registry PROPERTIES TIMEOUT 30)
+    add_test(NAME lana_source_inputs
+        COMMAND ${LANA_PYTHON3} -E "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_source_inputs.py" $<TARGET_FILE:lana>)
+    set_tests_properties(lana_source_inputs PROPERTIES TIMEOUT 90)
+    add_test(NAME lana_store_process
+        COMMAND ${LANA_PYTHON3} -E "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_store_process.py"
+            --c11 $<TARGET_FILE:lana_store_tests>)
+    set_tests_properties(lana_store_process PROPERTIES TIMEOUT 180)
+    add_test(NAME lana_benchmark_accounting
+        COMMAND ${LANA_PYTHON3} -E "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_benchmark.py")
+    set_tests_properties(lana_benchmark_accounting PROPERTIES TIMEOUT 30)
+    add_test(NAME lana_independent_oracles
+        COMMAND ${LANA_PYTHON3} -E "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_oracles.py" --lana $<TARGET_FILE:lana>)
+    set_tests_properties(lana_independent_oracles PROPERTIES TIMEOUT 180)
+    add_test(NAME lana_model_comparison
+        COMMAND ${LANA_PYTHON3} -E "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_quantum_vs_classical.py")
+    set_tests_properties(lana_model_comparison PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77
+        ENVIRONMENT "LANA_BIN=$<TARGET_FILE:lana>")
+    add_test(NAME lana_conformance_runner
+        COMMAND ${LANA_PYTHON3} -E
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_conformance_runner.py")
+    set_tests_properties(lana_conformance_runner PROPERTIES TIMEOUT 30)
+    add_test(NAME lana_guarded_source_errors
+        COMMAND ${LANA_PYTHON3} -E
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_guarded_source.py"
+            $<TARGET_FILE:lana>)
+    set_tests_properties(lana_guarded_source_errors PROPERTIES
+        PASS_REGULAR_EXPRESSION "GUARDED_SOURCE_ERRORS_PASS" TIMEOUT 90)
     add_test(NAME lana_tensor_source_errors
-        COMMAND ${LANA_PYTHON3}
+        COMMAND ${LANA_PYTHON3} -E
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_tensor_source.py"
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_tensor_source_errors PROPERTIES
         PASS_REGULAR_EXPRESSION "TENSOR_SOURCE_ERRORS_PASS" TIMEOUT 30)
     add_test(NAME lana_capability_source_errors
-        COMMAND ${LANA_PYTHON3}
+        COMMAND ${LANA_PYTHON3} -E
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_capability_source.py"
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_capability_source_errors PROPERTIES
         PASS_REGULAR_EXPRESSION "CAPABILITY_SOURCE_ERRORS_PASS" TIMEOUT 30)
     add_test(NAME lana_generator_source_errors
-        COMMAND ${LANA_PYTHON3}
+        COMMAND ${LANA_PYTHON3} -E
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_generator_source.py"
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_generator_source_errors PROPERTIES
         PASS_REGULAR_EXPRESSION "GENERATOR_SOURCE_ERRORS_PASS" TIMEOUT 30)
     add_test(NAME lana_set_source_errors
-        COMMAND ${LANA_PYTHON3}
+        COMMAND ${LANA_PYTHON3} -E
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_set_source.py"
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_set_source_errors PROPERTIES
         PASS_REGULAR_EXPRESSION "SET_SOURCE_ERRORS_PASS" TIMEOUT 30)
     add_test(NAME lana_iter_source_errors
-        COMMAND ${LANA_PYTHON3}
+        COMMAND ${LANA_PYTHON3} -E
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_iter_source.py"
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_iter_source_errors PROPERTIES
         PASS_REGULAR_EXPRESSION "ITER_SOURCE_ERRORS_PASS" TIMEOUT 30)
     add_test(NAME lana_async_source_errors
-        COMMAND ${LANA_PYTHON3}
+        COMMAND ${LANA_PYTHON3} -E
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_async_source.py"
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_async_source_errors PROPERTIES
         PASS_REGULAR_EXPRESSION "ASYNC_SOURCE_ERRORS_PASS" TIMEOUT 30)
     add_test(NAME lana_comprehension_source_errors
-        COMMAND ${LANA_PYTHON3}
+        COMMAND ${LANA_PYTHON3} -E
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_comprehension_source.py"
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_comprehension_source_errors PROPERTIES
         PASS_REGULAR_EXPRESSION "COMPREHENSION_SOURCE_ERRORS_PASS" TIMEOUT 30)
     add_test(NAME lana_lsp_roundtrip
-        COMMAND ${LANA_PYTHON3}
+        COMMAND ${LANA_PYTHON3} -E
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lsp.py"
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_lsp_roundtrip PROPERTIES
         PASS_REGULAR_EXPRESSION "LSP_ROUNDTRIP_PASS")
     add_test(NAME lana_repl_session
-        COMMAND ${LANA_PYTHON3}
+        COMMAND ${LANA_PYTHON3} -E
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_repl.py"
             $<TARGET_FILE:lana>)
     set_tests_properties(lana_repl_session PROPERTIES
         PASS_REGULAR_EXPRESSION "REPL_SESSION_PASS" TIMEOUT 30)
 endif()
-# WASM conformance (LIP-025): the node and WASI runners assert native-vs-WASM
-# byte-identical results and host-call gating. Both are soft gates where a
-# missing wasm toolchain (wasm-bindgen CLI / wasmtime) makes the script exit 0
-# with a SKIP notice, so they are safe in a non-Rust CI environment.
+# Missing WASM tools are visible skips. The full/release runner rejects them.
 add_test(NAME lana_wasm_node_conformance
     COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-wasm/tests/run-wasm-conformance.sh")
-set_tests_properties(lana_wasm_node_conformance PROPERTIES TIMEOUT 300)
+set_tests_properties(lana_wasm_node_conformance PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77
+    LABELS optional ENVIRONMENT "LANA_COMPILER_LABC=${LANA_NATIVE_COMPILER}")
 add_test(NAME lana_wasm_wasi_conformance
     COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-wasm/tests/run-wasi-conformance.sh")
-set_tests_properties(lana_wasm_wasi_conformance PROPERTIES TIMEOUT 300)
+set_tests_properties(lana_wasm_wasi_conformance PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77
+    LABELS optional ENVIRONMENT "LANA_COMPILER_LABC=${LANA_NATIVE_COMPILER}")
+set_tests_properties(lana_model_comparison PROPERTIES LABELS optional)
+if(APPLE)
+    set_tests_properties(native_m4_gpu_matmul_pass native_ml_tensor_device_pass native_ml_metal_fit_pass
+        PROPERTIES LABELS hardware)
+endif()
 add_test(NAME lana_project_workflow
     COMMAND "${CMAKE_COMMAND}" -DLANA=$<TARGET_FILE:lana>
         -DROOT=${CMAKE_CURRENT_BINARY_DIR}/project-workflow
@@ -409,12 +450,14 @@ add_test(NAME lana_source_debugger
         -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/debugger-test-output.txt
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestDebugger.cmake")
 if(CMAKE_OSX_ARCHITECTURES)
-    set(LANA_INSTALL_EXPECTED_ARCH -DEXPECTED_ARCH=${CMAKE_OSX_ARCHITECTURES})
+    string(REPLACE ";" "," LANA_INSTALL_ARCHS "${CMAKE_OSX_ARCHITECTURES}")
+    set(LANA_INSTALL_EXPECTED_ARCH -DEXPECTED_ARCH=${LANA_INSTALL_ARCHS})
 endif()
 add_test(NAME lana_local_install
     COMMAND "${CMAKE_COMMAND}"
         -DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
         -DROOT=${CMAKE_CURRENT_BINARY_DIR}/local-install
-        -DVERIFY_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify-install.sh
+        -DPYTHON=${LANA_PYTHON3}
+        -DVERIFY_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_install.py
         ${LANA_INSTALL_EXPECTED_ARCH}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLocalInstall.cmake")

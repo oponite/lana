@@ -149,7 +149,7 @@ static void test_traversal(void) {
     char path[] = "/tmp/lana-ledger-cov-XXXXXX";
     LanaStoreOptions options = {sizeof(options), 1u, path, 1000u};
     LanaStore *store = NULL; LanaLedger *ledger = NULL; LanaVM vm; LanaEvent event;
-    LanaEventInput input = {sizeof(input), 1u, "service-a", "sre", "alert", "decision 7", 10u, 0u};
+    LanaEventInput input = {sizeof(input), 1u, "service-a", "sre", "alert", "decision 17", 10u, 0u};
     LanaPolicyRule rule = {sizeof(rule), 1u, LANA_POLICY_PROBABILITY_AT_LEAST,
                            "probability", 0.8, NULL, "notify"};
     LanaPolicy policy = {sizeof(policy), 1u, "health", rule};
@@ -182,8 +182,15 @@ static void test_traversal(void) {
     assert(strcmp(records[0].policy_id, "health") == 0);
     assert(records[0].outcome == POLICY_OUTCOME_AUTHORIZE);
     assert(records[0].attempt_id == 1u && records[0].attempt_status == EFFECT_STATUS_SUCCEEDED);
-    assert(records[0].event_id != 0u);
+    assert(records[0].event_id == 0u);
     lana_traversal_records_free(records, count);
+    input.reason = "decision 7";
+    assert(lana_ledger_append(ledger, &input, &event) == LANA_OK);
+    assert(lana_ledger_traverse(ledger, &vm, &tquery, &records, &count) == LANA_OK);
+    assert(count == 1u && records[0].event_id == event.event_id);
+    lana_traversal_records_free(records, count);
+    tquery.evidence_id = "evidence-";
+    assert(lana_ledger_traverse(ledger, &vm, &tquery, &records, &count) == LANA_ERR_NO_MATCHING_EVENT);
     lana_vm_free(&vm); assert(lana_ledger_close(ledger) == LANA_OK); assert(lana_store_close(store) == LANA_OK);
     cleanup_store(path);
     printf("Pass.\n");

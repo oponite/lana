@@ -1,0 +1,6 @@
+{
+  "exit": 1,
+  "stdout": "",
+  "stderr": "<bytecode>:12:1-12:1: error[validation/LANA_ERR_INVALID_PARAMETERS]: LANA_ERR_INVALID_PARAMETERS (operation HOST_CALL) (instruction 11, opcode HOST_CALL)\n",
+  "no_files": true
+}

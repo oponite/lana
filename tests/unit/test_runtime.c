@@ -62,6 +62,44 @@ static int test_state_construction(void) {
     return 0;
 }
 
+static int test_ledger_host_rejects_invalid_numeric_ids(void) {
+    const double invalid[] = {-1.0, 0.5, NAN, INFINITY, 18446744073709551616.0};
+    for (size_t i = 0u; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        LanaChunk chunk;
+        LanaVM vm;
+        Value input, timestamp = lana_value_number(invalid[i]);
+        lana_chunk_init(&chunk);
+        CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 1, LANA_HOST_LEDGER_APPEND, 0, 1)) == LANA_OK);
+        CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+        lana_vm_init(&vm, &chunk);
+        CHECK(lana_json_parse(&vm, "{\"entity\":\"e\",\"actor\":\"a\",\"action\":\"x\",\"correction_of\":0}", &input) == LANA_OK);
+        CHECK(lana_map_set(&vm, input.as.map, "timestamp", &timestamp, false) == LANA_OK);
+        vm.frames[0].registers[0] = input;
+        CHECK(lana_vm_run(&vm) == LANA_ERR_INVALID_PARAMETERS);
+        CHECK(vm.store == NULL);
+        CHECK(vm.frames[0].registers[1].type == VAL_NULL);
+        lana_vm_free(&vm);
+        lana_chunk_free(&chunk);
+    }
+    return 0;
+}
+
+static int test_map_allocation_overflow(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    LanaMap *map = (LanaMap *)&vm;
+    lana_chunk_init(&chunk);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_map_new(&vm, SIZE_MAX, &map) == LANA_ERR_OOM);
+    CHECK(map == NULL);
+    CHECK(lana_map_new(NULL, 0u, &map) == LANA_ERR_INVALID_STATE);
+    CHECK(map == NULL);
+    CHECK(lana_map_new(&vm, 0u, NULL) == LANA_ERR_INVALID_STATE);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+    return 0;
+}
+
 static int test_json_parse_clears_output_metadata(void) {
     LanaChunk chunk;
     LanaVM vm;
@@ -919,6 +957,134 @@ static int test_guarded_path_limits(void) {
     return 0;
 }
 
+static int test_nested_definite_path_join(void) {
+    for (unsigned mode = 0u; mode < 4u; ++mode) {
+        LanaChunk chunk; LanaVM vm;
+        uint32_t yes, no, ten, twenty, thirty;
+        lana_chunk_init(&chunk); chunk.version = LABC_VERSION;
+        CHECK(lana_chunk_add_constant(&chunk, lana_value_bool(true), &yes) == LANA_OK);
+        CHECK(lana_chunk_add_constant(&chunk, lana_value_bool(false), &no) == LANA_OK);
+        CHECK(lana_chunk_add_constant(&chunk, lana_value_number(10), &ten) == LANA_OK);
+        CHECK(lana_chunk_add_constant(&chunk, lana_value_number(20), &twenty) == LANA_OK);
+        CHECK(lana_chunk_add_constant(&chunk, lana_value_number(30), &thirty) == LANA_OK);
+        LanaInstruction code[] = {
+            instruction(OP_LOAD_CONST, 0, 0, 0, yes),
+            instruction(OP_LOAD_CONST, 1, 0, 0, no),
+            instruction(OP_ARRAY_NEW, 2, 0, 2, 0),
+            instruction(OP_POSSIBILITY_BUILD, 2, 3, 0, 0),
+            instruction(OP_PATH_SPLIT, 3, 0, 0, 14),
+            instruction(OP_LOAD_CONST, 5, 0, 0, mode % 2u == 0u ? yes : no),
+            instruction(OP_ARRAY_NEW, 6, 5, 1, 0),
+            instruction(OP_POSSIBILITY_BUILD, 6, 7, 0, 0),
+            instruction(OP_PATH_SPLIT, mode < 2u ? 5 : 7, 0, 0, 11),
+            instruction(OP_LOAD_CONST, 4, 0, 0, ten),
+            instruction(OP_JUMP, 0, 0, 0, 12),
+            instruction(OP_LOAD_CONST, 4, 0, 0, thirty),
+            instruction(OP_PATH_JOIN, 0, 0, 0, 0),
+            instruction(OP_JUMP, 0, 0, 0, 15),
+            instruction(OP_LOAD_CONST, 4, 0, 0, twenty),
+            instruction(OP_PATH_JOIN, 0, 0, 0, 0),
+            instruction(OP_HALT, 0, 0, 0, 0)
+        };
+        for (size_t i = 0u; i < sizeof(code) / sizeof(code[0]); ++i)
+            CHECK(lana_chunk_emit(&chunk, code[i]) == LANA_OK);
+        CHECK(lana_chunk_verify(&chunk, NULL) == LANA_OK);
+        lana_vm_init(&vm, &chunk);
+        CHECK(lana_vm_run(&vm) == LANA_OK);
+        Value result = vm.frames[0].registers[4];
+        CHECK(result.type == VAL_PATH_SET && result.as.paths->count == 2u);
+        CHECK(result.as.paths->alternatives[0].result->as.number == (mode % 2u == 0u ? 10 : 30));
+        CHECK(result.as.paths->alternatives[1].result->as.number == 20);
+        lana_vm_free(&vm); lana_chunk_free(&chunk);
+    }
+    return 0;
+}
+
+static LanaError count_graph_effect(LanaVM *vm, const char *kind,
+                                    const Value *payload, void *context, Value *out) {
+    (void)vm; (void)kind; (void)payload;
+    ++*(size_t *)context;
+    *out = lana_value_number(7.0);
+    return LANA_OK;
+}
+
+static int test_value_format_graphs(void) {
+    LanaArray array = {0};
+    Value cycle = lana_value_array(&array);
+    char *text = NULL;
+    array.items = &cycle; array.count = 1u; array.capacity = 1u;
+    CHECK(lana_value_format(&cycle, 4096u, &text) == LANA_OK);
+    CHECK(strcmp(text, "[<cycle>]") == 0); free(text);
+    CHECK(lana_value_format(&cycle, 4u, &text) == LANA_ERR_OOM && text == NULL);
+    LanaChunk chunk;
+    LanaVM vm;
+    Value copy;
+    lana_chunk_init(&chunk);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_clone_live_value(&vm, &cycle, &copy) == LANA_OK);
+    CHECK(copy.as.array != &array);
+    CHECK(copy.as.array->items[0].as.array == copy.as.array);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+    size_t depth = 5001u;
+    LanaArray *arrays = calloc(depth, sizeof(*arrays));
+    Value *values = calloc(depth, sizeof(*values));
+    CHECK(arrays != NULL && values != NULL);
+    for (size_t i = 0u; i < depth; ++i) {
+        values[i] = i == 0u ? lana_value_number(1) : lana_value_array(&arrays[i - 1u]);
+        arrays[i].items = &values[i]; arrays[i].count = arrays[i].capacity = 1u;
+    }
+    Value root = lana_value_array(&arrays[depth - 1u]);
+    CHECK(lana_value_format(&root, 4u * 1024u * 1024u, &text) == LANA_OK);
+    CHECK(strlen(text) == 10003u);
+    lana_chunk_init(&chunk);
+    lana_vm_init(&vm, &chunk);
+    {
+        size_t executions = 0u;
+        LanaPlannedEffect effect = {0};
+        Value plan = lana_value_null(), output = lana_value_null();
+        LanaPossibility possibility = {0};
+        effect.kind = "deep-graph";
+        effect.payload = &root;
+        plan.planned_effect = &effect;
+        lana_vm_set_memory_limit(&vm, 1u);
+        CHECK(lana_vm_execute_planned_effect(&vm, &plan, count_graph_effect, &executions, &output) == LANA_ERR_OOM);
+        CHECK(executions == 0u && effect.receipts == NULL && output.type == VAL_NULL);
+        lana_vm_set_memory_limit(&vm, 4u * 1024u * 1024u);
+        values[0] = lana_value_possibility(&possibility);
+        CHECK(lana_vm_execute_planned_effect(&vm, &plan, count_graph_effect, &executions, &output) == LANA_ERR_UNRESOLVED_VALUE);
+        CHECK(executions == 0u && effect.receipts == NULL && output.type == VAL_NULL);
+        values[0] = lana_value_number(1.0);
+        CHECK(lana_vm_execute_planned_effect(&vm, &plan, count_graph_effect, &executions, &output) == LANA_OK);
+        CHECK(executions == 1u && output.as.number == 7.0);
+    }
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+    free(text); free(values); free(arrays);
+    return 0;
+}
+
+static int test_json_rejects_cyclic_materialization(void) {
+    LanaChunk chunk;
+    LanaVM vm;
+    uint32_t zero;
+    lana_chunk_init(&chunk);
+    chunk.version = LABC_VERSION;
+    CHECK(lana_chunk_add_constant(&chunk, lana_value_number(0), &zero) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_LOAD_CONST, 0, 0, 0, zero)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_ARRAY_NEW, 1, 0, 1, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_ARRAY_SET, 1, 0, 1, 0)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HOST_CALL, 2, LANA_HOST_JSON_STRINGIFY, 1, 1)) == LANA_OK);
+    CHECK(lana_chunk_emit(&chunk, instruction(OP_HALT, 0, 0, 0, 0)) == LANA_OK);
+    CHECK(lana_chunk_verify(&chunk, NULL) == LANA_OK);
+    lana_vm_init(&vm, &chunk);
+    CHECK(lana_vm_run(&vm) == LANA_ERR_UNSUPPORTED_OPERATION);
+    CHECK(vm.frames[0].registers[2].type == VAL_NULL);
+    lana_vm_free(&vm);
+    lana_chunk_free(&chunk);
+    return 0;
+}
+
 static int test_provenance_and_explanation(void) {
     LanaChunk chunk;
     LanaErrorInfo verify_error = {0};
@@ -1718,6 +1884,8 @@ static int test_regex_host_calls(void) {
 
 int main(void) {
     CHECK(test_state_construction() == 0);
+    CHECK(test_ledger_host_rejects_invalid_numeric_ids() == 0);
+    CHECK(test_map_allocation_overflow() == 0);
     CHECK(test_json_parse_clears_output_metadata() == 0);
     CHECK(test_json_large_integer_duplicate_keys_and_sorted_stringify() == 0);
     CHECK(test_state_canonicalization_and_transforms() == 0);
@@ -1742,6 +1910,9 @@ int main(void) {
     CHECK(test_assembler_indexed_fixups() == 0);
     CHECK(test_named_joint_information() == 0);
     CHECK(test_guarded_path_limits() == 0);
+    CHECK(test_nested_definite_path_join() == 0);
+    CHECK(test_value_format_graphs() == 0);
+    CHECK(test_json_rejects_cyclic_materialization() == 0);
     CHECK(test_provenance_and_explanation() == 0);
     CHECK(test_vm_gc_roots_cycles_and_cancellation() == 0);
     CHECK(test_vm_gc_task_transfer_roots() == 0);
