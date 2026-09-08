@@ -38,6 +38,7 @@ jobs:
         compiler: [gcc, clang]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: rustup target add wasm32-unknown-unknown
       - name: Configure
         env:
           CC: ${{ matrix.compiler }}
@@ -59,6 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: rustup target add wasm32-unknown-unknown
       - run: cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_SANITIZERS=ON
       - run: cmake --build build-asan --parallel
       - run: ctest --test-dir build-asan --output-on-failure
@@ -68,6 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: rustup target add wasm32-unknown-unknown
       - run: cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_TSAN=ON
       - run: cmake --build build-tsan --parallel
       - run: ctest --test-dir build-tsan --output-on-failure
@@ -77,6 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: rustup target add wasm32-unknown-unknown
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLANA_BUILD_INTEGRATIONS=ON
       - run: cmake --build build --parallel
       - run: ctest --test-dir build --output-on-failure
