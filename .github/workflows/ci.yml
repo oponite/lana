@@ -5,7 +5,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main, dev]
-    tags: ["v*"]
   schedule:
     - cron: "23 4 * * *"
 
@@ -117,7 +116,7 @@ jobs:
 
   fuzz-scheduled:
     name: Nightly correctness and ten-minute fuzz test
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
