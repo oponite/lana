@@ -26,6 +26,7 @@ jobs:
       - name: Debug build and tests
         run: |
           rustup target add wasm32-unknown-unknown
+          cargo install wasm-bindgen-cli --version 0.2.100 --locked
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
           cmake --build build --parallel
           ctest --test-dir build --output-on-failure
@@ -116,7 +117,6 @@ jobs:
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
           lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
           arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${EXPECTED_VERSION}-macos-universal.tar.gz" .
           (
             cd "$RUNNER_TEMP"
@@ -133,9 +133,16 @@ jobs:
           retention-days: 7
 
   verify-macos-artifact:
-    name: Verify macOS release artifact
+    name: Verify macOS release artifact (${{ matrix.arch }})
     needs: macos
-    runs-on: macos-15
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -155,10 +162,9 @@ jobs:
           tar -C "$prefix" -xzf "$artifact_dir/$archive"
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
           lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
-          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          arch -${{ matrix.arch }} "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           cp examples/belief.lana "$prefix/belief.lana"
-          "$prefix/bin/lana" run "$prefix/belief.lana"
+          arch -${{ matrix.arch }} "$prefix/bin/lana" run "$prefix/belief.lana"
 
   publish:
     name: Publish GitHub Release

@@ -35,6 +35,18 @@ if [[ ! -f "$LANA_COMPILER_LABC" ]]; then
     echo "lana-compiler.labc not found at $LANA_COMPILER_LABC (cmake --build build first)" >&2
     exit 1
 fi
+if ! command -v "$WASM_BINDGEN" >/dev/null 2>&1; then
+    echo "SKIP: wasm-bindgen is not installed"
+    exit 0
+fi
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustup >/dev/null 2>&1; then
+    echo "SKIP: Rust toolchain is not installed"
+    exit 0
+fi
+if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
+    echo "SKIP: wasm32-unknown-unknown target is not installed"
+    exit 0
+fi
 
 cargo build -p lana-wasm --target wasm32-unknown-unknown
 
