@@ -12,9 +12,7 @@ Lana takes this premise literally as a computational design principle: informati
 
 This document is the normative Lana 1.0 definition of `STATE`, `STATE_DIST`, and the core state operations `MEASURE`, `TRANSFORM`, and `APPEND`. It also specifies how those values and operations compose, their mathematical guarantees and boundary behavior, and the minimum obligations of a conforming runtime.
 
-The other Lana documents have narrower roles. `../lip/archive/LIP-026.md`
-constrains the shape of the source surface without redefining these
-mathematical objects.
+The other Lana documents have narrower roles.
 
 1. `VM.md` describes execution architecture.
 2. `BYTECODE.md` describes LABC representation and instruction encoding.
@@ -1521,11 +1519,11 @@ This table records current instruction availability without making opcode encodi
 
 | Semantic concept               | Runtime responsibility                                                            | Current direct opcode                       |
 | ------------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------- |
-| `STATE` construction         | Validate and create a concrete canonical `STATE`                                 | `STATE_NEW` / `STATE_BUILD`             |
+| `STATE` construction         | Validate and create a concrete canonical`STATE`                                 | `STATE_NEW` / `STATE_BUILD`             |
 | `MEASURE`                    | Produce the computational-basis distribution without mutation                     | `MEASURE`                                 |
 | Classical measurement sampling | Draw a binary scalar using the runtime RNG                                        | `MEASURE` sample mode                     |
-| `TRANSFORM`                  | Execute an admissible $`\Phi`$ and reject invalid output                           | `TRANSFORM`                               |
-| `APPEND`                     | Construct the prescribed lazy `STATE_DIST`                                       | `APPEND`                                  |
+| `TRANSFORM`                  | Execute an admissible$`\Phi`$ and reject invalid output                         | `TRANSFORM`                               |
+| `APPEND`                     | Construct the prescribed lazy`STATE_DIST`                                       | `APPEND`                                  |
 | `STATE_DIST` sampling        | Evaluate and sample a lazy distribution                                           | `SAMPLE_STATE_DIST`                       |
 | Named n-ary joint construction | Validate names and build an immutable joint law/view                              | `JOINT_BUILD`                             |
 | Joint projection               | Return an immutable named projection                                              | `JOINT_PROJECT`                           |

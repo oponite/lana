@@ -102,8 +102,41 @@ static void test_trailing_partial_revision_is_ignored(void) {
     store = open_store(path);
     assert(lana_store_get(store, &vm, "key", &value) == LANA_OK);
     assert(value.type == VAL_BOOL && value.as.boolean);
+    assert(lana_store_put(store, "after", lana_value_number(2.0)) == LANA_OK);
+    assert(lana_store_commit(store, NULL) == LANA_OK);
+    assert(lana_store_close(store) == LANA_OK);
+    store = open_store(path);
+    assert(lana_store_get(store, &vm, "key", &value) == LANA_OK);
+    assert(value.type == VAL_BOOL && value.as.boolean);
+    assert(lana_store_get(store, &vm, "after", &value) == LANA_OK);
+    assert(value.type == VAL_NUMBER && value.as.number == 2.0);
     assert(lana_store_close(store) == LANA_OK);
     lana_vm_free(&vm);
+    cleanup_store(path);
+}
+
+static void test_lock_timeout_and_acknowledged_truncation(void) {
+    char path[] = "/tmp/lana-store-lock-XXXXXX";
+    char journal[512];
+    LanaStoreOptions options = {sizeof(options), 1u, path, 20u};
+    LanaStore *first = NULL, *second = NULL;
+    int fd;
+    assert(mkdtemp(path) != NULL);
+    assert(lana_store_open(&options, &first) == LANA_OK);
+    assert(lana_store_open(&options, &second) == LANA_ERR_TIMEOUT);
+    assert(second == NULL);
+    assert(lana_store_put(first, "key", lana_value_bool(true)) == LANA_OK);
+    assert(lana_store_commit(first, NULL) == LANA_OK);
+    assert(lana_store_close(first) == LANA_OK);
+    assert(lana_store_open(&options, &second) == LANA_OK);
+    assert(lana_store_close(second) == LANA_OK);
+    (void)snprintf(journal, sizeof(journal), "%s/journal", path);
+    fd = open(journal, O_WRONLY | O_TRUNC);
+    assert(fd >= 0);
+    assert(write(fd, "LREV", 4u) == 4);
+    assert(close(fd) == 0);
+    assert(lana_store_open(&options, &second) == LANA_ERR_CORRUPTION);
+    assert(second == NULL);
     cleanup_store(path);
 }
 
@@ -289,6 +322,7 @@ static void test_mvcc_get_at_and_commit_if(void) {
 int main(void) {
     test_recovery_and_history();
     test_trailing_partial_revision_is_ignored();
+    test_lock_timeout_and_acknowledged_truncation();
     test_corrupt_snapshot_fails_open();
     test_corrupt_committed_journal_fails_open();
     test_persistent_state_current_and_history();

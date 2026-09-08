@@ -18,7 +18,7 @@ typedef struct {
     size_t struct_size;
     uint32_t schema_version;
     const char *path;
-    uint32_t timeout_ms;
+    uint32_t timeout_ms; /* Exclusive open lock: zero waits; positive values time out. */
 } LanaStoreOptions;
 
 typedef struct {
