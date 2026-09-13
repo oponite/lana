@@ -206,6 +206,9 @@ def main():
             ctest("hardware", build, "-L", "hardware")
         elif args.profile in ("asan", "tsan", "integrations"):
             ctest(args.profile, build)
+            if args.profile in ("asan", "tsan"):
+                command("rust-" + args.profile, ["bash", ROOT / "tests/run_rust_safety.sh",
+                        args.profile, output / ("rust-" + args.profile)], timeout=1800)
         else:
             ctest("native", build, *(["-LE", "optional|hardware"] if args.profile == "quick" else []))
             rust_step = command("rust", ["cargo", "test", "--workspace", "--locked"],
@@ -235,6 +238,8 @@ def main():
                     "-DLANA_OUTPUT=" + str(output / "rust-bootstrap.lasm"),
                     "-P", ROOT / "cmake/VerifyNativeBootstrap.cmake"], timeout=300)
             version = (ROOT / "VERSION").read_text().strip()
+            command("lsp-rust", [sys.executable, ROOT / "tests/test_lsp.py", rust, version],
+                    env={"LANA_COMPILER_LABC": str(build / "lana-compiler.labc")})
             for name, binary in (("c11", build / "lana"), ("rust", rust)):
                 step = command("version-" + name, [binary, "version"])
                 if not Path(step["log"]).read_text().startswith(f"Lana {version} (LABC v2,"):
@@ -254,6 +259,8 @@ def main():
                 directory = build.with_name(build.name + "-" + name)
                 configure(directory, "-D" + option + "=ON")
                 ctest(name, directory)
+                command("rust-" + name, ["bash", ROOT / "tests/run_rust_safety.sh",
+                        name, output / ("rust-" + name)], timeout=1800)
             compiler = args.fuzz_cc or ("/opt/homebrew/opt/llvm/bin/clang" if sys.platform == "darwin" else "clang")
             compiler = shutil.which(compiler)
             if not compiler or not Path(compiler).is_file():
@@ -267,6 +274,8 @@ def main():
             command("fuzz-seed", [build / "lanavm", "asm", ROOT / "tests/conformance/fuzz/state.lasm", "-o", corpus / "state.labc"])
             command("fuzz", [fuzz / "lana_bytecode_fuzz", "-seed=42", "-max_total_time=600", "-timeout=5",
                              "-artifact_prefix=" + str(corpus) + "/", corpus], timeout=660)
+            command("rust-fuzz", ["bash", ROOT / "tests/run_rust_safety.sh", "fuzz",
+                    output / "rust-fuzz", compiler], timeout=1200)
         if args.profile in ("hardware", "release"):
             universal = build.with_name(build.name + "-universal")
             configure(universal, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64")
@@ -282,10 +291,28 @@ def main():
                 ctest("integrations", integrations)
             venv = output / "python-venv"
             command("python-venv", [sys.executable, "-m", "venv", venv])
-            command("python-dependencies", [venv / "bin/python", "-m", "pip", "install", "-e", str(ROOT / "integrations/python") + "[test]"])
-            command("python-integrations", [venv / "bin/python", "-m", "pytest", "-q", ROOT / "integrations/python/tests"],
-                    env={"LANA_BIN": str(integrations / "lana")})
+            command("python-dependencies", [venv / "bin/python", "-m", "pip", "install", "-e", str(ROOT / "integrations/python") + "[test,mcp,jupyter]"])
+            prefix = output / "integration-install"
+            command("install-integrations", ["cmake", "--install", integrations, "--prefix", prefix])
+            library_name = "liblana_ffi.dylib" if sys.platform == "darwin" else "liblana_ffi.so"
+            library = prefix / "lib" / library_name
+            bytecode = output / "echo-bridge.labc"
+            command("compile-rust-bridge", [prefix / "bin/lana", "compile",
+                    ROOT / "integrations/lana/echo_bridge.lana", "-o", bytecode])
+            python_junit = output / "python-integrations.xml"
+            python_step = command("python-integrations", [venv / "bin/python", "-m", "pytest", "-q",
+                    ROOT / "integrations/python/tests", "--junitxml", python_junit],
+                    env={"LANA_BIN": str(integrations / "lana"), "LANA_FFI_LIBRARY": str(library),
+                         "LANA_RUNTIME_LIBRARY": str(integrations / ("liblanaruntime_shared.dylib" if sys.platform == "darwin" else "liblanaruntime_shared.so")),
+                         "LANA_HTTP_SERVICE": str(integrations / "lana_http_service"),
+                         "LANA_BRIDGE_TEST_LIBRARY": str(library), "LANA_BRIDGE_TEST_BYTECODE": str(bytecode)})
+            cases = ET.parse(python_junit).getroot().findall(".//testcase")
+            if not cases or any(case.find("skipped") is not None for case in cases):
+                python_step["status"] = "failed"
+                raise RuntimeError("Python integration evidence contains missing or skipped tests")
+            python_step["counts"] = {"passed": len(cases), "skipped": 0}
         command("whitespace", ["git", "diff", "--check"])
+        command("candidate-whitespace", ["git", "diff", "HEAD", "--check"])
         report["status"] = "passed"
     except (RuntimeError, OSError, ValueError, ET.ParseError, subprocess.SubprocessError, KeyboardInterrupt) as error:
         report["status"] = "failed"

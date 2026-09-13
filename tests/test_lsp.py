@@ -53,8 +53,8 @@ BAD_URI = "file:///tmp/lana-lsp-bad.lana"
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("usage: test_lsp.py <lana-binary>", file=sys.stderr)
+    if len(sys.argv) not in (2, 3):
+        print("usage: test_lsp.py <lana-binary> [expected-version]", file=sys.stderr)
         return 1
 
     proc = subprocess.Popen(
@@ -108,6 +108,8 @@ def main():
     init = responses.get(1)
     if init is None or "lana-lsp" not in json.dumps(init):
         failures.append("initialize response missing serverInfo")
+    if len(sys.argv) == 3 and (init or {}).get("result", {}).get("serverInfo", {}).get("version") != sys.argv[2]:
+        failures.append(f"initialize version does not match {sys.argv[2]}: {init}")
 
     hover = responses.get(2)
     if hover is None or "add" not in json.dumps(hover):

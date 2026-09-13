@@ -1,8 +1,8 @@
 {
   "name": "lana-language-support",
   "displayName": "Lana Language Support",
-  "description": "Language Server Protocol support for Lana 2.0",
-  "version": "2.1.0",
+  "description": "Language Server Protocol support for Lana 2.2",
+  "version": "2.2.0",
   "publisher": "lana-language",
   "license": "Apache-2.0",
   "engines": {
@@ -11,6 +11,7 @@
   "categories": ["Programming Languages"],
   "files": [
     "out/**",
+    "node_modules/**",
     "syntaxes/**",
     "language-configuration.json",
     "README.md",
@@ -40,7 +41,7 @@
         "lana.server.path": {
           "type": "string",
           "default": "lana",
-          "description": "Path to a Lana 2.0 executable providing `lana lsp`."
+          "description": "Path to a Lana 2.2 executable providing `lana lsp`."
         }
       }
     }
@@ -48,7 +49,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "check": "tsc -p ./ --noEmit",
-    "package": "npm run compile && vsce package --no-dependencies"
+    "package": "npm run compile && vsce package"
   },
   "dependencies": {
     "vscode-languageclient": "^10.1.0"

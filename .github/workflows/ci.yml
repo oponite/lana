@@ -15,9 +15,6 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  EXPECTED_VERSION: "2.1.0"
-
 jobs:
   paper-math:
     name: Paper math rendering
@@ -118,7 +115,7 @@ jobs:
     name: Nightly correctness and ten-minute fuzz test
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/test-tools
@@ -138,9 +135,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: ./.github/actions/test-tools
       - run: python3 tests/run.py full --cc clang
+      - run: bash tests/run_macos_metal_leaks.sh build/metal-leaks
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: macos-metal-evidence
-          path: build/test-evidence/
+          path: |
+            build/test-evidence/
+            build/metal-leaks/
           if-no-files-found: error

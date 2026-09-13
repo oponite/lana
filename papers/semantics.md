@@ -1,16 +1,16 @@
 # 1.0 - Lana Mathematical Semantics
 
-***Tl/dr:***
+***Short introduction:***
 
-*A basic idea in information theory is that information can be treated very much like a physical quantity, such as mass or energy.*
+*A basic idea in information theory is that information can be treated very much like a physical quantity, such as mass or energy.* - **Claude E. Shannon, 1985**
 
-**Claude E. Shannon, 1985**
-
-Lana takes this premise literally as a computational design principle: information state is represented explicitly and may be transformed, combined, and resolved by the language.
+This premise is taken literally as a computational design principle: information state is represented explicitly and may be transformed, combined, and resolved. This document makes those principles precise as mathematics. The next sections define the meaning of Lana's core state values and the operations that act on them, and the following scope section explains how this document relates to the rest of the Lana specification.
 
 ## 0. Scope and Semantic Authority
 
-This document is the normative Lana 1.0 definition of `STATE`, `STATE_DIST`, and the core state operations `MEASURE`, `TRANSFORM`, and `APPEND`. It also specifies how those values and operations compose, their mathematical guarantees and boundary behavior, and the minimum obligations of a conforming runtime.
+This document is the normative Lana 1.0 definition of the  `STATE`, `STATE_DIST`, and the core state operations `MEASURE`, `TRANSFORM`, and `APPEND`.
+
+It also specifies how those values and operations compose, their mathematical guarantees and boundary behavior, and the minimum obligations of a conforming runtime.
 
 The other Lana documents have narrower roles.
 

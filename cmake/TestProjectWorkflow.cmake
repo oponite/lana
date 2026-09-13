@@ -8,7 +8,8 @@ execute_process(COMMAND "${LANA}" new "${ROOT}-dep" RESULT_VARIABLE result)
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "dependency project creation failed")
 endif()
-file(APPEND "${ROOT}/lana.toml" "dep = \"../project-workflow-dep\"\n")
+get_filename_component(project_name "${ROOT}" NAME)
+file(APPEND "${ROOT}/lana.toml" "dep = \"../${project_name}-dep\"\n")
 if(NOT EXISTS "${ROOT}/src/main.lana" OR
    NOT EXISTS "${ROOT}/src/belief.lana" OR
    NOT EXISTS "${ROOT}/tests/main_test.lana")
@@ -27,6 +28,15 @@ foreach(command IN ITEMS build check test run doc)
         message(FATAL_ERROR "lana ${command} failed")
     endif()
 endforeach()
+if(EXPLICIT_DIRECTORY)
+    foreach(command IN ITEMS build check test run)
+        execute_process(COMMAND "${LANA}" ${command} "${ROOT}"
+                        RESULT_VARIABLE result)
+        if(NOT result EQUAL 0)
+            message(FATAL_ERROR "lana ${command} directory failed")
+        endif()
+    endforeach()
+endif()
 execute_process(COMMAND "${LANA}" fmt WORKING_DIRECTORY "${ROOT}"
                 RESULT_VARIABLE result)
 execute_process(COMMAND "${LANA}" fmt --check WORKING_DIRECTORY "${ROOT}"

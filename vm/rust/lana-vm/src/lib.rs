@@ -12,6 +12,7 @@
 pub mod backend;
 pub mod derivation;
 pub mod heap;
+pub mod gc;
 pub mod inspect;
 pub mod metal;
 pub mod rng;

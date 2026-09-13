@@ -1,28 +1,27 @@
 # 2.0 - Lana Mathematical Semantics: The Density-Operator Substrate
 
+***Tl/dr:*** Mathematical specifications on what the quantum concepts of state, composition and measurement mean - just enough for those concepts to be programmable.
+
 ## 0. Scope and relationship to 1.0
 
 This document is the normative Lana 2.0 definition of the generalized state
-object and its operations. It **replaces** the Lana 1.0 `STATE`/`STATE_DIST`
-core with an N-qubit density-operator substrate. It is a new substrate, not an
-extension: the 1.0 core is recovered as the N=1 special case, but the source
-language, bytecode, and VM are redefined around this document.
-
-The authority order is this document, then `../lip/archive/LIP-026.md`, `SPEC.md`,
-`BYTECODE.md`, and `VM.md`. Where this document and `semantics.md` (1.0)
-disagree, this document is authoritative for Lana 2.0.
+object and its operations.
 
 Decisions fixed by this substrate:
 
-1. A state holds **N qubits**, with N a runtime value, `1 <= N <= 10` for all of
+1. The Lana primitive `STATE`/`STATE_DIST` holds **N qubits**, with N a runtime value, `1 <= N <= 10` for all of
    Lana 2.x.
-2. **Entanglement** is supported.
-3. **Two composition operations** exist: tensor product (side-by-side) and the
-   classical merge (same-size evidence combination, the 1.0 `APPEND` rule).
+   * The 1.0 core is recovered as the N=1 special case.
+   * Source code, bytecode, and VM are redefined around this document.
+2. **Quantum entanglement** is supported - it is programatically representable, creatable, measurable, reducible.
+3. **Two composition operations** exist: tensor product (side-by-side) and the  classical merge (same-size evidence combination, the 1.0 `APPEND` rule).
 4. **Measurement is user-defined** (POVM).
 5. **Evolution is user-defined** (quantum channels), including noise.
-6. **Complex amplitudes everywhere**; classical probability is the diagonal
-   special case.
+6. **Complex amplitudes everywhere**; classical probability is the diagonal special case.
+
+The authority order is this document, then `../lip/archive/LIP-026.md`, `SPEC.md`,
+`BYTECODE.md`, and `VM.md`. Where this document and `semantics.md` (1.0)
+disagree, **this document is authoritative for Lana 2.0**.
 
 ## 1. The state space
 

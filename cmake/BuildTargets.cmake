@@ -147,7 +147,11 @@ add_custom_target(lana_native_compiler ALL DEPENDS "${LANA_NATIVE_COMPILER}")
 add_dependencies(lana lana_native_compiler)
 
 install(TARGETS lanaruntime ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(TARGETS lanavm lana RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+# The C CLI executables (`lana`, `lanavm`) remain buildable in the build tree
+# (`build/lana`, `build/lanavm`) for the differential conformance tests, but the
+# installed `lana` / `lanavm` names now ship from the Rust CLI (see
+# cmake/RustTargets.cmake). Removing the C binaries from this install step is
+# the Rust-only migration, not a deletion of the C targets.
 install(FILES "${LANA_NATIVE_COMPILER}" DESTINATION ${CMAKE_INSTALL_BINDIR})
 # Installed standard library (LIP-016): the compiler resolves the reserved
 # `std/` import prefix to `${DATADIR}/lana/stdlib` via LANA_STDLIB_DIR.

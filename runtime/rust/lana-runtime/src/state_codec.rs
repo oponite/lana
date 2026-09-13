@@ -11,7 +11,8 @@
 //!
 //! Both are byte-identical to the C11 reference.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use lana_vm::gc::{Gc, GraphCell};
 
 use lana_bytecode::LanaError;
 use lana_vm::state::{state_valid, State};
@@ -223,7 +224,7 @@ pub fn persistent_state_encode(state: &PersistentState) -> Result<Vec<u8>, LanaE
     let mut top = Map::new(&heap, 6)?;
     top.set(Arc::from("d_im"), Value::number(state.state.d_im), false)?;
     top.set(Arc::from("d_re"), Value::number(state.state.d_re), false)?;
-    top.set(Arc::from("metadata"), Value::map(Arc::new(Mutex::new(metadata))), false)?;
+    top.set(Arc::from("metadata"), Value::map(Gc::new(&heap, GraphCell::new(metadata))?), false)?;
     top.set(Arc::from("p"), Value::number(state.state.p), false)?;
     if state.has_provenance {
         let mut provenance = Map::new(&heap, 5)?;
@@ -262,13 +263,13 @@ pub fn persistent_state_encode(state: &PersistentState) -> Result<Vec<u8>, LanaE
                 false,
             )
             ?;
-        top.set(Arc::from("provenance"), Value::map(Arc::new(Mutex::new(provenance))), false)?;
+        top.set(Arc::from("provenance"), Value::map(Gc::new(&heap, GraphCell::new(provenance))?), false)?;
     } else {
         top.set(Arc::from("provenance"), Value::null(), false)?;
     }
     top.set(Arc::from("schema"), Value::number(STATE_CODEC_SCHEMA as f64), false)?;
 
-    let encoded = encode_value(&Value::map(Arc::new(Mutex::new(top))))?;
+    let encoded = encode_value(&Value::map(Gc::new(&heap, GraphCell::new(top))?))?;
     Ok(encoded.into_bytes())
 }
 

@@ -4,7 +4,8 @@
 //! heap before allocation. Each owner releases its reservation on drop; views
 //! share the backing buffer and its single reservation.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use crate::gc::{Gc, GraphCell};
 
 use lana_bytecode::LanaError;
 
@@ -1532,7 +1533,7 @@ pub fn tensor_uncertain_result(
     let mut map = Map::new(heap, 2)?;
     map.set(Arc::from("prediction"), Value::tensor(pred), false)?;
     map.set(Arc::from("uncertainty"), Value::tensor(var), false)?;
-    Ok(Value::map(Arc::new(Mutex::new(map))))
+    Ok(Value::map(Gc::new(heap, GraphCell::new(map))?))
 }
 
 /// A zero real tensor with the same shape as `t` (the variance of a certain
@@ -2041,7 +2042,7 @@ mod tests {
 
     fn array(items: Vec<Value>) -> Value {
         let heap = crate::heap::Heap::new(256 * 1024 * 1024);
-        Value::array(Arc::new(std::sync::Mutex::new(crate::value::Array::from_items(&heap, items).unwrap())))
+        Value::array(Gc::new(&heap, GraphCell::new(crate::value::Array::from_items(&heap, items).unwrap())).unwrap())
     }
 
     #[test]
@@ -2798,7 +2799,7 @@ mod tests {
         let mut map1 = Map::new(&crate::heap::Heap::default(), 1).unwrap();
         map1.set(Arc::from("prediction"), Value::tensor(Arc::new(a.try_clone(&crate::heap::Heap::default()).unwrap())), false).unwrap();
         assert!(matches!(
-            tensor_uncertainty_unpack(&Value::map(Arc::new(Mutex::new(map1)))),
+            tensor_uncertainty_unpack(&Value::map(Gc::new(&crate::heap::Heap::default(), GraphCell::new(map1)).unwrap())),
             Err(LanaError::Type)
         ));
 
@@ -2807,7 +2808,7 @@ mod tests {
         map2.set(Arc::from("prediction"), Value::tensor(Arc::new(a.try_clone(&crate::heap::Heap::default()).unwrap())), false).unwrap();
         map2.set(Arc::from("variance"), Value::tensor(Arc::new(va.try_clone(&crate::heap::Heap::default()).unwrap())), false).unwrap();
         assert!(matches!(
-            tensor_uncertainty_unpack(&Value::map(Arc::new(Mutex::new(map2)))),
+            tensor_uncertainty_unpack(&Value::map(Gc::new(&crate::heap::Heap::default(), GraphCell::new(map2)).unwrap())),
             Err(LanaError::Type)
         ));
 
@@ -2816,7 +2817,7 @@ mod tests {
         map3.set(Arc::from("prediction"), Value::tensor(Arc::new(a.try_clone(&crate::heap::Heap::default()).unwrap())), false).unwrap();
         map3.set(Arc::from("uncertainty"), Value::number(1.0), false).unwrap();
         assert!(matches!(
-            tensor_uncertainty_unpack(&Value::map(Arc::new(Mutex::new(map3)))),
+            tensor_uncertainty_unpack(&Value::map(Gc::new(&crate::heap::Heap::default(), GraphCell::new(map3)).unwrap())),
             Err(LanaError::Type)
         ));
 

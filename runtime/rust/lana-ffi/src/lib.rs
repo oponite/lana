@@ -50,9 +50,7 @@
 //!
 //! # Memory notes
 //!
-//! * `lana_vm_create` leaks the (empty) `Chunk` it borrows; `lana_vm_free`
-//!   cannot reclaim it because the `Vm` holds a `&'static Chunk`. One small
-//!   chunk is leaked per VM, which is bounded and acceptable at an FFI edge.
+//! * VM handles own their chunks and release them after destroying the VM.
 //! * Strings returned by `lana_store_get_path` must be released with
 //!   `lana_string_free` (not C `free`). Byte buffers returned by
 //!   `lana_state_encode` must be released with `lana_bytes_free`.
@@ -146,9 +144,29 @@ pub struct LanaPolicy {
 // Opaque handles
 // ---------------------------------------------------------------------------
 
-/// Owns a `Vm` that borrows a leaked `Chunk`.
+/// Owns a VM and its chunk. The chunk has a stable allocation and outlives the VM.
 pub struct VmHandle {
-    vm: Vm<'static>,
+    vm: std::mem::ManuallyDrop<Vm<'static>>,
+    chunk: *mut Chunk,
+}
+
+impl VmHandle {
+    fn new(chunk: Box<Chunk>) -> Self {
+        let chunk = Box::into_raw(chunk);
+        // SAFETY: this allocation remains owned by the handle until Drop,
+        // which destroys the borrowing VM before reclaiming the chunk.
+        let vm = Vm::new(unsafe { &*chunk });
+        Self { vm: std::mem::ManuallyDrop::new(vm), chunk }
+    }
+}
+
+impl Drop for VmHandle {
+    fn drop(&mut self) {
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut self.vm);
+            drop(Box::from_raw(self.chunk));
+        }
+    }
 }
 
 /// Growable byte buffer backing the codec functions (opaque `LanaBuffer`).
@@ -758,22 +776,17 @@ pub extern "C" fn lana_opcode_name(opcode: u8) -> *const c_char {
 /// Mirrors `lana_vm_create` (creates a VM over an empty chunk).
 #[no_mangle]
 pub extern "C" fn lana_vm_create() -> *mut VmHandle {
-    let chunk: &'static Chunk = Box::leak(Box::new(Chunk::new(LABC_VERSION, 0)));
-    let vm = Vm::new(chunk);
-    Box::into_raw(Box::new(VmHandle { vm }))
+    Box::into_raw(Box::new(VmHandle::new(Box::new(Chunk::new(LABC_VERSION, 0)))))
 }
 
 /// Creates a VM over a caller-provided chunk (extension; the chunk handle's
-/// ownership transfers to the VM and is leaked on free).
+/// ownership transfers to the VM and is released on free).
 #[no_mangle]
 pub unsafe extern "C" fn lana_vm_create_with_chunk(chunk: *mut Chunk) -> *mut VmHandle {
     if chunk.is_null() {
         return ptr::null_mut();
     }
-    let chunk_box = Box::from_raw(chunk);
-    let chunk_ref: &'static Chunk = Box::leak(chunk_box);
-    let vm = Vm::new(chunk_ref);
-    Box::into_raw(Box::new(VmHandle { vm }))
+    Box::into_raw(Box::new(VmHandle::new(Box::from_raw(chunk))))
 }
 
 /// Mirrors `lana_vm_seed`.
@@ -1423,12 +1436,297 @@ pub unsafe extern "C" fn lana_bytes_free(ptr: *mut c_void, len: usize) {
 }
 
 // ---------------------------------------------------------------------------
+// bridge.h (integrations/native/include/lana/bridge.h)
+// ---------------------------------------------------------------------------
+
+/// Mirrors `LanaBridgeOptions` in `integrations/native/include/lana/bridge.h`.
+#[repr(C)]
+pub struct LanaBridgeOptions {
+    pub struct_size: usize,
+    pub abi_version: u32,
+    pub seed: u64,
+    pub instruction_limit: u64,
+    pub memory_limit_bytes: usize,
+    pub workers: usize,
+    pub max_tasks: usize,
+}
+
+/// Mirrors `LanaBridgeStatus` in `integrations/native/include/lana/bridge.h`.
+const LANA_BRIDGE_ABI_VERSION: u32 = 1;
+const LANA_BRIDGE_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
+
+const LANA_BRIDGE_OK: i32 = 0;
+const LANA_BRIDGE_ERR_ARGUMENT: i32 = -1;
+const LANA_BRIDGE_ERR_ABI: i32 = -2;
+const LANA_BRIDGE_ERR_IO: i32 = -3;
+const LANA_BRIDGE_ERR_PROTOCOL: i32 = -4;
+const LANA_BRIDGE_ERR_OOM: i32 = -5;
+
+fn bridge_version_str() -> &'static str {
+    include_str!("../../../../VERSION").trim()
+}
+
+static BRIDGE_VERSION: LazyLock<CString> =
+    LazyLock::new(|| CString::new(bridge_version_str()).expect("VERSION contains no NUL"));
+
+fn bridge_error_envelope(phase: &str, code: &str, message: &str, status: i32) -> Option<CString> {
+    let phase = json_stringify(&Value::string(phase.into())).ok()?;
+    let code = json_stringify(&Value::string(code.into())).ok()?;
+    let message = json_stringify(&Value::string(message.into())).ok()?;
+    let text = format!(
+        "{{\"schema\":1,\"ok\":false,\"phase\":{},\"error\":{{\"code\":{},\"message\":{}}},\"exit_code\":{},\"stdout\":\"\",\"stderr\":\"\",\"execution\":{{\"engine\":\"native\",\"lana_version\":\"{}\"}}}}",
+        phase, code, message, status, bridge_version_str()
+    );
+    CString::new(text).ok()
+}
+
+fn bridge_success_envelope(response: &str) -> Option<CString> {
+    let text = format!(
+        "{{\"schema\":1,\"ok\":true,\"result\":{},\"stdout\":\"\",\"stderr\":\"\",\"execution\":{{\"engine\":\"native\",\"lana_version\":\"{}\"}}}}",
+        response, bridge_version_str()
+    );
+    CString::new(text).ok()
+}
+
+/// Writes an error envelope to `*envelope_json` and returns `status`, or
+/// returns `LANA_BRIDGE_ERR_OOM` when the envelope cannot be allocated.
+unsafe fn bridge_fail(
+    envelope_json: *mut *mut c_char,
+    status: i32,
+    phase: &str,
+    code: &str,
+    message: &str,
+) -> i32 {
+    match bridge_error_envelope(phase, code, message, status) {
+        Some(c) => {
+            *envelope_json = c.into_raw();
+            status
+        }
+        None => LANA_BRIDGE_ERR_OOM,
+    }
+}
+
+/// Reads the response file, mirroring `read_response` in `lana_bridge.c`.
+/// Returns `LANA_BRIDGE_ERR_IO` on a read failure and
+/// `LANA_BRIDGE_ERR_PROTOCOL` when the file exceeds the size limit.
+fn bridge_read_response(path: &str) -> Result<String, i32> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|_| LANA_BRIDGE_ERR_IO)?;
+    let mut bytes = Vec::new();
+    file.take(LANA_BRIDGE_RESPONSE_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes).map_err(|_| LANA_BRIDGE_ERR_IO)?;
+    if bytes.len() > LANA_BRIDGE_RESPONSE_LIMIT {
+        return Err(LANA_BRIDGE_ERR_PROTOCOL);
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Runs the LABC program, mirroring `run_program` in `lana_bridge.c`. On
+/// failure writes an error envelope and returns the (positive `LanaError` or
+/// negative `LanaBridgeStatus`) status; on success returns the response text.
+unsafe fn bridge_run_program(
+    labc_path: &str,
+    request_path: &str,
+    response_path: &str,
+    options: *const LanaBridgeOptions,
+    envelope_json: *mut *mut c_char,
+) -> Result<String, i32> {
+    let _ = std::fs::remove_file(response_path);
+
+    let bytes = match std::fs::read(labc_path) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let status = LanaError::Io as i32;
+            bridge_fail(envelope_json, status, "load", cstr(lana_error_name(status)), "failed to load LABC");
+            return Err(status);
+        }
+    };
+    let chunk = match lana_bytecode::loader::load(&bytes) {
+        Ok(chunk) => chunk,
+        Err(info) => {
+            let status = info.code as i32;
+            let message = if info.message.is_empty() {
+                "failed to load LABC".to_string()
+            } else {
+                info.message
+            };
+            bridge_fail(envelope_json, status, "load", cstr(lana_error_name(status)), &message);
+            return Err(status);
+        }
+    };
+
+    let mut vm = Vm::new(&chunk);
+    let mut store_host = lana_runtime::host_calls::StoreHost::with_heap(vm.heap());
+    vm.set_host_call_extension(Box::new(move |host_id, args, out| {
+        store_host.dispatch(host_id, args, out)
+    }));
+
+    if !options.is_null() {
+        let opts = &*options;
+        if opts.seed != 0 {
+            vm.seed(opts.seed);
+        }
+        if opts.instruction_limit != 0 {
+            vm.set_instruction_limit(opts.instruction_limit);
+        }
+        if opts.memory_limit_bytes != 0 {
+            vm.set_memory_limit(opts.memory_limit_bytes);
+        }
+        if (opts.workers != 0 && vm.set_worker_count(opts.workers) != LanaError::Ok)
+            || (opts.max_tasks != 0 && vm.set_task_limit(opts.max_tasks) != LanaError::Ok)
+        {
+            let status = LanaError::Task as i32;
+            bridge_fail(envelope_json, status, "run", "LANA_ERR_TASK", "invalid scheduler options");
+            return Err(status);
+        }
+    }
+
+    let args = vec![request_path.to_string(), response_path.to_string()];
+    vm.set_program_args(&args);
+
+    let result = vm.run();
+    if result != LanaError::Ok {
+        let message = if vm.error().message.is_empty() {
+            result.name().to_string()
+        } else {
+            vm.error().message.clone()
+        };
+        let status = result as i32;
+        bridge_fail(envelope_json, status, "run", result.name(), &message);
+        return Err(status);
+    }
+
+    let response = match bridge_read_response(response_path) {
+        Ok(response) => response,
+        Err(status) => {
+            let code = if status == LANA_BRIDGE_ERR_IO {
+                "LANA_RESPONSE_MISSING"
+            } else {
+                "LANA_RESPONSE_LIMIT"
+            };
+            let message = if status == LANA_BRIDGE_ERR_IO {
+                "program did not write a readable response file"
+            } else {
+                "response could not be loaded"
+            };
+            bridge_fail(envelope_json, status, "protocol", code, message);
+            return Err(status);
+        }
+    };
+
+    if json_parse(&response).is_err() {
+        bridge_fail(
+            envelope_json,
+            LANA_BRIDGE_ERR_PROTOCOL,
+            "protocol",
+            "LANA_RESPONSE_INVALID",
+            "program wrote invalid response JSON",
+        );
+        return Err(LANA_BRIDGE_ERR_PROTOCOL);
+    }
+    Ok(response)
+}
+
+/// Mirrors `lana_bridge_version` (returns the `VERSION` file contents).
+#[no_mangle]
+pub extern "C" fn lana_bridge_version() -> *const c_char {
+    BRIDGE_VERSION.as_ptr()
+}
+
+/// Mirrors `lana_bridge_run_labc`.
+#[no_mangle]
+pub unsafe extern "C" fn lana_bridge_run_labc(
+    labc_path: *const c_char,
+    request_path: *const c_char,
+    response_path: *const c_char,
+    options: *const LanaBridgeOptions,
+    envelope_json: *mut *mut c_char,
+) -> c_int {
+    if envelope_json.is_null() {
+        return LANA_BRIDGE_ERR_ARGUMENT;
+    }
+    *envelope_json = ptr::null_mut();
+
+    if labc_path.is_null() || request_path.is_null() || response_path.is_null() {
+        return bridge_fail(
+            envelope_json,
+            LANA_BRIDGE_ERR_ARGUMENT,
+            "input",
+            "LANA_BRIDGE_ARGUMENT",
+            "paths must not be null",
+        );
+    }
+    if !options.is_null() {
+        let opts = &*options;
+        if opts.struct_size < std::mem::size_of::<LanaBridgeOptions>()
+            || opts.abi_version != LANA_BRIDGE_ABI_VERSION
+        {
+            return bridge_fail(
+                envelope_json,
+                LANA_BRIDGE_ERR_ABI,
+                "compatibility",
+                "LANA_BRIDGE_ABI",
+                "unsupported bridge options ABI",
+            );
+        }
+    }
+
+    let response = match bridge_run_program(
+        cstr(labc_path),
+        cstr(request_path),
+        cstr(response_path),
+        options,
+        envelope_json,
+    ) {
+        Ok(response) => response,
+        Err(status) => return status,
+    };
+
+    match bridge_success_envelope(&response) {
+        Some(c) => {
+            *envelope_json = c.into_raw();
+            LANA_BRIDGE_OK
+        }
+        None => LANA_BRIDGE_ERR_OOM,
+    }
+}
+
+/// Mirrors `lana_bridge_free` (releases the envelope string).
+#[no_mangle]
+pub unsafe extern "C" fn lana_bridge_free(value: *mut c_char) {
+    if !value.is_null() {
+        drop(CString::from_raw(value));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_response_size_boundaries() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("lana-response-{}-{nanos}", std::process::id()));
+        let name = path.to_str().unwrap();
+        assert_eq!(bridge_read_response(name), Err(LANA_BRIDGE_ERR_IO));
+        let file = std::fs::File::create(&path).unwrap();
+        for length in [0, LANA_BRIDGE_RESPONSE_LIMIT - 1, LANA_BRIDGE_RESPONSE_LIMIT,
+                       LANA_BRIDGE_RESPONSE_LIMIT + 1, 1024 * 1024 * 1024] {
+            file.set_len(length as u64).unwrap();
+            let result = bridge_read_response(name);
+            if length > LANA_BRIDGE_RESPONSE_LIMIT {
+                assert_eq!(result, Err(LANA_BRIDGE_ERR_PROTOCOL));
+            } else {
+                assert_eq!(result.unwrap().len(), length);
+            }
+        }
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
 
     unsafe fn cstr_to_string(ptr: *const c_char) -> String {
         if ptr.is_null() {
@@ -1440,8 +1738,7 @@ mod tests {
     #[test]
     fn map_allocation_failure_clears_output_and_preserves_budget() {
         let chunk = lana_bytecode::assembler::assemble("HALT\n").unwrap();
-        let chunk = Box::into_raw(Box::new(chunk));
-        let mut handle = VmHandle { vm: Vm::new(unsafe { &*chunk }) };
+        let mut handle = VmHandle::new(Box::new(chunk));
         handle.vm.set_memory_limit(1);
         let mut output = std::ptr::NonNull::<Map>::dangling().as_ptr();
         unsafe {
@@ -1454,7 +1751,22 @@ mod tests {
             assert!(output.is_null());
         }
         drop(handle);
-        unsafe { drop(Box::from_raw(chunk)); }
+    }
+
+    #[test]
+    fn vm_handles_release_owned_chunks() {
+        for _ in 0..32 {
+            let mut chunk = lana_bytecode::assembler::assemble("HALT\n").unwrap();
+            // LeakSanitizer checks that both destruction entry points reclaim
+            // the chunk, including constants retained after execution.
+            chunk.constants.push(lana_bytecode::Value::String("x".repeat(1024 * 1024)));
+            unsafe {
+                let vm = lana_vm_create_with_chunk(Box::into_raw(Box::new(chunk)));
+                assert_eq!(lana_vm_run(vm), LanaError::Ok as i32);
+                lana_vm_free(vm);
+                lana_vm_destroy(lana_vm_create());
+            }
+        }
     }
 
     #[test]
@@ -1474,6 +1786,33 @@ mod tests {
 
             lana_value_free(value);
             lana_buffer_free(buffer);
+        }
+    }
+
+    #[test]
+    fn bridge_version_matches_version_file() {
+        let version = unsafe { cstr_to_string(lana_bridge_version()) };
+        assert_eq!(version, include_str!("../../../../VERSION").trim());
+    }
+
+    #[test]
+    fn bridge_rejects_null_envelope_and_paths() {
+        unsafe {
+            let mut envelope: *mut c_char = ptr::null_mut();
+            assert_eq!(lana_bridge_run_labc(ptr::null(), ptr::null(), ptr::null(), ptr::null(), ptr::null_mut()), LANA_BRIDGE_ERR_ARGUMENT);
+            assert_eq!(
+                lana_bridge_run_labc(
+                    c"x".as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    ptr::null(),
+                    &mut envelope
+                ),
+                LANA_BRIDGE_ERR_ARGUMENT
+            );
+            assert!(!envelope.is_null());
+            assert!(cstr_to_string(envelope).contains("LANA_BRIDGE_ARGUMENT"));
+            lana_bridge_free(envelope);
         }
     }
 
