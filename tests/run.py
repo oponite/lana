@@ -302,7 +302,7 @@ def main():
             python_junit = output / "python-integrations.xml"
             python_step = command("python-integrations", [venv / "bin/python", "-m", "pytest", "-q",
                     ROOT / "integrations/python/tests", "--junitxml", python_junit],
-                    env={"LANA_BIN": str(integrations / "lana"), "LANA_FFI_LIBRARY": str(library),
+                    env={"LANA_EXECUTABLE": str(integrations / "lana"), "LANA_FFI_LIBRARY": str(library),
                          "LANA_RUNTIME_LIBRARY": str(integrations / ("liblanaruntime_shared.dylib" if sys.platform == "darwin" else "liblanaruntime_shared.so")),
                          "LANA_HTTP_SERVICE": str(integrations / "lana_http_service"),
                          "LANA_BRIDGE_TEST_LIBRARY": str(library), "LANA_BRIDGE_TEST_BYTECODE": str(bytecode)})
