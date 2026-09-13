@@ -1884,7 +1884,29 @@ static int test_regex_host_calls(void) {
     return 0;
 }
 
+static int test_verifier_register_range_overflow(void) {
+    const uint8_t opcodes[] = {OP_ADT_BUILD, OP_ARRAY_NEW, OP_JOINT_BUILD,
+        OP_CALL, OP_FORK, OP_HOST_CALL, OP_GENERATOR, OP_ASYNC};
+    size_t i;
+    for (i = 0; i < sizeof(opcodes) / sizeof(opcodes[0]); ++i) {
+        LanaChunk chunk;
+        LanaErrorInfo error;
+        bool uses_b = opcodes[i] == OP_ADT_BUILD || opcodes[i] == OP_ARRAY_NEW ||
+                      opcodes[i] == OP_JOINT_BUILD;
+        LanaInstruction instruction = {opcodes[i], 0, uses_b ? 1u : 0u,
+            uses_b ? UINT32_MAX : 1u, uses_b ? 0u : UINT32_MAX, 1};
+        lana_chunk_init(&chunk);
+        chunk.version = LABC_VERSION_4;
+        CHECK(lana_chunk_emit(&chunk, instruction) == LANA_OK);
+        CHECK(lana_chunk_add_function(&chunk, "main", 0, 1, 0, NULL) == LANA_OK);
+        CHECK(lana_chunk_verify(&chunk, &error) == LANA_ERR_REGISTER);
+        lana_chunk_free(&chunk);
+    }
+    return 0;
+}
+
 int main(void) {
+    CHECK(test_verifier_register_range_overflow() == 0);
     CHECK(test_state_construction() == 0);
     CHECK(test_ledger_host_rejects_invalid_numeric_ids() == 0);
     CHECK(test_map_allocation_overflow() == 0);

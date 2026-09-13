@@ -282,7 +282,7 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
             case OP_JOINT_BUILD:
                 result = verify_register(error, ip, ins, ins->a);
                 if (result == LANA_OK) result = verify_register(error, ip, ins, ins->b);
-                if (result == LANA_OK && (ins->c == 0u || ins->b + ins->c > LANA_MAX_REGISTERS))
+                if (result == LANA_OK && (ins->c == 0u || ins->c > LANA_MAX_REGISTERS - ins->b))
                     result = LANA_ERR_REGISTER;
                 if (result == LANA_OK && !constant_valid(chunk, ins->imm)) result = LANA_ERR_CONSTANT;
                 if (result == LANA_OK && chunk->constants[ins->imm].type != VAL_STRING)
@@ -405,17 +405,17 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
                 break;
             case OP_ARRAY_NEW:
                 result = verify_register(error, ip, ins, ins->a);
-                if (result == LANA_OK && (ins->b >= LANA_MAX_REGISTERS || ins->b + ins->c > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
+                if (result == LANA_OK && (ins->b >= LANA_MAX_REGISTERS || ins->c > LANA_MAX_REGISTERS - ins->b)) result = LANA_ERR_REGISTER;
                 break;
             case OP_CALL:
                 result = verify_register(error, ip, ins, ins->a);
                 if (result == LANA_OK && ins->b >= chunk->function_count) result = LANA_ERR_FORMAT;
-                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->c + ins->imm > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
+                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->imm > LANA_MAX_REGISTERS - ins->c)) result = LANA_ERR_REGISTER;
                 break;
             case OP_FORK:
                 result = verify_register(error, ip, ins, ins->a);
                 if (result == LANA_OK && ins->b >= chunk->function_count) result = LANA_ERR_FORMAT;
-                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->c + ins->imm > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
+                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->imm > LANA_MAX_REGISTERS - ins->c)) result = LANA_ERR_REGISTER;
                 if (result == LANA_OK && ins->imm != chunk->functions[ins->b].arity) result = LANA_ERR_TYPE;
                 break;
             case OP_JOIN: case OP_JOIN_ALL:
@@ -434,7 +434,7 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
                 result = verify_register(error, ip, ins, ins->a);
                 if (result == LANA_OK && ins->b >= LANA_HOST_COUNT)
                     result = LANA_ERR_FORMAT;
-                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->c + ins->imm > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
+                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->imm > LANA_MAX_REGISTERS - ins->c)) result = LANA_ERR_REGISTER;
                 break;
             case OP_ATTENUATE:
                 result = verify_register(error, ip, ins, ins->a);
@@ -464,7 +464,7 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
             case OP_ADT_BUILD:
                 result = verify_register(error, ip, ins, ins->a);
                 if (result == LANA_OK && (ins->b >= LANA_MAX_REGISTERS ||
-                    ins->b + ins->c > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
+                    ins->c > LANA_MAX_REGISTERS - ins->b)) result = LANA_ERR_REGISTER;
                 if (result == LANA_OK && !constant_valid(chunk, ins->imm)) result = LANA_ERR_CONSTANT;
                 if (result == LANA_OK && chunk->constants[ins->imm].type != VAL_NUMBER) result = LANA_ERR_TYPE;
                 break;
@@ -499,7 +499,7 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
             case OP_GENERATOR:
                 result = verify_register(error, ip, ins, ins->a);
                 if (result == LANA_OK && ins->b >= chunk->function_count) result = LANA_ERR_FORMAT;
-                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->c + ins->imm > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
+                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->imm > LANA_MAX_REGISTERS - ins->c)) result = LANA_ERR_REGISTER;
                 break;
             case OP_YIELD:
                 result = verify_register(error, ip, ins, ins->a);
@@ -512,7 +512,7 @@ LanaError lana_chunk_verify(const LanaChunk *chunk, LanaErrorInfo *error) {
             case OP_ASYNC:
                 result = verify_register(error, ip, ins, ins->a);
                 if (result == LANA_OK && ins->b >= chunk->function_count) result = LANA_ERR_FORMAT;
-                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->c + ins->imm > LANA_MAX_REGISTERS)) result = LANA_ERR_REGISTER;
+                if (result == LANA_OK && (ins->c >= LANA_MAX_REGISTERS || ins->imm > LANA_MAX_REGISTERS - ins->c)) result = LANA_ERR_REGISTER;
                 break;
             case OP_AWAIT:
                 result = verify_register(error, ip, ins, ins->a);

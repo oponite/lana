@@ -37,6 +37,7 @@ if(LANA_ENABLE_SANITIZERS AND LANA_ENABLE_TSAN)
 endif()
 
 include(cmake/BuildTargets.cmake)
+include(cmake/RustTargets.cmake)
 include(CTest)
 if(BUILD_TESTING)
     include(cmake/CTestTargets.cmake)

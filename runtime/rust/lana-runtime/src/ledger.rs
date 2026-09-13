@@ -3,7 +3,8 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use lana_vm::gc::{Gc, GraphCell};
 
 use lana_bytecode::LanaError;
 use lana_vm::value::{Map, Value, ValueKind};
@@ -143,7 +144,7 @@ fn key_tail_id(key: &str) -> u64 {
 }
 
 /// Decode a stored record (JSON text or an already-parsed map) to a map.
-fn scan_value_map(value: &Value) -> Result<Arc<Mutex<Map>>, LanaError> {
+fn scan_value_map(value: &Value) -> Result<Gc<GraphCell<Map>>, LanaError> {
     match &value.kind {
         ValueKind::Map(map) => Ok(map.clone()),
         ValueKind::String(s) => {

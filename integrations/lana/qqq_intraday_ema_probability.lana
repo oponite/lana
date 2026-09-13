@@ -1,9 +1,47 @@
 import "./bridge.lana" as bridge;
 
-fn probability(value) {
-    assert(value >= 0, "probability below zero");
-    assert(value <= 1, "probability above one");
+// qqq_intraday_ema_probability — same-day directional signal for QQQ close
+// above the prior close, derived from 15-minute EMA state. The logistic score
+// is compared against a break-even threshold (where the isotonic up-rate
+// crosses 0.5) to produce a bullish/bearish direction and a confidence tier.
+// Advisory only; never authorizes an order.
+
+// --- local numeric helpers (Lana's math module has no transcendentals) ---
+
+fn abs_number(value) {
+    if (value < 0) { return -value; }
     return value;
+}
+
+fn exp_approx(value) {
+    if (value > 40) { value = 40; }
+    if (value < -40) { value = -40; }
+    let negative = value < 0;
+    if (negative) { value = -value; }
+    let halvings = 0;
+    while (value > 0.5) {
+        value = value / 2;
+        halvings = halvings + 1;
+    }
+    let term = 1.0;
+    let total = 1.0;
+    let i = 1;
+    while (i <= 14) {
+        term = term * value / i;
+        total = total + term;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < halvings) {
+        total = total * total;
+        i = i + 1;
+    }
+    if (negative) { return 1.0 / total; }
+    return total;
+}
+
+fn sigmoid(score) {
+    return 1.0 / (1.0 + exp_approx(-score));
 }
 
 fn validate_model(model, order) {
@@ -17,28 +55,11 @@ fn validate_model(model, order) {
         assert(model["scale"][index] > 0, "model scale must be positive");
         index = index + 1;
     }
-    assert(array_length(model["calibration_breakpoints"]) > 0, "calibration is empty");
-    assert(array_length(model["calibration_breakpoints"]) == array_length(model["calibration_probabilities"]), "calibration mismatch");
     return true;
 }
 
-fn calibrated(score, points, values) {
-    if (score <= points[0]) { return probability(values[0]); }
-    let index = 1;
-    while (index < array_length(points)) {
-        assert(points[index] > points[index - 1], "calibration breakpoints must increase");
-        assert(values[index] >= values[index - 1], "calibration probabilities must increase");
-        if (score <= points[index]) {
-            let fraction = (score - points[index - 1]) / (points[index] - points[index - 1]);
-            return probability(values[index - 1] + fraction * (values[index] - values[index - 1]));
-        }
-        index = index + 1;
-    }
-    return probability(values[array_length(values) - 1]);
-}
-
-fn infer(request, target) {
-    let model = request["models"][target];
+fn infer_direction(request) {
+    let model = request["model"];
     let order = request["feature_order"];
     validate_model(model, order);
     let score = model["intercept"];
@@ -49,7 +70,19 @@ fn infer(request, target) {
         score = score + ((value - model["center"][index]) / model["scale"][index]) * model["coefficients"][index];
         index = index + 1;
     }
-    return calibrated(score, model["calibration_breakpoints"], model["calibration_probabilities"]);
+    let threshold = request["direction_threshold"];
+    let reference_probability = sigmoid(score);
+    let direction = "bearish";
+    if (score > threshold) { direction = "bullish"; }
+    let distance = abs_number(score - threshold);
+    let confidence = "weak";
+    if (distance >= 0.4) { confidence = "moderate"; }
+    if (distance >= 1.0) { confidence = "strong"; }
+    return {
+        "direction": direction,
+        "confidence": confidence,
+        "reference_probability": reference_probability
+    };
 }
 
 fn forecast(request) {
@@ -59,16 +92,16 @@ fn forecast(request) {
     assert(request["historical_provider"] == "massive", "historical provider must be Massive");
     assert(request["live_provider"] == "yfinance", "live provider must be yfinance");
     assert(request["advisory_only"] == true, "forecast must be advisory-only");
-    let prior = infer(request, "close_above_prior");
-    let open = infer(request, "close_above_open");
+    let signal = infer_direction(request);
     return {
         "schema": 1,
         "kind": "qqq_intraday_ema_probability_forecast",
         "symbol": "QQQ",
         "session_date": request["session_date"],
         "slot": request["slot"],
-        "probability_close_above_prior_close": prior,
-        "probability_close_above_today_open": open,
+        "direction": signal["direction"],
+        "confidence": signal["confidence"],
+        "reference_probability": signal["reference_probability"],
         "historical_provider": "massive",
         "live_provider": "yfinance",
         "advisory_only": true

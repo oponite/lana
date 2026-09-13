@@ -9,15 +9,8 @@ use crate::chunk::{Chunk, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
 use crate::opcode::{OpCode, LANA_MAX_REGISTERS};
 
-/// Maximum host-call id. The C11 reference carries 141 host calls (ids 0-140,
-/// through the LIP-015 dataset calls); the Rust VM adds 11 durable-pipeline
-/// host calls (store/policy/ledger, ids 141-151) behind the host-call
-/// extension, so the Rust verifier accepts the wider range. This is a
-/// deliberate, documented divergence from the C11 verifier. LIP-024 async host
-/// calls (run_async/future_all/future_race/sleep) occupy ids 126-129 and the
-/// LIP-015 dataset calls ids 130-140, LIP-018 FFI calls 157-159, LIP-019 net
-/// calls 160-165, LIP-027 cast at 166, matching the C11 VM.
-pub const LANA_HOST_COUNT: u32 = 167;
+/// Keep the verifier's bound aligned with the assembler's host-call table.
+pub const LANA_HOST_COUNT: u32 = crate::assembler::HOST_CALL_NAMES.len() as u32;
 
 const LANA_TRANSFORM_NEUTRALIZE: u32 = 1;
 const LANA_MEASURE_SAMPLE: u32 = 2;
@@ -281,7 +274,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
         }
         AdtBuild => {
             check(&mut result, &mut error, ip, ins, ins.a);
-            if result.is_ok() && (ins.b >= LANA_MAX_REGISTERS || ins.b + ins.c > LANA_MAX_REGISTERS) {
+            if result.is_ok() && (ins.b >= LANA_MAX_REGISTERS || ins.c > LANA_MAX_REGISTERS - ins.b) {
                 result = Err(LanaError::Register);
             }
             if result.is_ok() && !constant_valid(chunk, ins.imm) {
@@ -342,7 +335,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= chunk.functions.len() as u32 {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.imm > LANA_MAX_REGISTERS - ins.c) {
                 result = Err(LanaError::Register);
             }
         }
@@ -359,7 +352,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= chunk.functions.len() as u32 {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.imm > LANA_MAX_REGISTERS - ins.c) {
                 result = Err(LanaError::Register);
             }
         }
@@ -413,7 +406,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
         JointBuild => {
             check(&mut result, &mut error, ip, ins, ins.a);
             check(&mut result, &mut error, ip, ins, ins.b);
-            if result.is_ok() && (ins.c == 0 || ins.b + ins.c > LANA_MAX_REGISTERS) {
+            if result.is_ok() && (ins.c == 0 || ins.c > LANA_MAX_REGISTERS - ins.b) {
                 result = Err(LanaError::Register);
             }
             if result.is_ok() && !constant_valid(chunk, ins.imm) {
@@ -568,7 +561,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
         }
         ArrayNew => {
             check(&mut result, &mut error, ip, ins, ins.a);
-            if result.is_ok() && (ins.b >= LANA_MAX_REGISTERS || ins.b + ins.c > LANA_MAX_REGISTERS) {
+            if result.is_ok() && (ins.b >= LANA_MAX_REGISTERS || ins.c > LANA_MAX_REGISTERS - ins.b) {
                 result = Err(LanaError::Register);
             }
         }
@@ -577,7 +570,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= chunk.functions.len() as u32 {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.imm > LANA_MAX_REGISTERS - ins.c) {
                 result = Err(LanaError::Register);
             }
         }
@@ -586,7 +579,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= chunk.functions.len() as u32 {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.imm > LANA_MAX_REGISTERS - ins.c) {
                 result = Err(LanaError::Register);
             }
             if result.is_ok() && ins.imm != chunk.functions[ins.b as usize].arity {
@@ -610,7 +603,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= LANA_HOST_COUNT {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.imm > LANA_MAX_REGISTERS - ins.c) {
                 result = Err(LanaError::Register);
             }
         }

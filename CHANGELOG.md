@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.2.0
+
+- Make the Rust toolchain the shipped runtime: the Rust CLI reaches full command
+  parity (including the LSP) and installs as `lana`/`lanavm`.
+- Port the SQLite and HTTP/JSON evidence adapters natively to Rust (the C
+  dlopen plugin path is retained for the frozen reference).
+- Complete the Rust FFI with the native bridge (`lana_bridge_run_labc`) and a
+  handle-based ctypes binding for the Python integration.
+- Freeze the C11 VM as a conformance reference; it is no longer actively
+  developed.
+- Preserve Lana 2.0 source behavior, bridge ABI v1, and LABC v1/v2/v3/v4
+  loading.
+
 ## 2.1.0
 
 - Complete the accepted 2.1 improvement proposals, including tensors and Metal,

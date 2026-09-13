@@ -10,7 +10,8 @@
 //!
 //! String decoding is shared with the JSON boundary so encoded values round-trip.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use lana_vm::gc::{Gc, GraphCell};
 
 use lana_bytecode::LanaError;
 use lana_vm::value::{Array, Map, MapEntry, Value, ValueKind};
@@ -188,14 +189,14 @@ fn parse_value(parser: &mut Parser) -> Result<Value, LanaError> {
         parser.skip_space();
         let mut array = Array::new(&parser.heap, 0)?;
         if parser.take(b']') {
-            return Ok(Value::array(Arc::new(Mutex::new(array))));
+            return Ok(Value::array(Gc::new(&parser.heap, GraphCell::new(array))?));
         }
         loop {
             let item = parse_value(parser)?;
             array.push(item)?;
             parser.skip_space();
             if parser.take(b']') {
-                return Ok(Value::array(Arc::new(Mutex::new(array))));
+                return Ok(Value::array(Gc::new(&parser.heap, GraphCell::new(array))?));
             }
             if !parser.take(b',') {
                 return Err(LanaError::Parse);
@@ -207,7 +208,7 @@ fn parse_value(parser: &mut Parser) -> Result<Value, LanaError> {
         parser.skip_space();
         let mut map = Map::new(&parser.heap, 4)?;
         if parser.take(b'}') {
-            return Ok(Value::map(Arc::new(Mutex::new(map))));
+            return Ok(Value::map(Gc::new(&parser.heap, GraphCell::new(map))?));
         }
         loop {
             let key = parse_value(parser)?;
@@ -226,7 +227,7 @@ fn parse_value(parser: &mut Parser) -> Result<Value, LanaError> {
             map.set(key, value, true).map_err(|_| LanaError::Schema)?;
             parser.skip_space();
             if parser.take(b'}') {
-                return Ok(Value::map(Arc::new(Mutex::new(map))));
+                return Ok(Value::map(Gc::new(&parser.heap, GraphCell::new(map))?));
             }
             if !parser.take(b',') {
                 return Err(LanaError::Parse);
@@ -288,6 +289,7 @@ fn parse_number(data: &[u8], offset: usize) -> Result<(f64, usize), LanaError> {
 
 /// Decode one JSON value, advancing `offset`, mirroring `lana_codec_decode_value`.
 pub fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, LanaError> {
+    let _collection = lana_vm::gc::Scope::new();
     if *offset > data.len() {
         return Err(LanaError::InvalidState);
     }
@@ -347,10 +349,11 @@ mod tests {
 
     #[test]
     fn encode_map_sorts_keys() {
-        let mut map = Map::new(&lana_vm::heap::Heap::default(), 2).unwrap();
+        let heap = lana_vm::heap::Heap::default();
+        let mut map = Map::new(&heap, 2).unwrap();
         map.set(Arc::from("b"), Value::number(2.0), false).unwrap();
         map.set(Arc::from("a"), Value::number(1.0), false).unwrap();
-        let value = Value::map(Arc::new(Mutex::new(map)));
+        let value = Value::map(Gc::new(&heap, GraphCell::new(map)).unwrap());
         assert_eq!(encode_value(&value).unwrap(), "{\"a\":1,\"b\":2}");
     }
 

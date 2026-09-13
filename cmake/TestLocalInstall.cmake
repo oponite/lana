@@ -23,7 +23,7 @@ if(DEFINED EXPECTED_ARCH)
     endforeach()
 endif()
 execute_process(
-    COMMAND "${PYTHON}" -E "${VERIFY_SCRIPT}" --prefix "${prefix}" ${architecture_args}
+    COMMAND "${PYTHON}" -E "${VERIFY_SCRIPT}" --prefix "${prefix}" --libdir "${LIBDIR}" ${architecture_args}
     RESULT_VARIABLE verify_result
 )
 if(NOT verify_result EQUAL 0)

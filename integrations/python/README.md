@@ -1,6 +1,6 @@
 # Lana integrations
 
-This optional Python package connects Lana 2.0 programs to subprocess callers,
+This optional Python package connects Lana 2.x programs to subprocess callers,
 MCP hosts, and IPython. It does not add dependencies to Lana itself.
 
 ```bash
@@ -12,7 +12,20 @@ printf '{"message":"hello"}' |
 ```
 
 The `lana` executable is resolved from `--lana`, `LANA_EXECUTABLE`, then
-`PATH`. Only Lana 2.0 reporting LABC v2 is accepted.
+`PATH`. The subprocess bridge accepts Lana 2.x reporting LABC v2.
+
+The CMake install includes `lib/liblana_ffi.dylib` on macOS and
+`lib/liblana_ffi.so` on Linux. The Rust API uses opaque handles, not the C
+reference value layout:
+
+```python
+from lana_integrations.api_rust import RustLanaAPI
+
+api = RustLanaAPI(library_path="/path/to/install/lib/liblana_ffi.dylib")
+```
+
+`LANA_FFI_LIBRARY` can also select this library. Do not set
+`LANA_RUNTIME_LIBRARY` to the Rust library for the C reference API.
 
 The ergonomic `Lana` class prefers the native ctypes bridge when a compatible
 `liblana_bridge` is available and falls back to the subprocess bridge otherwise:

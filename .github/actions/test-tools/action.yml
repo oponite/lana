@@ -17,6 +17,7 @@ runs:
     - name: WASM toolchain
       shell: bash
       run: |
+        rustup toolchain install nightly --profile minimal --component rust-src
         rustup target add wasm32-unknown-unknown wasm32-wasip1
         cargo install wasm-bindgen-cli --version 0.2.100 --locked
         case "$RUNNER_OS/$RUNNER_ARCH" in

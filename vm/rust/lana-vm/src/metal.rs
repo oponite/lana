@@ -9,6 +9,7 @@ mod imp {
     use std::sync::OnceLock;
 
     use metal::*;
+    use metal::objc::rc::autoreleasepool;
 
     pub struct ResidentBuffer { buffer: Buffer, len: usize }
 
@@ -20,24 +21,28 @@ mod imp {
 
     impl ResidentBuffer {
         pub fn new(bytes: &[u8]) -> Option<Self> {
-            let (device, _) = pipeline()?;
-            let buffer = if bytes.is_empty() { device.new_buffer(0, MTLResourceOptions::StorageModeShared) }
-                else { device.new_buffer_with_data(bytes.as_ptr() as *const c_void, bytes.len() as u64, MTLResourceOptions::StorageModeShared) };
-            Some(Self { buffer, len: bytes.len() })
+            autoreleasepool(|| {
+                let (device, _) = pipeline()?;
+                let buffer = if bytes.is_empty() { device.new_buffer(0, MTLResourceOptions::StorageModeShared) }
+                    else { device.new_buffer_with_data(bytes.as_ptr() as *const c_void, bytes.len() as u64, MTLResourceOptions::StorageModeShared) };
+                Some(Self { buffer, len: bytes.len() })
+            })
         }
         pub(crate) fn copy_into(&self, bytes: &mut [u8]) {
-            assert_eq!(bytes.len(), self.len, "resident buffer length changed");
-            if self.len > 0 { unsafe { std::ptr::copy_nonoverlapping(self.buffer.contents() as *const u8, bytes.as_mut_ptr(), self.len); } }
+            autoreleasepool(|| {
+                assert_eq!(bytes.len(), self.len, "resident buffer length changed");
+                if self.len > 0 { unsafe { std::ptr::copy_nonoverlapping(self.buffer.contents() as *const u8, bytes.as_mut_ptr(), self.len); } }
+            })
         }
     }
 
     const SHADER: &str = include_str!("../../../metal/matmul.metal");
 
-    /// The device and compiled pipeline are cached across calls (the VM is
-    /// single-threaded). `None` means no Metal device is available.
+    /// OnceLock synchronizes the shared device and pipeline initialization.
+    /// `None` means no Metal device is available.
     fn pipeline() -> Option<&'static (Device, ComputePipelineState)> {
         static PIPELINE: OnceLock<Option<(Device, ComputePipelineState)>> = OnceLock::new();
-        PIPELINE.get_or_init(|| {
+        PIPELINE.get_or_init(|| autoreleasepool(|| {
             let device = Device::system_default()?;
             let library = device
                 .new_library_with_source(SHADER, &CompileOptions::new())
@@ -47,58 +52,60 @@ mod imp {
                 .new_compute_pipeline_state_with_function(&function)
                 .ok()?;
             Some((device, pipeline))
-        })
+        }))
         .as_ref()
     }
 
     pub fn sgemm(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c: *mut f32) -> bool {
-        if m == 0 || n == 0 {
-            return true; // nothing to write
-        }
-        if m > u32::MAX as usize || k > u32::MAX as usize || n > u32::MAX as usize {
-            return false;
-        }
-        let Some((device, pipeline)) = pipeline() else {
-            return false;
-        };
-        let queue = device.new_command_queue();
-        let a_bytes = (m * k * std::mem::size_of::<f32>()) as u64;
-        let b_bytes = (k * n * std::mem::size_of::<f32>()) as u64;
-        let c_bytes = (m * n * std::mem::size_of::<f32>()) as u64;
-        let buf_a = device.new_buffer_with_data(a as *const c_void, a_bytes, MTLResourceOptions::StorageModeShared);
-        let buf_b = device.new_buffer_with_data(b as *const c_void, b_bytes, MTLResourceOptions::StorageModeShared);
-        let buf_c = device.new_buffer(c_bytes, MTLResourceOptions::StorageModeShared);
-        let dims: [u32; 3] = [m as u32, k as u32, n as u32];
-        let buf_dims = device.new_buffer_with_data(
-            dims.as_ptr() as *const c_void,
-            std::mem::size_of_val(&dims) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        autoreleasepool(|| {
+            if m == 0 || n == 0 {
+                return true; // nothing to write
+            }
+            if m > u32::MAX as usize || k > u32::MAX as usize || n > u32::MAX as usize {
+                return false;
+            }
+            let Some((device, pipeline)) = pipeline() else {
+                return false;
+            };
+            let queue = device.new_command_queue();
+            let a_bytes = (m * k * std::mem::size_of::<f32>()) as u64;
+            let b_bytes = (k * n * std::mem::size_of::<f32>()) as u64;
+            let c_bytes = (m * n * std::mem::size_of::<f32>()) as u64;
+            let buf_a = device.new_buffer_with_data(a as *const c_void, a_bytes, MTLResourceOptions::StorageModeShared);
+            let buf_b = device.new_buffer_with_data(b as *const c_void, b_bytes, MTLResourceOptions::StorageModeShared);
+            let buf_c = device.new_buffer(c_bytes, MTLResourceOptions::StorageModeShared);
+            let dims: [u32; 3] = [m as u32, k as u32, n as u32];
+            let buf_dims = device.new_buffer_with_data(
+                dims.as_ptr() as *const c_void,
+                std::mem::size_of_val(&dims) as u64,
+                MTLResourceOptions::StorageModeShared,
+            );
 
-        let command_buffer = queue.new_command_buffer();
-        let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(pipeline);
-        encoder.set_buffer(0, Some(&buf_a), 0);
-        encoder.set_buffer(1, Some(&buf_b), 0);
-        encoder.set_buffer(2, Some(&buf_c), 0);
-        encoder.set_buffer(3, Some(&buf_dims), 0);
-        encoder.set_buffer(4, Some(&buf_dims), 4);
-        encoder.set_buffer(5, Some(&buf_dims), 8);
+            let command_buffer = queue.new_command_buffer();
+            let encoder = command_buffer.new_compute_command_encoder();
+            encoder.set_compute_pipeline_state(pipeline);
+            encoder.set_buffer(0, Some(&buf_a), 0);
+            encoder.set_buffer(1, Some(&buf_b), 0);
+            encoder.set_buffer(2, Some(&buf_c), 0);
+            encoder.set_buffer(3, Some(&buf_dims), 0);
+            encoder.set_buffer(4, Some(&buf_dims), 4);
+            encoder.set_buffer(5, Some(&buf_dims), 8);
 
-        let threads = MTLSize::new(16, 16, 1);
-        let groups = MTLSize::new(((m + 15) / 16) as u64, ((n + 15) / 16) as u64, 1);
-        encoder.dispatch_thread_groups(groups, threads);
-        encoder.end_encoding();
-        command_buffer.commit();
-        command_buffer.wait_until_completed();
+            let threads = MTLSize::new(16, 16, 1);
+            let groups = MTLSize::new(((m + 15) / 16) as u64, ((n + 15) / 16) as u64, 1);
+            encoder.dispatch_thread_groups(groups, threads);
+            encoder.end_encoding();
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
 
-        if command_buffer.status() == MTLCommandBufferStatus::Error {
-            return false;
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(buf_c.contents() as *const f32, c, m * n);
-        }
-        true
+            if command_buffer.status() == MTLCommandBufferStatus::Error {
+                return false;
+            }
+            unsafe {
+                std::ptr::copy_nonoverlapping(buf_c.contents() as *const f32, c, m * n);
+            }
+            true
+        })
     }
 
     pub fn available() -> bool { pipeline().is_some() }
@@ -129,3 +136,19 @@ pub fn metal_sgemm(m: usize, k: usize, n: usize, a: *const f32, b: *const f32, c
 }
 
 pub fn metal_available() -> bool { imp::available() }
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn resident_buffers_survive_pool_drain_and_repeated_commands() {
+    if !metal_available() { return; }
+    let bytes = [1, 2, 3, 4];
+    let resident = ResidentBuffer::new(&bytes).unwrap();
+    for _ in 0..64 {
+        let mut copied = [0; 4];
+        resident.copy_into(&mut copied);
+        assert_eq!(copied, bytes);
+        let mut result = [0.0f32];
+        assert!(metal_sgemm(1, 1, 1, [2.0f32].as_ptr(), [3.0f32].as_ptr(), result.as_mut_ptr()));
+        assert_eq!(result, [6.0]);
+    }
+}

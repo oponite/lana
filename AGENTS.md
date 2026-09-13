@@ -11,10 +11,10 @@ session with:
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel
-build/lana new hello-lana
+build/lana-rust new hello-lana
 cd hello-lana
-../build/lana run .
-../build/lana test .
+../build/lana-rust run .
+../build/lana-rust test .
 ```
 
 `lana new` creates a small module in `src/belief.lana`, imports it from
@@ -58,19 +58,19 @@ applicable authority first when intentionally changing the language.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-build/lana run examples/general.lana
-build/lana check examples/belief.lana
+build/lana-rust run examples/general.lana
+build/lana-rust check examples/belief.lana
 git diff --check
 ```
 
 Project workflow:
 
 ```bash
-build/lana new my-program
-build/lana build my-program
-build/lana check my-program
-build/lana test my-program
-build/lana run my-program
+build/lana-rust new my-program
+build/lana-rust build my-program
+build/lana-rust check my-program
+build/lana-rust test my-program
+build/lana-rust run my-program
 ```
 
 Low-level bytecode workflow:
@@ -93,7 +93,7 @@ Record command output; do not substitute earlier results.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-build/lana version
+build/lana-rust version
 git diff --check
 ```
 
@@ -117,6 +117,24 @@ ctest --test-dir build-tsan --output-on-failure
 
 Required result: both complete suites pass with no sanitizer report.
 
+Rust safety checks require nightly Rust and the `rust-src` component:
+
+```bash
+rustup toolchain install nightly --profile minimal --component rust-src
+bash tests/run_rust_safety.sh asan build/rust-asan-evidence
+bash tests/run_rust_safety.sh tsan build/rust-tsan-evidence
+```
+
+The strict `asan`, `tsan`, `nightly`, and `release` profiles run these checks.
+The nightly and release profiles also run the Rust bytecode fuzzer for 600 seconds.
+
+On macOS, Rust LeakSanitizer excludes only the tests that initialize Apple's
+Metal framework. The normal suite still checks their behavior, and
+`tests/run_macos_metal_leaks.sh` checks the Metal lifetime with Apple's native
+detector. Its clean control must report no leaks, its deliberate control must
+be detected, and three Metal runs must report no leaks. Do not add sanitizer
+suppressions for this boundary.
+
 ### 3. Malformed-bytecode resilience
 
 ```bash
@@ -129,8 +147,12 @@ build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5
 
 Required result: ten minutes complete without a crash, leak, timeout, failed
 assertion, or sanitizer report. Preserve any crashing input as a regression.
-On macOS, use a Clang installation that includes the libFuzzer runtime; current
-Xcode command-line tools may omit it.
+On macOS, use Clang 22.1.8. The fuzz builds download the checksum-pinned LLVM
+source and build libFuzzer locally with an RSS-thread shutdown fix.
+The build records source, patch, compiler, and library provenance in
+`fuzzer-runtime/provenance.json` for C or `runtime/provenance.json` for Rust.
+Qualification controls require clean empty runs and detection of deliberate
+leaks, crashes, timeouts, and RSS overruns. The build does not replace system LLVM.
 
 ### 4. Universal clean install
 
@@ -165,8 +187,12 @@ cmake --build build-integrations --parallel
 ctest --test-dir build-integrations --output-on-failure
 ```
 
-Required result: the Python bridge accepts Lana 2.0 with LABC v2, the native
+Required result: the Python bridge accepts Lana 2.x with LABC v2, the native
 bridge reports ABI v1, and all integration tests pass.
+
+For release evidence, run `python3 tests/run.py integrations --build-dir build-integrations`.
+This profile installs the test, MCP, and Jupyter dependencies and supplies both native libraries.
+Skipped Python tests fail the profile.
 
 The release workflow downloads the macOS archive into a clean directory, checks
 its SHA-256 digest, extracts it, and runs both installed architecture slices
@@ -175,7 +201,7 @@ a clean directory, and runs the example before publication. Homebrew Core
 submission is an external publication step; the release workflow publishes a
 checksum-backed formula artifact. Signing and notarization remain deferred.
 
-The compiler emits LABC v2; the dual-version loader accepts v1 and v2.
+The compiler emits LABC v2. The loader accepts v1, v2, v3, and v4.
 Pre-release bytecode and textual assembly are not accepted or converted; rebuild
 them from source.
 

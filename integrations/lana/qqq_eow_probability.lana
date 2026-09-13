@@ -77,7 +77,7 @@ fn confidence_status(request) {
     return "high";
 }
 
-fn infer(request, target) {
+fn infer_probability(request, target) {
     let model = request["models"][target];
     let features = request["features"];
     let order = request["feature_order"];
@@ -105,8 +105,8 @@ fn forecast(request) {
     assert(request["advisory_only"] == true, "forecast must be advisory-only");
     let order = request["feature_order"];
     assert(array_length(order) > 0, "feature order is empty");
-    let up = infer(request, "up_1pct");
-    let down = infer(request, "down_1pct");
+    let up = infer_probability(request, "up_1pct");
+    let down = infer_probability(request, "down_1pct");
     return {
         "schema": 1,
         "kind": "qqq_eow_probability_forecast",

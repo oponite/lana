@@ -1,4 +1,4 @@
-# Required 2.0 branch checks
+# Required 2.2.0 branch checks
 
 Protect `main` and `dev` in the GitHub repository. Require pull requests, a
 branch that is up to date before merge, and these status checks:
@@ -9,11 +9,14 @@ branch that is up to date before merge, and these status checks:
 - `Thread sanitizer`
 - `Optional integrations`
 - `Fuzz smoke test`
+- `Paper math rendering`
+- `macOS Metal and native conformance`
 
-Do not require `Full fuzz test` for ordinary pull requests. It runs on the
-weekly schedule and on version tags.
+Do not require `Nightly correctness and ten-minute fuzz test` for ordinary
+pull requests. It runs daily and through manual dispatch. Release tags have
+separate release gates.
 
-Create a repository ruleset for the exact tag `v2.0.0` before pushing it.
+Create a repository ruleset for the exact tag `v2.2.0` before pushing it.
 Restrict tag creation and updates to release maintainers, and disallow tag
 deletion. The release workflow checks `github.ref_protected`, so it cannot
 publish unless GitHub reports that this tag is protected.

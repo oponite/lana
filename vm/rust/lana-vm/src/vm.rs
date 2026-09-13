@@ -23,13 +23,19 @@ use crate::derivation::{
 };
 use crate::rng::Rng;
 use crate::heap::{Buffer, Heap};
+use crate::gc::{Gc, GraphCell, GraphCondvar};
+
+// Host/opcode handlers return LanaError directly; allocation helpers return Result.
+macro_rules! gc_or_return {
+    ($allocation:expr) => { match $allocation { Ok(value) => value, Err(error) => return error } };
+}
 use crate::sha256::{hex_digest, sha256};
 use crate::state::{self, Indexes, State, StateValue};
 use crate::state_dist::{self, DistEvalFrame, EvalAction, LANA_STATE_DIST_DEPTH_LIMIT};
 use crate::tensor;
 use crate::tensor::{tensor_get_imag, tensor_get_real, tensor_set_imag, tensor_set_real};
 use crate::value::{
-    Adt, Array, CapabilityToken, Claim, Dataset, DatasetOp, DistOperand, EffectReceipt, InferenceAlgorithm, JointKind, JointRow,
+    Adt, Array, CapabilityGrant, CapabilityToken, Claim, Dataset, DatasetOp, DistOperand, EffectReceipt, InferenceAlgorithm, JointKind, JointRow,
     JointState, Map, Optimizer, PathAlternative, PathSet, PlannedEffect, PlannedEffectState, Possibility, Posterior, Reactive,
     ReactiveKind, ReactiveVersion, RelationshipKind, SharedCommit, SharedInformation,
     SharedObservation, SharedState, SharedVersion, Set, StateDist, StateDistKind, Task, Tensor, TensorDtype, TrainingResult, Value,
@@ -251,9 +257,9 @@ struct PathExecution {
 /// across one clone operation.
 #[derive(Default)]
 struct DeepCloneMemo {
-    arrays: HashMap<usize, Arc<Mutex<Array>>>,
-    maps: HashMap<usize, Arc<Mutex<Map>>>,
-    sets: HashMap<usize, Arc<Mutex<Set>>>,
+    arrays: HashMap<usize, Gc<GraphCell<Array>>>,
+    maps: HashMap<usize, Gc<GraphCell<Map>>>,
+    sets: HashMap<usize, Gc<GraphCell<Set>>>,
     strings: HashMap<usize, Arc<str>>,
 }
 
@@ -653,7 +659,7 @@ fn normalize_virtual_path(path: &str) -> String {
 /// child to completion.
 struct QueuedTask<'a> {
     child: Vm<'a>,
-    handle: Arc<Task>,
+    handle: Gc<Task>,
 }
 
 /// The shared scheduler state, mirroring `struct LanaScheduler` in `vm/c/vm.c`.
@@ -662,7 +668,7 @@ struct QueuedTask<'a> {
 /// every live task before joining the workers.
 struct SchedulerState<'a> {
     queue: VecDeque<QueuedTask<'a>>,
-    all_tasks: Vec<Arc<Task>>,
+    all_tasks: Vec<Gc<Task>>,
     live_tasks: usize,
     next_task_id: u64,
     stopping: bool,
@@ -778,7 +784,7 @@ pub struct Vm<'a> {
     observation_count: u64,
     program_argc: usize,
     program_argv: Vec<Arc<str>>,
-    shared_references: Vec<Arc<SharedInformation>>,
+    shared_references: Vec<Gc<SharedInformation>>,
     path_execution: Vec<PathExecution>,
     frames: Vec<Frame>,
     max_registers: Vec<usize>,
@@ -795,21 +801,23 @@ pub struct Vm<'a> {
     cancelled: Arc<AtomicBool>,
     configured_worker_count: usize,
     configured_task_limit: usize,
-    tasks: Vec<Arc<Task>>,
+    tasks: Vec<Gc<Task>>,
     /// The single-threaded event loop's ready queue (LIP-024 §6). Futures
     /// become runnable in FIFO creation order; the loop always picks the oldest
     /// runnable future next, guaranteeing reproducible scheduling.
-    ready_futures: VecDeque<Arc<Mutex<Future>>>,
+    ready_futures: VecDeque<Gc<GraphCell<Future>>>,
     /// Futures awaiting a given future, keyed by `Arc::as_ptr` of the awaited
     /// future. When a future completes, its awaiters are made ready and
     /// re-queued (LIP-024 §6 "Completion").
-    awaiters: HashMap<usize, Vec<Arc<Mutex<Future>>>>,
+    awaiters: HashMap<usize, Vec<Gc<GraphCell<Future>>>>,
     /// True while the event loop is driving async frames. The dispatch loop
     /// breaks back to the event loop when the frame stack returns to
     /// `event_loop_base_depth` (an async frame returned or suspended).
     event_loop_active: bool,
     event_loop_base_depth: usize,
     host_call_extension: Option<Box<dyn FnMut(u32, &[Value], &mut Value) -> LanaError + Send>>,
+    instruction_hook: Option<Arc<Mutex<dyn FnMut(&Chunk, usize, &str, usize, u64) -> bool + Send>>>,
+    task_id: u64,
     /// Optional in-memory filesystem. When set, the file-backed host calls
     /// (`read_text`, `write_text`, `write_text_atomic`, `path_exists`) resolve
     /// against this map instead of `std::fs`, so the self-hosted compiler can
@@ -1388,6 +1396,8 @@ impl<'a> Vm<'a> {
             event_loop_active: false,
             event_loop_base_depth: 0,
             host_call_extension: None,
+            instruction_hook: None,
+            task_id: 0,
             virtual_fs: None,
             ffi_sigs: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1436,6 +1446,17 @@ impl<'a> Vm<'a> {
 
     pub fn heap(&self) -> Heap { self.heap.clone() }
 
+    /// Observe an instruction before execution. Returning false cancels the
+    /// run, matching the native debugger boundary without doing terminal I/O.
+    pub fn set_instruction_hook(
+        &mut self,
+        hook: impl FnMut(&Chunk, usize, &str, usize, u64) -> bool + Send + 'static,
+    ) {
+        // ponytail: serialize debugger/trace output per run; split sinks only
+        // if trace throughput becomes a measured bottleneck.
+        self.instruction_hook = Some(Arc::new(Mutex::new(hook)));
+    }
+
     /// Per-opcode execution counts, for `--stats` output.
     pub fn opcode_counts(&self) -> &[u64] {
         &self.opcode_counts
@@ -1450,6 +1471,7 @@ impl<'a> Vm<'a> {
     /// `wait_task` executes queued tasks inline (its helper mechanism), keeping
     /// `FORK`/`WAIT` correct single-threaded.
     pub fn run(&mut self) -> LanaError {
+        let _collection = crate::gc::Scope::new();
         if let Err(info) = lana_bytecode::verifier::verify(self.chunk) {
             return self.fail(info.code, info.ip, info.opcode, info.line, "execute", info.message);
         }
@@ -1510,6 +1532,17 @@ impl<'a> Vm<'a> {
             let instruction = self.chunk.code[self.ip];
             self.ip += 1;
             self.opcode_counts[instruction.opcode as usize] += 1;
+            let proceed = if let Some(hook) = self.instruction_hook.as_ref() {
+                let function = self.frames.last()
+                    .and_then(|frame| self.chunk.functions.get(frame.function as usize))
+                    .map_or("<entry>", |function| function.name.as_str());
+                hook.lock().unwrap()(self.chunk, self.ip - 1, function, self.frames.len(), self.task_id)
+            } else { true };
+            if !proceed {
+                return self.fail(LanaError::Cancelled, self.ip - 1,
+                    instruction.opcode as u8, instruction.line,
+                    instruction.opcode.name(), "debugger stopped execution");
+            }
             let error = self.execute(&instruction);
             if error != LanaError::Ok {
                 // The C11 VM passes `lana_error_name(error)` as the message
@@ -1529,7 +1562,7 @@ impl<'a> Vm<'a> {
     /// Enqueue a future on the event loop's ready queue (LIP-024 §6). A future
     /// is enqueued at most once: exhausted futures are skipped, and a future
     /// already in the queue is not re-enqueued.
-    fn enqueue_future(&mut self, future: Arc<Mutex<Future>>) {
+    fn enqueue_future(&mut self, future: Gc<GraphCell<Future>>) {
         let should_enqueue = {
             let mut guard = future.lock().unwrap();
             if guard.exhausted || guard.queued {
@@ -1666,7 +1699,7 @@ impl<'a> Vm<'a> {
     /// Fork a task, mirroring `start_task` in `vm/c/vm.c`. The child VM is
     /// deep-cloned from the parent's argument registers and queued for a
     /// worker; the returned handle is stored in the parent's register.
-    fn start_task(&mut self, function_index: u32, argc: u32, first_arg: u32) -> Result<Arc<Task>, LanaError> {
+    fn start_task(&mut self, function_index: u32, argc: u32, first_arg: u32) -> Result<Gc<Task>, LanaError> {
         let function = &self.chunk.functions[function_index as usize];
         if argc as usize != function.arity as usize {
             return Err(LanaError::Type);
@@ -1688,10 +1721,12 @@ impl<'a> Vm<'a> {
             state.next_task_id += 1;
             id
         };
-        let handle = Arc::new(Task::new(id, self.current_group_id));
+        let handle = Gc::new(&self.heap, Task::new(&self.heap, id, self.current_group_id)?)?;
         let mut child = Vm::new(self.chunk);
         child.scheduler = Some(scheduler.clone());
         child.scheduler_owner = false;
+        child.instruction_hook = self.instruction_hook.clone();
+        child.task_id = id;
         child.ip = function.entry as usize;
         child.frames[0].function = function_index;
         child.instruction_limit = self.instruction_limit;
@@ -1712,13 +1747,12 @@ impl<'a> Vm<'a> {
             let history = self.current_frame().histories[(first_arg as usize) + index].clone();
             child.frames[0].histories[index] = history;
         }
+        let queued = QueuedTask { child, handle: handle.clone() };
+        let retained = handle.clone();
         {
             let mut state = scheduler.state.lock().unwrap();
-            state.queue.push_back(QueuedTask {
-                child,
-                handle: handle.clone(),
-            });
-            state.all_tasks.push(handle.clone());
+            state.queue.push_back(queued);
+            state.all_tasks.push(retained);
             scheduler.available.notify_one();
         }
         self.tasks.push(handle.clone());
@@ -3134,7 +3168,8 @@ impl<'a> Vm<'a> {
                 if &**s == name {
                     let state = shared.state.lock().unwrap();
                     for capability in &state.capabilities {
-                        if capability_allows_locked(shared, capability, LANA_CAPABILITY_READ) {
+                        if !capability.revoked.load(Ordering::Acquire)
+                            && capability.permissions & LANA_CAPABILITY_READ != 0 {
                             return true;
                         }
                     }
@@ -3596,11 +3631,11 @@ impl<'a> Vm<'a> {
                 }
                 step_map.set(
                     Arc::from("optimizer_state"),
-                    Value::map(Arc::new(Mutex::new(state_map))),
+                    Value::map(Gc::new(&self.heap, GraphCell::new(state_map))?),
                     true,
                 )?;
 
-                steps.items.push(Value::map(Arc::new(Mutex::new(step_map))))?;
+                steps.items.push(Value::map(Gc::new(&self.heap, GraphCell::new(step_map))?))?;
 
                 params = new_params;
                 params_deriv = Some(step_deriv);
@@ -3616,15 +3651,15 @@ impl<'a> Vm<'a> {
         data_copy.reactive = None;
         data_copy.claim = None;
         data_copy.planned_effect = None;
-        let result = Arc::new(TrainingResult {
+        let result = Gc::new(&self.heap, TrainingResult {
             params,
-            steps: Arc::new(Mutex::new(steps)),
+            steps: Gc::new(&self.heap, GraphCell::new(steps))?,
             model_function: model_fn,
             loss_function: loss_fn,
             optimizer: optimizer.clone(),
             data: data_copy,
             batch_size: batch,
-        });
+        })?;
         let mut result_value = Value::training_result(result);
         if data_is_reactive {
             // Wire the training result into the reactive DAG: a TRAIN node whose
@@ -3639,7 +3674,7 @@ impl<'a> Vm<'a> {
             let id = self.next_reactive_id;
             self.next_reactive_id += 1;
             let current = self.clone_without_runtime_metadata(&result_value)?;
-            let node = Arc::new(Mutex::new(Reactive {
+            let node = Gc::new(&self.heap, GraphCell::new(Reactive {
                 id,
                 dependency_id,
                 revision: self.revision,
@@ -3652,7 +3687,7 @@ impl<'a> Vm<'a> {
                 current: Some(current),
                 history: Vec::new(),
                 is_training_data: false,
-            }));
+            }))?;
             result_value.reactive = Some(node);
         }
         *out = result_value;
@@ -3983,25 +4018,25 @@ impl<'a> Vm<'a> {
             }
             step_map.set(
                 Arc::from("optimizer_state"),
-                Value::map(Arc::new(Mutex::new(state_map))),
+                Value::map(Gc::new(&self.heap, GraphCell::new(state_map))?),
                 true,
             )?;
 
-            steps.items.push(Value::map(Arc::new(Mutex::new(step_map))))?;
+            steps.items.push(Value::map(Gc::new(&self.heap, GraphCell::new(step_map))?))?;
 
             params = new_params;
             params_deriv = Some(step_deriv);
         }
 
-        *out = Value::training_result(Arc::new(TrainingResult {
+        *out = Value::training_result(Gc::new(&self.heap, TrainingResult {
             params,
-            steps: Arc::new(Mutex::new(steps)),
+            steps: Gc::new(&self.heap, GraphCell::new(steps))?,
             model_function: prior.model_function,
             loss_function: prior.loss_function,
             optimizer: prior.optimizer.clone(),
             data: prior.data.clone(),
             batch_size: prior.batch_size,
-        }));
+        })?);
         Ok(())
     }
 
@@ -4063,7 +4098,7 @@ impl<'a> Vm<'a> {
     /// `reactive_train_recompute` in `vm/c/vm.c`.
     fn reactive_train_recompute(
         &mut self,
-        node: &Arc<Mutex<Reactive>>,
+        node: &Gc<GraphCell<Reactive>>,
         observation: &Value,
         scratch_register: u32,
         out: &mut Value,
@@ -4080,7 +4115,7 @@ impl<'a> Vm<'a> {
         };
 
         let single = match Array::from_items(&self.heap, vec![observation.clone()]) {
-            Ok(array) => Arc::new(Mutex::new(array)),
+            Ok(array) => gc_or_return!(Gc::new(&self.heap, GraphCell::new(array))),
             Err(error) => return error,
         };
         let single_value = Value::array(single);
@@ -4480,25 +4515,25 @@ impl<'a> Vm<'a> {
             }
             step_map.set(
                 Arc::from("optimizer_state"),
-                Value::map(Arc::new(Mutex::new(state_map))),
+                Value::map(Gc::new(&self.heap, GraphCell::new(state_map))?),
                 true,
             )?;
 
-            steps.items.push(Value::map(Arc::new(Mutex::new(step_map))))?;
+            steps.items.push(Value::map(Gc::new(&self.heap, GraphCell::new(step_map))?))?;
 
             params = new_params;
             params_deriv = Some(step_deriv);
         }
 
-        let mut result_value = Value::training_result(Arc::new(TrainingResult {
+        let mut result_value = Value::training_result(Gc::new(&self.heap, TrainingResult {
             params,
-            steps: Arc::new(Mutex::new(steps)),
+            steps: Gc::new(&self.heap, GraphCell::new(steps))?,
             model_function: prior.model_function,
             loss_function: prior.loss_function,
             optimizer: prior.optimizer.clone(),
             data: prior.data.clone(),
             batch_size: prior.batch_size,
-        }));
+        })?);
 
         // Record the resumption point as a run-level derivation.
         let resume_inputs = [run];
@@ -4619,7 +4654,7 @@ impl<'a> Vm<'a> {
         map.set(Arc::from("step"), Value::number(step as f64), true)?;
         map.set(Arc::from("parameters"), params_value, true)?;
         map.set(Arc::from("log_likelihood"), Value::number(log_likelihood), true)?;
-        steps.items.push(Value::map(Arc::new(Mutex::new(map))))?;
+        steps.items.push(Value::map(Gc::new(&self.heap, GraphCell::new(map))?))?;
         Ok(())
     }
 
@@ -4833,7 +4868,7 @@ impl<'a> Vm<'a> {
             mean,
             variance,
             samples: Some(sample_matrix),
-            steps: Arc::new(Mutex::new(steps)),
+            steps: Gc::new(&self.heap, GraphCell::new(steps))?,
             seed: self.root_seed,
         })
     }
@@ -4965,7 +5000,7 @@ impl<'a> Vm<'a> {
             mean,
             variance,
             samples: None,
-            steps: Arc::new(Mutex::new(steps)),
+            steps: Gc::new(&self.heap, GraphCell::new(steps))?,
             seed: self.root_seed,
         })
     }
@@ -5093,7 +5128,7 @@ impl<'a> Vm<'a> {
             mean,
             variance,
             samples: Some(resampled),
-            steps: Arc::new(Mutex::new(steps)),
+            steps: Gc::new(&self.heap, GraphCell::new(steps))?,
             seed: self.root_seed,
         })
     }
@@ -5180,7 +5215,7 @@ impl<'a> Vm<'a> {
             return Err(LanaError::InvalidParameters);
         };
 
-        *out = Value::posterior(Arc::new(posterior));
+        *out = Value::posterior(Gc::new(&self.heap, posterior)?);
         Ok(())
     }
 
@@ -5191,11 +5226,16 @@ impl<'a> Vm<'a> {
     }
 
     fn array_value(&self, items: Vec<Value>) -> Result<Value, LanaError> {
-        Ok(Value::array(Arc::new(Mutex::new(Array::from_items(&self.heap, items)?))))
+        Ok(Value::array(Gc::new(&self.heap, GraphCell::new(Array::from_items(&self.heap, items)?))?))
     }
 
     /// Dispatch one instruction, mirroring the `switch` in `lana_vm_run`.
     fn execute(&mut self, ins: &Instruction) -> LanaError {
+        // Collect before taking any graph lock, including nested function dispatch.
+        // Allocation failures also retry collection when no graph guard is held.
+        if self.instruction_count % 256 == 0 && self.allocated_bytes() > self.memory_limit / 2 {
+            crate::gc::collect();
+        }
         use OpCode::*;
         match ins.opcode {
             Nop => LanaError::Ok,
@@ -5583,7 +5623,7 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 if let Err(error) = items.extend((0..count).map(|i| self.current_frame().registers[ins.b as usize + i].clone())) { return error; }
-                let array = Arc::new(Mutex::new(Array { items }));
+                let array = gc_or_return!(Gc::new(&self.heap, GraphCell::new(Array { items })));
                 self.current_frame_mut().registers[ins.a as usize] = Value::array(array);
                 LanaError::Ok
             }
@@ -5710,7 +5750,7 @@ impl<'a> Vm<'a> {
                     exhausted: false,
                 };
                 self.current_frame_mut().registers[ins.a as usize] =
-                    Value::generator(Arc::new(Mutex::new(generator)));
+                    Value::generator(gc_or_return!(Gc::new(&self.heap, GraphCell::new(generator))));
                 LanaError::Ok
             }
             Yield => {
@@ -5802,7 +5842,7 @@ impl<'a> Vm<'a> {
                     queued: false,
                 };
                 self.current_frame_mut().registers[ins.a as usize] =
-                    Value::future(Arc::new(Mutex::new(future)));
+                    Value::future(gc_or_return!(Gc::new(&self.heap, GraphCell::new(future))));
                 LanaError::Ok
             }
             Await => {
@@ -5836,7 +5876,7 @@ impl<'a> Vm<'a> {
                     current.ready = false;
                 }
                 self.awaiters
-                    .entry(Arc::as_ptr(&awaited) as usize)
+                    .entry(Gc::as_ptr(&awaited) as usize)
                     .or_default()
                     .push(current.clone());
                 self.frames.pop();
@@ -5941,7 +5981,7 @@ impl<'a> Vm<'a> {
                     if let Err(error) = map.set(Arc::from(key), value, false) { return error; }
                 }
                 self.current_frame_mut().registers[ins.a as usize] =
-                    Value::map(Arc::new(Mutex::new(map)));
+                    Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(map))));
                 LanaError::Ok
             }
             Return => {
@@ -5958,7 +5998,7 @@ impl<'a> Vm<'a> {
                         future.queued = false;
                         future.registers[0] = returned;
                     }
-                    if let Some(awaiters) = self.awaiters.remove(&(Arc::as_ptr(&future) as usize)) {
+                    if let Some(awaiters) = self.awaiters.remove(&(Gc::as_ptr(&future) as usize)) {
                         for awaiter in awaiters {
                             self.enqueue_future(awaiter);
                         }
@@ -6110,7 +6150,7 @@ impl<'a> Vm<'a> {
                 let fields: Vec<Value> = (0..count)
                     .map(|i| self.current_frame().registers[ins.b as usize + i].clone())
                     .collect();
-                let adt = Arc::new(Adt { variant, fields });
+                let adt = gc_or_return!(Gc::new(&self.heap, Adt { variant, fields }));
                 self.current_frame_mut().registers[ins.a as usize] = Value::adt(adt);
                 LanaError::Ok
             }
@@ -6555,9 +6595,11 @@ impl<'a> Vm<'a> {
                 let ValueKind::Array(tasks) = &tasks_value.kind else {
                     return LanaError::Type;
                 };
-                let tasks = tasks.lock().unwrap();
-                let mut results = Vec::with_capacity(tasks.items.len());
-                for task_value in &tasks.items {
+                // Workers need graph access while JOIN_ALL waits; snapshot the
+                // handles and release the array lock before joining any task.
+                let tasks = tasks.lock().unwrap().items.to_vec();
+                let mut results = Vec::with_capacity(tasks.len());
+                for task_value in &tasks {
                     let ValueKind::Task(task) = &task_value.kind else {
                         return LanaError::Type;
                     };
@@ -7341,7 +7383,7 @@ impl<'a> Vm<'a> {
         method: &str,
         value: f64,
         observable: u32,
-    ) -> Result<Arc<Mutex<Map>>, LanaError> {
+    ) -> Result<Gc<GraphCell<Map>>, LanaError> {
         let mut map = Map::new(&self.heap, 6)?;
         map.set(Arc::from("method"), Value::string(Arc::from(method)), false)?;
         map.set(Arc::from("value"), Value::number(value), false)?;
@@ -7357,20 +7399,20 @@ impl<'a> Vm<'a> {
         map.set(Arc::from("provenance"), Value::string(Arc::from("exact")), false)?;
         map.set(Arc::from("sample_count"), Value::null(), false)?;
         map.set(Arc::from("seed"), Value::null(), false)?;
-        Ok(Arc::new(Mutex::new(map)))
+        Ok(Gc::new(&self.heap, GraphCell::new(map))?)
     }
 
     /// Build a validation-result map, mirroring `validate_result`.
-    fn validate_result(&mut self, status: &str, reason: &str) -> Result<Arc<Mutex<Map>>, LanaError> {
+    fn validate_result(&mut self, status: &str, reason: &str) -> Result<Gc<GraphCell<Map>>, LanaError> {
         let mut map = Map::new(&self.heap, 3)?;
         map.set(Arc::from("status"), Value::string(Arc::from(status)), false)?;
         map.set(Arc::from("reason"), Value::string(Arc::from(reason)), false)?;
         map.set(Arc::from("schema_version"), Value::number(1.0), false)?;
-        Ok(Arc::new(Mutex::new(map)))
+        Ok(Gc::new(&self.heap, GraphCell::new(map))?)
     }
 
     /// Validate a value against a schema map, mirroring `lana_vm_validate`.
-    fn validate(&mut self, value: &Value, schema: &Value) -> Result<Arc<Mutex<Map>>, LanaError> {
+    fn validate(&mut self, value: &Value, schema: &Value) -> Result<Gc<GraphCell<Map>>, LanaError> {
         let ValueKind::Map(schema_rc) = &schema.kind else {
             return Err(LanaError::Schema);
         };
@@ -7519,13 +7561,13 @@ impl<'a> Vm<'a> {
             ValueKind::String(string) => cloned.kind = ValueKind::String(self.clone_string(string, memo)?),
             ValueKind::State(state) => cloned.kind = ValueKind::State(state.clone()),
             ValueKind::Array(array) => {
-                let key = Arc::as_ptr(array) as usize;
+                let key = Gc::as_ptr(array) as usize;
                 if let Some(existing) = memo.arrays.get(&key) {
                     cloned.kind = ValueKind::Array(existing.clone());
                 } else {
                     let count = array.lock().unwrap().items.len();
                     let items = self.allocate_array_items(count)?;
-                    let copy = Arc::new(Mutex::new(Array { items }));
+                    let copy = Gc::new(&self.heap, GraphCell::new(Array { items }))?;
                     memo.arrays.insert(key, copy.clone());
                     for index in 0..count {
                         let item = array.lock().unwrap().items[index].clone();
@@ -7536,11 +7578,11 @@ impl<'a> Vm<'a> {
                 }
             }
             ValueKind::Map(map) => {
-                let key = Arc::as_ptr(map) as usize;
+                let key = Gc::as_ptr(map) as usize;
                 if let Some(existing) = memo.maps.get(&key) {
                     cloned.kind = ValueKind::Map(existing.clone());
                 } else {
-                    let copy = Arc::new(Mutex::new(Map::new(&self.heap, map.lock().unwrap().entries.len())?));
+                    let copy = Gc::new(&self.heap, GraphCell::new(Map::new(&self.heap, map.lock().unwrap().entries.len())?))?;
                     memo.maps.insert(key, copy.clone());
                     let count = map.lock().unwrap().entries.len();
                     for index in 0..count {
@@ -7567,14 +7609,14 @@ impl<'a> Vm<'a> {
                     }
                     rows.push(JointRow { values: row_values, weight: row.weight });
                 }
-                cloned.kind = ValueKind::Joint(Arc::new(JointState {
+                cloned.kind = ValueKind::Joint(Gc::new(&self.heap, JointState {
                     names: joint.names.clone(),
                     domains: joint.domains.clone(),
                     values,
                     rows,
                     kind: joint.kind,
                     capabilities: joint.capabilities,
-                }));
+                })?);
             }
             ValueKind::StateDist(distribution) => {
                 let kind = self.deep_clone_state_dist_kind(&distribution.kind, memo)?;
@@ -7588,11 +7630,11 @@ impl<'a> Vm<'a> {
                 for value in &possibility.values {
                     values.push(self.deep_clone_value(value, memo)?);
                 }
-                cloned.kind = ValueKind::Possibility(Arc::new(Possibility {
+                cloned.kind = ValueKind::Possibility(Gc::new(&self.heap, Possibility {
                     values,
                     weights: possibility.weights.clone(),
                     dependency_id: possibility.dependency_id,
-                }));
+                })?);
             }
             ValueKind::PathSet(paths) => {
                 if self.alloc_bytes(std::mem::size_of::<PathSet>()) != LanaError::Ok {
@@ -7606,10 +7648,10 @@ impl<'a> Vm<'a> {
                         result: self.deep_clone_value(&alternative.result, memo)?,
                     });
                 }
-                cloned.kind = ValueKind::PathSet(Arc::new(PathSet {
+                cloned.kind = ValueKind::PathSet(Gc::new(&self.heap, PathSet {
                     alternatives,
                     dependency_id: paths.dependency_id,
-                }));
+                })?);
             }
             ValueKind::Adt(adt) => {
                 if self.alloc_bytes(std::mem::size_of::<Adt>()) != LanaError::Ok {
@@ -7619,15 +7661,15 @@ impl<'a> Vm<'a> {
                 for field in &adt.fields {
                     fields.push(self.deep_clone_value(field, memo)?);
                 }
-                cloned.kind = ValueKind::Adt(Arc::new(Adt { variant: adt.variant, fields }));
+                cloned.kind = ValueKind::Adt(Gc::new(&self.heap, Adt { variant: adt.variant, fields })?);
             }
             ValueKind::Set(set) => {
-                let key = Arc::as_ptr(set) as usize;
+                let key = Gc::as_ptr(set) as usize;
                 if let Some(existing) = memo.sets.get(&key) {
                     cloned.kind = ValueKind::Set(existing.clone());
                 } else {
                     let count = set.lock().unwrap().items.len();
-                    let copy = Arc::new(Mutex::new(Set::new(&self.heap, count)?));
+                    let copy = Gc::new(&self.heap, GraphCell::new(Set::new(&self.heap, count)?))?;
                     memo.sets.insert(key, copy.clone());
                     for index in 0..count {
                         let item = set.lock().unwrap().items[index].clone();
@@ -7818,7 +7860,7 @@ impl<'a> Vm<'a> {
                 {
                     return LanaError::UnsupportedOperation;
                 }
-                let paths = Arc::new(PathSet {
+                let paths = gc_or_return!(Gc::new(&self.heap, PathSet {
                     alternatives: vec![
                         PathAlternative {
                             guard: true,
@@ -7832,7 +7874,7 @@ impl<'a> Vm<'a> {
                         },
                     ],
                     dependency_id,
-                });
+                }));
                 let inputs = [true_value, &false_value];
                 let derivation = self.record_derivation(
                     DerivationKind::Path,
@@ -7859,7 +7901,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Build a joint state from marginals, mirroring `lana_vm_joint_build`.
-    fn joint_build(&mut self, values: &[Value], descriptor: &str) -> Result<Arc<JointState>, LanaError> {
+    fn joint_build(&mut self, values: &[Value], descriptor: &str) -> Result<Gc<JointState>, LanaError> {
         let count = values.len();
         if count == 0 {
             return Err(LanaError::Format);
@@ -7898,7 +7940,7 @@ impl<'a> Vm<'a> {
             joint.domains.push(value.value_type());
             joint.values.push(value);
         }
-        Ok(Arc::new(joint))
+        Ok(Gc::new(&self.heap, joint)?)
     }
 
     /// Build a finite correlated law, mirroring `lana_vm_joint_build_finite`.
@@ -7909,7 +7951,7 @@ impl<'a> Vm<'a> {
         weights: &[f64],
         row_count: usize,
         variable_count: usize,
-    ) -> Result<Arc<JointState>, LanaError> {
+    ) -> Result<Gc<JointState>, LanaError> {
         if row_count == 0 || variable_count == 0 {
             return Err(LanaError::Format);
         }
@@ -7997,7 +8039,7 @@ impl<'a> Vm<'a> {
                 weight: unique_weights[row] / total,
             });
         }
-        Ok(Arc::new(joint))
+        Ok(Gc::new(&self.heap, joint)?)
     }
 
     /// Build a finite law from an array of rows, mirroring
@@ -8006,7 +8048,7 @@ impl<'a> Vm<'a> {
         &mut self,
         rows_value: &Value,
         names_text: &str,
-    ) -> Result<Arc<JointState>, LanaError> {
+    ) -> Result<Gc<JointState>, LanaError> {
         let ValueKind::Array(outer) = &rows_value.kind else {
             return Err(LanaError::Type);
         };
@@ -8048,7 +8090,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Project a joint onto a subset of names, mirroring `lana_vm_joint_project`.
-    fn joint_project(&mut self, source: &JointState, names_text: &str) -> Result<Arc<JointState>, LanaError> {
+    fn joint_project(&mut self, source: &JointState, names_text: &str) -> Result<Gc<JointState>, LanaError> {
         if source.capabilities & LANA_JOINT_CAN_PROJECT == 0 {
             return Err(LanaError::UnsupportedOperation);
         }
@@ -8085,7 +8127,7 @@ impl<'a> Vm<'a> {
             let joint = self.joint_build(&values, &descriptor)?;
             let mut joint = (*joint).clone();
             joint.kind = JointKind::Projected;
-            Ok(Arc::new(joint))
+            Ok(Gc::new(&self.heap, joint)?)
         } else {
             let mut values: Vec<Value> = Vec::with_capacity(source.rows.len() * count);
             let mut weights: Vec<f64> = Vec::with_capacity(source.rows.len());
@@ -8098,12 +8140,12 @@ impl<'a> Vm<'a> {
             let joint = self.joint_build_finite(names_text, &values, &weights, source.rows.len(), count)?;
             let mut joint = (*joint).clone();
             joint.kind = JointKind::Projected;
-            Ok(Arc::new(joint))
+            Ok(Gc::new(&self.heap, joint)?)
         }
     }
 
     /// Condition a joint on evidence, mirroring `lana_vm_joint_condition`.
-    fn joint_condition(&mut self, source: &JointState, name: &str, evidence: &Value) -> Result<Arc<JointState>, LanaError> {
+    fn joint_condition(&mut self, source: &JointState, name: &str, evidence: &Value) -> Result<Gc<JointState>, LanaError> {
         if source.capabilities & LANA_JOINT_CAN_CONDITION == 0 {
             return Err(LanaError::UnsupportedOperation);
         }
@@ -8137,7 +8179,7 @@ impl<'a> Vm<'a> {
             let joint = self.joint_build_finite(&names_text, &values, &weights, kept.len(), source.names.len())?;
             let mut joint = (*joint).clone();
             joint.kind = JointKind::Conditional;
-            Ok(Arc::new(joint))
+            Ok(Gc::new(&self.heap, joint)?)
         } else {
             if !joint_value_is_definite(&source.values[position]) {
                 return Err(LanaError::UnsupportedOperation);
@@ -8146,20 +8188,20 @@ impl<'a> Vm<'a> {
                 return Err(LanaError::InvalidConditioning);
             }
             let mut memo = DeepCloneMemo::default();
-            let wrapped = Value::joint(Arc::new(source.clone()));
+            let wrapped = Value::joint(Gc::new(&self.heap, source.clone())?);
             let mut cloned = self.deep_clone_value(&wrapped, &mut memo)?;
             let ValueKind::Joint(joint) = &mut cloned.kind else {
                 unreachable!("wrapped value is a joint");
             };
             let mut state = (**joint).clone();
             state.kind = JointKind::Conditional;
-            *joint = Arc::new(state);
+            *joint = Gc::new(&self.heap, state)?;
             Ok(joint.clone())
         }
     }
 
     /// Observe evidence on a joint, mirroring `lana_vm_joint_observe`.
-    fn joint_observe(&mut self, source: &JointState, name: &str, evidence: &Value) -> Result<Arc<JointState>, LanaError> {
+    fn joint_observe(&mut self, source: &JointState, name: &str, evidence: &Value) -> Result<Gc<JointState>, LanaError> {
         if self.active_path_count > 1 {
             return Err(LanaError::UnsupportedOperation);
         }
@@ -8241,7 +8283,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Rename a joint variable, mirroring `lana_vm_joint_rename`.
-    fn joint_rename(&mut self, source: &JointState, old_name: &str, new_name: &str) -> Result<Arc<JointState>, LanaError> {
+    fn joint_rename(&mut self, source: &JointState, old_name: &str, new_name: &str) -> Result<Gc<JointState>, LanaError> {
         if new_name.is_empty() {
             return Err(LanaError::Format);
         }
@@ -8276,7 +8318,7 @@ impl<'a> Vm<'a> {
 
     /// Build a possibility from an array of values, mirroring
     /// `lana_vm_possibility_build`.
-    fn possibility_build(&mut self, values: &[Value]) -> Result<Arc<Possibility>, LanaError> {
+    fn possibility_build(&mut self, values: &[Value]) -> Result<Gc<Possibility>, LanaError> {
         if values.is_empty() {
             return Err(LanaError::Format);
         }
@@ -8299,11 +8341,11 @@ impl<'a> Vm<'a> {
         }
         let dependency_id = self.next_dependency_id;
         self.next_dependency_id += 1;
-        Ok(Arc::new(Possibility {
+        Ok(Gc::new(&self.heap, Possibility {
             values: cloned,
             weights: None,
             dependency_id,
-        }))
+        })?)
     }
 
     /// Resolve any information value, mirroring `lana_vm_information_resolve`.
@@ -8429,13 +8471,13 @@ impl<'a> Vm<'a> {
         map.set(Arc::from("kind"), Value::string(Arc::from(derivation::kind_name(node.kind))), true)?;
         map.set(Arc::from("operation"), Value::string(node.operation.clone()), true)?;
         map.set(Arc::from("inputs"), self.array_value(inputs)?, true)?;
-        map.set(Arc::from("source"), Value::map(Arc::new(Mutex::new(source_map))), true)?;
+        map.set(Arc::from("source"), Value::map(Gc::new(&self.heap, GraphCell::new(source_map))?), true)?;
         map.set(Arc::from("exactness"), Value::string(Arc::from(derivation::exactness_name(node.exactness))), true)?;
-        map.set(Arc::from("details"), Value::map(Arc::new(Mutex::new(details_map))), true)?;
+        map.set(Arc::from("details"), Value::map(Gc::new(&self.heap, GraphCell::new(details_map))?), true)?;
         map.set(Arc::from("outcome"), Value::string(Arc::from(derivation::outcome_name(node.outcome))), true)?;
         map.set(Arc::from("status"), Value::string(Arc::from(derivation::status_name(node.status()))), true)?;
         map.set(Arc::from("reason"), Value::string(node.reason.clone()), true)?;
-        Ok(Value::map(Arc::new(Mutex::new(map))))
+        Ok(Value::map(Gc::new(&self.heap, GraphCell::new(map))?))
     }
 
     /// Render a value's derivation as a map, mirroring `lana_vm_derivation`.
@@ -8604,7 +8646,7 @@ impl<'a> Vm<'a> {
                 }
                 alternatives.push(PathAlternative { guard, weight, result });
             }
-            *out = Value::paths(Arc::new(PathSet { alternatives, dependency_id }));
+            *out = Value::paths(gc_or_return!(Gc::new(&self.heap, PathSet { alternatives, dependency_id })));
             return LanaError::Ok;
         }
         if left_possibility.is_some() || right_possibility.is_some() {
@@ -8658,7 +8700,7 @@ impl<'a> Vm<'a> {
                 };
                 let mut possibility = (*possibility).clone();
                 possibility.dependency_id = dependency_id;
-                *out = Value::possibility(Arc::new(possibility));
+                *out = Value::possibility(gc_or_return!(Gc::new(&self.heap, possibility)));
                 return LanaError::Ok;
             }
             *out = Value::possibility(possibility);
@@ -8685,10 +8727,10 @@ impl<'a> Vm<'a> {
                         result,
                     });
                 }
-                *out = Value::paths(Arc::new(PathSet {
+                *out = Value::paths(gc_or_return!(Gc::new(&self.heap, PathSet {
                     alternatives,
                     dependency_id: paths.dependency_id,
-                }));
+                })));
                 LanaError::Ok
             }
             ValueKind::Possibility(possibility) => {
@@ -8708,7 +8750,7 @@ impl<'a> Vm<'a> {
                 };
                 let mut built = (*built).clone();
                 built.dependency_id = source_dependency_id;
-                *out = Value::possibility(Arc::new(built));
+                *out = Value::possibility(gc_or_return!(Gc::new(&self.heap, built)));
                 LanaError::Ok
             }
             _ => {
@@ -8772,13 +8814,13 @@ impl<'a> Vm<'a> {
         let current = self.reactive_value(source);
         match &current.kind {
             ValueKind::Array(array) => {
-                let key = Arc::as_ptr(array) as usize;
+                let key = Gc::as_ptr(array) as usize;
                 if let Some(copy) = memo.arrays.get(&key) {
                     return Ok(Value::array(copy.clone()));
                 }
                 let count = array.lock().unwrap().items.len();
                 let items = self.allocate_array_items(count)?;
-                let copy = Arc::new(Mutex::new(Array { items }));
+                let copy = Gc::new(&self.heap, GraphCell::new(Array { items }))?;
                 memo.arrays.insert(key, copy.clone());
                 for index in 0..count {
                     let item = array.lock().unwrap().items[index].clone();
@@ -8788,11 +8830,11 @@ impl<'a> Vm<'a> {
                 Ok(Value::array(copy))
             }
             ValueKind::Map(map) => {
-                let key = Arc::as_ptr(map) as usize;
+                let key = Gc::as_ptr(map) as usize;
                 if let Some(copy) = memo.maps.get(&key) {
                     return Ok(Value::map(copy.clone()));
                 }
-                let copy = Arc::new(Mutex::new(Map::new(&self.heap, map.lock().unwrap().entries.len())?));
+                let copy = Gc::new(&self.heap, GraphCell::new(Map::new(&self.heap, map.lock().unwrap().entries.len())?))?;
                 memo.maps.insert(key, copy.clone());
                 let count = map.lock().unwrap().entries.len();
                 for index in 0..count {
@@ -8803,12 +8845,12 @@ impl<'a> Vm<'a> {
                 Ok(Value::map(copy))
             }
             ValueKind::Set(set) => {
-                let key = Arc::as_ptr(set) as usize;
+                let key = Gc::as_ptr(set) as usize;
                 if let Some(copy) = memo.sets.get(&key) {
                     return Ok(Value::set(copy.clone()));
                 }
                 let count = set.lock().unwrap().items.len();
-                let copy = Arc::new(Mutex::new(Set::new(&self.heap, count)?));
+                let copy = Gc::new(&self.heap, GraphCell::new(Set::new(&self.heap, count)?))?;
                 memo.sets.insert(key, copy.clone());
                 for index in 0..count {
                     let item = set.lock().unwrap().items[index].clone();
@@ -8827,11 +8869,11 @@ impl<'a> Vm<'a> {
     /// does not mutate another.
     fn deep_clone_reactive(
         &mut self,
-        node: &Arc<Mutex<Reactive>>,
-        memo: &mut HashMap<usize, Arc<Mutex<Reactive>>>,
+        node: &Gc<GraphCell<Reactive>>,
+        memo: &mut HashMap<usize, Gc<GraphCell<Reactive>>>,
         containers: &mut DeepCloneMemo,
-    ) -> Result<Arc<Mutex<Reactive>>, LanaError> {
-        let key = Arc::as_ptr(node) as usize;
+    ) -> Result<Gc<GraphCell<Reactive>>, LanaError> {
+        let key = Gc::as_ptr(node) as usize;
         if let Some(existing) = memo.get(&key) {
             return Ok(existing.clone());
         }
@@ -8854,11 +8896,11 @@ impl<'a> Vm<'a> {
                 guard.is_training_data,
             )
         };
-        let copy = Arc::new(Mutex::new(Reactive {
+        let copy = Gc::new(&self.heap, GraphCell::new(Reactive {
             id, dependency_id, revision, kind, relationship, exactness, operation,
             inputs: [None, None], constants: [None, None], current: None,
             history: Vec::new(), is_training_data,
-        }));
+        }))?;
         memo.insert(key, copy.clone());
         let cloned_input0 = match &input0 {
             Some(input) => Some(self.deep_clone_reactive(input, memo, containers)?),
@@ -8916,7 +8958,7 @@ impl<'a> Vm<'a> {
     fn deep_clone_live_value(
         &mut self,
         value: &Value,
-        reactive_memo: &mut HashMap<usize, Arc<Mutex<Reactive>>>,
+        reactive_memo: &mut HashMap<usize, Gc<GraphCell<Reactive>>>,
     ) -> Result<Value, LanaError> {
         self.deep_clone_live_value_memo(value, reactive_memo, &mut DeepCloneMemo::default())
     }
@@ -8924,7 +8966,7 @@ impl<'a> Vm<'a> {
     fn deep_clone_live_value_memo(
         &mut self,
         value: &Value,
-        reactive_memo: &mut HashMap<usize, Arc<Mutex<Reactive>>>,
+        reactive_memo: &mut HashMap<usize, Gc<GraphCell<Reactive>>>,
         containers: &mut DeepCloneMemo,
     ) -> Result<Value, LanaError> {
         let mut cloned = Value {
@@ -8962,14 +9004,14 @@ impl<'a> Vm<'a> {
             ValueKind::String(string) => cloned.kind = ValueKind::String(self.clone_string(string, containers)?),
             ValueKind::State(state) => cloned.kind = ValueKind::State(state.clone()),
             ValueKind::Array(array) => {
-                let key = Arc::as_ptr(array) as usize;
+                let key = Gc::as_ptr(array) as usize;
                 if let Some(copy) = containers.arrays.get(&key) {
                     cloned.kind = ValueKind::Array(copy.clone());
                     return Ok(cloned);
                 }
                 let count = array.lock().unwrap().items.len();
                 let items = self.allocate_array_items(count)?;
-                let copy = Arc::new(Mutex::new(Array { items }));
+                let copy = Gc::new(&self.heap, GraphCell::new(Array { items }))?;
                 containers.arrays.insert(key, copy.clone());
                 for index in 0..count {
                     let item = array.lock().unwrap().items[index].clone();
@@ -8979,12 +9021,12 @@ impl<'a> Vm<'a> {
                 cloned.kind = ValueKind::Array(copy);
             }
             ValueKind::Map(map) => {
-                let key = Arc::as_ptr(map) as usize;
+                let key = Gc::as_ptr(map) as usize;
                 if let Some(copy) = containers.maps.get(&key) {
                     cloned.kind = ValueKind::Map(copy.clone());
                     return Ok(cloned);
                 }
-                let copy = Arc::new(Mutex::new(Map::new(&self.heap, 0)?));
+                let copy = Gc::new(&self.heap, GraphCell::new(Map::new(&self.heap, 0)?))?;
                 containers.maps.insert(key, copy.clone());
                 let count = map.lock().unwrap().entries.len();
                 for index in 0..count {
@@ -9000,11 +9042,11 @@ impl<'a> Vm<'a> {
                     .iter()
                     .map(|v| self.deep_clone_live_value_memo(v, reactive_memo, containers))
                     .collect::<Result<Vec<_>, _>>()?;
-                cloned.kind = ValueKind::Possibility(Arc::new(Possibility {
+                cloned.kind = ValueKind::Possibility(Gc::new(&self.heap, Possibility {
                     values,
                     weights: possibility.weights.clone(),
                     dependency_id: possibility.dependency_id,
-                }));
+                })?);
             }
             ValueKind::PathSet(paths) => {
                 let mut alternatives = Vec::with_capacity(paths.alternatives.len());
@@ -9015,10 +9057,10 @@ impl<'a> Vm<'a> {
                         result: self.deep_clone_live_value_memo(&alternative.result, reactive_memo, containers)?,
                     });
                 }
-                cloned.kind = ValueKind::PathSet(Arc::new(PathSet {
+                cloned.kind = ValueKind::PathSet(Gc::new(&self.heap, PathSet {
                     alternatives,
                     dependency_id: paths.dependency_id,
-                }));
+                })?);
             }
             ValueKind::Adt(adt) => {
                 let fields = adt
@@ -9026,16 +9068,16 @@ impl<'a> Vm<'a> {
                     .iter()
                     .map(|field| self.deep_clone_live_value_memo(field, reactive_memo, containers))
                     .collect::<Result<Vec<_>, _>>()?;
-                cloned.kind = ValueKind::Adt(Arc::new(Adt { variant: adt.variant, fields }));
+                cloned.kind = ValueKind::Adt(Gc::new(&self.heap, Adt { variant: adt.variant, fields })?);
             }
             ValueKind::Set(set) => {
-                let key = Arc::as_ptr(set) as usize;
+                let key = Gc::as_ptr(set) as usize;
                 if let Some(copy) = containers.sets.get(&key) {
                     cloned.kind = ValueKind::Set(copy.clone());
                     return Ok(cloned);
                 }
                 let count = set.lock().unwrap().items.len();
-                let copy = Arc::new(Mutex::new(Set::new(&self.heap, count)?));
+                let copy = Gc::new(&self.heap, GraphCell::new(Set::new(&self.heap, count)?))?;
                 containers.sets.insert(key, copy.clone());
                 for index in 0..count {
                     let item = set.lock().unwrap().items[index].clone();
@@ -9073,7 +9115,7 @@ impl<'a> Vm<'a> {
             }
         };
         let current = self.clone_without_runtime_metadata(source)?;
-        let node = Arc::new(Mutex::new(Reactive {
+        let node = Gc::new(&self.heap, GraphCell::new(Reactive {
             id,
             dependency_id,
             revision: self.revision,
@@ -9086,7 +9128,7 @@ impl<'a> Vm<'a> {
             current: Some(current),
             history: Vec::new(),
             is_training_data: false,
-        }));
+        }))?;
         let mut out = source.clone();
         out.reactive = Some(node);
         Ok(out)
@@ -9178,13 +9220,13 @@ impl<'a> Vm<'a> {
         }
         let mut memo = DeepCloneMemo::default();
         let value = self.deep_clone_value(source, &mut memo)?;
-        let claim = Arc::new(Claim {
+        let claim = Gc::new(&self.heap, Claim {
             value,
             proposition: Arc::from(proposition),
             exactness,
             tolerance,
             source_valid,
-        });
+        })?;
         let mut out = source.clone();
         out.claim = Some(claim);
         Ok(out)
@@ -9201,12 +9243,12 @@ impl<'a> Vm<'a> {
         let id = self.next_effect_id;
         self.next_effect_id += 1;
         let payload_plain = self.clone_without_runtime_metadata(payload)?;
-        let plan = Arc::new(PlannedEffect {
+        let plan = Gc::new(&self.heap, PlannedEffect {
             id,
             kind: Arc::from(kind),
             payload: payload_plain,
-            state: Mutex::new(PlannedEffectState::default()),
-        });
+            state: GraphCell::new(PlannedEffectState::default()),
+        })?;
         let mut out = payload.clone();
         out.planned_effect = Some(plan);
         Ok(out)
@@ -9250,18 +9292,18 @@ impl<'a> Vm<'a> {
     /// `reactive_recompute_transaction` in `vm/c/vm.c`.
     fn reactive_recompute_transaction(
         &mut self,
-        root: &Arc<Mutex<Reactive>>,
+        root: &Gc<GraphCell<Reactive>>,
         replacement: &Value,
         scratch_register: u32,
     ) -> Result<(), LanaError> {
-        let mut list: Vec<Arc<Mutex<Reactive>>> = Vec::new();
+        let mut list: Vec<Gc<GraphCell<Reactive>>> = Vec::new();
         for frame in &self.frames {
             for register in frame.registers.iter() {
                 reactive_collect_value(&mut list, register);
             }
         }
         reactive_collect_value(&mut list, &self.result);
-        if !list.iter().any(|node| Arc::ptr_eq(node, root)) {
+        if !list.iter().any(|node| Gc::ptr_eq(node, root)) {
             reactive_list_add(&mut list, root);
         }
         let count = list.len();
@@ -9269,7 +9311,7 @@ impl<'a> Vm<'a> {
         let mut affected: Vec<bool> = vec![false; count];
         for index in 0..count {
             let node = list[index].clone();
-            let is_root = Arc::ptr_eq(&node, root);
+            let is_root = Gc::ptr_eq(&node, root);
             if is_root {
                 affected[index] = true;
             } else {
@@ -9279,10 +9321,10 @@ impl<'a> Vm<'a> {
                 };
                 let left_index = input0
                     .as_ref()
-                    .and_then(|input| list.iter().position(|n| Arc::ptr_eq(n, input)));
+                    .and_then(|input| list.iter().position(|n| Gc::ptr_eq(n, input)));
                 let right_index = input1
                     .as_ref()
-                    .and_then(|input| list.iter().position(|n| Arc::ptr_eq(n, input)));
+                    .and_then(|input| list.iter().position(|n| Gc::ptr_eq(n, input)));
                 affected[index] = left_index.map(|i| affected[i]).unwrap_or(false)
                     || right_index.map(|i| affected[i]).unwrap_or(false);
             }
@@ -9353,7 +9395,7 @@ impl<'a> Vm<'a> {
     fn set_host_call(&self, host: u32, arguments: &[Value]) -> Result<Value, LanaError> {
         if host == LANA_HOST_SET_NEW {
             if !arguments.is_empty() { return Err(LanaError::Type); }
-            return Ok(Value::set(Arc::new(Mutex::new(Set::new(&self.heap, 0)?))));
+            return Ok(Value::set(Gc::new(&self.heap, GraphCell::new(Set::new(&self.heap, 0)?))?));
         }
         if arguments.len() != 2 { return Err(LanaError::Type); }
         let ValueKind::Set(left) = &arguments[0].kind else { return Err(LanaError::Type); };
@@ -9366,7 +9408,7 @@ impl<'a> Vm<'a> {
             let mut result = Set::new(&self.heap, capacity)?;
             result.items.extend(left.items.iter().cloned())?;
             if !found { result.items.push(arguments[1].clone())?; }
-            return Ok(Value::set(Arc::new(Mutex::new(result))));
+            return Ok(Value::set(Gc::new(&self.heap, GraphCell::new(result))?));
         }
         let ValueKind::Set(right) = &arguments[1].kind else { return Err(LanaError::Type); };
         // Release the left lock before taking the right lock: operands can alias.
@@ -9386,7 +9428,7 @@ impl<'a> Vm<'a> {
                 }
             }
         }
-        Ok(Value::set(Arc::new(Mutex::new(result))))
+        Ok(Value::set(Gc::new(&self.heap, GraphCell::new(result))?))
     }
 
     /// Execute a host call, mirroring `execute_host_call` in `vm/c/vm.c`.
@@ -9415,7 +9457,7 @@ impl<'a> Vm<'a> {
                     };
                     if let Err(error) = items.push(item) { return error; }
                 }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                *out = Value::array(gc_or_return!(Gc::new(&self.heap, GraphCell::new(Array { items }))));
                 LanaError::Ok
             }
             LANA_HOST_READ_TEXT => {
@@ -9903,7 +9945,7 @@ impl<'a> Vm<'a> {
                     Ok(items) => items, Err(error) => return error,
                 };
                 if let Err(error) = items.extend(t.shape.iter().map(|&dim| Value::number(dim as f64))) { return error; }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                *out = Value::array(gc_or_return!(Gc::new(&self.heap, GraphCell::new(Array { items }))));
                 LanaError::Ok
             }
             LANA_HOST_TENSOR_NDIM => {
@@ -10514,7 +10556,7 @@ impl<'a> Vm<'a> {
                     }
                     index += 2;
                 }
-                *out = Value::map(Arc::new(Mutex::new(map)));
+                *out = Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(map))));
                 LanaError::Ok
             }
             LANA_HOST_MAP_HAS => {
@@ -10583,7 +10625,7 @@ impl<'a> Vm<'a> {
                     Ok(items) => items, Err(error) => return error,
                 };
                 if let Err(error) = items.extend(map.entries.iter().map(|entry| Value::string(entry.key.clone()))) { return error; }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                *out = Value::array(gc_or_return!(Gc::new(&self.heap, GraphCell::new(Array { items }))));
                 LanaError::Ok
             }
             LANA_HOST_INDEX_GET => {
@@ -10785,7 +10827,7 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 if let Err(error) = items.resize(count, Value::null()) { return error; }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                *out = Value::array(gc_or_return!(Gc::new(&self.heap, GraphCell::new(Array { items }))));
                 LanaError::Ok
             }
             LANA_HOST_ARRAY_PUSH => {
@@ -10941,7 +10983,7 @@ impl<'a> Vm<'a> {
                 }
                 *out = match self.array_value(vec![
                         arguments[0].clone(),
-                        Value::map(Arc::new(Mutex::new(metadata))),
+                        Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(metadata)))),
                     ]) {
                     Ok(value) => value,
                     Err(error) => return error,
@@ -11021,7 +11063,7 @@ impl<'a> Vm<'a> {
                 ) {
                     return error;
                 }
-                *out = Value::map(Arc::new(Mutex::new(status)));
+                *out = Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(status))));
                 LanaError::Ok
             }
             LANA_HOST_PLANNED_EFFECT_NEW => {
@@ -11068,7 +11110,7 @@ impl<'a> Vm<'a> {
                 if let Err(error) = status.set(Arc::from("kind"), Value::string(plan.kind.clone()), true) {
                     return error;
                 }
-                *out = Value::map(Arc::new(Mutex::new(status)));
+                *out = Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(status))));
                 LanaError::Ok
             }
             LANA_HOST_SHARED_INFORMATION => {
@@ -11527,7 +11569,7 @@ impl<'a> Vm<'a> {
                             ("end", Value::number(end as f64)), ("text", matched_text)] {
                             if let Err(error) = map.set(Arc::from(key), value, false) { return error; }
                         }
-                        *out = match self.make_result(true, Value::map(Arc::new(Mutex::new(map)))) { Ok(value) => value, Err(error) => return error };
+                        *out = match self.make_result(true, Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(map))))) { Ok(value) => value, Err(error) => return error };
                     }
                     None => {
                         *out = match self.make_result(false, Value::string(Arc::from("no match"))) { Ok(value) => value, Err(error) => return error }
@@ -11726,7 +11768,7 @@ impl<'a> Vm<'a> {
         if map.set(Arc::from(key), value.clone(), false).is_err() {
             return LanaError::Oom;
         }
-        *out = Value::map(Arc::new(Mutex::new(map)));
+        *out = Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(map))));
         LanaError::Ok
     }
 
@@ -11832,14 +11874,14 @@ impl<'a> Vm<'a> {
         let status_value = Value::number(status);
         let body_value = match self.string_value(body_text) { Ok(value) => value, Err(error) => return error };
         if resp.set(Arc::from("status"), status_value, false).is_err()
-            || resp.set(Arc::from("headers"), Value::map(Arc::new(Mutex::new(match Map::new(&self.heap, 0) { Ok(map) => map, Err(error) => return error }))), false).is_err()
+            || resp.set(Arc::from("headers"), Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(match Map::new(&self.heap, 0) { Ok(map) => map, Err(error) => return error })))), false).is_err()
             || resp.set(Arc::from("body"), body_value, false).is_err()
         {
             return LanaError::Oom;
         }
         // LIP-019 §4: root the response as Information with an evidence
         // derivation recording the operation and URL, then wrap `[true, val]`.
-        let resp_value = Value::map(Arc::new(Mutex::new(resp)));
+        let resp_value = Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(resp))));
         let mut rooted = match self.reactive_root(&resp_value, DerivationExactness::Exact) {
             Ok(rooted) => rooted,
             Err(error) => return error,
@@ -12072,20 +12114,20 @@ impl<'a> Vm<'a> {
         let mut registers = Vec::with_capacity(items.len() + 1);
         registers.push(Value::string(Arc::from("all")));
         registers.extend(items.clone());
-        let composite = Arc::new(Mutex::new(crate::value::Future {
+        let composite = gc_or_return!(Gc::new(&self.heap, GraphCell::new(crate::value::Future {
             function: u32::MAX,
             ip: 0,
             registers,
             exhausted: false,
             ready: true,
             queued: false,
-        }));
+        })));
         for item in &items {
             let ValueKind::Future(f) = &item.kind else {
                 continue;
             };
             self.awaiters
-                .entry(Arc::as_ptr(f) as usize)
+                .entry(Gc::as_ptr(f) as usize)
                 .or_default()
                 .push(composite.clone());
             self.enqueue_future(f.clone());
@@ -12114,20 +12156,20 @@ impl<'a> Vm<'a> {
         let mut registers = Vec::with_capacity(items.len() + 1);
         registers.push(Value::string(Arc::from("race")));
         registers.extend(items.clone());
-        let composite = Arc::new(Mutex::new(crate::value::Future {
+        let composite = gc_or_return!(Gc::new(&self.heap, GraphCell::new(crate::value::Future {
             function: u32::MAX,
             ip: 0,
             registers,
             exhausted: false,
             ready: true,
             queued: false,
-        }));
+        })));
         for item in &items {
             let ValueKind::Future(f) = &item.kind else {
                 continue;
             };
             self.awaiters
-                .entry(Arc::as_ptr(f) as usize)
+                .entry(Gc::as_ptr(f) as usize)
                 .or_default()
                 .push(composite.clone());
             self.enqueue_future(f.clone());
@@ -12150,14 +12192,14 @@ impl<'a> Vm<'a> {
         if !ms.is_finite() || ms < 0.0 {
             return LanaError::InvalidParameters;
         }
-        let composite = Arc::new(Mutex::new(crate::value::Future {
+        let composite = gc_or_return!(Gc::new(&self.heap, GraphCell::new(crate::value::Future {
             function: u32::MAX,
             ip: 0,
             registers: vec![Value::string(Arc::from("sleep")), Value::number(ms)],
             exhausted: false,
             ready: true,
             queued: false,
-        }));
+        })));
         self.enqueue_future(composite.clone());
         *out = Value::future(composite);
         LanaError::Ok
@@ -12176,7 +12218,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[0].kind, ValueKind::Lazy { .. } | ValueKind::Array(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(gc_or_return!(Gc::new(&self.heap, Dataset {
             op: DatasetOp::Source,
             source: arguments[0].clone(),
             function: 0,
@@ -12185,7 +12227,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        })));
         LanaError::Ok
     }
 
@@ -12200,7 +12242,7 @@ impl<'a> Vm<'a> {
         let ValueKind::Function(function) = arguments[1].kind else {
             return LanaError::Type;
         };
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(gc_or_return!(Gc::new(&self.heap, Dataset {
             op: DatasetOp::Filter,
             source: arguments[0].clone(),
             function,
@@ -12209,7 +12251,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        })));
         LanaError::Ok
     }
 
@@ -12224,7 +12266,7 @@ impl<'a> Vm<'a> {
         let ValueKind::Function(function) = arguments[1].kind else {
             return LanaError::Type;
         };
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(gc_or_return!(Gc::new(&self.heap, Dataset {
             op: DatasetOp::Map,
             source: arguments[0].clone(),
             function,
@@ -12233,7 +12275,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        })));
         LanaError::Ok
     }
 
@@ -12248,7 +12290,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[1].kind, ValueKind::Array(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(gc_or_return!(Gc::new(&self.heap, Dataset {
             op: DatasetOp::Select,
             source: arguments[0].clone(),
             function: 0,
@@ -12257,7 +12299,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        })));
         LanaError::Ok
     }
 
@@ -12275,7 +12317,7 @@ impl<'a> Vm<'a> {
         if !n.is_finite() || n < 0.0 {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(gc_or_return!(Gc::new(&self.heap, Dataset {
             op: DatasetOp::Limit,
             source: arguments[0].clone(),
             function: 0,
@@ -12284,7 +12326,7 @@ impl<'a> Vm<'a> {
             limit: arguments[1].clone(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        })));
         LanaError::Ok
     }
 
@@ -12299,7 +12341,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[1].kind, ValueKind::String(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(gc_or_return!(Gc::new(&self.heap, Dataset {
             op: DatasetOp::Sort,
             source: arguments[0].clone(),
             function: 0,
@@ -12308,7 +12350,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        })));
         LanaError::Ok
     }
 
@@ -12323,7 +12365,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[1].kind, ValueKind::String(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(gc_or_return!(Gc::new(&self.heap, Dataset {
             op: DatasetOp::GroupBy,
             source: arguments[0].clone(),
             function: 0,
@@ -12332,7 +12374,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        })));
         LanaError::Ok
     }
 
@@ -12348,7 +12390,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[1].kind, ValueKind::Array(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(gc_or_return!(Gc::new(&self.heap, Dataset {
             op: DatasetOp::Aggregate,
             source: arguments[0].clone(),
             function: 0,
@@ -12357,7 +12399,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: arguments[1].clone(),
-        }));
+        })));
         LanaError::Ok
     }
 
@@ -12376,7 +12418,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[2].kind, ValueKind::String(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(gc_or_return!(Gc::new(&self.heap, Dataset {
             op: DatasetOp::Join,
             source: arguments[0].clone(),
             function: 0,
@@ -12385,7 +12427,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: arguments[1].clone(),
             aggregate: Value::null(),
-        }));
+        })));
         LanaError::Ok
     }
 
@@ -12528,7 +12570,7 @@ impl<'a> Vm<'a> {
                         let col_value = row_map.get(&**col_name).cloned().ok_or(LanaError::Type)?;
                         projected.set(col_name.clone(), col_value, false)?;
                     }
-                    result.push(Value::map(Arc::new(Mutex::new(projected))));
+                    result.push(Value::map(Gc::new(&self.heap, GraphCell::new(projected))?));
                 }
                 Ok(result)
             }
@@ -12575,7 +12617,7 @@ impl<'a> Vm<'a> {
                 for row in source_rows {
                     let key_value = Self::dataset_row_key(&row, &**key)?;
                     // Find an existing group record with this key.
-                    let mut group_map: Option<Arc<Mutex<Map>>> = None;
+                    let mut group_map: Option<Gc<GraphCell<Map>>> = None;
                     for g in 0..result.len() {
                         let ValueKind::Map(existing) = &result[g].kind else {
                             return Err(LanaError::Type);
@@ -12587,7 +12629,7 @@ impl<'a> Vm<'a> {
                             break;
                         }
                     }
-                    let group_rows: Arc<Mutex<Array>>;
+                    let group_rows: Gc<GraphCell<Array>>;
                     if let Some(gm) = group_map {
                         let guard = gm.lock().unwrap();
                         let rows_value = guard.get("rows").cloned().ok_or(LanaError::Type)?;
@@ -12599,10 +12641,10 @@ impl<'a> Vm<'a> {
                         group_rows.lock().unwrap().items.push(row)?;
                     } else {
                         let mut new_map = Map::new(&self.heap, 2)?;
-                        let new_rows = Arc::new(Mutex::new(Array::from_items(&self.heap, vec![row])?));
+                        let new_rows = Gc::new(&self.heap, GraphCell::new(Array::from_items(&self.heap, vec![row])?))?;
                         new_map.set(Arc::from("key"), key_value, false)?;
                         new_map.set(Arc::from("rows"), Value::array(new_rows.clone()), false)?;
-                        result.push(Value::map(Arc::new(Mutex::new(new_map))));
+                        result.push(Value::map(Gc::new(&self.heap, GraphCell::new(new_map))?));
                     }
                 }
                 Ok(result)
@@ -12683,7 +12725,7 @@ impl<'a> Vm<'a> {
                     let mut out_row = Map::new(&self.heap, 2)?;
                     out_row.set(key_name, key_value, false)?;
                     out_row.set(agg_op.clone(), agg_value, false)?;
-                    result.push(Value::map(Arc::new(Mutex::new(out_row))));
+                    result.push(Value::map(Gc::new(&self.heap, GraphCell::new(out_row))?));
                 }
                 Ok(result)
             }
@@ -12720,7 +12762,7 @@ impl<'a> Vm<'a> {
                         for entry in &right_guard.entries {
                             merged.set(entry.key.clone(), entry.value.clone(), false)?;
                         }
-                        result.push(Value::map(Arc::new(Mutex::new(merged))));
+                        result.push(Value::map(Gc::new(&self.heap, GraphCell::new(merged))?));
                     }
                 }
                 Ok(result)
@@ -12787,14 +12829,14 @@ impl<'a> Vm<'a> {
             let other_value = self.dataset_explain(other)?;
             map.set(Arc::from("other"), other_value, false)?;
         }
-        Ok(Value::map(Arc::new(Mutex::new(map))))
+        Ok(Value::map(Gc::new(&self.heap, GraphCell::new(map))?))
     }
 
     /// Poll a composite future (`future_all` / `future_race` / `sleep`) for
     /// completion. When done, marks it complete, stores its result, and
     /// re-queues any futures awaiting it. When not done, leaves it suspended;
     /// it is re-queued when an input future completes.
-    fn poll_composite_future(&mut self, future: Arc<Mutex<Future>>) -> Result<(), LanaError> {
+    fn poll_composite_future(&mut self, future: Gc<GraphCell<Future>>) -> Result<(), LanaError> {
         let (kind, inputs) = {
             let guard = future.lock().unwrap();
             let kind = guard.registers[0].clone();
@@ -12851,7 +12893,7 @@ impl<'a> Vm<'a> {
             guard.ready = false;
             guard.queued = false;
             guard.registers[0] = result;
-            if let Some(awaiters) = self.awaiters.remove(&(Arc::as_ptr(&future) as usize)) {
+            if let Some(awaiters) = self.awaiters.remove(&(Gc::as_ptr(&future) as usize)) {
                 for awaiter in awaiters {
                     self.enqueue_future(awaiter);
                 }
@@ -12927,7 +12969,7 @@ impl<'a> Vm<'a> {
             if let Err(error) = map.set(Arc::from("kind"), Value::string(Arc::from(kind)), true) {
                 return error;
             }
-            items.push(Value::map(Arc::new(Mutex::new(map))));
+            items.push(Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(map)))));
         }
         *out = match self.array_value(items) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
@@ -13147,7 +13189,7 @@ impl<'a> Vm<'a> {
                     return Err(LanaError::Parse);
                 }
                 *pos += 1;
-                Ok(Value::array(Arc::new(Mutex::new(array))))
+                Ok(Value::array(Gc::new(&self.heap, GraphCell::new(array))?))
             }
             b'{' => {
                 *pos += 1;
@@ -13177,7 +13219,7 @@ impl<'a> Vm<'a> {
                     return Err(LanaError::Parse);
                 }
                 *pos += 1;
-                Ok(Value::map(Arc::new(Mutex::new(map))))
+                Ok(Value::map(Gc::new(&self.heap, GraphCell::new(map))?))
             }
             b'n' => {
                 if bytes.len() - *pos >= 4 && &bytes[*pos..*pos + 4] == b"null" {
@@ -13322,8 +13364,8 @@ impl<'a> Vm<'a> {
             return Err(LanaError::Limit);
         }
         let identity = match &value.kind {
-            ValueKind::Array(array) => Some(Arc::as_ptr(array) as usize),
-            ValueKind::Map(map) => Some(Arc::as_ptr(map) as usize),
+            ValueKind::Array(array) => Some(Gc::as_ptr(array) as usize),
+            ValueKind::Map(map) => Some(Gc::as_ptr(map) as usize),
             _ => None,
         };
         if let Some(id) = identity {
@@ -13453,7 +13495,7 @@ impl<'a> Vm<'a> {
                     return error;
                 }
             }
-            items.push(Value::map(Arc::new(Mutex::new(map))));
+            items.push(Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(map)))));
         }
         *out = match self.array_value(items) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
@@ -13525,17 +13567,17 @@ impl<'a> Vm<'a> {
     fn shared_information_create(
         &mut self,
         source: &Value,
-    ) -> Result<(Arc<SharedInformation>, Arc<CapabilityToken>), LanaError> {
+    ) -> Result<(Gc<SharedInformation>, Gc<CapabilityToken>), LanaError> {
         let identity = NEXT_SHARED_IDENTITY.fetch_add(1, Ordering::Relaxed);
         let mut memo = DeepCloneMemo::default();
         let mut base_snapshot = self.deep_clone_value(source, &mut memo)?;
         if base_snapshot.reactive.is_none() {
             base_snapshot = self.reactive_root(&base_snapshot, DerivationExactness::Exact)?;
         }
-        let shared = Arc::new(SharedInformation {
+        let shared = Gc::new(&self.heap, SharedInformation {
             identity,
             base_snapshot,
-            state: Mutex::new(SharedState {
+            state: GraphCell::new(SharedState {
                 capability_epoch: 0,
                 next_capability_id: 2,
                 next_observation_sequence: 1,
@@ -13543,24 +13585,26 @@ impl<'a> Vm<'a> {
                 observations: Vec::new(),
                 current: Some(SharedCommit { revision: 0, versions: Vec::new() }),
             }),
-            condition: Condvar::new(),
-        });
-        let admin = Arc::new(CapabilityToken {
+            condition: GraphCondvar::new(),
+        })?;
+        let admin = Gc::new(&self.heap, CapabilityToken {
             shared: shared.clone(),
-            id: 1,
-            permissions: LANA_CAPABILITY_ADMIN,
-            revoked: AtomicBool::new(false),
-        });
-        shared.state.lock().unwrap().capabilities.push(admin.clone());
+            grant: Arc::new(CapabilityGrant {
+                id: 1,
+                permissions: LANA_CAPABILITY_ADMIN,
+                revoked: AtomicBool::new(false),
+            }),
+        })?;
+        shared.state.lock().unwrap().capabilities.push(admin.grant.clone());
         self.shared_references.push(shared.clone());
         Ok((shared, admin))
     }
 
     fn shared_capability_grant(
         &self,
-        admin: &Arc<CapabilityToken>,
+        admin: &Gc<CapabilityToken>,
         permissions: u32,
-    ) -> Result<Arc<CapabilityToken>, LanaError> {
+    ) -> Result<Gc<CapabilityToken>, LanaError> {
         const VALID: u32 = LANA_CAPABILITY_READ | LANA_CAPABILITY_OBSERVE | LANA_CAPABILITY_ADMIN;
         if permissions == 0 || (permissions & !VALID) != 0 {
             return Err(LanaError::Format);
@@ -13572,23 +13616,25 @@ impl<'a> Vm<'a> {
         }
         let id = state.next_capability_id;
         state.next_capability_id += 1;
-        let capability = Arc::new(CapabilityToken {
+        let capability = Gc::new(&self.heap, CapabilityToken {
             shared: shared.clone(),
-            id,
-            permissions,
-            revoked: AtomicBool::new(false),
-        });
-        state.capabilities.push(capability.clone());
+            grant: Arc::new(CapabilityGrant {
+                id,
+                permissions,
+                revoked: AtomicBool::new(false),
+            }),
+        })?;
+        state.capabilities.push(capability.grant.clone());
         state.capability_epoch += 1;
         Ok(capability)
     }
 
     fn shared_capability_revoke(
         &self,
-        admin: &Arc<CapabilityToken>,
-        target: &Arc<CapabilityToken>,
+        admin: &Gc<CapabilityToken>,
+        target: &Gc<CapabilityToken>,
     ) -> LanaError {
-        if !Arc::ptr_eq(&admin.shared, &target.shared) {
+        if !Gc::ptr_eq(&admin.shared, &target.shared) {
             return LanaError::Capability;
         }
         let shared = admin.shared.clone();
@@ -13596,16 +13642,16 @@ impl<'a> Vm<'a> {
         if !capability_allows_locked(&shared, admin, LANA_CAPABILITY_ADMIN) {
             return LanaError::Capability;
         }
-        target.revoked.store(true, Ordering::Release);
+        target.grant.revoked.store(true, Ordering::Release);
         state.capability_epoch += 1;
         shared.condition.notify_all();
         LanaError::Ok
     }
 
-    fn shared_capability_invalidate(&self, target: &Arc<CapabilityToken>) -> LanaError {
+    fn shared_capability_invalidate(&self, target: &Gc<CapabilityToken>) -> LanaError {
         let shared = target.shared.clone();
         let mut state = shared.state.lock().unwrap();
-        target.revoked.store(true, Ordering::Release);
+        target.grant.revoked.store(true, Ordering::Release);
         state.capability_epoch += 1;
         shared.condition.notify_all();
         LanaError::Ok
@@ -13613,7 +13659,7 @@ impl<'a> Vm<'a> {
 
     fn shared_information_snapshot(
         &mut self,
-        capability: &Arc<CapabilityToken>,
+        capability: &Gc<CapabilityToken>,
         out: &mut Value,
     ) -> LanaError {
         let shared = capability.shared.clone();
@@ -13638,7 +13684,7 @@ impl<'a> Vm<'a> {
 
     fn shared_information_at(
         &mut self,
-        capability: &Arc<CapabilityToken>,
+        capability: &Gc<CapabilityToken>,
         effective_time: f64,
         out: &mut Value,
     ) -> LanaError {
@@ -13670,7 +13716,7 @@ impl<'a> Vm<'a> {
 
     fn shared_information_observe(
         &mut self,
-        capability: &Arc<CapabilityToken>,
+        capability: &Gc<CapabilityToken>,
         evidence: &Value,
         effective_time: f64,
     ) -> Result<u64, LanaError> {
@@ -13752,7 +13798,7 @@ impl<'a> Vm<'a> {
 
     fn build_commit_candidate(
         &mut self,
-        shared: &Arc<SharedInformation>,
+        shared: &Gc<SharedInformation>,
         observations: &[SharedObservation],
         pending: &SharedObservation,
     ) -> Result<SharedCommit, LanaError> {
@@ -13782,7 +13828,7 @@ impl<'a> Vm<'a> {
         Ok(SharedCommit { revision: 0, versions })
     }
 
-    fn shared_information_revision(&self, capability: &Arc<CapabilityToken>) -> u64 {
+    fn shared_information_revision(&self, capability: &Gc<CapabilityToken>) -> u64 {
         let state = capability.shared.state.lock().unwrap();
         state
             .current
@@ -13793,7 +13839,7 @@ impl<'a> Vm<'a> {
 
     fn shared_information_wait(
         &mut self,
-        capability: &Arc<CapabilityToken>,
+        capability: &Gc<CapabilityToken>,
         after_revision: u64,
         timeout_milliseconds: u64,
         out: &mut Value,
@@ -13890,7 +13936,7 @@ impl<'a> Vm<'a> {
                 Value::boolean(capability_allows_locked(&shared, capability, LANA_CAPABILITY_ADMIN)),
                 true,
             );
-            *out = Value::map(Arc::new(Mutex::new(inspection)));
+            *out = Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(inspection))));
             return LanaError::Ok;
         }
         let value = self.reactive_value(argument);
@@ -13986,7 +14032,7 @@ impl<'a> Vm<'a> {
             };
             let _ = inspection.set(Arc::from("derivation"), derivation, true);
         }
-        *out = Value::map(Arc::new(Mutex::new(inspection)));
+        *out = Value::map(gc_or_return!(Gc::new(&self.heap, GraphCell::new(inspection))));
         LanaError::Ok
     }
 }
@@ -14663,7 +14709,7 @@ fn csv_scalar(value: &Value, field: &mut String) -> bool {
 
 /// Collect reactive nodes reachable from a value, mirroring
 /// `reactive_collect_value` in `vm/c/vm.c`.
-fn reactive_collect_value(list: &mut Vec<Arc<Mutex<Reactive>>>, value: &Value) {
+fn reactive_collect_value(list: &mut Vec<Gc<GraphCell<Reactive>>>, value: &Value) {
     if let Some(reactive) = &value.reactive {
         reactive_list_add(list, reactive);
     }
@@ -14684,8 +14730,8 @@ fn reactive_collect_value(list: &mut Vec<Arc<Mutex<Reactive>>>, value: &Value) {
 
 /// Add a reactive node and its inputs to a list in topological order, mirroring
 /// `reactive_list_add` in `vm/c/vm.c`.
-fn reactive_list_add(list: &mut Vec<Arc<Mutex<Reactive>>>, node: &Arc<Mutex<Reactive>>) {
-    if list.iter().any(|existing| Arc::ptr_eq(existing, node)) {
+fn reactive_list_add(list: &mut Vec<Gc<GraphCell<Reactive>>>, node: &Gc<GraphCell<Reactive>>) {
+    if list.iter().any(|existing| Gc::ptr_eq(existing, node)) {
         return;
     }
     let (input0, input1) = {
@@ -14704,15 +14750,15 @@ fn reactive_list_add(list: &mut Vec<Arc<Mutex<Reactive>>>, node: &Arc<Mutex<Reac
 /// Resolve a reactive input to its staged or current value, mirroring
 /// `reactive_staged_input` in `vm/c/vm.c`.
 fn reactive_staged_input(
-    list: &[Arc<Mutex<Reactive>>],
+    list: &[Gc<GraphCell<Reactive>>],
     staged: &[Option<Value>],
-    input: &Option<Arc<Mutex<Reactive>>>,
+    input: &Option<Gc<GraphCell<Reactive>>>,
     constant: &Option<Value>,
 ) -> Value {
     let Some(input) = input else {
         return constant.clone().unwrap_or_else(Value::null);
     };
-    if let Some(index) = list.iter().position(|node| Arc::ptr_eq(node, input)) {
+    if let Some(index) = list.iter().position(|node| Gc::ptr_eq(node, input)) {
         if let Some(staged_value) = &staged[index] {
             return staged_value.clone();
         }
@@ -14723,13 +14769,13 @@ fn reactive_staged_input(
 /// Whether a capability token allows a permission, mirroring
 /// `capability_allows_locked` in `runtime/c/shared.c`.
 fn capability_allows_locked(
-    shared: &Arc<SharedInformation>,
-    capability: &Arc<CapabilityToken>,
+    shared: &Gc<SharedInformation>,
+    capability: &Gc<CapabilityToken>,
     permissions: u32,
 ) -> bool {
-    Arc::ptr_eq(&capability.shared, shared)
-        && !capability.revoked.load(Ordering::Acquire)
-        && (capability.permissions & permissions) == permissions
+    Gc::ptr_eq(&capability.shared, shared)
+        && !capability.grant.revoked.load(Ordering::Acquire)
+        && (capability.grant.permissions & permissions) == permissions
 }
 
 /// Whether a value is a non-negative integer, mirroring `nonnegative_integer`
@@ -14796,15 +14842,15 @@ fn joint_value_equal(left: &Value, right: &Value) -> bool {
                 && l.state.d_im == right.as_state().state.d_im
         }
         ValueKind::Array(l) => match &right.kind {
-            ValueKind::Array(r) => Arc::ptr_eq(l, r),
+            ValueKind::Array(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Map(l) => match &right.kind {
-            ValueKind::Map(r) => Arc::ptr_eq(l, r),
+            ValueKind::Map(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Joint(l) => match &right.kind {
-            ValueKind::Joint(r) => Arc::ptr_eq(l, r),
+            ValueKind::Joint(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::StateDist(l) => match &right.kind {
@@ -14812,15 +14858,15 @@ fn joint_value_equal(left: &Value, right: &Value) -> bool {
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Possibility(l) => match &right.kind {
-            ValueKind::Possibility(r) => Arc::ptr_eq(l, r),
+            ValueKind::Possibility(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::PathSet(l) => match &right.kind {
-            ValueKind::PathSet(r) => Arc::ptr_eq(l, r),
+            ValueKind::PathSet(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Capability(l) => match &right.kind {
-            ValueKind::Capability(r) => Arc::ptr_eq(l, r),
+            ValueKind::Capability(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         _ => false,
@@ -14861,23 +14907,23 @@ fn set_value_equal(left: &Value, right: &Value) -> bool {
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Array(l) => match &right.kind {
-            ValueKind::Array(r) => Arc::ptr_eq(l, r),
+            ValueKind::Array(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Map(l) => match &right.kind {
-            ValueKind::Map(r) => Arc::ptr_eq(l, r),
+            ValueKind::Map(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Task(l) => match &right.kind {
-            ValueKind::Task(r) => Arc::ptr_eq(l, r),
+            ValueKind::Task(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Capability(l) => match &right.kind {
-            ValueKind::Capability(r) => Arc::ptr_eq(l, r),
+            ValueKind::Capability(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Adt(l) => match &right.kind {
-            ValueKind::Adt(r) => Arc::ptr_eq(l, r),
+            ValueKind::Adt(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Tensor(l) => match &right.kind {
@@ -14901,15 +14947,15 @@ fn set_value_equal(left: &Value, right: &Value) -> bool {
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Generator(l) => match &right.kind {
-            ValueKind::Generator(r) => Arc::ptr_eq(l, r),
+            ValueKind::Generator(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Future(l) => match &right.kind {
-            ValueKind::Future(r) => Arc::ptr_eq(l, r),
+            ValueKind::Future(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Set(l) => match &right.kind {
-            ValueKind::Set(r) => Arc::ptr_eq(l, r),
+            ValueKind::Set(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Regex(l) => match &right.kind {
@@ -15521,7 +15567,7 @@ fn linalg_measure_with(
         }
         array.push(Value::number(re))?;
     }
-    Ok(Value::array(Arc::new(Mutex::new(array))))
+    Ok(Value::array(Gc::new(heap, GraphCell::new(array))?))
 }
 
 /// apply_to(chan, rho): Φ(ρ) = Σ_k K_k ρ K_k†.
@@ -16010,11 +16056,11 @@ fn values_equal(left: &Value, right: &Value, out: &mut bool) -> LanaError {
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Array(l) => *out = match &right.kind {
-            ValueKind::Array(r) => Arc::ptr_eq(l, r),
+            ValueKind::Array(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         ValueKind::Task(l) => *out = match &right.kind {
-            ValueKind::Task(r) => Arc::ptr_eq(l, r),
+            ValueKind::Task(r) => Gc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
         _ => *out = false,
@@ -16038,7 +16084,7 @@ mod tests {
     fn cyclic_container_clone_and_materialization_preserve_identity() {
         let chunk = assembler::assemble("HALT\n").unwrap();
         let mut vm = Vm::new(&chunk);
-        let array = Arc::new(Mutex::new(Array::new(&vm.heap, 0).unwrap()));
+        let array = Gc::new(&vm.heap, GraphCell::new(Array::new(&vm.heap, 0).unwrap())).unwrap();
         let source = Value::array(array.clone());
         array.lock().unwrap().items.push(source.clone()).unwrap();
         for copy in [
@@ -16047,44 +16093,57 @@ mod tests {
             vm.deep_clone_live_value(&source, &mut HashMap::new()).unwrap(),
         ] {
             let ValueKind::Array(cloned) = &copy.kind else { panic!("array expected") };
-            assert!(!Arc::ptr_eq(&array, cloned));
+            assert!(!Gc::ptr_eq(&array, cloned));
             let child = cloned.lock().unwrap().items[0].clone();
             let ValueKind::Array(back_edge) = child.kind else { panic!("array expected") };
-            assert!(Arc::ptr_eq(cloned, &back_edge));
+            assert!(Gc::ptr_eq(cloned, &back_edge));
             assert_eq!(copy.print(), "[<cycle>]");
-            cloned.lock().unwrap().items.clear();
         }
-        array.lock().unwrap().items.clear();
+    }
+
+    #[test]
+    fn collector_counts_shared_wrapper_edges_once() {
+        let heap = crate::heap::Heap::default();
+        let array = Gc::new(&heap, GraphCell::new(Array::new(&heap, 2).unwrap())).unwrap();
+        let wrapper = Gc::new(&heap, Adt { variant: 1, fields: vec![Value::array(array.clone())] }).unwrap();
+        array.lock().unwrap().push(Value::adt(wrapper.clone())).unwrap();
+        array.lock().unwrap().push(Value::adt(wrapper.clone())).unwrap();
+        let weak = Gc::downgrade(&array);
+        drop(wrapper);
+        crate::gc::collect();
+        assert_eq!(array.lock().unwrap().items.len(), 2);
+        assert!(weak.upgrade().is_some());
+        drop(array);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(heap.live_bytes(), 0);
     }
 
     #[test]
     fn clone_memos_survive_immutable_wrappers_and_reactive_history() {
         let chunk = assembler::assemble("HALT\n").unwrap();
         let mut vm = Vm::new(&chunk);
-        let array = Arc::new(Mutex::new(Array::new(&vm.heap, 1).unwrap()));
+        let array = Gc::new(&vm.heap, GraphCell::new(Array::new(&vm.heap, 1).unwrap())).unwrap();
         let source = Value::array(array.clone());
-        array.lock().unwrap().push(Value::adt(Arc::new(Adt { variant: 1, fields: vec![source.clone()] }))).unwrap();
+        array.lock().unwrap().push(Value::adt(Gc::new(&vm.heap, Adt { variant: 1, fields: vec![source.clone()] }).unwrap())).unwrap();
         for copy in [vm.deep_clone_value(&source, &mut DeepCloneMemo::default()).unwrap(),
             vm.materialize_value(&source).unwrap(), vm.deep_clone_live_value(&source, &mut HashMap::new()).unwrap()] {
             let ValueKind::Array(cloned) = copy.kind else { panic!("array expected") };
             let wrapper = cloned.lock().unwrap().items[0].clone();
             let ValueKind::Adt(wrapper) = wrapper.kind else { panic!("ADT expected") };
             let ValueKind::Array(back_edge) = &wrapper.fields[0].kind else { panic!("array expected") };
-            assert!(Arc::ptr_eq(&cloned, back_edge));
-            cloned.lock().unwrap().items.clear();
+            assert!(Gc::ptr_eq(&cloned, back_edge));
         }
-        array.lock().unwrap().items.clear();
         let root = vm.reactive_root(&source, DerivationExactness::Exact).unwrap();
         let reactive = root.reactive.as_ref().unwrap();
         let current = reactive.lock().unwrap().current.clone();
         reactive.lock().unwrap().history.push(ReactiveVersion { revision: 0, value: current });
         let copy = vm.deep_clone_live_value(&root, &mut HashMap::new()).unwrap();
         let cloned_reactive = copy.reactive.unwrap();
-        assert!(!Arc::ptr_eq(reactive, &cloned_reactive));
+        assert!(!Gc::ptr_eq(reactive, &cloned_reactive));
         let cloned_reactive = cloned_reactive.lock().unwrap();
         let ValueKind::Array(current) = &cloned_reactive.current.as_ref().unwrap().kind else { panic!("array expected") };
         let ValueKind::Array(history) = &cloned_reactive.history[0].value.as_ref().unwrap().kind else { panic!("array expected") };
-        assert!(Arc::ptr_eq(current, history));
+        assert!(Gc::ptr_eq(current, history));
     }
 
     #[test]
@@ -16105,10 +16164,53 @@ mod tests {
 
     #[test]
     fn json_rejects_cyclic_materialized_argument() {
-        let (error, _) = run_chunk(
+        let chunk = assembler::assemble(
             "LOAD_CONST R0 0\nARRAY_NEW R1 R0 1\nARRAY_SET R1 R0 R1\nHOST_CALL json_stringify R1 1 R2\nRETURN R2\n",
-        );
-        assert_eq!(error, LanaError::UnsupportedOperation);
+        ).unwrap();
+        for _ in 0..64 {
+            let mut vm = Vm::new(&chunk);
+            let heap = vm.heap();
+            assert_eq!(vm.run(), LanaError::UnsupportedOperation);
+            drop(vm);
+            assert_eq!(heap.live_bytes(), 0, "original and materialized cycles are both reclaimed");
+        }
+    }
+
+    #[test]
+    fn cyclic_arrays_obey_live_budget_and_outlive_the_vm() {
+        let chunk = assembler::assemble(
+            "LOAD_CONST R0 10000\nLOAD_CONST R1 0\nLOAD_CONST R2 1\nloop:\nARRAY_NEW R3 R1 1\nARRAY_SET R3 R1 R3\nBINARY R0 sub R2 R0\nCOMPARE R0 > R1 R4\nJUMP_IF_TRUE R4 loop\nRETURN R3\n",
+        ).unwrap();
+        let bytes = std::mem::size_of::<Array>() + std::mem::size_of::<Value>()
+            + Gc::<GraphCell<Array>>::allocation_bytes();
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(2 * bytes);
+        assert_eq!(vm.run(), LanaError::Ok);
+        let heap = vm.heap();
+        let retained = vm.result().clone();
+        drop(vm);
+        assert_eq!(retained.print(), "[<cycle>]");
+        assert_eq!(heap.live_bytes(), bytes);
+        drop(retained);
+        assert_eq!(heap.live_bytes(), 0);
+        assert!(heap.peak_bytes() <= 2 * bytes);
+    }
+
+    #[test]
+    fn failed_materialization_releases_partial_cycles() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let source_heap = Heap::default();
+        let source = Gc::new(&source_heap, GraphCell::new(Array::new(&source_heap, 2).unwrap())).unwrap();
+        source.lock().unwrap().items.push(Value::array(source.clone())).unwrap();
+        source.lock().unwrap().items.push(Value::string(source_heap.string(&"x".repeat(4096)).unwrap())).unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(2048);
+        assert!(matches!(vm.materialize_value(&Value::array(source)), Err(LanaError::Oom)));
+        let heap = vm.heap();
+        drop(vm);
+        assert_eq!(heap.live_bytes(), 0);
+        source_heap.collect_strings();
+        assert_eq!(source_heap.live_bytes(), 0);
     }
 
     #[test]
@@ -16220,7 +16322,8 @@ mod tests {
             "LOAD_CONST R0 1\nARRAY_NEW R1 R0 1\nMOVE R2 R0\nHOST_CALL array_push R1 2 R3\nRETURN R3\n",
         ).unwrap();
         let mut vm = Vm::new(&chunk);
-        vm.set_memory_limit(std::mem::size_of::<Array>() + std::mem::size_of::<Value>());
+        vm.set_memory_limit(std::mem::size_of::<Array>() + std::mem::size_of::<Value>()
+            + Gc::<GraphCell<Array>>::allocation_bytes());
         assert_eq!(vm.run(), LanaError::Oom);
         let ValueKind::Array(array) = &vm.frames[0].registers[1].kind else { panic!("array expected") };
         assert_eq!(array.lock().unwrap().items.len(), 1);
@@ -16247,7 +16350,8 @@ mod tests {
         let chunk = assembler::assemble(
             "LOAD_CONST R0 1000\nLOAD_CONST R1 16\nLOAD_CONST R2 1\nloop:\nHOST_CALL array_new R1 1 R3\nBINARY R0 sub R2 R0\nLOAD_CONST R4 0\nCOMPARE R0 > R4 R5\nJUMP_IF_TRUE R5 loop\nRETURN R3\n",
         ).unwrap();
-        let array_bytes = std::mem::size_of::<Array>() + 16 * std::mem::size_of::<Value>();
+        let array_bytes = std::mem::size_of::<Array>() + 16 * std::mem::size_of::<Value>()
+            + Gc::<GraphCell<Array>>::allocation_bytes();
         let mut vm = Vm::new(&chunk);
         vm.set_memory_limit(array_bytes * 2);
         assert_eq!(vm.run(), LanaError::Ok);
@@ -17250,6 +17354,47 @@ mod tests {
         assert_eq!(vm.set_task_limit(1), LanaError::Ok);
         let error = vm.run();
         assert_eq!(error, LanaError::Limit);
+    }
+
+    #[test]
+    fn capability_owners_release_without_losing_named_grants() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let (shared, admin) = vm.shared_information_create(&Value::string(Arc::from("train"))).unwrap();
+        let owner = Gc::downgrade(&shared);
+        let read = vm.shared_capability_grant(&admin, LANA_CAPABILITY_READ).unwrap();
+        let retained = read.clone();
+        drop(read);
+        assert!(vm.has_named_capability("train"));
+        assert_eq!(vm.shared_capability_revoke(&admin, &retained), LanaError::Ok);
+        assert!(!vm.has_named_capability("train"));
+        let read = vm.shared_capability_grant(&admin, LANA_CAPABILITY_READ).unwrap();
+        drop(read);
+        assert!(vm.has_named_capability("train"));
+        let (_, other_admin) = vm.shared_information_create(&Value::number(1.0)).unwrap();
+        assert_eq!(vm.shared_capability_revoke(&other_admin, &admin), LanaError::Capability);
+        drop(shared);
+        drop(admin);
+        drop(vm);
+        assert!(owner.upgrade().is_some(), "external token retains its owner");
+        drop(retained);
+        assert!(owner.upgrade().is_none(), "grant records must not retain the owner");
+    }
+
+    #[test]
+    fn capability_revocation_wakes_a_waiter() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let (_, admin) = vm.shared_information_create(&Value::number(42.0)).unwrap();
+        let read = vm.shared_capability_grant(&admin, LANA_CAPABILITY_READ).unwrap();
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let mut observer = Vm::new(&chunk);
+                observer.shared_information_wait(&read, 0, 1000, &mut Value::null())
+            });
+            assert_eq!(vm.shared_capability_revoke(&admin, &read), LanaError::Ok);
+            assert_eq!(waiter.join().unwrap(), LanaError::Capability);
+        });
     }
 
     #[test]
