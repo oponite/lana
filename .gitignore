@@ -26,3 +26,5 @@ REQUIREMENTS.md
 ghost_*/
 .claude/worktrees/
 .cache/
+.env
+.claude/settings.local.json
