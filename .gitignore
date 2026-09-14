@@ -21,3 +21,6 @@ archive
 TODO.md
 REQUIREMENTS.md
 ghost_*/
+.cache/
+.env
+.claude/settings.local.json
