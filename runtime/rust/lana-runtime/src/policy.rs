@@ -328,9 +328,10 @@ mod tests {
     #[test]
     fn evaluate_authorizes_when_above_threshold() {
         let policy = sample_policy();
-        let mut map = lana_vm::value::Map::new(&lana_vm::heap::Heap::default(), 1).unwrap();
+        let heap = lana_vm::heap::Heap::default();
+        let mut map = lana_vm::value::Map::new(&heap, 1).unwrap();
         map.set(Arc::from("p"), Value::number(0.75), false).unwrap();
-        let input = Value::map(Arc::new(std::sync::Mutex::new(map)));
+        let input = Value::map(lana_vm::gc::Gc::new(&heap, lana_vm::gc::GraphCell::new(map)).unwrap());
         let evaluation = PolicyEvaluation {
             schema_version: 1,
             decision_id: 1,

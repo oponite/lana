@@ -48,6 +48,16 @@ mod tests {
     }
 
     #[test]
+    fn verify_accepts_every_named_host_call_and_rejects_next_id() {
+        for name in assembler::HOST_CALL_NAMES {
+            assert!(assemble(&format!("HOST_CALL {name} R0 0 R1\nHALT\n")).is_ok(), "{name}");
+        }
+        let mut chunk = sample_chunk();
+        chunk.code[0] = Instruction::new(OpCode::HostCall, 0, verifier::LANA_HOST_COUNT, 0, 0, 1);
+        assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Format);
+    }
+
+    #[test]
     fn verify_rejects_bad_entry() {
         let mut chunk = sample_chunk();
         chunk.entry = 99;
@@ -61,6 +71,23 @@ mod tests {
         chunk.code[0] = Instruction::new(OpCode::LoadConst, 300, 0, 0, 0, 1);
         let error = verifier::verify(&chunk).unwrap_err();
         assert_eq!(error.code, LanaError::Register);
+    }
+
+    #[test]
+    fn verify_rejects_overflowing_register_ranges() {
+        for opcode in [OpCode::AdtBuild, OpCode::ArrayNew, OpCode::JointBuild,
+                       OpCode::Call, OpCode::Fork, OpCode::HostCall,
+                       OpCode::Generator, OpCode::Async] {
+            let mut chunk = sample_chunk();
+            chunk.version = opcode::LABC_VERSION_4;
+            let (b, c, imm) = if matches!(opcode, OpCode::AdtBuild | OpCode::ArrayNew | OpCode::JointBuild) {
+                (1, u32::MAX, 0)
+            } else {
+                (0, 1, u32::MAX)
+            };
+            chunk.code[0] = Instruction::new(opcode, 0, b, c, imm, 1);
+            assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Register, "{opcode:?}");
+        }
     }
 
     #[test]

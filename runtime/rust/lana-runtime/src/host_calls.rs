@@ -10,7 +10,8 @@
 //! value to JSON immediately and `store_get` decodes a fresh value, so no
 //! aliasing between the VM's value graph and the store is possible.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use lana_vm::gc::{Gc, GraphCell};
 
 use lana_bytecode::LanaError;
 use lana_vm::value::{Array, Map, Value, ValueKind};
@@ -191,12 +192,13 @@ impl StoreHost {
                     let key = match self.heap.string(&record.key) { Ok(key) => key, Err(error) => return error };
                     if let Err(error) = map.set(Arc::from("key"), Value::string(key), false) { return error; }
                     if let Err(error) = map.set(Arc::from("value"), record.value, false) { return error; }
-                    items.push(Value::map(Arc::new(Mutex::new(map))));
+                    let map = match Gc::new(&self.heap, GraphCell::new(map)) { Ok(map) => map, Err(error) => return error };
+                    items.push(Value::map(map));
                 }
                 let array = match Array::from_items(&self.heap, items) {
                     Ok(array) => array, Err(error) => return error,
                 };
-                *out = Value::array(Arc::new(Mutex::new(array)));
+                *out = Value::array(match Gc::new(&self.heap, GraphCell::new(array)) { Ok(array) => array, Err(error) => return error });
                 LanaError::Ok
             }
             Err(e) => e,
@@ -431,7 +433,7 @@ impl StoreHost {
                 let array = match Array::from_items(&self.heap, items) {
                     Ok(array) => array, Err(error) => return error,
                 };
-                *out = Value::array(Arc::new(Mutex::new(array)));
+                *out = Value::array(match Gc::new(&self.heap, GraphCell::new(array)) { Ok(array) => array, Err(error) => return error });
                 LanaError::Ok
             }
             Err(e) => e,
@@ -616,7 +618,7 @@ fn decision_to_value(heap: &lana_vm::heap::Heap, decision: &Decision) -> Result<
     if let Some(s) = &decision.requested_evidence {
         map.set(Arc::from("requested_evidence"), Value::string(s.clone()), false)?;
     }
-    Ok(Value::map(Arc::new(Mutex::new(map))))
+    Ok(Value::map(Gc::new(heap, GraphCell::new(map))?))
 }
 
 fn event_to_value(heap: &lana_vm::heap::Heap, event: &Event) -> Result<Value, LanaError> {
@@ -629,7 +631,7 @@ fn event_to_value(heap: &lana_vm::heap::Heap, event: &Event) -> Result<Value, La
     map.set(Arc::from("timestamp"), Value::number(event.timestamp as f64), false)?;
     map.set(Arc::from("revision"), Value::number(event.revision as f64), false)?;
     map.set(Arc::from("correction_of"), Value::number(event.correction_of as f64), false)?;
-    Ok(Value::map(Arc::new(Mutex::new(map))))
+    Ok(Value::map(Gc::new(heap, GraphCell::new(map))?))
 }
 
 fn hex_encode(digest: &[u8; 32]) -> String {
@@ -683,11 +685,12 @@ mod tests {
     }
 
     fn map(entries: &[(&str, Value)]) -> Value {
-        let mut map = Map::new(&lana_vm::heap::Heap::default(), entries.len()).unwrap();
+        let heap = lana_vm::heap::Heap::default();
+        let mut map = Map::new(&heap, entries.len()).unwrap();
         for (key, value) in entries {
             map.set(Arc::from(*key), value.clone(), false).unwrap();
         }
-        Value::map(Arc::new(Mutex::new(map)))
+        Value::map(Gc::new(&heap, GraphCell::new(map)).unwrap())
     }
 
     fn string(s: &str) -> Value {

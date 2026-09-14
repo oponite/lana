@@ -35,7 +35,7 @@ const LANA_HISTORY_LATEST: u32 = 0;
 const LANA_HISTORY_DURATION: u32 = 1;
 
 /// Host-call names in id order, mirroring the table in `vm/c/assembler.c`.
-const HOST_CALL_NAMES: &[&str] = &[
+pub(crate) const HOST_CALL_NAMES: &[&str] = &[
     "args", "read_text", "write_text", "now", "random", "assert",
     "map_new", "map_has", "map_get", "map_set", "map_keys", "index_get", "index_set", "json_parse", "json_stringify",
     "csv_read", "csv_write", "string_length", "string_byte_at",

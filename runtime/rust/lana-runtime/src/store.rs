@@ -9,7 +9,8 @@
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use lana_vm::gc::{Gc, GraphCell};
 use std::time::{Duration, Instant};
 
 use lana_bytecode::LanaError;
@@ -655,7 +656,7 @@ pub fn store_snapshot(store: &mut Store) -> Result<(Value, StoreRevisionInfo), L
         let value = decode_bytes(data)?;
         map.set(Arc::from(key.as_str()), value, true).map_err(|_| LanaError::Key)?;
     }
-    let out_value = Value::map(Arc::new(Mutex::new(map)));
+    let out_value = Value::map(Gc::new(&heap, GraphCell::new(map))?);
     let encoded = codec::encode_value(&out_value)?;
     let digest = sha256::sha256(encoded.as_bytes());
 

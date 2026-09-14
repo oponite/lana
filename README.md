@@ -61,6 +61,16 @@ creates an immutable lazy distribution, and `sample()` returns a concrete state.
 
 ## Install and run
 
+On macOS, the Homebrew tap installs the published release:
+
+```bash
+brew tap oponite/lana
+brew install lana
+```
+
+For the current source tree, install CMake, a C11 compiler, Rust/Cargo,
+pkg-config, libffi, and OpenSSL 3 development files. Then build from source:
+
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
@@ -69,13 +79,15 @@ cmake --install build --prefix "$HOME/.local"
 "$HOME/.local/bin/lana" check examples/belief.lana
 ```
 
-The installed compile and run path consists of the C11 `lana`/`lanavm` binaries
+The installed compile and run path consists of the Rust `lana`/`lanavm` binaries
 and the self-hosted Lana compiler bytecode. Python is not required.
+The install also includes `liblana_ffi` for the Rust Python API. The C headers
+describe the C reference ABI, not the opaque Rust value handles.
 
 The canonical VM is the Rust runtime (crates `lana-bytecode`, `lana-vm`,
 `lana-runtime`, `lana-ffi`, `lana-cli` under `vm/rust/`, `runtime/rust/`, and
-`tools/rust/`). The C11 VM is retained as a reference implementation for
-conformance comparison.
+`tools/rust/`). The C11 VM is retained as a frozen reference implementation for
+differential conformance comparison.
 
 For VM development:
 
@@ -229,7 +241,7 @@ for every program or environment.
 
 ## Optional integrations
 
-The source-install integrations connect Lana 2.0.0 to JSON subprocess callers,
+The source-install integrations connect Lana 2.2.0 to JSON subprocess callers,
 MCP hosts, Jupyter, VS Code, Neovim, and a narrow native C ABI without adding
 dependencies to the normal Lana build. Start with
 [`integrations/README.md`](integrations/README.md).

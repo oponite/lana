@@ -89,6 +89,15 @@ if(LANA_BUILD_FUZZERS)
     if(NOT LANA_ENABLE_SANITIZERS)
         message(FATAL_ERROR "LANA_BUILD_FUZZERS requires LANA_ENABLE_SANITIZERS")
     endif()
+    if(APPLE)
+        execute_process(COMMAND "${LANA_PYTHON3}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/build_fuzzer_runtime.py"
+            --cc "${CMAKE_C_COMPILER}" --output "${CMAKE_CURRENT_BINARY_DIR}/fuzzer-runtime"
+            RESULT_VARIABLE LANA_FUZZER_BUILD_RESULT)
+        if(NOT LANA_FUZZER_BUILD_RESULT EQUAL 0)
+            message(FATAL_ERROR "The pinned macOS libFuzzer runtime failed qualification")
+        endif()
+    endif()
     add_library(lanaruntime_fuzz STATIC ${LANA_RUNTIME_SOURCES})
     target_include_directories(lanaruntime_fuzz PUBLIC ${LANA_INCLUDE_DIRS})
     target_link_libraries(lanaruntime_fuzz PUBLIC Threads::Threads PkgConfig::FFI OpenSSL::SSL ${LANA_BLAS_LIBS} ${LANA_METAL_LIBS})
@@ -102,9 +111,14 @@ if(LANA_BUILD_FUZZERS)
     add_executable(lana_bytecode_fuzz tests/unit/fuzz_bytecode.c)
     target_link_libraries(lana_bytecode_fuzz PRIVATE lanaruntime_fuzz m)
     target_compile_options(lana_bytecode_fuzz PRIVATE
-        -Wall -Wextra -Wpedantic -Werror -fsanitize=fuzzer,address,undefined
+        -Wall -Wextra -Wpedantic -Werror -fsanitize=fuzzer-no-link,address,undefined
         -fno-omit-frame-pointer)
-    target_link_options(lana_bytecode_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    if(APPLE)
+        target_link_options(lana_bytecode_fuzz PRIVATE -fsanitize=address,undefined)
+        target_link_libraries(lana_bytecode_fuzz PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/fuzzer-runtime/libFuzzer.a" c++)
+    else()
+        target_link_options(lana_bytecode_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    endif()
 endif()
 
 add_native_compile_failure(native_import_cycle_rejected_a tests/regression/import_cycle_a.lana "import cycle detected" "LANA_ERR_ASSERTION")
@@ -449,6 +463,38 @@ add_test(NAME lana_source_debugger
         -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m10_inspector_pass.lana
         -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/debugger-test-output.txt
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestDebugger.cmake")
+add_test(NAME lana_rust_project_workflow
+    COMMAND "${CMAKE_COMMAND}" -DLANA=${LANA_RUST_BINARY}
+        -DROOT=${CMAKE_CURRENT_BINARY_DIR}/rust-project-workflow
+        -DEXPLICIT_DIRECTORY=ON
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestProjectWorkflow.cmake")
+add_test(NAME lana_rust_source_debugger
+    COMMAND "${CMAKE_COMMAND}" -DLANA=${LANA_RUST_BINARY}
+        -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m10_inspector_pass.lana
+        -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/rust-debugger-test-output.txt
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestDebugger.cmake")
+add_test(NAME lana_rust_compiler_bootstrap
+    COMMAND "${CMAKE_COMMAND}"
+        -DLANA_VM=${LANA_RUST_BINARY} -DLANA_COMPILER=${LANA_NATIVE_COMPILER}
+        -DLANA_BUNDLE=${LANA_COMPILER_BUNDLE}
+        -DLANA_REFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/compiler/bootstrap/compiler.lasm
+        -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/rust-compiler-selfcheck.lasm
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyNativeBootstrap.cmake")
+add_test(NAME lana_rust_imports COMMAND "${LANA_RUST_BINARY}" run
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/import_main.lana")
+foreach(example IN ITEMS lana_pricing_model qqq_eow_probability qqq_friday_strike_probability
+        qqq_intraday_ema_probability qqq_next_day_direction qqq_weekly_direction)
+    add_test(NAME lana_rust_check_${example} COMMAND "${LANA_RUST_BINARY}" check
+        "${CMAKE_CURRENT_SOURCE_DIR}/integrations/lana/${example}.lana")
+    set_tests_properties(lana_rust_check_${example} PROPERTIES
+        ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+endforeach()
+if(LANA_PYTHON3)
+    add_test(NAME lana_rust_cli COMMAND ${LANA_PYTHON3} -E
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rust_cli.py" "${LANA_RUST_BINARY}")
+    add_test(NAME lana_rust_lsp COMMAND ${LANA_PYTHON3} -E
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lsp.py" "${LANA_RUST_BINARY}" "${LANA_VERSION}")
+endif()
 if(CMAKE_OSX_ARCHITECTURES)
     string(REPLACE ";" "," LANA_INSTALL_ARCHS "${CMAKE_OSX_ARCHITECTURES}")
     set(LANA_INSTALL_EXPECTED_ARCH -DEXPECTED_ARCH=${LANA_INSTALL_ARCHS})
@@ -459,5 +505,6 @@ add_test(NAME lana_local_install
         -DROOT=${CMAKE_CURRENT_BINARY_DIR}/local-install
         -DPYTHON=${LANA_PYTHON3}
         -DVERIFY_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_install.py
+        -DLIBDIR=${CMAKE_INSTALL_LIBDIR}
         ${LANA_INSTALL_EXPECTED_ARCH}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLocalInstall.cmake")

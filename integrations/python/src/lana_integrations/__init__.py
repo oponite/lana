@@ -1,4 +1,4 @@
-"""Optional integrations for Lana 2.0 runtimes."""
+"""Optional integrations for Lana 2.2 runtimes."""
 
 from .bridge import BridgeRunner, LanaCompatibilityError
 from .evidence import EvidenceValidationError, validate_evidence
@@ -12,4 +12,4 @@ __all__ = [
     "LanaResult",
     "validate_evidence",
 ]
-__version__ = "2.1.0"
+__version__ = "2.2.0"

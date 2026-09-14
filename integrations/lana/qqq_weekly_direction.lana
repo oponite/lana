@@ -1,0 +1,123 @@
+// qqq_weekly_direction — Lana re-runs the logistic fit for the weekly QQQ
+// direction study. Python ships the standardized training matrix and its own
+// fitted weights; Lana independently fits logistic_binary via std/ml, applies
+// the isotonic calibration, and checks its weights against Python's. Advisory
+// only; never authorizes an order.
+
+import "./bridge.lana" as bridge;
+import "std/ml" as ml;
+
+fn require_probability(value, label) {
+    assert(value >= 0, label);
+    assert(value <= 1, label);
+    return value;
+}
+
+fn abs_number(value) {
+    if (value < 0) { return -value; }
+    return value;
+}
+
+fn calibrated(score, breakpoints, probabilities) {
+    if (score <= breakpoints[0]) { return probabilities[0]; }
+    let index = 1;
+    while (index < array_length(breakpoints)) {
+        if (score <= breakpoints[index]) {
+            let fraction = (score - breakpoints[index - 1]) / (breakpoints[index] - breakpoints[index - 1]);
+            return probabilities[index - 1] + fraction * (probabilities[index] - probabilities[index - 1]);
+        }
+        index = index + 1;
+    }
+    return probabilities[array_length(probabilities) - 1];
+}
+
+fn passes_confidence_gate(metrics, policy) {
+    if (metrics["rows"] < policy["min_walk_forward_rows"]) { return false; }
+    if (metrics["brier_score"] >= metrics["constant_baseline_brier_score"]) { return false; }
+    if (metrics["log_loss"] >= metrics["constant_baseline_log_loss"]) { return false; }
+    if (metrics["calibration_error"] > policy["max_calibration_error"]) { return false; }
+    return true;
+}
+
+fn tensor_to_array(t) {
+    let count = shape(t)[0];
+    let out = array_new(0);
+    let i = 0;
+    while (i < count) {
+        array_push(out, t[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+fn forecast(request) {
+    assert(request["schema"] == 1, "unsupported weekly direction schema");
+    assert(request["kind"] == "qqq_weekly_direction_request", "invalid weekly direction kind");
+    assert(request["symbol"] == "QQQ", "request symbol must be QQQ");
+    assert(request["reference_date"] != request["target_date"], "target date must differ from reference date");
+    assert(request["advisory_only"] == true, "forecast must be advisory-only");
+    let refit = request["refit"];
+    let ml_config = refit["ml"];
+    let fit = ml.fit("logistic_binary",
+        {x: tensor(refit["train_x"]), y: tensor(refit["train_y"])},
+        {epochs: ml_config["epochs"], learning_rate: ml_config["learning_rate"], ridge: ml_config["ridge"]});
+    assert(fit[0], "logistic fit failed");
+    let lana_model = fit[1].model;
+    let lana_weights = tensor_to_array(lana_model.parameters.weights);
+    let lana_intercept = lana_model.parameters.intercept;
+
+    // The probability is re-derived from Python's production weights (the model
+    // actually used for the forecast), so Lana's number matches Python's. The
+    // re-fit above is a separate check on the training, not the source of the
+    // probability.
+    let production = request["model"];
+    let production_weights = production["coefficients"];
+    let production_intercept = production["intercept"];
+    let current = refit["current_features"];
+    let score = production_intercept;
+    let index = 0;
+    while (index < array_length(production_weights)) {
+        score = score + production_weights[index] * current[index];
+        index = index + 1;
+    }
+    let probability_up = require_probability(
+        calibrated(score, production["calibration_breakpoints"], production["calibration_probabilities"]),
+        "inferred probability is outside [0,1]"
+    );
+    let probability_down = require_probability(1 - probability_up, "down probability is outside [0,1]");
+
+    // Training verification: Lana's re-fit must match Python's verification fit
+    // on the same capped rows.
+    let verification_weights = refit["python_weights"];
+    let verification_intercept = refit["python_intercept"];
+    let max_delta = abs_number(lana_intercept - verification_intercept);
+    index = 0;
+    while (index < array_length(lana_weights)) {
+        let delta = abs_number(lana_weights[index] - verification_weights[index]);
+        if (delta > max_delta) { max_delta = delta; }
+        index = index + 1;
+    }
+    let fit_agreement = max_delta <= refit["fit_agreement_tolerance"];
+    let confidence = "low";
+    if (passes_confidence_gate(request["validation"], request["confidence_policy"])) { confidence = "high"; }
+    if (!fit_agreement) { confidence = "low"; }
+    return {
+        schema: 1,
+        kind: "qqq_weekly_direction_forecast",
+        symbol: "QQQ",
+        reference_date: request["reference_date"],
+        target_date: request["target_date"],
+        probability_up: probability_up,
+        probability_down: probability_down,
+        confidence_status: confidence,
+        fit_agreement: fit_agreement,
+        max_weight_delta: max_delta,
+        lana_weights: lana_weights,
+        lana_intercept: lana_intercept,
+        training_rows: array_length(refit["train_y"]),
+        advisory_only: true
+    };
+}
+
+let request = bridge.read_request();
+bridge.write_response(forecast(request));

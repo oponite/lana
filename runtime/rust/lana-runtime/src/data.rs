@@ -10,7 +10,8 @@
 //! * the parser accepts `\u` escapes (including surrogate pairs), enforces a
 //!   128-level depth limit, and rejects leading `+`/`0` in numbers.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use lana_vm::gc::{Gc, GraphCell};
 
 use lana_bytecode::LanaError;
 use lana_vm::value::{Array, Map, MapEntry, Value, ValueKind};
@@ -182,7 +183,7 @@ fn json_value(parser: &mut JsonParser, depth: usize, heap: &lana_vm::heap::Heap)
             return Err(LanaError::Parse);
         }
         parser.offset += 1;
-        return Ok(Value::array(Arc::new(Mutex::new(array))));
+        return Ok(Value::array(Gc::new(heap, GraphCell::new(array))?));
     }
     if parser.data[parser.offset] == b'{' {
         parser.offset += 1;
@@ -214,7 +215,7 @@ fn json_value(parser: &mut JsonParser, depth: usize, heap: &lana_vm::heap::Heap)
             return Err(LanaError::Parse);
         }
         parser.offset += 1;
-        return Ok(Value::map(Arc::new(Mutex::new(map))));
+        return Ok(Value::map(Gc::new(heap, GraphCell::new(map))?));
     }
     let remaining = &parser.data[parser.offset..];
     if remaining.starts_with(b"null") {
@@ -331,6 +332,7 @@ fn parse_number_strict(data: &[u8], offset: usize) -> Result<(f64, usize), LanaE
 
 /// Parse a complete JSON document, mirroring `lana_json_parse`.
 pub fn json_parse(text: &str) -> Result<Value, LanaError> {
+    let _collection = lana_vm::gc::Scope::new();
     let data = text.as_bytes();
     let heap = lana_vm::heap::Heap::new(256 * 1024 * 1024);
     let mut parser = JsonParser { data, offset: 0 };
@@ -367,8 +369,8 @@ fn json_emit(value: &Value, out: &mut String, stack: &mut Vec<usize>, depth: usi
         return Err(LanaError::Limit);
     }
     let identity = match &value.kind {
-        ValueKind::Array(array) => Some(Arc::as_ptr(array) as usize),
-        ValueKind::Map(map) => Some(Arc::as_ptr(map) as usize),
+        ValueKind::Array(array) => Some(Gc::as_ptr(array) as usize),
+        ValueKind::Map(map) => Some(Gc::as_ptr(map) as usize),
         _ => None,
     };
     if let Some(identity) = identity {
@@ -500,6 +502,7 @@ fn csv_records(text: &str) -> Result<Vec<Vec<String>>, LanaError> {
 
 /// Read a CSV file into an array of maps, mirroring `lana_csv_read`.
 pub fn csv_read(path: &str) -> Result<Value, LanaError> {
+    let _collection = lana_vm::gc::Scope::new();
     let heap = lana_vm::heap::Heap::new(256 * 1024 * 1024);
     let mut text = std::fs::read_to_string(path).map_err(|_| LanaError::Io)?;
     if text.starts_with('\u{feff}') {
@@ -530,10 +533,10 @@ pub fn csv_read(path: &str) -> Result<Value, LanaError> {
                 let value = Value::string(Arc::from(row[column].as_str()));
                 map.set(Arc::from(name.as_str()), value, true).map_err(|_| LanaError::Parse)?;
             }
-            items.push(Value::map(Arc::new(Mutex::new(map))));
+            items.push(Value::map(Gc::new(&heap, GraphCell::new(map))?));
         }
     }
-    Ok(Value::array(Arc::new(Mutex::new(Array::from_items(&heap, items)?))))
+    Ok(Value::array(Gc::new(&heap, GraphCell::new(Array::from_items(&heap, items)?))?))
 }
 
 fn csv_scalar(value: &Value, field: &mut String) -> bool {
@@ -672,10 +675,11 @@ mod tests {
 
     #[test]
     fn json_stringify_sorts_keys() {
-        let mut map = Map::new(&lana_vm::heap::Heap::default(), 2).unwrap();
+        let heap = lana_vm::heap::Heap::default();
+        let mut map = Map::new(&heap, 2).unwrap();
         map.set(Arc::from("b"), Value::number(2.0), false).unwrap();
         map.set(Arc::from("a"), Value::number(1.0), false).unwrap();
-        let value = Value::map(Arc::new(Mutex::new(map)));
+        let value = Value::map(Gc::new(&heap, GraphCell::new(map)).unwrap());
         assert_eq!(json_stringify(&value).unwrap(), r#"{"a":1,"b":2}"#);
     }
 
@@ -685,8 +689,8 @@ mod tests {
         map.set(Arc::from("a"), Value::string(Arc::from("1")), false).unwrap();
         map.set(Arc::from("b"), Value::string(Arc::from("x,y")), false).unwrap();
         let heap = lana_vm::heap::Heap::new(4096);
-        let rows = Value::array(Arc::new(Mutex::new(Array::from_items(&heap,
-            vec![Value::map(Arc::new(Mutex::new(map)))]).unwrap())));
+        let rows = Value::array(Gc::new(&heap, GraphCell::new(Array::from_items(&heap,
+            vec![Value::map(Gc::new(&heap, GraphCell::new(map)).unwrap())]).unwrap())).unwrap());
         let path = std::env::temp_dir().join("lana_csv_test.csv");
         let path = path.to_str().unwrap();
         csv_write(path, &rows).unwrap();

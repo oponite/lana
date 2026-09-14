@@ -96,7 +96,10 @@ impl Heap {
 
     pub fn reserve(&self, bytes: usize) -> Result<Reservation, LanaError> {
         let mut reservation = Reservation { heap: self.clone(), bytes: 0 };
-        reservation.resize(bytes)?;
+        if let Err(error) = reservation.resize(bytes) {
+            if error != LanaError::Oom || !crate::gc::collect() { return Err(error); }
+            reservation.resize(bytes)?;
+        }
         Ok(reservation)
     }
 }

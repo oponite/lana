@@ -25,6 +25,8 @@ def outcome(binary, path):
 
 
 def mutations(valid, count, seed):
+    for path in sorted((ROOT / "tests/conformance/fuzz").glob("*.hex")):
+        yield path.stem, bytes.fromhex(path.read_text()), False
     yield "valid", valid, True
     yield "bad-magic", b"FAIL" + valid[4:], False
     yield "trailing", valid + b"\x00", False

@@ -54,7 +54,7 @@ fn passes_confidence_gate(metrics, policy) {
     return true;
 }
 
-fn infer(request) {
+fn infer_probability(request) {
     let model = request["model"];
     let order = request["feature_order"];
     validate_model(model, array_length(order), order);
@@ -78,7 +78,7 @@ fn forecast(request) {
     assert(request["symbol"] == "QQQ", "request symbol must be QQQ");
     assert(request["reference_date"] != request["target_date"], "target date must differ from reference date");
     assert(request["advisory_only"] == true, "forecast must be advisory-only");
-    let probability_up = infer(request);
+    let probability_up = infer_probability(request);
     let probability_down = require_probability(1 - probability_up, "down probability is outside [0,1]");
     let confidence = "low";
     if (passes_confidence_gate(request["validation"], request["confidence_policy"])) { confidence = "high"; }

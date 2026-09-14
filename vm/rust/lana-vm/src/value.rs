@@ -9,7 +9,8 @@
 //! value `Send`, so a child VM's value graph can cross a task boundary.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+use crate::gc::{Gc, GraphCell, GraphCondvar as Condvar, Trace};
 
 use lana_bytecode::{LanaError, ValueType};
 
@@ -382,7 +383,7 @@ pub struct Optimizer {
 #[derive(Debug, Clone)]
 pub struct TrainingResult {
     pub params: Arc<Tensor>,
-    pub steps: Arc<Mutex<Array>>,
+    pub steps: Gc<GraphCell<Array>>,
     pub model_function: u32,
     pub loss_function: u32,
     pub optimizer: Arc<Optimizer>,
@@ -414,7 +415,7 @@ pub struct Posterior {
     pub mean: Arc<Tensor>,
     pub variance: Arc<Tensor>,
     pub samples: Option<Arc<Tensor>>,
-    pub steps: Arc<Mutex<Array>>,
+    pub steps: Gc<GraphCell<Array>>,
     pub seed: u64,
 }
 
@@ -549,7 +550,7 @@ pub struct Task {
     pub id: u64,
     pub group_id: u64,
     /// The completion state, written by the worker and read by the parent.
-    pub state: Arc<Mutex<TaskState>>,
+    pub state: Gc<GraphCell<TaskState>>,
     /// Signalled when the worker finishes the child VM.
     pub completed_cond: Arc<Condvar>,
     /// Set by `CANCEL`; the child VM polls it at each instruction.
@@ -569,20 +570,20 @@ pub struct TaskState {
 
 impl Task {
     /// Create a task handle with a fresh completion state.
-    pub fn new(id: u64, group_id: u64) -> Self {
-        Self {
+    pub fn new(heap: &crate::heap::Heap, id: u64, group_id: u64) -> Result<Self, LanaError> {
+        Ok(Self {
             id,
             group_id,
-            state: Arc::new(Mutex::new(TaskState {
+            state: Gc::new(heap, GraphCell::new(TaskState {
                 status: LanaError::Ok,
                 error: VmError::default(),
                 result: Value::null(),
                 completed: false,
                 joined: false,
-            })),
+            }))?,
             completed_cond: Arc::new(Condvar::new()),
             cancelled: Arc::new(AtomicBool::new(false)),
-        }
+        })
     }
 
     /// Whether the task has been cancelled, mirroring `cancel_task`.
@@ -634,7 +635,7 @@ pub struct Reactive {
     pub relationship: RelationshipKind,
     pub exactness: DerivationExactness,
     pub operation: u32,
-    pub inputs: [Option<Arc<Mutex<Reactive>>>; 2],
+    pub inputs: [Option<Gc<GraphCell<Reactive>>>; 2],
     pub constants: [Option<Value>; 2],
     pub current: Option<Value>,
     pub history: Vec<ReactiveVersion>,
@@ -670,7 +671,7 @@ pub struct PlannedEffect {
     pub id: u64,
     pub kind: Arc<str>,
     pub payload: Value,
-    pub state: Mutex<PlannedEffectState>,
+    pub state: GraphCell<PlannedEffectState>,
 }
 
 /// The mutable execution state of a planned effect, guarded by the effect's
@@ -686,7 +687,13 @@ pub struct PlannedEffectState {
 /// in `runtime/c/shared.c`.
 #[derive(Debug)]
 pub struct CapabilityToken {
-    pub shared: Arc<SharedInformation>,
+    pub shared: Gc<SharedInformation>,
+    pub grant: Arc<CapabilityGrant>,
+}
+
+/// Retained by the shared owner without a reference back to that owner.
+#[derive(Debug)]
+pub struct CapabilityGrant {
     pub id: u64,
     pub permissions: u32,
     pub revoked: AtomicBool,
@@ -731,7 +738,7 @@ pub struct SharedState {
     pub capability_epoch: u64,
     pub next_capability_id: u64,
     pub next_observation_sequence: u64,
-    pub capabilities: Vec<Arc<CapabilityToken>>,
+    pub capabilities: Vec<Arc<CapabilityGrant>>,
     pub observations: Vec<SharedObservation>,
     pub current: Option<SharedCommit>,
 }
@@ -745,7 +752,7 @@ pub struct SharedState {
 pub struct SharedInformation {
     pub identity: u64,
     pub base_snapshot: Value,
-    pub state: Mutex<SharedState>,
+    pub state: GraphCell<SharedState>,
     pub condition: Condvar,
 }
 
@@ -755,9 +762,9 @@ pub struct SharedInformation {
 pub struct Value {
     pub kind: ValueKind,
     pub derivation: Option<Arc<Derivation>>,
-    pub reactive: Option<Arc<Mutex<Reactive>>>,
-    pub claim: Option<Arc<Claim>>,
-    pub planned_effect: Option<Arc<PlannedEffect>>,
+    pub reactive: Option<Gc<GraphCell<Reactive>>>,
+    pub claim: Option<Gc<Claim>>,
+    pub planned_effect: Option<Gc<PlannedEffect>>,
 }
 
 /// The value payload, mirroring the C11 `Value.as` union.
@@ -770,31 +777,112 @@ pub enum ValueKind {
     State(StateValue),
     Distribution { p0: f64, p1: f64 },
     Sample(i32),
-    Joint(Arc<JointState>),
-    Array(Arc<Mutex<Array>>),
+    Joint(Gc<JointState>),
+    Array(Gc<GraphCell<Array>>),
     Function(u32),
-    Task(Arc<Task>),
+    Task(Gc<Task>),
     StateDist(Arc<StateDist>),
-    Map(Arc<Mutex<Map>>),
-    Possibility(Arc<Possibility>),
-    PathSet(Arc<PathSet>),
-    Capability(Arc<CapabilityToken>),
-    Adt(Arc<Adt>),
+    Map(Gc<GraphCell<Map>>),
+    Possibility(Gc<Possibility>),
+    PathSet(Gc<PathSet>),
+    Capability(Gc<CapabilityToken>),
+    Adt(Gc<Adt>),
     Tensor(Arc<Tensor>),
     NQubitState(Arc<Tensor>),
     Povm(Arc<Tensor>),
     Channel(Arc<Tensor>),
     Observable(Arc<Tensor>),
     Lazy { function: u32, bound: usize },
-    Generator(Arc<Mutex<Generator>>),
-    Future(Arc<Mutex<Future>>),
-    Set(Arc<Mutex<Set>>),
+    Generator(Gc<GraphCell<Generator>>),
+    Future(Gc<GraphCell<Future>>),
+    Set(Gc<GraphCell<Set>>),
     Regex(Arc<Regex>),
     Optimizer(Arc<Optimizer>),
-    TrainingResult(Arc<TrainingResult>),
+    TrainingResult(Gc<TrainingResult>),
     InferenceAlgorithm(Arc<InferenceAlgorithm>),
-    Posterior(Arc<Posterior>),
-    Dataset(Arc<Dataset>),
+    Posterior(Gc<Posterior>),
+    Dataset(Gc<Dataset>),
+}
+
+// Enumerate physical ownership edges exactly once, including metadata and inline
+// records. Immutable wrappers must be managed too: two aliases of one ADT own
+// only one copy of its fields, not two copies of those fields' references.
+macro_rules! trace_fields {
+    ($ty:ty: $($field:ident),+ $(,)?) => {
+        unsafe impl Trace for $ty {
+            fn trace(&self, visit: &mut dyn FnMut(usize)) { $(self.$field.trace(visit);)+ }
+        }
+    };
+}
+unsafe impl<T: Trace> Trace for Gc<T> {
+    fn trace(&self, visit: &mut dyn FnMut(usize)) { self.edge(visit); }
+}
+unsafe impl<T: Trace> Trace for Option<T> {
+    fn trace(&self, visit: &mut dyn FnMut(usize)) { if let Some(value) = self { value.trace(visit); } }
+}
+unsafe impl<T: Trace> Trace for Vec<T> {
+    fn trace(&self, visit: &mut dyn FnMut(usize)) { for value in self { value.trace(visit); } }
+}
+unsafe impl<T: Trace, const N: usize> Trace for [T; N] {
+    fn trace(&self, visit: &mut dyn FnMut(usize)) { for value in self { value.trace(visit); } }
+}
+unsafe impl<T: Trace> Trace for crate::heap::Buffer<T> {
+    fn trace(&self, visit: &mut dyn FnMut(usize)) { for value in self.iter() { value.trace(visit); } }
+}
+trace_fields!(Value: kind, reactive, claim, planned_effect);
+trace_fields!(Array: items);
+trace_fields!(Map: entries);
+trace_fields!(MapEntry: value);
+trace_fields!(Set: items);
+trace_fields!(Adt: fields);
+trace_fields!(Possibility: values);
+trace_fields!(PathSet: alternatives);
+trace_fields!(PathAlternative: result);
+trace_fields!(JointState: values, rows);
+trace_fields!(JointRow: values);
+trace_fields!(Generator: registers);
+trace_fields!(Future: registers);
+trace_fields!(Reactive: inputs, constants, current, history);
+trace_fields!(ReactiveVersion: value);
+trace_fields!(Claim: value);
+trace_fields!(PlannedEffect: payload, state);
+trace_fields!(PlannedEffectState: receipts);
+trace_fields!(EffectReceipt: result);
+trace_fields!(CapabilityToken: shared);
+trace_fields!(SharedInformation: base_snapshot, state);
+trace_fields!(SharedState: observations, current);
+trace_fields!(SharedObservation: evidence);
+trace_fields!(SharedCommit: versions);
+trace_fields!(SharedVersion: snapshot);
+trace_fields!(Task: state);
+trace_fields!(TaskState: result);
+trace_fields!(TrainingResult: steps, data);
+trace_fields!(Posterior: steps);
+trace_fields!(Dataset: source, columns, key, limit, other, aggregate);
+unsafe impl Trace for ValueKind {
+    fn trace(&self, visit: &mut dyn FnMut(usize)) {
+        match self {
+            Self::Joint(value) => value.trace(visit),
+            Self::Array(value) => value.trace(visit),
+            Self::Task(value) => value.trace(visit),
+            Self::Map(value) => value.trace(visit),
+            Self::Possibility(value) => value.trace(visit),
+            Self::PathSet(value) => value.trace(visit),
+            Self::Capability(value) => value.trace(visit),
+            Self::Adt(value) => value.trace(visit),
+            Self::Generator(value) => value.trace(visit),
+            Self::Future(value) => value.trace(visit),
+            Self::Set(value) => value.trace(visit),
+            Self::TrainingResult(value) => value.trace(visit),
+            Self::Posterior(value) => value.trace(visit),
+            Self::Dataset(value) => value.trace(visit),
+            Self::Null | Self::Number(_) | Self::Bool(_) | Self::String(_) | Self::State(_)
+            | Self::Distribution { .. } | Self::Sample(_) | Self::Function(_) | Self::StateDist(_)
+            | Self::Tensor(_) | Self::NQubitState(_) | Self::Povm(_) | Self::Channel(_)
+            | Self::Observable(_) | Self::Lazy { .. } | Self::Regex(_) | Self::Optimizer(_)
+            | Self::InferenceAlgorithm(_) => {},
+        }
+    }
 }
 
 impl Value {
@@ -826,7 +914,7 @@ impl Value {
         Self { kind: ValueKind::Sample(sample), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn array(array: Arc<Mutex<Array>>) -> Self {
+    pub fn array(array: Gc<GraphCell<Array>>) -> Self {
         Self { kind: ValueKind::Array(array), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
@@ -834,7 +922,7 @@ impl Value {
         Self { kind: ValueKind::Function(function), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn task(task: Arc<Task>) -> Self {
+    pub fn task(task: Gc<Task>) -> Self {
         Self { kind: ValueKind::Task(task), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
@@ -842,27 +930,27 @@ impl Value {
         Self { kind: ValueKind::StateDist(distribution), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn map(map: Arc<Mutex<Map>>) -> Self {
+    pub fn map(map: Gc<GraphCell<Map>>) -> Self {
         Self { kind: ValueKind::Map(map), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn possibility(possibility: Arc<Possibility>) -> Self {
+    pub fn possibility(possibility: Gc<Possibility>) -> Self {
         Self { kind: ValueKind::Possibility(possibility), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn paths(paths: Arc<PathSet>) -> Self {
+    pub fn paths(paths: Gc<PathSet>) -> Self {
         Self { kind: ValueKind::PathSet(paths), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn joint(joint: Arc<JointState>) -> Self {
+    pub fn joint(joint: Gc<JointState>) -> Self {
         Self { kind: ValueKind::Joint(joint), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn capability(capability: Arc<CapabilityToken>) -> Self {
+    pub fn capability(capability: Gc<CapabilityToken>) -> Self {
         Self { kind: ValueKind::Capability(capability), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn adt(adt: Arc<Adt>) -> Self {
+    pub fn adt(adt: Gc<Adt>) -> Self {
         Self { kind: ValueKind::Adt(adt), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
@@ -890,15 +978,15 @@ impl Value {
         Self { kind: ValueKind::Lazy { function, bound }, derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn generator(generator: Arc<Mutex<Generator>>) -> Self {
+    pub fn generator(generator: Gc<GraphCell<Generator>>) -> Self {
         Self { kind: ValueKind::Generator(generator), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn future(future: Arc<Mutex<Future>>) -> Self {
+    pub fn future(future: Gc<GraphCell<Future>>) -> Self {
         Self { kind: ValueKind::Future(future), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn set(set: Arc<Mutex<Set>>) -> Self {
+    pub fn set(set: Gc<GraphCell<Set>>) -> Self {
         Self { kind: ValueKind::Set(set), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
@@ -910,7 +998,7 @@ impl Value {
         Self { kind: ValueKind::Optimizer(optimizer), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn training_result(result: Arc<TrainingResult>) -> Self {
+    pub fn training_result(result: Gc<TrainingResult>) -> Self {
         Self { kind: ValueKind::TrainingResult(result), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
@@ -918,11 +1006,11 @@ impl Value {
         Self { kind: ValueKind::InferenceAlgorithm(algorithm), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn posterior(posterior: Arc<Posterior>) -> Self {
+    pub fn posterior(posterior: Gc<Posterior>) -> Self {
         Self { kind: ValueKind::Posterior(posterior), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    pub fn dataset(dataset: Arc<Dataset>) -> Self {
+    pub fn dataset(dataset: Gc<Dataset>) -> Self {
         Self { kind: ValueKind::Dataset(dataset), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
@@ -1055,13 +1143,13 @@ impl Value {
 
     fn container_identity(&self) -> Option<usize> {
         match &self.kind {
-            ValueKind::Array(v) => Some(Arc::as_ptr(v) as usize),
-            ValueKind::Map(v) => Some(Arc::as_ptr(v) as usize),
-            ValueKind::Set(v) => Some(Arc::as_ptr(v) as usize),
-            ValueKind::Joint(v) => Some(Arc::as_ptr(v) as usize),
-            ValueKind::Possibility(v) => Some(Arc::as_ptr(v) as usize),
-            ValueKind::PathSet(v) => Some(Arc::as_ptr(v) as usize),
-            ValueKind::Adt(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Array(v) => Some(Gc::as_ptr(v) as usize),
+            ValueKind::Map(v) => Some(Gc::as_ptr(v) as usize),
+            ValueKind::Set(v) => Some(Gc::as_ptr(v) as usize),
+            ValueKind::Joint(v) => Some(Gc::as_ptr(v) as usize),
+            ValueKind::Possibility(v) => Some(Gc::as_ptr(v) as usize),
+            ValueKind::PathSet(v) => Some(Gc::as_ptr(v) as usize),
+            ValueKind::Adt(v) => Some(Gc::as_ptr(v) as usize),
             _ => None,
         }
     }
@@ -1093,7 +1181,7 @@ impl Value {
         fn check(value: &Value, rejected: LanaError) -> Result<(), LanaError> {
             let bad = match &value.kind {
                 ValueKind::Possibility(_) | ValueKind::PathSet(_) => rejected == LanaError::UnresolvedValue,
-                ValueKind::Capability(v) => rejected == LanaError::ClaimRevoked && v.revoked.load(Ordering::Acquire),
+                ValueKind::Capability(v) => rejected == LanaError::ClaimRevoked && v.grant.revoked.load(Ordering::Acquire),
                 _ => false,
             };
             if bad { Err(rejected) } else { Ok(()) }
@@ -1143,13 +1231,13 @@ impl Value {
             if out.failed { return Err(LanaError::Oom); }
             let frame_index = stack.len() - 1;
             let identity = match &stack[frame_index].value.kind {
-                ValueKind::Array(value) => Some(Arc::as_ptr(value) as usize),
-                ValueKind::Map(value) => Some(Arc::as_ptr(value) as usize),
-                ValueKind::Set(value) => Some(Arc::as_ptr(value) as usize),
-                ValueKind::Joint(value) => Some(Arc::as_ptr(value) as usize),
-                ValueKind::Possibility(value) => Some(Arc::as_ptr(value) as usize),
-                ValueKind::PathSet(value) => Some(Arc::as_ptr(value) as usize),
-                ValueKind::Adt(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Array(value) => Some(Gc::as_ptr(value) as usize),
+                ValueKind::Map(value) => Some(Gc::as_ptr(value) as usize),
+                ValueKind::Set(value) => Some(Gc::as_ptr(value) as usize),
+                ValueKind::Joint(value) => Some(Gc::as_ptr(value) as usize),
+                ValueKind::Possibility(value) => Some(Gc::as_ptr(value) as usize),
+                ValueKind::PathSet(value) => Some(Gc::as_ptr(value) as usize),
+                ValueKind::Adt(value) => Some(Gc::as_ptr(value) as usize),
                 _ => None,
             };
             let Some(identity) = identity else {
@@ -1421,8 +1509,9 @@ mod tests {
 
     #[test]
     fn print_cycles_aliases_and_deep_graphs() {
+        let _collection = crate::gc::Scope::new();
         let heap = crate::heap::Heap::new(4 * 1024 * 1024);
-        let array = Arc::new(Mutex::new(Array::new(&heap, 0).unwrap()));
+        let array = Gc::new(&heap, GraphCell::new(Array::new(&heap, 0).unwrap())).unwrap();
         let value = Value::array(array.clone());
         array.lock().unwrap().items.push(value.clone()).unwrap();
         assert_eq!(value.print(), "[<cycle>]");
@@ -1430,12 +1519,12 @@ mod tests {
         assert_eq!(value.check_capabilities(4096), Ok(()));
         array.lock().unwrap().items.clear();
         array.lock().unwrap().items.push(Value::number(1.0)).unwrap();
-        let aliases = Value::array(Arc::new(Mutex::new(Array::from_items(&heap, vec![value.clone(), value]).unwrap())));
+        let aliases = Value::array(Gc::new(&heap, GraphCell::new(Array::from_items(&heap, vec![value.clone(), value]).unwrap())).unwrap());
         assert_eq!(aliases.print(), "[[1], [1]]");
         assert_eq!(aliases.try_print(4).unwrap_err(), LanaError::Oom);
-        let mut roots = vec![Arc::new(Mutex::new(Array::from_items(&heap, vec![Value::number(1.0)]).unwrap()))];
+        let mut roots = vec![Gc::new(&heap, GraphCell::new(Array::from_items(&heap, vec![Value::number(1.0)]).unwrap())).unwrap()];
         for _ in 0..5000 {
-            roots.push(Arc::new(Mutex::new(Array::from_items(&heap, vec![Value::array(roots.last().unwrap().clone())]).unwrap())));
+            roots.push(Gc::new(&heap, GraphCell::new(Array::from_items(&heap, vec![Value::array(roots.last().unwrap().clone())]).unwrap())).unwrap());
         }
         let root = Value::array(roots.last().unwrap().clone());
         let rendered = root.try_print(4 * 1024 * 1024).unwrap();
@@ -1443,16 +1532,16 @@ mod tests {
         assert_eq!(root.check_resolved(4 * 1024 * 1024), Ok(()));
         assert_eq!(root.check_capabilities(4 * 1024 * 1024), Ok(()));
         assert_eq!(root.check_resolved(16), Err(LanaError::Oom));
-        let unknown = Value::possibility(Arc::new(Possibility {
+        let unknown = Value::possibility(Gc::new(&heap, Possibility {
             values: vec![Value::number(1.), Value::number(2.)], weights: None, dependency_id: 1,
-        }));
-        roots[0].lock().unwrap().items[0] = Value::adt(Arc::new(Adt { variant: 0, fields: vec![unknown] }));
+        }).unwrap());
+        roots[0].lock().unwrap().items[0] = Value::adt(Gc::new(&heap, Adt { variant: 0, fields: vec![unknown] }).unwrap());
         assert_eq!(root.check_resolved(4 * 1024 * 1024), Err(LanaError::UnresolvedValue));
-        for root in &roots { root.lock().unwrap().items.clear(); }
     }
 
     #[test]
     fn type_names_match_c11() {
+        let heap = crate::heap::Heap::default();
         assert_eq!(Value::null().type_name(), "null");
         assert_eq!(Value::number(1.0).type_name(), "number");
         assert_eq!(Value::boolean(true).type_name(), "bool");
@@ -1466,18 +1555,20 @@ mod tests {
                 .type_name(),
             "state_dist"
         );
-        let shared = Arc::new(SharedInformation {
+        let shared = Gc::new(&heap, SharedInformation {
             identity: 1,
             base_snapshot: Value::null(),
-            state: Mutex::new(SharedState::default()),
+            state: GraphCell::new(SharedState::default()),
             condition: Condvar::new(),
-        });
-        let token = Arc::new(CapabilityToken {
+        }).unwrap();
+        let token = Gc::new(&heap, CapabilityToken {
             shared,
-            id: 1,
-            permissions: LANA_CAPABILITY_ADMIN,
-            revoked: AtomicBool::new(false),
-        });
+            grant: Arc::new(CapabilityGrant {
+                id: 1,
+                permissions: LANA_CAPABILITY_ADMIN,
+                revoked: AtomicBool::new(false),
+            }),
+        }).unwrap();
         assert_eq!(Value::capability(token).type_name(), "shared_capability");
     }
 
@@ -1505,8 +1596,8 @@ mod tests {
     #[test]
     fn print_matches_c11_array() {
         let heap = crate::heap::Heap::new(4096);
-        let array = Arc::new(Mutex::new(Array::from_items(&heap,
-            vec![Value::number(1.0), Value::boolean(true)]).unwrap()));
+        let array = Gc::new(&heap, GraphCell::new(Array::from_items(&heap,
+            vec![Value::number(1.0), Value::boolean(true)]).unwrap())).unwrap();
         assert_eq!(Value::array(array).print(), "[1, true]");
     }
 }

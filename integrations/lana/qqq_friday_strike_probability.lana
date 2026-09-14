@@ -59,7 +59,7 @@ fn passes_confidence_gate(metrics, policy) {
     return true;
 }
 
-fn infer(request) {
+fn infer_probability(request) {
     let model = request["model"];
     let order = request["feature_order"];
     validate_model(model, array_length(order), order);
@@ -87,7 +87,7 @@ fn forecast(request) {
     assert(request["reference_open"] > 0, "reference open must be positive");
     assert(request["strike"] > 0, "strike must be positive");
     assert(abs_value(request["strike"] - request["reference_open"]) <= request["max_strike_offset"], "strike is outside allowed range");
-    let probability_above = infer(request);
+    let probability_above = infer_probability(request);
     let probability_below = require_probability(1 - probability_above, "below probability is outside [0,1]");
     let confidence = "low";
     if (passes_confidence_gate(request["validation"], request["confidence_policy"])) { confidence = "high"; }

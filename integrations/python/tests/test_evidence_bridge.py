@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def built_lana() -> Path:
-    executable = ROOT / "build" / "lana"
+    executable = Path(os.environ.get("LANA_EXECUTABLE", ROOT / "build" / "lana"))
     if not executable.is_file():
         pytest.skip("requires a built Lana executable")
     return executable

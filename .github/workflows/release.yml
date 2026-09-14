@@ -1,20 +1,20 @@
-name: Release Lana 2.1.0
+name: Release Lana 2.2.0
 
 on:
   push:
-    tags: ["v2.1.0"]
+    tags: ["v2.2.0"]
 
 permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION: "2.1.0"
+  EXPECTED_VERSION: "2.2.0"
 
 jobs:
   linux:
     name: Release gates (Linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Verify tag and version
@@ -58,6 +58,11 @@ jobs:
           version="$(tr -d '\n' < VERSION)"
           test "$version" = "$EXPECTED_VERSION"
           test "$GITHUB_REF_NAME" = "v$version"
+      - name: Native build dependencies
+        run: |
+          brew install cmake libffi openssl@3 pkg-config
+          cargo --version
+          rustup target add ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
       - name: Build and install ${{ matrix.arch }} binaries
         run: |
           cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES='${{ matrix.arch }}'
@@ -66,12 +71,21 @@ jobs:
           cmake --install build-release --prefix "$prefix"
           python3 -E tests/verify_install.py --prefix "$prefix" --architecture '${{ matrix.arch }}'
           tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${{ matrix.arch }}.tar.gz" .
+      - name: Verify native Metal lifetime
+        if: matrix.arch == 'arm64'
+        run: bash tests/run_macos_metal_leaks.sh build/metal-leaks
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lana-macos-${{ matrix.arch }}
           path: ${{ runner.temp }}/lana-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
           retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: matrix.arch == 'arm64' && always()
+        with:
+          name: macos-metal-leak-evidence
+          path: build/metal-leaks/
+          if-no-files-found: error
 
   macos:
     name: Assemble macOS universal artifact
@@ -92,11 +106,12 @@ jobs:
           prefix="$RUNNER_TEMP/lana-install"
           cp -R "$arm" "$prefix"
           cmp "$arm/bin/lana-compiler.labc" "$intel/bin/lana-compiler.labc"
-          for file in bin/lana bin/lanavm lib/liblanaruntime.a; do
+          for file in bin/lana bin/lanavm lib/liblanaruntime.a lib/liblana_ffi.dylib; do
             lipo -create "$arm/$file" "$intel/$file" -output "$prefix/$file"
           done
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
           lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
+          lipo "$prefix/lib/liblana_ffi.dylib" -verify_arch arm64 x86_64
           arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${EXPECTED_VERSION}-macos-universal.tar.gz" .
           (
@@ -108,8 +123,8 @@ jobs:
         with:
           name: lana-macos-universal
           path: |
-            ${{ runner.temp }}/lana-2.1.0-macos-universal.tar.gz
-            ${{ runner.temp }}/lana-2.1.0-macos-universal.tar.gz.sha256
+            ${{ runner.temp }}/lana-2.2.0-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-2.2.0-macos-universal.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -153,6 +168,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libffi-dev libssl-dev pkg-config
+          cargo --version
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: lana-macos-universal
@@ -185,6 +205,7 @@ jobs:
 
             depends_on "cmake" => :build
             depends_on "pkgconf" => :build
+            depends_on "rust" => :build
             depends_on "libffi"
             depends_on "openssl@3"
 
@@ -192,13 +213,6 @@ jobs:
               system "cmake", "-S", ".", "-B", "build", *std_cmake_args
               system "cmake", "--build", "build", "--parallel"
               system "cmake", "--install", "build"
-              libexec.install bin/"lana-compiler.labc"
-              (bin/"lana").rename bin/"lana-bin"
-              (bin/"lana").write <<~EOS
-                #!/bin/sh
-                export LANA_COMPILER_LABC="#{libexec}/lana-compiler.labc"
-                exec "#{bin}/lana-bin" "\$@"
-              EOS
             end
 
             test do
@@ -220,8 +234,8 @@ jobs:
           tar -C "$source_root" -xzf "$RUNNER_TEMP/lana-release-files/lana-${EXPECTED_VERSION}-source.tar.gz"
           cmake -S "$source_root/lana-${EXPECTED_VERSION}" -B "$source_root/build" -DCMAKE_BUILD_TYPE=Release
           cmake --build "$source_root/build" --parallel
-          "$source_root/build/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          "$source_root/build/lana" run "$source_root/lana-${EXPECTED_VERSION}/examples/belief.lana"
+          cmake --install "$source_root/build" --prefix "$source_root/install"
+          python3 -E "$source_root/lana-${EXPECTED_VERSION}/tests/verify_install.py" --prefix "$source_root/install"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

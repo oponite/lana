@@ -1,0 +1,262 @@
+// lana_pricing_model — causal trend + jump + noise return decomposition and
+// next-bar close forecast (LIP-028 std/ml).
+//
+// r_t = trend_t + jump_t + noise_t, where every component at bar t uses only
+// data <= t. The decomposed components become features for a ridge/linear
+// regression that predicts the next bar's log-return, converted to a close
+// price with a +/- 1-sigma band. Advisory only; never authorizes an order.
+
+import "./bridge.lana" as bridge;
+import "std/ml" as ml;
+
+// --- local numeric helpers (Lana's math module has no transcendentals) ---
+
+fn finite(value) {
+    if (type_of(value) != "number") { return false; }
+    return value - value == 0;
+}
+
+fn abs_number(value) {
+    if (value < 0) { return -value; }
+    return value;
+}
+
+fn exp_approx(value) {
+    if (value > 40) { value = 40; }
+    if (value < -40) { value = -40; }
+    let negative = value < 0;
+    if (negative) { value = -value; }
+    let halvings = 0;
+    while (value > 0.5) {
+        value = value / 2;
+        halvings = halvings + 1;
+    }
+    let term = 1.0;
+    let total = 1.0;
+    let i = 1;
+    while (i <= 14) {
+        term = term * value / i;
+        total = total + term;
+        i = i + 1;
+    }
+    i = 0;
+    while (i < halvings) {
+        total = total * total;
+        i = i + 1;
+    }
+    if (negative) { return 1.0 / total; }
+    return total;
+}
+
+fn sqrt_approx(value) {
+    if (value <= 0) { return 0.0; }
+    let estimate = value;
+    if (estimate < 1) { estimate = 1.0; }
+    let i = 0;
+    while (i < 20) {
+        estimate = 0.5 * (estimate + value / estimate);
+        i = i + 1;
+    }
+    return estimate;
+}
+
+fn option(options, name, fallback) {
+    if (map_has(options, name)) { return options[name]; }
+    return fallback;
+}
+
+fn tensor_to_array(t) {
+    let count = shape(t)[0];
+    let out = array_new(0);
+    let i = 0;
+    while (i < count) {
+        array_push(out, t[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+// --- causal decomposition ---
+
+fn kalman_trend(returns, q, r) {
+    let fit = ml.fit("kalman", {observations: tensor(returns)}, {q: q, r: r});
+    assert(fit[0], "kalman fit failed");
+    return tensor_to_array(fit[1].prediction);
+}
+
+fn decompose(returns, trend, threshold) {
+    let count = array_length(returns);
+    let jump = array_new(0);
+    let noise = array_new(0);
+    let i = 0;
+    while (i < count) {
+        let residual = returns[i] - trend[i];
+        let jump_value = 0.0;
+        if (abs_number(residual) >= threshold) { jump_value = residual; }
+        array_push(jump, jump_value);
+        array_push(noise, residual - jump_value);
+        i = i + 1;
+    }
+    return {trend: trend, jump: jump, noise: noise};
+}
+
+// --- causal features (6 columns) ---
+
+fn build_features(returns, trend, jump, noise, window) {
+    let count = array_length(returns);
+    let x_rows = array_new(0);
+    let y_values = array_new(0);
+    let t = window;
+    while (t < count - 1) {
+        let trend_delta = trend[t] - trend[t - 1];
+        let noise_momentum = 0.0;
+        let jump_momentum = 0.0;
+        let k = t - window + 1;
+        while (k <= t) {
+            noise_momentum = noise_momentum + noise[k];
+            jump_momentum = jump_momentum + jump[k];
+            k = k + 1;
+        }
+        let row = array_new(0);
+        array_push(row, trend[t]);
+        array_push(row, jump[t]);
+        array_push(row, noise[t]);
+        array_push(row, trend_delta);
+        array_push(row, noise_momentum);
+        array_push(row, jump_momentum);
+        array_push(x_rows, row);
+        array_push(y_values, returns[t + 1]);
+        t = t + 1;
+    }
+    let last = count - 1;
+    let trend_delta = trend[last] - trend[last - 1];
+    let noise_momentum = 0.0;
+    let jump_momentum = 0.0;
+    let k = last - window + 1;
+    while (k <= last) {
+        noise_momentum = noise_momentum + noise[k];
+        jump_momentum = jump_momentum + jump[k];
+        k = k + 1;
+    }
+    let latest = array_new(0);
+    array_push(latest, trend[last]);
+    array_push(latest, jump[last]);
+    array_push(latest, noise[last]);
+    array_push(latest, trend_delta);
+    array_push(latest, noise_momentum);
+    array_push(latest, jump_momentum);
+    return {x_rows: x_rows, y_values: y_values, latest: latest};
+}
+
+// --- ML fit + next-bar prediction ---
+
+fn fit_and_predict(x_rows, y_values, latest, config) {
+    let kind = option(config, "kind", "ridge");
+    let epochs = option(config, "epochs", 150);
+    let learning_rate = option(config, "learning_rate", 0.05);
+    let ridge = option(config, "ridge", 0.0001);
+    let max_train_rows = option(config, "max_train_rows", 2000);
+    let total = array_length(x_rows);
+    let start = 0;
+    if (total > max_train_rows) { start = total - max_train_rows; }
+    let x_train = array_new(0);
+    let y_train = array_new(0);
+    let i = start;
+    while (i < total) {
+        array_push(x_train, x_rows[i]);
+        array_push(y_train, y_values[i]);
+        i = i + 1;
+    }
+    let fit = ml.fit(kind, {x: tensor(x_train), y: tensor(y_train)},
+        {epochs: epochs, learning_rate: learning_rate, ridge: ridge});
+    assert(fit[0], "ml fit failed");
+    let model = fit[1].model;
+    let pred = ml.predict(model, tensor([latest]), {});
+    assert(pred[0], "ml predict failed");
+    return {
+        predicted_return: pred[1].prediction[0],
+        uncertainty: pred[1].uncertainty[0],
+        weights: tensor_to_array(model.parameters.weights),
+        intercept: model.parameters.intercept,
+        residual_variance: model.parameter_uncertainty.residual_variance,
+        training_rows: array_length(x_train),
+        epochs: epochs,
+        method: fit[1].method,
+        device: model.device,
+        kind: kind
+    };
+}
+
+fn price_forecast(last_close, predicted_return, uncertainty) {
+    let sigma = sqrt_approx(uncertainty);
+    return {
+        forecast_close: last_close * exp_approx(predicted_return),
+        lower: last_close * exp_approx(predicted_return - sigma),
+        upper: last_close * exp_approx(predicted_return + sigma),
+        sigma: sigma
+    };
+}
+
+fn decompose_returns(returns, config) {
+    let q = option(config["trend"], "q", 0.0001);
+    let r = option(config["trend"], "r", 0.01);
+    let threshold = config["jump"]["threshold"];
+    assert(threshold > 0, "jump threshold must be positive");
+    let trend = kalman_trend(returns, q, r);
+    return decompose(returns, trend, threshold);
+}
+
+fn build_model_summary(fit) {
+    return {
+        kind: fit.kind,
+        weights: fit.weights,
+        intercept: fit.intercept,
+        residual_variance: fit.residual_variance,
+        training_rows: fit.training_rows,
+        epochs: fit.epochs,
+        method: fit.method,
+        device: fit.device
+    };
+}
+
+fn build_response(request, parts, fit, prices) {
+    return {
+        schema: 1,
+        kind: "lana_pricing_model_forecast",
+        symbol: request["symbol"],
+        timeframe: request["timeframe"],
+        reference_timestamp: request["reference_timestamp"],
+        last_close: request["last_close"],
+        predicted_log_return: fit.predicted_return,
+        predicted_return_uncertainty: fit.uncertainty,
+        forecast_close: prices.forecast_close,
+        forecast_close_lower: prices.lower,
+        forecast_close_upper: prices.upper,
+        decomposition: {trend: parts.trend, jump: parts.jump, noise: parts.noise},
+        model: build_model_summary(fit),
+        advisory_only: true
+    };
+}
+
+fn forecast(request) {
+    assert(request["schema"] == 1, "unsupported lana pricing model schema");
+    assert(request["kind"] == "lana_pricing_model_request", "invalid lana pricing model kind");
+    assert(request["symbol"] == "QQQ", "request symbol must be QQQ");
+    let returns = request["returns"];
+    let count = array_length(returns);
+    assert(count >= 3, "returns must have at least 3 observations");
+    let config = request["config"];
+    let window = option(config["features"], "momentum_window", 5);
+    assert(count >= window + 2, "not enough returns for the configured momentum window");
+    let parts = decompose_returns(returns, config);
+    let features = build_features(returns, parts.trend, parts.jump, parts.noise, window);
+    let fit = fit_and_predict(features.x_rows, features.y_values, features.latest, config["ml"]);
+    let prices = price_forecast(request["last_close"], fit.predicted_return, fit.uncertainty);
+    assert(finite(prices.forecast_close), "forecast close is not finite");
+    assert(finite(prices.lower), "forecast lower is not finite");
+    assert(finite(prices.upper), "forecast upper is not finite");
+    return build_response(request, parts, fit, prices);
+}
+
+let request = bridge.read_request();
+bridge.write_response(forecast(request));

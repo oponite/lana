@@ -22,3 +22,8 @@ net-tls = ["lana-vm/net-tls"]
 lana-bytecode = { workspace = true }
 lana-vm = { workspace = true, default-features = false }
 ed25519-compact = { version = "2.4.2", default-features = false, features = ["std"] }
+# SQLite adapter (native port of `runtime/c/adapters/sqlite_adapter.c`). The
+# `bundled` feature compiles SQLite from source so the runtime has no system
+# libsqlite3 dependency.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
