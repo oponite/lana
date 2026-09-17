@@ -350,6 +350,7 @@ pub const LANA_HOST_CORRELATED: u32 = 54;
 // both the C11 VM and the Rust VM at id 55.
 pub const LANA_HOST_SURPRISAL: u32 = 55;
 
+<<<<<<< Updated upstream
 // Durable-pipeline host calls (Rust-only). The C11 VM is frozen at 56 host
 // calls (ids 0-55); these IDs exist only in the Rust VM and are dispatched
 // through the host-call extension registered by the CLI (see
@@ -365,6 +366,205 @@ pub const LANA_HOST_POLICY_EVALUATE: u32 = 63;
 pub const LANA_HOST_POLICY_STORE_DECISION: u32 = 64;
 pub const LANA_HOST_LEDGER_APPEND: u32 = 65;
 pub const LANA_HOST_LEDGER_QUERY: u32 = 66;
+=======
+// LIP-004 first-class tensors. Present in both the C11 VM and the Rust VM at
+// ids 56-73, so a `.labc` assembled by either backend runs identically under
+// both.
+pub const LANA_HOST_TENSOR_ALLOC: u32 = 56;
+pub const LANA_HOST_TENSOR_ZEROS: u32 = 57;
+pub const LANA_HOST_TENSOR_ONES: u32 = 58;
+pub const LANA_HOST_TENSOR_EYE: u32 = 59;
+pub const LANA_HOST_TENSOR_DTYPE: u32 = 60;
+pub const LANA_HOST_TENSOR_SHAPE: u32 = 61;
+pub const LANA_HOST_TENSOR_NDIM: u32 = 62;
+pub const LANA_HOST_TENSOR_ADD: u32 = 63;
+pub const LANA_HOST_TENSOR_SUB: u32 = 64;
+pub const LANA_HOST_TENSOR_MUL: u32 = 65;
+pub const LANA_HOST_TENSOR_DIV: u32 = 66;
+pub const LANA_HOST_TENSOR_MATMUL: u32 = 67;
+pub const LANA_HOST_TENSOR_SUM: u32 = 68;
+pub const LANA_HOST_TENSOR_MEAN: u32 = 69;
+pub const LANA_HOST_TENSOR_MAX: u32 = 70;
+pub const LANA_HOST_TENSOR_MIN: u32 = 71;
+pub const LANA_HOST_TENSOR: u32 = 72;
+pub const LANA_HOST_TENSOR_COMPLEX: u32 = 73;
+
+// LIP-012 capability grant/revoke. Present in both the C11 VM and the Rust VM
+// at ids 74-75, so a `.labc` assembled by either backend runs identically under
+// both.
+pub const LANA_HOST_GRANT: u32 = 74;
+pub const LANA_HOST_REVOKE: u32 = 75;
+
+// LIP-022 §1 immutable sets. Present in both the C11 VM and the Rust VM at
+// ids 76-81, so a `.labc` assembled by either backend runs identically under
+// both.
+pub const LANA_HOST_SET_NEW: u32 = 76;
+pub const LANA_HOST_SET_ADD: u32 = 77;
+pub const LANA_HOST_SET_CONTAINS: u32 = 78;
+pub const LANA_HOST_SET_UNION: u32 = 79;
+pub const LANA_HOST_SET_INTERSECT: u32 = 80;
+pub const LANA_HOST_SET_DIFFERENCE: u32 = 81;
+
+// LIP-016 installed stdlib: read an environment variable. Present in both the
+// C11 VM and the Rust VM at id 82.
+pub const LANA_HOST_GETENV: u32 = 82;
+// LIP-016 stdlib: reseed the RNG and floor a number. Present in both VMs.
+pub const LANA_HOST_RANDOM_SEED: u32 = 83;
+pub const LANA_HOST_FLOOR: u32 = 84;
+// LIP-023 data interchange: parse a number from text. Present in both VMs.
+pub const LANA_HOST_STRING_TO_NUMBER: u32 = 85;
+// LIP-023 data interchange: runtime type name of a value. Present in both VMs.
+pub const LANA_HOST_TYPE_OF: u32 = 86;
+// LIP-021 §3 explicit formatting. Present in both VMs.
+pub const LANA_HOST_FORMAT: u32 = 87;
+pub const LANA_HOST_FORMAT_NUMBER: u32 = 88;
+// LIP-021 §1/§4 Unicode code points and simple case mapping. Present in both VMs.
+pub const LANA_HOST_CHAR_LENGTH: u32 = 89;
+pub const LANA_HOST_STRING_CODEPOINT_SLICE: u32 = 90;
+pub const LANA_HOST_TO_UPPER: u32 = 91;
+pub const LANA_HOST_TO_LOWER: u32 = 92;
+// LIP-021 §2 regular expressions. Present in both VMs.
+pub const LANA_HOST_REGEX_COMPILE: u32 = 93;
+pub const LANA_HOST_REGEX_MATCH: u32 = 94;
+pub const LANA_HOST_REGEX_SEARCH: u32 = 95;
+pub const LANA_HOST_REGEX_REPLACE: u32 = 96;
+// LIP-004 §5 explicit GPU matmul. Present in both VMs at id 97.
+pub const LANA_HOST_GPU_MATMUL: u32 = 97;
+
+// LIP-005 linear algebra on STATEs. Present in both the C11 VM and the Rust VM
+// at ids 98-110, so a `.labc` assembled by either backend runs identically
+// under both.
+pub const LANA_HOST_DENSITY_OPERATOR: u32 = 98;
+pub const LANA_HOST_POVM: u32 = 99;
+pub const LANA_HOST_CHANNEL: u32 = 100;
+pub const LANA_HOST_OBSERVABLE: u32 = 101;
+pub const LANA_HOST_TENSOR_PRODUCT: u32 = 102;
+pub const LANA_HOST_PARTIAL_TRACE: u32 = 103;
+pub const LANA_HOST_MEASURE_WITH: u32 = 104;
+pub const LANA_HOST_APPLY_TO: u32 = 105;
+pub const LANA_HOST_EXPECT: u32 = 106;
+pub const LANA_HOST_MIX: u32 = 107;
+pub const LANA_HOST_TRACE_DISTANCE: u32 = 108;
+pub const LANA_HOST_IS_SEPARABLE: u32 = 109;
+pub const LANA_HOST_TO_STATE: u32 = 110;
+
+// LIP-011 reverse-mode automatic differentiation. Present in both the C11 VM
+// and the Rust VM at ids 111-112, so a `.labc` assembled by either backend
+// runs identically under both.
+pub const LANA_HOST_GRAD: u32 = 111;
+pub const LANA_HOST_VJP: u32 = 112;
+
+// LIP-006 auditable, replayable training primitive. Present in both the C11 VM
+// and the Rust VM at ids 113-115, so a `.labc` assembled by either backend
+// runs identically under both.
+pub const LANA_HOST_SGD: u32 = 113;
+pub const LANA_HOST_ADAM: u32 = 114;
+pub const LANA_HOST_TRAIN: u32 = 115;
+
+// LIP-009 Bayesian inference as a first-class training mode. Present in both
+// the C11 VM and the Rust VM at ids 116-119, so a `.labc` assembled by either
+// backend runs identically under both.
+pub const LANA_HOST_MCMC: u32 = 116;
+pub const LANA_HOST_VI: u32 = 117;
+pub const LANA_HOST_SMC: u32 = 118;
+pub const LANA_HOST_INFER: u32 = 119;
+
+// LIP-010 incremental / online learning. Present in both the C11 VM and the
+// Rust VM at id 120, so a `.labc` assembled by either backend runs identically
+// under both.
+pub const LANA_HOST_UPDATE: u32 = 120;
+
+// LIP-014 whole-run reproducibility and resumability. Present in both the C11
+// VM and the Rust VM at id 121, so a `.labc` assembled by either backend runs
+// identically under both.
+pub const LANA_HOST_RESUME: u32 = 121;
+
+// LIP-007 differentiable STATE tensors. Present in both the C11 VM and the
+// Rust VM at ids 122-125, so a `.labc` assembled by either backend runs
+// identically under both.
+pub const LANA_HOST_STATE_TENSOR: u32 = 122;
+pub const LANA_HOST_APPEND: u32 = 123;
+pub const LANA_HOST_MEASURE: u32 = 124;
+pub const LANA_HOST_TRANSFORM: u32 = 125;
+
+// Durable-pipeline host calls. The store/policy/ledger calls (141-151) are
+// dispatched through the host-call extension registered by the CLI (see
+// `set_host_call_extension`); the C11 VM dispatches the store calls directly.
+// They sit at the END of the id range (after the shared async/dataset calls at
+// 126-140) so the shared ids match the C11 VM.
+pub const LANA_HOST_STORE_OPEN: u32 = 141;
+pub const LANA_HOST_STORE_PUT: u32 = 142;
+pub const LANA_HOST_STORE_GET: u32 = 143;
+pub const LANA_HOST_STORE_DELETE: u32 = 144;
+pub const LANA_HOST_STORE_COMMIT: u32 = 145;
+pub const LANA_HOST_STORE_SCAN: u32 = 146;
+pub const LANA_HOST_STORE_CURRENT_REVISION: u32 = 147;
+pub const LANA_HOST_POLICY_EVALUATE: u32 = 148;
+pub const LANA_HOST_POLICY_STORE_DECISION: u32 = 149;
+pub const LANA_HOST_LEDGER_APPEND: u32 = 150;
+pub const LANA_HOST_LEDGER_QUERY: u32 = 151;
+// LIP-015 §3, §5 data layer: MVCC reads, optimistic commit, adapters.
+pub const LANA_HOST_STORE_GET_AT: u32 = 152;
+pub const LANA_HOST_STORE_SNAPSHOT: u32 = 153;
+pub const LANA_HOST_STORE_COMMIT_IF: u32 = 154;
+pub const LANA_HOST_ADAPTER_LOAD: u32 = 155;
+pub const LANA_HOST_ADAPTER_FETCH: u32 = 156;
+// LIP-018 two-way FFI.
+pub const LANA_HOST_FFI_DECLARE: u32 = 157;
+pub const LANA_HOST_FFI_LOAD: u32 = 158;
+pub const LANA_HOST_FFI_CALL: u32 = 159;
+// LIP-019 networking and HTTP.
+pub const LANA_HOST_HTTP_GET: u32 = 160;
+pub const LANA_HOST_HTTP_POST: u32 = 161;
+pub const LANA_HOST_SOCKET_CONNECT: u32 = 162;
+pub const LANA_HOST_SOCKET_SEND: u32 = 163;
+pub const LANA_HOST_SOCKET_RECV: u32 = 164;
+pub const LANA_HOST_SOCKET_CLOSE: u32 = 165;
+// LIP-027: cast a tensor to another real dtype.
+pub const LANA_HOST_TENSOR_CAST: u32 = 166;
+pub const LANA_HOST_TENSOR_RESHAPE: u32 = 167;
+pub const LANA_HOST_TENSOR_TRANSPOSE: u32 = 168;
+pub const LANA_HOST_TENSOR_EXP: u32 = 169;
+pub const LANA_HOST_TENSOR_LOG: u32 = 170;
+pub const LANA_HOST_TENSOR_SQRT: u32 = 171;
+pub const LANA_HOST_TENSOR_RELU: u32 = 172;
+pub const LANA_HOST_TENSOR_SOFTMAX: u32 = 173;
+pub const LANA_HOST_TENSOR_LOGSUMEXP: u32 = 174;
+pub const LANA_HOST_TENSOR_ARGMAX: u32 = 175;
+pub const LANA_HOST_TENSOR_COMPARE: u32 = 176;
+pub const LANA_HOST_TENSOR_SELECT: u32 = 177;
+pub const LANA_HOST_TENSOR_GATHER: u32 = 178;
+pub const LANA_HOST_CHOLESKY_SOLVE: u32 = 179;
+pub const LANA_HOST_RANDOM_UNIFORM: u32 = 180;
+pub const LANA_HOST_RANDOM_NORMAL: u32 = 181;
+pub const LANA_HOST_TENSOR_DEVICE: u32 = 182;
+pub const LANA_HOST_TENSOR_TO_DEVICE: u32 = 183;
+pub const LANA_HOST_TENSOR_TO_CPU: u32 = 184;
+// LIP-029 execution boundary. Rust-only: the C11 VM remains frozen at v1-v4.
+pub const LANA_HOST_EXECUTION_CAPABILITY: u32 = 185;
+pub const LANA_HOST_EXECUTION_AUTHORIZE: u32 = 186;
+pub const LANA_HOST_EXECUTION_EXECUTE: u32 = 187;
+
+// LIP-024 async/await. Present in both the C11 VM and the Rust VM at ids
+// 126-129 (matching the C11 assembler's host-call table and the
+// `LanaHostCallId` enum in `vm/include/bytecode.h`), so a `.labc` assembled
+// by either backend runs identically under both.
+pub const LANA_HOST_RUN_ASYNC: u32 = 126;
+pub const LANA_HOST_FUTURE_ALL: u32 = 127;
+pub const LANA_HOST_FUTURE_RACE: u32 = 128;
+pub const LANA_HOST_SLEEP: u32 = 129;
+pub const LANA_HOST_DATASET: u32 = 130;
+pub const LANA_HOST_DATASET_FILTER: u32 = 131;
+pub const LANA_HOST_DATASET_MAP: u32 = 132;
+pub const LANA_HOST_DATASET_SELECT: u32 = 133;
+pub const LANA_HOST_DATASET_LIMIT: u32 = 134;
+pub const LANA_HOST_DATASET_SORT: u32 = 135;
+pub const LANA_HOST_DATASET_GROUP_BY: u32 = 136;
+pub const LANA_HOST_DATASET_AGGREGATE: u32 = 137;
+pub const LANA_HOST_DATASET_JOIN: u32 = 138;
+pub const LANA_HOST_DATASET_MATERIALIZE: u32 = 139;
+pub const LANA_HOST_DATASET_EXPLAIN: u32 = 140;
+>>>>>>> Stashed changes
 
 /// The shared-information identity and commit-revision counters, matching the
 /// `next_shared_identity` / `next_commit_revision` atomics in `runtime/c/shared.c`.
@@ -2200,6 +2400,21 @@ impl<'a> Vm<'a> {
                 self.attach_derivation(ins.b, DerivationKind::Operation, "condition", &inputs, "",
                                        ins.line, DerivationExactness::Exact, &descriptor)
             }
+            JointConditionMap => {
+                let source = self.current_frame().registers[ins.a as usize].clone();
+                let evidence = self.current_frame().registers[ins.c as usize].clone();
+                let ValueKind::Joint(joint) = &source.kind else {
+                    return LanaError::Type;
+                };
+                let joint = match self.joint_condition_map(joint, &evidence) {
+                    Ok(joint) => joint,
+                    Err(error) => return error,
+                };
+                self.current_frame_mut().registers[ins.b as usize] = Value::joint(joint);
+                let inputs = [&source, &evidence];
+                self.attach_derivation(ins.b, DerivationKind::Operation, "condition", &inputs, "",
+                                       ins.line, DerivationExactness::Exact, "evidence_map")
+            }
             JointSample => {
                 let source = self.current_frame().registers[ins.a as usize].clone();
                 let ValueKind::Joint(joint) = &source.kind else {
@@ -2277,6 +2492,21 @@ impl<'a> Vm<'a> {
                 self.attach_derivation(ins.b, DerivationKind::Operation, "possibility", &inputs, "",
                                        ins.line, DerivationExactness::Exact, "equipossible_support")
             }
+            DistributionBuild => {
+                let source = self.current_frame().registers[ins.a as usize].clone();
+                let ValueKind::Array(array) = &source.kind else {
+                    return LanaError::Type;
+                };
+                let items = array.lock().unwrap().items.to_vec();
+                let distribution = match self.distribution_build(&items) {
+                    Ok(distribution) => distribution,
+                    Err(error) => return error,
+                };
+                self.current_frame_mut().registers[ins.b as usize] = Value::possibility(distribution);
+                let inputs = [&source];
+                self.attach_derivation(ins.b, DerivationKind::Operation, "distribution", &inputs, "",
+                                       ins.line, DerivationExactness::Exact, "finite_weighted_support")
+            }
             PathSplit => {
                 let condition = self.current_frame().registers[ins.a as usize].clone();
                 self.path_split(&condition, ins.imm as usize)
@@ -2303,6 +2533,32 @@ impl<'a> Vm<'a> {
                 let inputs = [&source, &evidence];
                 self.attach_derivation(ins.b, DerivationKind::Observation, "observe", &inputs, "",
                                        ins.line, DerivationExactness::Exact, &descriptor)
+            }
+            ObserveMap => {
+                if self.active_path_count > 1 {
+                    return LanaError::UnsupportedOperation;
+                }
+                let source = self.current_frame().registers[ins.a as usize].clone();
+                let evidence = self.current_frame().registers[ins.c as usize].clone();
+                let result = if source.reactive.is_some() {
+                    match self.reactive_observe(&source, &evidence, ins.b) {
+                        Ok(result) => result,
+                        Err(error) => return error,
+                    }
+                } else {
+                    let ValueKind::Joint(joint) = &source.kind else {
+                        return LanaError::Type;
+                    };
+                    let joint = match self.joint_observe_map(joint, &evidence) {
+                        Ok(joint) => joint,
+                        Err(error) => return error,
+                    };
+                    Value::joint(joint)
+                };
+                self.current_frame_mut().registers[ins.b as usize] = result;
+                let inputs = [&source, &evidence];
+                self.attach_derivation(ins.b, DerivationKind::Observation, "observe", &inputs, "",
+                                       ins.line, DerivationExactness::Exact, "evidence_map")
             }
             InfoSample => {
                 if self.active_path_count > 1 {
@@ -3770,12 +4026,37 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn joint_condition_map(&mut self, source: &JointState, evidence: &Value) -> Result<Arc<JointState>, LanaError> {
+        let ValueKind::Map(map) = &evidence.kind else {
+            return Err(LanaError::Type);
+        };
+        let entries = map.lock().unwrap().entries().iter()
+            .map(|entry| (entry.key.to_string(), entry.value.clone()))
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            return Err(LanaError::InvalidConditioning);
+        }
+        let mut conditioned = None;
+        for (name, value) in entries {
+            let input = conditioned.as_deref().unwrap_or(source);
+            conditioned = Some(self.joint_condition(input, &name, &value)?);
+        }
+        Ok(conditioned.unwrap())
+    }
+
     /// Observe evidence on a joint, mirroring `lana_vm_joint_observe`.
     fn joint_observe(&mut self, source: &JointState, name: &str, evidence: &Value) -> Result<Arc<JointState>, LanaError> {
         if self.active_path_count > 1 {
             return Err(LanaError::UnsupportedOperation);
         }
         let joint = self.joint_condition(source, name, evidence)?;
+        self.observation_count += 1;
+        self.revision += 1;
+        Ok(joint)
+    }
+
+    fn joint_observe_map(&mut self, source: &JointState, evidence: &Value) -> Result<Arc<JointState>, LanaError> {
+        let joint = self.joint_condition_map(source, evidence)?;
         self.observation_count += 1;
         self.revision += 1;
         Ok(joint)
@@ -3918,6 +4199,51 @@ impl<'a> Vm<'a> {
         }))
     }
 
+    /// Build a finite weighted Core distribution from `[[value, weight], ...]`.
+    fn distribution_build(&mut self, rows: &[Value]) -> Result<Arc<Possibility>, LanaError> {
+        if rows.is_empty() {
+            return Err(LanaError::InvalidDistribution);
+        }
+        let mut values = Vec::with_capacity(rows.len());
+        let mut weights = Vec::with_capacity(rows.len());
+        let mut total = 0.0;
+        for row in rows {
+            let ValueKind::Array(pair) = &row.kind else {
+                return Err(LanaError::Type);
+            };
+            let pair = pair.lock().unwrap();
+            if pair.items.len() != 2 || !joint_value_is_definite(&pair.items[0]) {
+                return Err(LanaError::Type);
+            }
+            let ValueKind::Number(weight) = pair.items[1].kind else {
+                return Err(LanaError::Type);
+            };
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(LanaError::InvalidDistribution);
+            }
+            if values.iter().any(|value| joint_value_equal(value, &pair.items[0])) {
+                return Err(LanaError::InvalidDistribution);
+            }
+            total += weight;
+            values.push(pair.items[0].clone());
+            weights.push(weight);
+        }
+        if !total.is_finite() || (total - 1.0).abs() > 1e-12 {
+            return Err(LanaError::InvalidDistribution);
+        }
+        if self.alloc_bytes(std::mem::size_of::<Possibility>()) != LanaError::Ok {
+            return Err(LanaError::Oom);
+        }
+        let mut memo = DeepCloneMemo::default();
+        let mut cloned = Vec::with_capacity(values.len());
+        for value in &values {
+            cloned.push(self.deep_clone_value(value, &mut memo)?);
+        }
+        let dependency_id = self.next_dependency_id;
+        self.next_dependency_id += 1;
+        Ok(Arc::new(Possibility { values: cloned, weights: Some(weights), dependency_id }))
+    }
+
     /// Resolve any information value, mirroring `lana_vm_information_resolve`.
     fn information_resolve(&mut self, source: &Value) -> Result<Value, LanaError> {
         match &source.kind {
@@ -3960,6 +4286,26 @@ impl<'a> Vm<'a> {
                 Ok(Value::state(state))
             }
             ValueKind::Possibility(possibility) => {
+                if let Some(weights) = &possibility.weights {
+                    if self.consume_sampling_budget() != LanaError::Ok {
+                        return Err(LanaError::BudgetExhausted);
+                    }
+                    let draw = self.rng.random() as f64 / 4294967296.0;
+                    let mut cumulative = 0.0;
+                    let mut selected = possibility.values.len() - 1;
+                    for (index, weight) in weights.iter().enumerate() {
+                        cumulative += weight;
+                        if draw < cumulative {
+                            selected = index;
+                            break;
+                        }
+                    }
+                    let mut memo = DeepCloneMemo::default();
+                    return self.deep_clone_value(&possibility.values[selected], &mut memo);
+                }
+                if self.chunk.version == lana_bytecode::opcode::LABC_VERSION_5 {
+                    return Err(LanaError::UnsupportedOperation);
+                }
                 if self.consume_sampling_budget() != LanaError::Ok {
                     return Err(LanaError::BudgetExhausted);
                 }
@@ -7618,6 +7964,15 @@ mod tests {
     }
 
     #[test]
+    fn joint_condition_map_refines_named_evidence() {
+        let (error, result) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 2\nJOINT_BUILD R2 R0 2 independent:a;b\nLOAD_STRING R3 61\nLOAD_CONST R4 1\nHOST_CALL map_new R3 2 R5\nJOINT_CONDITION_MAP R2 R6 R5\nRESOLVE R6 R7\nRETURN R7\n",
+        );
+        assert_eq!(error, LanaError::Ok);
+        assert_eq!(result, "[1, 2]");
+    }
+
+    #[test]
     fn observe_increments_revision() {
         let (error, result) = run_chunk(
             "LOAD_CONST R0 1\nLOAD_CONST R1 2\nJOINT_BUILD R2 R0 2 independent:a;b\nLOAD_CONST R3 1\nOBSERVE R2 R4 a R3\nEXPLAIN R4 R5\nRETURN R5\n",
@@ -7657,12 +8012,40 @@ mod tests {
     }
 
     #[test]
-    fn info_sample_possibility_returns_element() {
+    fn info_sample_possibility_is_legacy_only() {
         let (error, result) = run_chunk(
             "LOAD_CONST R0 1\nLOAD_CONST R1 2\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nINFO_SAMPLE R3 R4\nRETURN R4\n",
         );
         assert_eq!(error, LanaError::Ok);
         assert!(result == "1" || result == "2", "expected 1 or 2, got {result}");
+
+        let (error, _) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 2\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nINFO_SAMPLE R3 R4\nRETURN R4\n",
+        );
+        assert_eq!(error, LanaError::UnsupportedOperation);
+    }
+
+    #[test]
+    fn distribution_build_samples_weighted_support() {
+        let (error, result) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 0.25\nARRAY_NEW R2 R0 2\nLOAD_CONST R3 2\nLOAD_CONST R4 0.75\nARRAY_NEW R5 R3 2\nMOVE R6 R2\nMOVE R7 R5\nARRAY_NEW R8 R6 2\nDISTRIBUTION_BUILD R8 R9\nINFO_SAMPLE R9 R10\nRETURN R10\n",
+        );
+        assert_eq!(error, LanaError::Ok);
+        assert!(result == "1" || result == "2", "expected supported value, got {result}");
+
+        let (error, _) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 0.2\nARRAY_NEW R2 R0 2\nARRAY_NEW R3 R2 1\nDISTRIBUTION_BUILD R3 R4\nRETURN R4\n",
+        );
+        assert_eq!(error, LanaError::InvalidDistribution);
+    }
+
+    #[test]
+    fn possibility_build_pair_rows_remains_unweighted() {
+        let (error, result) = run_chunk(
+            "LOAD_CONST R0 1\nLOAD_CONST R1 0.25\nARRAY_NEW R2 R0 2\nLOAD_CONST R3 2\nLOAD_CONST R4 0.75\nARRAY_NEW R5 R3 2\nMOVE R6 R2\nMOVE R7 R5\nARRAY_NEW R8 R6 2\nPOSSIBILITY_BUILD R8 R9\nRETURN R9\n",
+        );
+        assert_eq!(error, LanaError::Ok);
+        assert!(result.starts_with("possibility{"), "expected possibility, got {result}");
     }
 
     #[test]

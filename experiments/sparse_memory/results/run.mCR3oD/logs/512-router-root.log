@@ -1,0 +1,3 @@
+__m4__fit_logistic_binary:0:1-0:1: error[resource-limit/LANA_ERR_LIMIT]: instruction limit exceeded (operation execute) (instruction 3799, opcode NOP)
+  resolution: resource-limit, remaining alternatives: 0
+  resource: instructions limit 50000000, observed 50000001 instructions

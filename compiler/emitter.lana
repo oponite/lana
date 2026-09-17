@@ -1,6 +1,10 @@
 import "./syntax.lana" as syntax;
 
+<<<<<<< Updated upstream
 fn emitter_new(namespace, registry) { return [array_new(0), map_new(), 0, 0, namespace, map_new(), map_new(), 0, registry]; }
+=======
+fn emitter_new(namespace, registry, generators, asyncs, features) { return [array_new(0), map_new(), 0, 0, namespace, map_new(), map_new(), 0, registry, generators, asyncs, features]; }
+>>>>>>> Stashed changes
 fn emit(context, line) { array_push(context[0], line); return null; }
 fn reg(number) { return string_concat("R", number_to_string(number)); }
 
@@ -51,6 +55,7 @@ fn expression_is_information(context, node) {
         if (node[1] == "sample") { return false; }
         if (node[1] == "resolve") { return false; } return true;
     }
+    if (node[0] == 24) { return call_target(context, node[1]) == "__core_distribution__"; }
     return false;
 }
 
@@ -108,6 +113,71 @@ fn is_host_call(name) {
     if (name == "csv_read") { return true; } if (name == "csv_write") { return true; }
     if (name == "lazy_bound") { return true; }
     if (name == "surprisal") { return true; }
+<<<<<<< Updated upstream
+=======
+    if (name == "tensor") { return true; } if (name == "tensor_complex") { return true; }
+    if (name == "zeros") { return true; } if (name == "ones") { return true; }
+    if (name == "eye") { return true; } if (name == "shape") { return true; }
+    if (name == "ndim") { return true; } if (name == "dtype") { return true; }
+    if (name == "cast") { return true; }
+    if (name == "reshape") { return true; } if (name == "transpose") { return true; }
+    if (name == "exp") { return true; } if (name == "log") { return true; }
+    if (name == "sqrt") { return true; } if (name == "relu") { return true; }
+    if (name == "softmax") { return true; } if (name == "logsumexp") { return true; }
+    if (name == "argmax") { return true; }
+    if (name == "tensor_compare") { return true; }
+    if (name == "tensor_select") { return true; }
+    if (name == "gather") { return true; }
+    if (name == "cholesky_solve") { return true; }
+    if (name == "random_uniform") { return true; }
+    if (name == "random_normal") { return true; }
+    if (name == "device") { return true; }
+    if (name == "to_device") { return true; }
+    if (name == "to_cpu") { return true; }
+    if (name == "matmul") { return true; } if (name == "sum") { return true; }
+    if (name == "mean") { return true; } if (name == "max") { return true; }
+    if (name == "min") { return true; }
+    if (name == "set_new") { return true; } if (name == "set_add") { return true; }
+    if (name == "set_contains") { return true; } if (name == "set_union") { return true; }
+    if (name == "set_intersect") { return true; } if (name == "set_difference") { return true; }
+    if (name == "getenv") { return true; }
+    if (name == "format") { return true; } if (name == "format_number") { return true; }
+    if (name == "char_length") { return true; } if (name == "string_codepoint_slice") { return true; }
+    if (name == "to_upper") { return true; } if (name == "to_lower") { return true; }
+    if (name == "regex_compile") { return true; } if (name == "regex_match") { return true; }
+    if (name == "regex_search") { return true; } if (name == "regex_replace") { return true; }
+    if (name == "gpu_matmul") { return true; }
+    if (name == "density_operator") { return true; } if (name == "povm") { return true; }
+    if (name == "channel") { return true; } if (name == "observable") { return true; }
+    if (name == "tensor_product") { return true; } if (name == "partial_trace") { return true; }
+    if (name == "measure_with") { return true; } if (name == "apply_to") { return true; }
+    if (name == "is_separable") { return true; } if (name == "to_state") { return true; }
+    if (name == "grad") { return true; } if (name == "vjp") { return true; }
+    if (name == "sgd") { return true; } if (name == "adam") { return true; }
+    if (name == "train") { return true; }
+    if (name == "update") { return true; }
+    if (name == "resume") { return true; }
+    if (name == "mcmc") { return true; } if (name == "vi") { return true; }
+    if (name == "smc") { return true; } if (name == "infer") { return true; }
+    if (name == "state_tensor") { return true; } if (name == "append") { return true; }
+    if (name == "measure") { return true; } if (name == "transform") { return true; }
+    if (name == "run_async") { return true; }
+    if (name == "future_all") { return true; }
+    if (name == "future_race") { return true; }
+    if (name == "sleep") { return true; }
+    if (name == "dataset") { return true; }
+    if (name == "select") { return true; } if (name == "limit") { return true; }
+    if (name == "sort") { return true; } if (name == "group_by") { return true; }
+    if (name == "aggregate") { return true; } if (name == "join") { return true; }
+    if (name == "materialize") { return true; } if (name == "explain") { return true; }
+    if (name == "dataset_map") { return true; } if (name == "dataset_filter") { return true; }
+    if (name == "dataset_explain") { return true; }
+    if (name == "http_get") { return true; } if (name == "http_post") { return true; }
+    if (name == "execution_capability") { return true; } if (name == "execution_authorize") { return true; }
+    if (name == "execution_execute") { return true; }
+    if (name == "socket_connect") { return true; } if (name == "socket_send") { return true; }
+    if (name == "socket_recv") { return true; } if (name == "socket_close") { return true; } if (name == "dataset_materialize") { return true; }
+>>>>>>> Stashed changes
     return false;
 }
 
@@ -516,8 +586,12 @@ fn emit_append_relationship(context, opcode, arguments) {
 fn emit_joint_refinement(context, operation, arguments) {
     let source = emit_expression(context, arguments[0]); let destination = new_register(context);
     if (operation == "project") { emit(context, string_concat("JOINT_PROJECT ", reg(source), " ", reg(destination), " ", replace_commas(arguments[1][2]))); return destination; }
-    if (operation == "condition") { let evidence_value = emit_expression(context, arguments[2]); emit(context, string_concat("JOINT_CONDITION ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", reg(evidence_value))); return destination; }
+    if (operation == "condition") {
+        if (array_length(arguments) == 2) { let evidence_value = emit_expression(context, arguments[1]); emit(context, string_concat("JOINT_CONDITION_MAP ", reg(source), " ", reg(destination), " ", reg(evidence_value))); context[11][0] = true; return destination; }
+        let evidence_value = emit_expression(context, arguments[2]); emit(context, string_concat("JOINT_CONDITION ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", reg(evidence_value))); return destination;
+    }
     if (operation == "rename") { emit(context, string_concat("JOINT_RENAME ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", arguments[2][2])); return destination; }
+    if (array_length(arguments) == 2) { let evidence_value = emit_expression(context, arguments[1]); emit(context, string_concat("OBSERVE_MAP ", reg(source), " ", reg(destination), " ", reg(evidence_value))); context[11][0] = true; return destination; }
     let evidence_value = emit_expression(context, arguments[2]); emit(context, string_concat("OBSERVE ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", reg(evidence_value))); return destination;
 }
 
@@ -559,10 +633,10 @@ fn emit_information(context, node) {
 }
 
 fn emit_measure(context, node) {
-    let destination = new_register(context); let source = symbol_find(context, node[1]);
+    let destination = new_register(context); let source = emit_expression(context, node[1]);
     if (node[2] == "") { emit(context, string_concat("MEASURE ", reg(source), " ", node[3], " ", reg(destination))); }
     else { emit(context, string_concat("MEASURE_BASIS ", reg(source), " ", reg(destination), " ", node[2], " ", node[3])); }
-    if (node[3] == "sample") { return emit_sample_record(context, destination, node[1], "measure"); }
+    if (node[3] == "sample") { return emit_sample_record(context, destination, "measure", "measure"); }
     return destination;
 }
 
@@ -623,7 +697,15 @@ fn emit_expression(context, node) {
     }
     if (node[0] == 22) { return emit_binary(context, node); }
     if (node[0] == 23) { return emit_unary(context, node); }
-    if (node[0] == 24) { return emit_call(context, node); }
+    if (node[0] == 24) {
+        if (call_target(context, node[1]) == "__core_distribution__") {
+            let source = emit_expression(context, node[2][0]); let destination = new_register(context);
+            emit(context, string_concat("DISTRIBUTION_BUILD ", reg(source), " ", reg(destination)));
+            context[11][0] = true;
+            return destination;
+        }
+        return emit_call(context, node);
+    }
     if (node[0] == 25) { return emit_array(context, node); }
     if (node[0] == 26) { return emit_index(context, node); }
     if (node[0] == 40) { return emit_match(context, node); }
@@ -707,9 +789,17 @@ fn emit_statements(context, statements) {
     return null;
 }
 
+<<<<<<< Updated upstream
 fn emit_function_named(node, emitted_name, mappings, registry) {
     let context = emitter_new(emitted_name, registry); context[6] = mappings; let index = 0;
     while (index < array_length(node[3])) { symbol_add(context, node[3][index], index, false); context[2] = index + 1; index = index + 1; }
+=======
+fn emit_function_named(node, emitted_name, mappings, registry, generators, asyncs, features) {
+    let context = emitter_new(emitted_name, registry, generators, asyncs, features); context[6] = mappings; let index = 0;
+    let offset = 0; if (node[6]) { offset = 1; } if (node[7]) { offset = 1; }
+    context[2] = offset; context[7] = offset;
+    while (index < array_length(node[3])) { symbol_add(context, node[3][index], index + offset, false); context[2] = index + offset + 1; index = index + 1; }
+>>>>>>> Stashed changes
     emit_statements(context, node[4]);
     let empty = new_register(context); emit(context, string_concat("LOAD_CONST ", reg(empty), " null")); emit(context, string_concat("RETURN ", reg(empty)));
     let header_sb = sb_new();
@@ -718,8 +808,11 @@ fn emit_function_named(node, emitted_name, mappings, registry) {
     return sb_join(header_sb);
 }
 
+<<<<<<< Updated upstream
 fn emit_function(node, registry) { return emit_function_named(node, node[1], array_new(0), registry); }
 
+=======
+>>>>>>> Stashed changes
 fn merge_mappings(left, right) {
     let merged = map_new();
     let keys = map_keys(left);
@@ -737,6 +830,7 @@ fn merge_mappings(left, right) {
     return merged;
 }
 
+<<<<<<< Updated upstream
 fn emit_program(program) {
     let sections = sb_new();
     sb_push(sections, ".version 2");
@@ -758,6 +852,29 @@ fn emit_modules(modules, root_index) {
     let items = modules["items"];
     let function_count = 0; let module_index = 0;
     while (module_index < array_length(items)) { function_count = function_count + array_length(items[module_index][2][1]); module_index = module_index + 1; }
+=======
+fn emit_modules(modules, root_index) {
+    let sections = sb_new(); let features = [false];
+    let items = modules["items"];
+    let generators = map_new();
+    let asyncs = map_new();
+    let has_generators = false;
+    let has_async = false;
+    let has_ad = false;
+    let function_count = 0; let module_index = 0;
+    while (module_index < array_length(items)) {
+        function_count = function_count + array_length(items[module_index][2][1]);
+        let module = items[module_index]; let function_index = 0;
+        if (module[2][5]) { has_ad = true; }
+        while (function_index < array_length(module[2][1])) {
+            let function_node = module[2][1][function_index];
+            if (function_node[6]) { map_set(generators, string_concat(module[1], function_node[1]), true); has_generators = true; }
+            if (function_node[7]) { map_set(asyncs, string_concat(module[1], function_node[1]), true); has_async = true; }
+            function_index = function_index + 1;
+        }
+        module_index = module_index + 1;
+    }
+>>>>>>> Stashed changes
     if (function_count > 0) { sb_push(sections, "JUMP __main\n"); }
     module_index = 0;
     while (module_index < array_length(items)) {
@@ -768,13 +885,24 @@ fn emit_modules(modules, root_index) {
         let mappings = merge_mappings(local_mappings, import_mappings);
         while (function_index < array_length(module[2][1])) {
             let function_node = module[2][1][function_index];
+<<<<<<< Updated upstream
             sb_push(sections, emit_function_named(function_node, string_concat(module[1], function_node[1]), mappings, module[2][4])); sb_push(sections, "\n"); function_index = function_index + 1;
+=======
+            sb_push(sections, emit_function_named(function_node, string_concat(module[1], function_node[1]), mappings, module[2][4], generators, asyncs, features)); sb_push(sections, "\n"); function_index = function_index + 1;
+>>>>>>> Stashed changes
         }
         module_index = module_index + 1;
     }
     if (function_count > 0) { sb_push(sections, "__main:\n"); }
+<<<<<<< Updated upstream
     let root = items[root_index]; let main = emitter_new("main", root[2][4]); main[6] = root[3]; emit_statements(main, root[2][2]); emit(main, "HALT");
+=======
+    let root = items[root_index]; let main = emitter_new("main", root[2][4], generators, asyncs, features); main[6] = root[3]; emit_statements(main, root[2][2]); emit(main, "HALT");
+>>>>>>> Stashed changes
     sb_push(sections, string_join(main[0], "\n"));
     sb_push(sections, "\n");
-    return sb_join(sections);
+    let output = sb_join(sections); let version = ".version 2\n";
+    if (has_async) { version = ".version 4\n"; } else { if (has_generators) { version = ".version 3\n"; } else { if (has_ad) { version = ".version 3\n"; } } }
+    if (features[0]) { version = ".version 5\n"; }
+    return string_concat(version, output);
 }

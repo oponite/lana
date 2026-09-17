@@ -156,6 +156,46 @@ pub struct Buffer {
     data: Vec<u8>,
 }
 
+/// Opaque LIP-029 record handle. Records remain JSON at this narrow bridge;
+/// callers cannot borrow Rust value graphs or layouts.
+pub struct RecordHandle { json: Vec<u8> }
+
+#[repr(C)]
+pub struct LanaRecordBuffer { pub struct_size: usize, pub data: *mut u8, pub length: usize }
+
+pub const LANA_RECORD_ABI_VERSION: u32 = 1;
+
+#[no_mangle]
+pub extern "C" fn lana_record_abi_version() -> u32 { LANA_RECORD_ABI_VERSION }
+
+#[no_mangle]
+pub unsafe extern "C" fn lana_record_parse(data: *const u8, length: usize, out: *mut *mut RecordHandle) -> i32 {
+    if data.is_null() || out.is_null() { return LanaError::Type as i32; }
+    let bytes = std::slice::from_raw_parts(data, length);
+    let Ok(text) = std::str::from_utf8(bytes) else { return LanaError::Schema as i32; };
+    if json_parse(text).is_err() { return LanaError::Schema as i32; }
+    *out = Box::into_raw(Box::new(RecordHandle { json: bytes.to_vec() }));
+    LanaError::Ok as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lana_record_json(record: *const RecordHandle, out: *mut LanaRecordBuffer) -> i32 {
+    if record.is_null() || out.is_null() || (*out).struct_size != std::mem::size_of::<LanaRecordBuffer>() { return LanaError::Type as i32; }
+    let data = leak_bytes(&(*record).json) as *mut u8;
+    (*out).data = data; (*out).length = (*record).json.len();
+    LanaError::Ok as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lana_record_free(record: *mut RecordHandle) { if !record.is_null() { drop(Box::from_raw(record)); } }
+
+#[no_mangle]
+pub unsafe extern "C" fn lana_record_buffer_free(buffer: *mut LanaRecordBuffer) {
+    if buffer.is_null() { return; }
+    if !(*buffer).data.is_null() { drop(Box::from_raw(std::slice::from_raw_parts_mut((*buffer).data, (*buffer).length))); }
+    (*buffer).data = ptr::null_mut(); (*buffer).length = 0;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

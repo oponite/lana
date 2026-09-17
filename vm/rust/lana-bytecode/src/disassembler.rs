@@ -189,7 +189,10 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
         OpCode::JointCondition => {
             out.push_str(&format!("R{} condition[{}]=R{} -> R{}", ins.a, ins.c, ins.imm, ins.b));
         }
-        OpCode::JointSample | OpCode::Resolve | OpCode::PossibilityBuild
+        OpCode::JointConditionMap | OpCode::ObserveMap => {
+            out.push_str(&format!("R{} evidence=R{} -> R{}", ins.a, ins.c, ins.b));
+        }
+        OpCode::JointSample | OpCode::Resolve | OpCode::PossibilityBuild | OpCode::DistributionBuild
         | OpCode::InfoSample | OpCode::Derivation | OpCode::Explain
         | OpCode::Join | OpCode::JoinAll => {
             out.push_str(&format!("R{} -> R{}", ins.a, ins.b));

@@ -96,9 +96,21 @@ fn parse_joint(parser, line, column) {
 }
 
 fn parse_measure(parser, line, column) {
-    let source = take(parser)[1]; let basis = ""; let mode = "distribution";
+    let source = take(parser); let basis = ""; let mode = "distribution";
     if (matches(parser, "in")) { take(parser); basis = take(parser)[1]; }
     if (matches(parser, "as")) { take(parser); mode = take(parser)[1]; }
+    return syntax.measure_node(syntax.name_node(source[1], source[2], source[3]), basis, mode, line, column);
+}
+
+fn parse_measure_call(parser, line, column) {
+    expect_token(parser, "("); let source = parse_expression(parser); let basis = ""; let mode = "";
+    while (!matches(parser, ")")) {
+        expect_token(parser, ","); let name = take(parser)[1]; expect_token(parser, ":"); let value = take(parser);
+        if (name == "basis") { basis = value[1]; }
+        else { if (name == "result") { mode = value[1]; } else { parse_error(value, "measure accepts only basis: and result:"); } }
+    }
+    expect_token(parser, ")");
+    if (mode == "") { parse_error(current(parser), "measure requires result:"); }
     return syntax.measure_node(source, basis, mode, line, column);
 }
 
@@ -143,7 +155,11 @@ fn parse_keyword_primary(parser, text, line, column) {
     if (text == "attenuate") { return parse_attenuate(parser, line, column); }
     if (text == "trace_distance") { return parse_trace_distance(parser, line, column); }
     if (text == "append") { if (!matches(parser, "(")) { return parse_append_relationship(parser, line, column); } }
+<<<<<<< Updated upstream
     if (text == "measure") { return parse_measure(parser, line, column); }
+=======
+    if (text == "measure") { if (matches(parser, "(")) { return parse_measure_call(parser, line, column); } return parse_measure(parser, line, column); }
+>>>>>>> Stashed changes
     if (text == "estimate_measure") { return parse_estimate_measure(parser, line, column); }
     if (text == "joint") { return parse_joint(parser, line, column); }
     if (text == "correlated") { return parse_correlated(parser, line, column); }

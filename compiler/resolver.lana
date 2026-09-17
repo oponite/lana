@@ -150,6 +150,22 @@ fn host_effect(name) {
     if (name == "assert") { return effects("external_call"); }
     if (name == "index_set") { return effects("mutation"); }
     if (name == "array_push") { return effects("mutation"); }
+<<<<<<< Updated upstream
+=======
+    if (name == "run_async") { return effects("io"); }
+    if (name == "future_all") { return effects("io"); }
+    if (name == "future_race") { return effects("io"); }
+    if (name == "sleep") { return effects("io"); }
+    if (name == "http_get") { return effects("io"); }
+    if (name == "http_post") { return effects("io"); }
+    if (name == "execution_capability") { return effects("external_call"); }
+    if (name == "execution_authorize") { return effects("pure"); }
+    if (name == "execution_execute") { return effects("io"); }
+    if (name == "socket_connect") { return effects("io"); }
+    if (name == "socket_send") { return effects("io"); }
+    if (name == "socket_recv") { return effects("io"); }
+    if (name == "socket_close") { return effects("io"); }
+>>>>>>> Stashed changes
     if (host_is_pure(name)) { return effects("pure"); }
     return effects("external_call");
 }
@@ -179,6 +195,18 @@ fn host_type(name) {
     if (name == "assert") { return type_ordinary("null"); }
     if (name == "json_parse") { return type_unknown(); }
     if (name == "json_stringify") { return type_ordinary("string"); }
+<<<<<<< Updated upstream
+=======
+    if (name == "http_get") { return type_result(type_information(type_unknown()), type_ordinary("string")); }
+    if (name == "http_post") { return type_result(type_information(type_unknown()), type_ordinary("string")); }
+    if (name == "execution_capability") { return type_unknown(); }
+    if (name == "execution_authorize") { return type_unknown(); }
+    if (name == "execution_execute") { return type_unknown(); }
+    if (name == "socket_connect") { return type_result(type_ordinary("number"), type_ordinary("string")); }
+    if (name == "socket_send") { return type_result(type_ordinary("number"), type_ordinary("string")); }
+    if (name == "socket_recv") { return type_result(type_ordinary("string"), type_ordinary("string")); }
+    if (name == "socket_close") { return type_ordinary("null"); }
+>>>>>>> Stashed changes
     if (name == "csv_read") { return type_ordinary("array"); }
     if (name == "csv_write") { return type_ordinary("null"); }
     if (name == "array_length") { return type_ordinary("number"); }
@@ -606,6 +634,41 @@ fn resolve_call(node, environment) {
     symbol_add_reference(environment, node[1], node[3], node[4]);
     let resolved = resolve_arguments(node[2], environment);
     let effect_value = arguments_effect(resolved);
+<<<<<<< Updated upstream
+=======
+    if (map_has(environment, "__core_distribution_aliases__")) {
+        if (map_has(map_get(environment, "__core_distribution_aliases__"), node[1])) {
+            require_argument_count(node[1], resolved, 1);
+            return typed(node, type_information(type_unknown()), effect_value);
+        }
+    }
+    let is_ad = false;
+    if (node[1] == "grad") { is_ad = true; }
+    if (node[1] == "vjp") { is_ad = true; }
+    if (is_ad) {
+        if (map_has(environment, "__uses_ad__")) { map_set(map_get(environment, "__uses_ad__"), "yes", true); }
+        let expected = 2; if (node[1] == "vjp") { expected = 3; }
+        require_argument_count(node[1], resolved, expected);
+        if (node[2][0][0] != 21) { type_error(node, string_concat(node[1], " function must be a function name")); }
+        let fname = node[2][0][1];
+        let feffect = effects("external_call");
+        if (map_has(environment, "__function_effects__")) {
+            if (map_has(map_get(environment, "__function_effects__"), fname)) {
+                feffect = map_get(map_get(environment, "__function_effects__"), fname);
+            }
+        }
+        if (!effects_is_pure(feffect)) {
+            type_error(node, string_concat(node[1], " requires a pure function"));
+        }
+        if (map_has(environment, "__function_ops__")) {
+            if (map_has(map_get(environment, "__function_ops__"), fname)) {
+                if (list_uses_non_diff_op(map_get(map_get(environment, "__function_ops__"), fname))) {
+                    type_error(node, string_concat(node[1], " requires a differentiable function (max, min, and gpu_matmul are not differentiable)"));
+                }
+            }
+        }
+    }
+>>>>>>> Stashed changes
     let registry = type_registry_of(environment);
     if (registry != null) {
         let variant = type_registry_lookup_variant(registry, node[1]);
@@ -754,7 +817,7 @@ fn resolve_information_expression(node, environment) {
 fn resolve_runtime_expression(node, environment) {
     if (node[0] == 32) {
         if (node[3] == "sample") {
-            return typed(node, type_sample(type_unknown(), node[1], "measure"), effects("stochastic"));
+            return typed(node, type_sample(type_unknown(), "measure", "measure"), effects("stochastic"));
         }
         return typed(node, type_unknown(), effects("pure"));
     }
@@ -993,9 +1056,33 @@ fn resolve_type_declaration(node, environment) {
 fn resolve_program(program) {
     let box = symbol_box_new();
     let registry = type_registry_new();
+<<<<<<< Updated upstream
     let top_environment = environment_new();
     map_set(top_environment, "__symbols__", box);
     map_set(top_environment, "__types__", registry);
+=======
+    let generators = map_new();
+    let asyncs = map_new();
+    let function_effects = map_new();
+    let uses_ad = map_new();
+    let function_ops = map_new();
+    let core_distribution_aliases = map_new();
+    let top_environment = environment_new();
+    map_set(top_environment, "__symbols__", box);
+    map_set(top_environment, "__types__", registry);
+    map_set(top_environment, "__generators__", generators);
+    map_set(top_environment, "__asyncs__", asyncs);
+    map_set(top_environment, "__function_effects__", function_effects);
+    map_set(top_environment, "__uses_ad__", uses_ad);
+    map_set(top_environment, "__function_ops__", function_ops);
+    map_set(top_environment, "__core_distribution_aliases__", core_distribution_aliases);
+    let import_index = 0;
+    while (import_index < array_length(program[3])) {
+        let imported = program[3][import_index];
+        if (imported[0] == "std/core") { map_set(core_distribution_aliases, string_concat(imported[1], ".distribution"), true); }
+        import_index = import_index + 1;
+    }
+>>>>>>> Stashed changes
     let index = 0;
     while (index < array_length(program[4])) {
         resolve_type_declaration(program[4][index], top_environment); index = index + 1;

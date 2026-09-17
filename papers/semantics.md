@@ -177,6 +177,7 @@ sample, and resolve it supports. An undeclared operation returns
 `SS_ERR_UNSUPPORTED_OPERATION`; it may not fall back to enumeration, sampling,
 or an independence assumption.
 
+<<<<<<< Updated upstream
 Existing `STATE` values embed as `Definite(STATE)`. Existing `STATE_DIST`
 values embed as `Distribution(STATE)`. These embeddings do not change the
 observable behavior of `MEASURE`, `TRANSFORM`, `APPEND`, or
@@ -196,6 +197,13 @@ and $\eta_D(\mu)=\operatorname{Distribution}(\mu)$:
 
 These are compatibility identities, not alternate implementations. In
 particular, embedding cannot add normalization, sampling, collapse, or a new
+=======
+`STATE` and `STATE_DIST` are a separate specialized density-operator surface.
+They have no implicit embedding into `Information`: `to_state`, measurement,
+and declared transforms are the only bridges. `MEASURE`, `TRANSFORM`, `APPEND`,
+and `SAMPLE_STATE_DIST` retain their State-specific semantics below. In
+particular, a bridge cannot add normalization, sampling, collapse, or a new
+>>>>>>> Stashed changes
 equality rule to an existing operation.
 
 ### 0.1.3 Information-aware execution

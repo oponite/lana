@@ -30,6 +30,36 @@ add_lana_c_test(lana_effects_tests tests/unit/test_effects.c)
 add_lana_c_test(lana_ledger_coverage_tests tests/unit/test_ledger_coverage.c)
 add_lana_c_test(lana_shared_tests tests/unit/test_shared.c)
 
+<<<<<<< Updated upstream
+=======
+# LIP-018 two-way FFI: a test shared library (a deterministic function and a
+# deliberately-faulting one) plus the unit test that loads and calls it.
+add_library(lana_ffi_test_lib SHARED tests/unit/ffi_test_lib.c)
+target_compile_options(lana_ffi_test_lib PRIVATE -Wall -Wextra -Wpedantic -Werror)
+set_target_properties(lana_ffi_test_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
+add_lana_c_test(lana_ffi_tests tests/unit/test_ffi.c)
+target_compile_definitions(lana_ffi_tests PRIVATE
+    LANA_FFI_TEST_LIB="$<TARGET_FILE:lana_ffi_test_lib>")
+# LIP-019 networking: real-network paths (C-only, non-deterministic).
+add_lana_c_test(lana_net_tests tests/unit/test_net.c)
+# LIP-019 live networking over the .lana std/http surface: http_get with
+# provenance rooting plus TLS verify-on/off against a loopback server. Skips
+# itself if openssl/python3 are unavailable.
+add_test(
+    NAME net_live_conformance
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance/differential/run_net_live.sh")
+set_tests_properties(net_live_conformance PROPERTIES
+    TIMEOUT 90 SKIP_RETURN_CODE 77
+    ENVIRONMENT "LANA=$<TARGET_FILE:lana>;LANAVM=$<TARGET_FILE:lanavm>")
+
+add_test(
+    NAME execution_live_conformance
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance/run_execution_live.sh")
+set_tests_properties(execution_live_conformance PROPERTIES
+    TIMEOUT 90
+    ENVIRONMENT "LANA=${CMAKE_CURRENT_BINARY_DIR}/cargo/release/lana")
+
+>>>>>>> Stashed changes
 function(add_native_compile_failure name source expected)
     add_test(
         NAME ${name}
@@ -131,6 +161,89 @@ add_test(NAME native_inspect_dot COMMAND lana inspect "${CMAKE_CURRENT_SOURCE_DI
 set_tests_properties(native_inspect_dot PROPERTIES PASS_REGULAR_EXPRESSION "digraph state_dist")
 add_test(NAME native_external_prediction_data COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/examples/external_prediction_data.lana")
 add_test(NAME native_imports COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/import_main.lana")
+<<<<<<< Updated upstream
+=======
+add_test(NAME native_m22_generator_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_generator_pass.lana")
+set_tests_properties(native_m22_generator_pass PROPERTIES PASS_REGULAR_EXPRESSION "M22_GENERATOR_PASS")
+add_test(NAME native_m22_generator_exhausted COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_generator_exhausted.lana")
+set_tests_properties(native_m22_generator_exhausted PROPERTIES PASS_REGULAR_EXPRESSION "M22_GENERATOR_EXHAUSTED")
+add_test(NAME native_async_simple_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/async_simple_pass.lana")
+set_tests_properties(native_async_simple_pass PROPERTIES PASS_REGULAR_EXPRESSION "ASYNC_SIMPLE_PASS")
+add_test(NAME native_async_concurrent_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/async_concurrent_pass.lana")
+set_tests_properties(native_async_concurrent_pass PROPERTIES PASS_REGULAR_EXPRESSION "ASYNC_CONCURRENT_PASS")
+add_test(NAME native_async_determinism_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/async_determinism_pass.lana")
+set_tests_properties(native_async_determinism_pass PROPERTIES PASS_REGULAR_EXPRESSION "ASYNC_DETERMINISM_PASS")
+add_test(NAME native_async_future_all_race_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/async_future_all_race_pass.lana")
+set_tests_properties(native_async_future_all_race_pass PROPERTIES PASS_REGULAR_EXPRESSION "ASYNC_FUTURE_ALL_RACE_PASS")
+add_test(NAME native_async_sleep_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/async_sleep_pass.lana")
+set_tests_properties(native_async_sleep_pass PROPERTIES PASS_REGULAR_EXPRESSION "ASYNC_SLEEP_PASS")
+add_test(NAME native_m22_set_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_set_pass.lana")
+set_tests_properties(native_m22_set_pass PROPERTIES PASS_REGULAR_EXPRESSION "M22_SET_PASS")
+add_native_runtime_failure(native_m22_set_state_rejected tests/regression/m22_set_state_rejected.lana "LANA_ERR_TYPE")
+add_test(NAME native_m22_iter_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_iter_pass.lana")
+set_tests_properties(native_m22_iter_pass PROPERTIES PASS_REGULAR_EXPRESSION "M22_ITER_PASS")
+add_test(NAME native_m22_map_filter_reduce_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_map_filter_reduce_pass.lana")
+set_tests_properties(native_m22_map_filter_reduce_pass PROPERTIES PASS_REGULAR_EXPRESSION "M22_MAP_FILTER_REDUCE_PASS")
+add_test(NAME native_m22_comprehension_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m22_comprehension_pass.lana")
+set_tests_properties(native_m22_comprehension_pass PROPERTIES PASS_REGULAR_EXPRESSION "M22_COMPREHENSION_PASS")
+add_test(NAME native_m23_csv_toml_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m23_csv_toml_pass.lana")
+set_tests_properties(native_m23_csv_toml_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "M23_CSV_TOML_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_m23_json_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m23_json_pass.lana")
+set_tests_properties(native_m23_json_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "M23_JSON_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_m21_format_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m21_format_pass.lana")
+set_tests_properties(native_m21_format_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "M21_FORMAT_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_m21_unicode_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m21_unicode_pass.lana")
+set_tests_properties(native_m21_unicode_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "M21_UNICODE_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_m21_regex_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m21_regex_pass.lana")
+set_tests_properties(native_m21_regex_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "M21_REGEX_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_std_import_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/std_import_pass.lana")
+set_tests_properties(native_std_import_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "STD_IMPORT_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_std_modules_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/std_modules_pass.lana")
+set_tests_properties(native_std_modules_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "STD_MODULES_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_decision_voi_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/decision_voi_pass.lana")
+set_tests_properties(native_decision_voi_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "DECISION_VOI_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_decision_review_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/decision_review_pass.lana")
+set_tests_properties(native_decision_review_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "DECISION_REVIEW_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_native_runtime_failure(native_decision_voi_invalid tests/regression/decision_voi_invalid.lana "LANA_ERR_ASSERTION")
+add_test(NAME native_ml_regression_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_regression_pass.lana")
+set_tests_properties(native_ml_regression_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_REGRESSION_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_invalid_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_invalid_pass.lana")
+set_tests_properties(native_ml_invalid_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_INVALID_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_families_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_families_pass.lana")
+set_tests_properties(native_ml_families_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_FAMILIES_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_dataset_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_dataset_pass.lana")
+set_tests_properties(native_ml_dataset_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_DATASET_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+add_test(NAME native_ml_kalman_multivariate_pass COMMAND lana run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/ml_kalman_multivariate_pass.lana")
+set_tests_properties(native_ml_kalman_multivariate_pass PROPERTIES
+    PASS_REGULAR_EXPRESSION "ML_KALMAN_MULTIVARIATE_PASS"
+    ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+>>>>>>> Stashed changes
 
 add_test(NAME native_compiler_bootstrap
     COMMAND "${CMAKE_COMMAND}"
@@ -140,6 +253,60 @@ add_test(NAME native_compiler_bootstrap
         -DLANA_REFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/compiler/bootstrap/compiler.lasm
         -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/compiler-selfcheck.lasm
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyNativeBootstrap.cmake")
+add_test(NAME cfg_dump_control_flow
+    COMMAND "${CMAKE_COMMAND}"
+        -DLANA_VM=$<TARGET_FILE:lanavm>
+        -DLANA_COMPILER=${LANA_NATIVE_COMPILER}
+        -DLANA_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/cfg_control_flow.lana
+        -DLANA_REFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/cfg_control_flow.cfg.txt
+        -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/cfg_control_flow.cfg.txt
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestCfgDump.cmake")
+add_test(NAME ssa_dump_control_flow
+    COMMAND "${CMAKE_COMMAND}"
+        -DLANA_VM=$<TARGET_FILE:lanavm>
+        -DLANA_COMPILER=${LANA_NATIVE_COMPILER}
+        -DLANA_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/cfg_control_flow.lana
+        -DLANA_REFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/cfg_control_flow.ssa.txt
+        -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/cfg_control_flow.ssa.txt
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestSsaDump.cmake")
+add_test(NAME analysis_dump_control_flow
+    COMMAND "${CMAKE_COMMAND}"
+        -DLANA_VM=$<TARGET_FILE:lanavm>
+        -DLANA_COMPILER=${LANA_NATIVE_COMPILER}
+        -DLANA_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/analysis_control_flow.lana
+        -DLANA_REFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/analysis_control_flow.analysis.txt
+        -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/analysis_control_flow.analysis.txt
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestAnalysisDump.cmake")
+add_test(NAME opt_dump_control_flow
+    COMMAND "${CMAKE_COMMAND}"
+        -DLANA_VM=$<TARGET_FILE:lanavm>
+        -DLANA_COMPILER=${LANA_NATIVE_COMPILER}
+        -DLANA_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/opt_control_flow.lana
+        -DLANA_REFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/opt_control_flow.opt.txt
+        -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/opt_control_flow.opt.txt
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestOptDump.cmake")
+add_test(NAME opt_dump_correlated
+    COMMAND "${CMAKE_COMMAND}"
+        -DLANA_VM=$<TARGET_FILE:lanavm>
+        -DLANA_COMPILER=${LANA_NATIVE_COMPILER}
+        -DLANA_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/opt_correlated.lana
+        -DLANA_REFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/opt_correlated.opt.txt
+        -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/opt_correlated.opt.txt
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestOptDump.cmake")
+add_test(NAME optimization_differential
+    COMMAND "${CMAKE_COMMAND}"
+        -DLANA_VM=$<TARGET_FILE:lanavm>
+        -DLANA_COMPILER=${LANA_NATIVE_COMPILER}
+        -DLANA_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/opt_differential.lana
+        -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/opt_differential
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestOptimizationDifferential.cmake")
+add_test(NAME optimization_differential_correlated
+    COMMAND "${CMAKE_COMMAND}"
+        -DLANA_VM=$<TARGET_FILE:lanavm>
+        -DLANA_COMPILER=${LANA_NATIVE_COMPILER}
+        -DLANA_INPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/opt_correlated_differential.lana
+        -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/opt_correlated_differential
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestOptimizationDifferential.cmake")
 add_test(NAME lana_lsp_protocol
     COMMAND "${CMAKE_COMMAND}" -DLANA=$<TARGET_FILE:lana>
         -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/lsp-test-output.txt
@@ -154,9 +321,11 @@ if(LANA_PYTHON3)
         PASS_REGULAR_EXPRESSION "LSP_ROUNDTRIP_PASS")
 endif()
 add_test(NAME lana_project_workflow
-    COMMAND "${CMAKE_COMMAND}" -DLANA=$<TARGET_FILE:lana>
+    COMMAND "${CMAKE_COMMAND}" -DLANA=${LANA_RUST_CLI}
         -DROOT=${CMAKE_CURRENT_BINARY_DIR}/project-workflow
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestProjectWorkflow.cmake")
+set_tests_properties(lana_project_workflow PROPERTIES
+    ENVIRONMENT "LANA_COMPILER_LABC=${LANA_NATIVE_COMPILER};LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
 add_test(NAME lana_source_debugger
     COMMAND "${CMAKE_COMMAND}" -DLANA=$<TARGET_FILE:lana>
         -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m10_inspector_pass.lana

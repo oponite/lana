@@ -22,7 +22,7 @@ compatibility requires it.
 Example:
 
 ```lana
-measure x
+measure(x, result: "probability")
 ```
 
 rather than also supporting:
@@ -66,7 +66,7 @@ operation → target → modifier
 Examples:
 
 ```lana
-measure x
+measure(x, result: "probability")
 transform x with invert
 append a with b as redundant 0.8
 ```
@@ -141,7 +141,7 @@ state scenario =
     sample possibilities
 
 bit result =
-    measure scenario
+    measure(scenario, result: "probability")
 ```
 
 Important transitions such as:

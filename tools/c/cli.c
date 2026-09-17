@@ -291,8 +291,26 @@ static int inspect_command(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     char compiler_path[4096];
+<<<<<<< Updated upstream
     if (argc < 2) { usage(stderr); return 2; }
     if (strcmp(argv[1], "version") == 0) { (void)printf("Lana %s (LABC v2, C VM, native compiler)\n", LANA_VERSION); return 0; }
+=======
+    if (argc < 2) {
+        /* Bare `lana` (no subcommand) launches the REPL (LIP-020). */
+        if (!lana_compiler_find(argv[0], compiler_path, sizeof(compiler_path))) {
+            (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1;
+        }
+        return repl_command(compiler_path);
+    }
+    if (strcmp(argv[1], "repl") == 0) {
+        if (argc != 2) { usage(stderr); return 2; }
+        if (!lana_compiler_find(argv[0], compiler_path, sizeof(compiler_path))) {
+            (void)fprintf(stderr, "native Lana compiler bytecode not found\n"); return 1;
+        }
+        return repl_command(compiler_path);
+    }
+    if (strcmp(argv[1], "version") == 0) { (void)printf("Lana %s (LABC v1-v4, C VM, native compiler)\n", LANA_VERSION); return 0; }
+>>>>>>> Stashed changes
     if (strcmp(argv[1], "new") == 0) {
         if (argc != 3) { usage(stderr); return 2; }
         if (!lana_compiler_find(argv[0], compiler_path, sizeof(compiler_path))) {

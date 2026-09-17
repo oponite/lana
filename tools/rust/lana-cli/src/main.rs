@@ -5,9 +5,9 @@
 //! runs it on the Rust VM, and reports the result. Output matches `tools/c/cli.c`
 //! `load_command` so differential spot-checks can compare the two byte-for-byte.
 //!
-//! The full command surface mirrors `tools/c/cli.c` `main()`: `version`, `new`,
+//! The command surface is based on `tools/c/cli.c` `main()`: `version`, `new`,
 //! `lsp`, `fmt`, `doc`, `build`, `test`, `compile`, `check`, `asm`, `debug`,
-//! `run`, `run-bytecode`, `dis`, and `verify`. Commands that need the
+//! `run`, `run-bytecode`, `dis`, `verify`, and `migrate`. Commands that need the
 //! self-hosted compiler locate `lana-compiler.labc` and run it on the Rust VM.
 
 use std::path::{Path, PathBuf};
@@ -22,7 +22,11 @@ const LANA_VERSION: &str = "2.0.0";
 /// into the single `lana` binary).
 fn usage(program: &str) {
     eprintln!(
+<<<<<<< Updated upstream
         "usage:\n  {program} compile program.lana -o program.labc\n  {program} new directory\n  {program} lsp\n  {program} debug program.lana\n  {program} build|run|test|check|fmt|doc\n  {program} check program.lana\n  {program} asm program.lasm -o program.labc\n  {program} run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n  {program} run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n  {program} dis program.labc\n  {program} verify program.labc\n  {program} inspect program.lana [--format json|dot]"
+=======
+        "usage:\n  {program} compile program.lana -o program.labc\n  {program} new directory\n  {program} lsp\n  {program} debug program.lana\n  {program} repl\n  {program} build|run|test|check|fmt|doc\n  {program} check program.lana\n  {program} migrate --to 3 program.lana [--write]\n  {program} execution-config init --metadata FILE --key FILE --capability-id ID --origin https://HOST --credential-key-id NAME [--ca-file PEM]\n  {program} asm program.lasm -o program.labc\n  {program} run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n  {program} run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N]\n  {program} dis program.labc\n  {program} verify program.labc\n  {program} inspect program.lana [--format json|dot]"
+>>>>>>> Stashed changes
     );
 }
 
@@ -31,6 +35,193 @@ fn run_usage(program: &str) {
     eprintln!(
         "usage: {program} run <file.labc> [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N] [--stats]"
     );
+}
+
+fn identifier_end(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if start >= bytes.len() || !(bytes[start].is_ascii_alphabetic() || bytes[start] == b'_') {
+        return None;
+    }
+    let mut end = start + 1;
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end += 1;
+    }
+    Some(end)
+}
+
+fn skip_whitespace(source: &str, mut index: usize) -> usize {
+    while index < source.len() && source.as_bytes()[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn legacy_measure_at(source: &str, start: usize) -> Option<(usize, String)> {
+    let after_measure = start + "measure".len();
+    if after_measure >= source.len() || !source.as_bytes()[after_measure].is_ascii_whitespace() {
+        return None;
+    }
+    let source_start = skip_whitespace(source, after_measure);
+    let source_end = identifier_end(source, source_start)?;
+    let name = &source[source_start..source_end];
+    let mut end = skip_whitespace(source, source_end);
+    let mut replacement_end = source_end;
+    let mut basis = None;
+    let mut mode = "distribution";
+
+    if source[end..].starts_with("in")
+        && source.as_bytes().get(end + 2).is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        let basis_start = skip_whitespace(source, end + 2);
+        let basis_end = identifier_end(source, basis_start)?;
+        basis = Some(&source[basis_start..basis_end]);
+        replacement_end = basis_end;
+        end = skip_whitespace(source, basis_end);
+    }
+    if source[end..].starts_with("as")
+        && source.as_bytes().get(end + 2).is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        let mode_start = skip_whitespace(source, end + 2);
+        let mode_end = identifier_end(source, mode_start)?;
+        mode = &source[mode_start..mode_end];
+        replacement_end = mode_end;
+    }
+
+    let replacement = match basis {
+        Some(basis) => format!("measure({name}, basis: \"{basis}\", result: \"{mode}\")"),
+        None => format!("measure({name}, result: \"{mode}\")"),
+    };
+    Some((replacement_end, replacement))
+}
+
+fn migrate_source(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut output = String::with_capacity(source.len());
+    let mut copied = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'#' || (bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/')) {
+            index += if bytes[index] == b'#' { 1 } else { 2 };
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+        } else if bytes[index] == b'"' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' {
+                    index += 2;
+                } else if bytes[index] == b'"' {
+                    index += 1;
+                    break;
+                } else {
+                    index += 1;
+                }
+            }
+        } else if bytes[index..].starts_with(b"measure")
+            && (index == 0 || !bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_')
+        {
+            if let Some((end, replacement)) = legacy_measure_at(source, index) {
+                output.push_str(&source[copied..index]);
+                output.push_str(&replacement);
+                copied = end;
+                index = end;
+            } else {
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    output.push_str(&source[copied..]);
+    output
+}
+
+fn warn_legacy_measure(path: &str, source: &str) {
+    if migrate_source(source) != source {
+        eprintln!("{path}: warning: sentence-form measure is deprecated in Lana 3.0; run `lana migrate --to 3 --write {path}`");
+    }
+}
+
+fn migrate_command(args: &[String]) -> ExitCode {
+    let mut target = None;
+    let mut path = None;
+    let mut write = false;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--to" => {
+                index += 1;
+                if target.is_some() || args.get(index).is_none() {
+                    usage("lana");
+                    return ExitCode::from(2);
+                }
+                target = Some(args[index].as_str());
+            }
+            "--write" => {
+                if write {
+                    usage("lana");
+                    return ExitCode::from(2);
+                }
+                write = true;
+            }
+            value if value.starts_with('-') || path.is_some() => {
+                usage("lana");
+                return ExitCode::from(2);
+            }
+            value => path = Some(value),
+        }
+        index += 1;
+    }
+    let Some(path) = path else {
+        usage("lana");
+        return ExitCode::from(2);
+    };
+    if target != Some("3") {
+        eprintln!("migrate: only --to 3 is supported");
+        return ExitCode::from(2);
+    }
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) => {
+            eprintln!("{path}: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let migrated = migrate_source(&source);
+    if write {
+        if let Err(error) = std::fs::write(path, migrated) {
+            eprintln!("{path}: {error}");
+            return ExitCode::from(1);
+        }
+    } else {
+        print!("{migrated}");
+    }
+    ExitCode::SUCCESS
+}
+
+fn execution_config_command(args: &[String]) -> ExitCode {
+    if args.first().map(String::as_str) != Some("init") { usage("lana"); return ExitCode::from(2); }
+    let mut metadata = None; let mut key = None; let mut id = None; let mut origin = None; let mut credential = None; let mut ca_file = None;
+    let mut index = 1;
+    while index < args.len() {
+        let flag = &args[index]; index += 1;
+        let Some(value) = args.get(index) else { usage("lana"); return ExitCode::from(2); };
+        index += 1;
+        match flag.as_str() {
+            "--metadata" if metadata.is_none() => metadata = Some(value),
+            "--key" if key.is_none() => key = Some(value),
+            "--capability-id" if id.is_none() => id = Some(value),
+            "--origin" if origin.is_none() => origin = Some(value),
+            "--credential-key-id" if credential.is_none() => credential = Some(value),
+            "--ca-file" if ca_file.is_none() => ca_file = Some(value),
+            _ => { usage("lana"); return ExitCode::from(2); }
+        }
+    }
+    let (Some(metadata), Some(key), Some(id), Some(origin), Some(credential)) = (metadata, key, id, origin, credential) else { usage("lana"); return ExitCode::from(2); };
+    match lana_runtime::execution::ExecutionConfig::write(Path::new(metadata), Path::new(key), id, origin, credential, ca_file.map(String::as_str)) {
+        Ok(()) => { println!("created encrypted execution metadata"); ExitCode::SUCCESS }
+        Err(error) => { eprintln!("execution-config: {}", error.name()); ExitCode::from(1) }
+    }
 }
 
 fn report_error(error: &lana_vm::VmError) {
@@ -224,6 +415,9 @@ fn write_chunk(chunk: &Chunk, path: &str) -> Result<(), LanaErrorInfo> {
 /// `compile_source_file` in `tools/c/cli.c`: run the compiler to emit assembly,
 /// assemble it, and write the chunk.
 fn compile_source_file(compiler: &Path, source_path: &str, output_path: &str) -> Result<(), CliError> {
+    if let Ok(source) = std::fs::read_to_string(source_path) {
+        warn_legacy_measure(source_path, &source);
+    }
     let asm_path = temp_path("lana-assembly");
     let asm_str = asm_path.to_string_lossy().into_owned();
     let program_args = vec![source_path.to_string(), asm_str.clone()];
@@ -914,7 +1108,11 @@ fn main() -> ExitCode {
     }
     match args[1].as_str() {
         "version" => {
+<<<<<<< Updated upstream
             println!("Lana {LANA_VERSION} (LABC v2, Rust VM, native compiler)");
+=======
+            println!("Lana {} (LABC v1-v5, Rust VM, native compiler)", lana_version());
+>>>>>>> Stashed changes
             ExitCode::SUCCESS
         }
         "new" => {
@@ -1001,6 +1199,8 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "migrate" => migrate_command(&args[2..]),
+        "execution-config" => execution_config_command(&args[2..]),
         "check" => {
             let Some(compiler) = find_compiler() else {
                 eprintln!("native Lana compiler bytecode not found");
@@ -1080,5 +1280,31 @@ fn main() -> ExitCode {
             usage("lana");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrate_source;
+
+    #[test]
+    fn migrates_legacy_measure_without_touching_text() {
+        let source = concat!(
+            "// measure belief as probability\n",
+            "# measure belief as probability\n",
+            "let p = measure belief as probability;\n",
+            "let d = measure belief in x;\n",
+            "let text = \"measure belief as probability\";\n",
+        );
+        assert_eq!(
+            migrate_source(source),
+            concat!(
+                "// measure belief as probability\n",
+                "# measure belief as probability\n",
+                "let p = measure(belief, result: \"probability\");\n",
+                "let d = measure(belief, basis: \"x\", result: \"distribution\");\n",
+                "let text = \"measure belief as probability\";\n",
+            )
+        );
     }
 }

@@ -1,28 +1,49 @@
 # Lana
 
-> A programming language for uncertainty computation.
+> A language for programming with uncertain information and derived controlled actions.
 
 Lana includes:
 
+<<<<<<< Updated upstream
 - an immutable density-operator primitive `STATE`, with an observable probability
   and normalized complex disposition
 - immutable lazy `STATE_DIST` values that compose states without sampling or
   mutation until explicitly measured or sampled
 - ordinary numbers, booleans, strings, arrays, functions, tasks, and host
   calls.
+=======
+The problem Lana addresses is concrete. Teams that make consequential decisions
+under uncertainty — risk, forecasting, service health — usually reach for a model or a library. That works
+until someone asks *why* a decision was made, or *what evidence* it rested on,
+or *whether it can be reproduced*. A library gives you a number; it does not
+give you a first-class, testable, versionable account of the reasoning.
+
+Lana's answer is four narrow surfaces rather than a general AI framework:
+
+- **Core** constructs and refines explicit finite uncertainty.
+- **State** preserves evidence and provenance.
+- **Decision** makes recommendation and review inputs explicit.
+- **Execution** derives controlled actions behind host authorization.
+
+Lana is a public, actively developed language project. Issues, questions, and
+focused pull requests are welcome. Changes to language behavior follow the
+authority order below and include tests or documentation when applicable.
+
+## Batteries Included
+
+The Core-first starting point is a finite distribution with explicit weights:
+>>>>>>> Stashed changes
 
 ```lana
-state belief = state(p: 0.50, d_re: 0.30, d_im: 0.10);
-state evidence = state(p: 0.90, d: 0.65);
-let combined = append(belief, evidence);
-transform combined with invert();
-print(measure combined as probability);
+import "std/core" as core;
+
+let options = core.distribution([["wait", 0.7], ["act", 0.3]]);
+print(sample_value(sample(options)));
 ```
 
-`p` is the observable probability. The complex normalized disposition is
-`d = d_re + i d_im` with `|d| <= 1`; the shorthand `d:` selects the real axis.
-At `p = 0` or `p = 1`, the disposition is canonicalized to zero. `append()`
-creates an immutable lazy distribution, and `sample()` returns a concrete state.
+Core distributions are finite, normalized, and inspectable. Existing State
+operations remain available when the program needs evidence composition and
+provenance.
 
 Lana is a public, actively developed language project. Issues, questions, and
 focused pull requests are welcome. Changes to language behavior follow the
@@ -58,8 +79,9 @@ cmake --install build --prefix "$HOME/.local"
 "$HOME/.local/bin/lana" check examples/belief.lana
 ```
 
-The installed compile and run path consists of the C11 `lana`/`lanavm` binaries
-and the self-hosted Lana compiler bytecode. Python is not required.
+The installed `lana` command is the Rust v1-v5 runtime. `lanavm` is the frozen
+C11 v1-v4 reference backend. Both use the self-hosted Lana compiler bytecode;
+Python is not required.
 
 The canonical VM is the Rust runtime (crates `lana-bytecode`, `lana-vm`,
 `lana-runtime`, `lana-ffi`, `lana-cli` under `vm/rust/`, `runtime/rust/`, and
@@ -82,6 +104,7 @@ build/lanavm dis build/belief.labc
 build/lanavm run build/belief.labc --trace
 ```
 
+<<<<<<< Updated upstream
 ## Three small examples
 
 These examples introduce Lana in three steps:
@@ -187,6 +210,35 @@ Output:
 ```
 
 Source: [`examples/tutorials/03_combined_evidence.lana`](examples/tutorials/03_combined_evidence.lana)
+=======
+## Repository
+
+- `compiler/` — the self-hosted Lana compiler.
+- `vm/` — canonical Rust `lana-vm` + `lana-bytecode`, plus the C11
+  reference VM core.
+- `runtime/` — canonical Rust `lana-runtime` + `lana-ffi`, plus the C11
+  hardware boundary.
+- `tools/` — Rust `lana-cli` + `lana-fuzz` + `lana-wasm` (WebAssembly bindings),
+  plus the C11 CLI, LSP, and project tooling.
+- `spec/` — `SPEC.md`, `SYNTAX.md`, `BYTECODE.md`, `VM.md`.
+- `papers/` — `semantics.md` (1.0) and `semantics-2.md` (2.0), the mathematical
+  authorities.
+- `lip/` — Lana Improvement Proposals.
+- `stdlib/` — Lana standard library.
+- `tests/` — unit, regression, and conformance suites.
+- `integrations/` — Python, editors, native ABI.
+
+Project governance: [GOVERNANCE.md](GOVERNANCE.md), [VERSIONING.md](VERSIONING.md),
+[CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md).
+
+## Test evidence
+
+Run `python3 tests/run.py quick` for the daily checks. The runner records the
+candidate hash, commands, results, and known coverage limits. The
+[test guide](tests/README.md) describes the full, sanitizer, hardware, and
+release profiles. Passing tests establish specific behavior, not a guarantee
+for every program or environment.
+>>>>>>> Stashed changes
 
 ## Optional integrations
 

@@ -16,7 +16,11 @@
 
 use crate::chunk::{Chunk, Function, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
+<<<<<<< Updated upstream
 use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1};
+=======
+use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1, LABC_VERSION_3, LABC_VERSION_4, LABC_VERSION_5};
+>>>>>>> Stashed changes
 use crate::value::{Value, ValueType};
 
 /// Maximum serialized chunk size, matching the C11 loader's 64 MiB cap.
@@ -82,7 +86,13 @@ pub fn load(bytes: &[u8]) -> Result<Chunk, LanaErrorInfo> {
     let instructions = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
     let entry = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
 
+<<<<<<< Updated upstream
     if version != LABC_VERSION && version != LABC_VERSION_1 {
+=======
+    if version != LABC_VERSION && version != LABC_VERSION_1 && version != LABC_VERSION_3
+        && version != LABC_VERSION_4 && version != LABC_VERSION_5
+    {
+>>>>>>> Stashed changes
         return Err(LanaErrorInfo::new(
             LanaError::IncompatibleFormat, 0, 0, 0,
             format!("unsupported LABC version {version}")));

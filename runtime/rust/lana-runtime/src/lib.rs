@@ -10,6 +10,7 @@ pub mod claims;
 pub mod codec;
 pub mod data;
 pub mod effects;
+pub mod execution;
 pub mod host_calls;
 pub mod ledger;
 pub mod policy;

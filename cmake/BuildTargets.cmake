@@ -84,8 +84,9 @@ add_custom_command(
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BundleCompiler.cmake"
     DEPENDS
         compiler/lexer.lana compiler/syntax.lana compiler/parser.lana
-        compiler/resolver.lana compiler/ir.lana compiler/emitter.lana
-        compiler/main.lana cmake/BundleCompiler.cmake
+        compiler/resolver.lana compiler/ir.lana compiler/cfg.lana
+        compiler/ssa.lana compiler/analysis.lana compiler/opt.lana
+        compiler/emitter.lana compiler/main.lana cmake/BundleCompiler.cmake
     VERBATIM
 )
 add_custom_target(lana_compiler_bundle ALL DEPENDS "${LANA_COMPILER_BUNDLE}")
@@ -101,8 +102,32 @@ add_custom_command(
 add_custom_target(lana_native_compiler ALL DEPENDS "${LANA_NATIVE_COMPILER}")
 add_dependencies(lana lana_native_compiler)
 
+find_program(LANA_CARGO cargo REQUIRED)
+set(LANA_RUST_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo")
+set(LANA_RUST_CLI "${LANA_RUST_TARGET_DIR}/release/lana")
+set(LANA_RUST_FFI "${LANA_RUST_TARGET_DIR}/release/${CMAKE_SHARED_LIBRARY_PREFIX}lana_ffi${CMAKE_SHARED_LIBRARY_SUFFIX}")
+add_custom_target(lana_rust_cli ALL
+    COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${LANA_RUST_TARGET_DIR}"
+            "${LANA_CARGO}" build --locked --release --manifest-path
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-cli/Cargo.toml" --bin lana
+    BYPRODUCTS "${LANA_RUST_CLI}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    VERBATIM
+)
+add_dependencies(lana_rust_cli lana_native_compiler)
+add_custom_target(lana_rust_ffi ALL
+    COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${LANA_RUST_TARGET_DIR}"
+            "${LANA_CARGO}" build --locked --release --manifest-path
+            "${CMAKE_CURRENT_SOURCE_DIR}/runtime/rust/lana-ffi/Cargo.toml" --lib
+    BYPRODUCTS "${LANA_RUST_FFI}"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    VERBATIM
+)
+
 install(TARGETS lanaruntime ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(TARGETS lanavm lana RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS lanavm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS "${LANA_RUST_CLI}" DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME lana)
+install(FILES "${LANA_RUST_FFI}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES "${LANA_NATIVE_COMPILER}" DESTINATION ${CMAKE_INSTALL_BINDIR})
 # Public headers keep the `lana/` install prefix; the three layer include dirs
 # are flattened into a single `${INCLUDEDIR}/lana` namespace.

@@ -1,0 +1,155 @@
+fn cfg_new() {
+    let cfg = map_new();
+    map_set(cfg, "blocks", array_new(0));
+    map_set(cfg, "order", array_new(0));
+    map_set(cfg, "entry", -1);
+    map_set(cfg, "exits", array_new(0));
+    map_set(cfg, "next", 0);
+    return cfg;
+}
+
+fn block_new(cfg) {
+    let id = cfg["next"];
+    map_set(cfg, "next", id + 1);
+    let block = map_new();
+    map_set(block, "id", id);
+    map_set(block, "instructions", array_new(0));
+    map_set(block, "terminator", ["none"]);
+    array_push(cfg["blocks"], block);
+    array_push(cfg["order"], id);
+    return id;
+}
+
+fn block_of(cfg, id) { return cfg["blocks"][id]; }
+
+fn block_set_term(cfg, id, term) { map_set(block_of(cfg, id), "terminator", term); }
+
+fn block_add_instr(cfg, id, stmt) { array_push(block_of(cfg, id)["instructions"], stmt); }
+
+fn cfg_lower_statements(cfg, statements) {
+    let entry = block_new(cfg);
+    let current = entry;
+    let index = 0;
+    while (index < array_length(statements)) {
+        let stmt = statements[index];
+        let tag = stmt[1];
+        let node = stmt[3];
+        if (tag == 4) {
+            let then_result = cfg_lower_statements(cfg, node[2]);
+            let else_result = cfg_lower_statements(cfg, node[3]);
+            let then_entry = then_result[0];
+            let then_exit = then_result[1];
+            let else_entry = else_result[0];
+            let else_exit = else_result[1];
+            block_set_term(cfg, current, ["branch", node[1], then_entry, else_entry]);
+            let join_block = block_new(cfg);
+            if (then_exit >= 0) { block_set_term(cfg, then_exit, ["jump", join_block]); }
+            if (else_exit >= 0) { block_set_term(cfg, else_exit, ["jump", join_block]); }
+            current = join_block;
+        } else {
+            if (tag == 6) {
+                block_set_term(cfg, current, ["ret", node[1]]);
+                array_push(cfg["exits"], current);
+                return [entry, -1];
+            } else {
+                if (tag == 5) {
+                    let header = block_new(cfg);
+                    block_set_term(cfg, current, ["jump", header]);
+                    let body_result = cfg_lower_statements(cfg, node[2]);
+                    let body_entry = body_result[0];
+                    let body_exit = body_result[1];
+                    let exit_block = block_new(cfg);
+                    block_set_term(cfg, header, ["branch", node[1], body_entry, exit_block]);
+                    if (body_exit >= 0) { block_set_term(cfg, body_exit, ["jump", header]); }
+                    current = exit_block;
+                } else {
+                    if (tag == 15) {
+                        let header = block_new(cfg);
+                        block_set_term(cfg, current, ["jump", header]);
+                        let body_result = cfg_lower_statements(cfg, node[3]);
+                        let body_entry = body_result[0];
+                        let body_exit = body_result[1];
+                        let exit_block = block_new(cfg);
+                        block_set_term(cfg, header, ["for", node[1], node[2], body_entry, exit_block]);
+                        if (body_exit >= 0) { block_set_term(cfg, body_exit, ["jump", header]); }
+                        current = exit_block;
+                    } else {
+                        block_add_instr(cfg, current, stmt);
+                    }
+                }
+            }
+        }
+        index = index + 1;
+    }
+    return [entry, current];
+}
+
+fn build_function_cfg(statements) {
+    let cfg = cfg_new();
+    let result = cfg_lower_statements(cfg, statements);
+    let entry = result[0];
+    let exit = result[1];
+    map_set(cfg, "entry", entry);
+    if (exit >= 0) { array_push(cfg["exits"], exit); }
+    return cfg;
+}
+
+fn stmt_name(tag) {
+    if (tag == 2) { return "let"; }
+    if (tag == 3) { return "assign"; }
+    if (tag == 4) { return "if"; }
+    if (tag == 5) { return "while"; }
+    if (tag == 6) { return "return"; }
+    if (tag == 7) { return "expr"; }
+    if (tag == 8) { return "print"; }
+    if (tag == 9) { return "state"; }
+    if (tag == 10) { return "history"; }
+    if (tag == 11) { return "transform"; }
+    if (tag == 12) { return "taskgroup"; }
+    if (tag == 13) { return "cancel"; }
+    if (tag == 14) { return "yield"; }
+    if (tag == 15) { return "for"; }
+    return "unknown";
+}
+
+fn dump_term(term) {
+    if (term[0] == "none") { return "none"; }
+    if (term[0] == "jump") { return string_concat("jump -> b", number_to_string(term[1])); }
+    if (term[0] == "branch") { return string_concat("branch -> b", number_to_string(term[2]), " b", number_to_string(term[3])); }
+    if (term[0] == "ret") { return "return"; }
+    if (term[0] == "for") { return string_concat("for -> b", number_to_string(term[3]), " b", number_to_string(term[4])); }
+    return "unknown";
+}
+
+fn dump_cfg(cfg) {
+    let text = "";
+    let blocks = cfg["blocks"];
+    let order = cfg["order"];
+    let index = 0;
+    while (index < array_length(order)) {
+        let id = order[index];
+        let block = blocks[id];
+        text = string_concat(text, "b", number_to_string(id), ":\n");
+        let instructions = block["instructions"];
+        let ins_index = 0;
+        while (ins_index < array_length(instructions)) {
+            text = string_concat(text, "  ", stmt_name(instructions[ins_index][1]), "\n");
+            ins_index = ins_index + 1;
+        }
+        text = string_concat(text, "  ", dump_term(block["terminator"]), "\n");
+        index = index + 1;
+    }
+    return text;
+}
+
+fn dump_program(program) {
+    let text = "";
+    text = string_concat(text, "=== top-level ===\n", dump_cfg(build_function_cfg(program[2])), "\n");
+    let functions = program[1];
+    let index = 0;
+    while (index < array_length(functions)) {
+        text = string_concat(text, "=== function ", functions[index][1], " ===\n", dump_cfg(build_function_cfg(functions[index][4])), "\n");
+        index = index + 1;
+    }
+    return text;
+}

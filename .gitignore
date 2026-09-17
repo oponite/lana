@@ -24,3 +24,5 @@ ghost_*/
 .cache/
 .env
 .claude/settings.local.json
+.claude/worktrees/
+.experiments/

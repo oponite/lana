@@ -190,8 +190,8 @@ impl Map {
     }
 }
 
-/// An equipossible support set, mirroring `struct LanaPossibility`. `weights`
-/// is `None` for a non-probabilistic, equipossible support.
+/// A finite Core support set. `weights == None` is a non-probabilistic
+/// Possibility; positive normalized weights denote a Distribution.
 #[derive(Debug, Clone)]
 pub struct Possibility {
     pub values: Vec<Value>,
@@ -553,7 +553,9 @@ impl Value {
             ValueKind::Task(_) => ValueType::Task,
             ValueKind::StateDist(_) => ValueType::StateDist,
             ValueKind::Map(_) => ValueType::Map,
-            ValueKind::Possibility(_) => ValueType::Possibility,
+            ValueKind::Possibility(ref value) => {
+                if value.weights.is_some() { ValueType::Distribution } else { ValueType::Possibility }
+            }
             ValueKind::PathSet(_) => ValueType::PathSet,
             ValueKind::Capability(_) => ValueType::SharedCapability,
             ValueKind::Adt(_) => ValueType::Adt,
@@ -577,7 +579,9 @@ impl Value {
             ValueKind::Task(_) => "task",
             ValueKind::StateDist(_) => "state_dist",
             ValueKind::Map(_) => "map",
-            ValueKind::Possibility(_) => "possibility",
+            ValueKind::Possibility(ref value) => {
+                if value.weights.is_some() { "distribution" } else { "possibility" }
+            }
             ValueKind::PathSet(_) => "paths",
             ValueKind::Capability(_) => "shared_capability",
             ValueKind::Adt(_) => "adt",
@@ -638,7 +642,115 @@ impl Value {
         out
     }
 
+<<<<<<< Updated upstream
     fn print_into(&self, out: &mut String) {
+=======
+    /// Render without recursively locking containers or traversing cycles.
+    pub fn try_print(&self, limit: usize) -> Result<String, LanaError> {
+        let mut out = PrintOutput { text: String::new(), limit, failed: false };
+        let mut stack = Vec::new();
+        let frame_size = std::mem::size_of::<PrintFrame>();
+        if frame_size > limit { return Err(LanaError::Oom); }
+        stack.try_reserve_exact(1).map_err(|_| LanaError::Oom)?;
+        stack.push(PrintFrame { value: self.clone(), next: 0, identity: None });
+        while !stack.is_empty() {
+            out.limit = limit.saturating_sub(stack.capacity() * frame_size);
+            if out.failed { return Err(LanaError::Oom); }
+            let frame_index = stack.len() - 1;
+            let identity = match &stack[frame_index].value.kind {
+                ValueKind::Array(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Map(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Set(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Joint(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Possibility(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::PathSet(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Adt(value) => Some(Arc::as_ptr(value) as usize),
+                _ => None,
+            };
+            let Some(identity) = identity else {
+                stack[frame_index].value.print_into(&mut out);
+                stack.pop();
+                continue;
+            };
+            // ponytail: linear ancestor scan; replace with a budgeted index if
+            // deep-graph rendering becomes a measured performance bottleneck.
+            if stack[frame_index].identity.is_none()
+                && stack[..frame_index].iter().any(|frame| frame.identity == Some(identity))
+            {
+                out.push_str("<cycle>");
+                stack.pop();
+                continue;
+            }
+            let frame = &mut stack[frame_index];
+            if frame.identity.is_none() {
+                frame.identity = Some(identity);
+                match &frame.value.kind {
+                    ValueKind::Array(_) => out.push('['),
+                    ValueKind::Map(_) => out.push('{'),
+                    ValueKind::Set(_) => out.push_str("set{"),
+                    ValueKind::Joint(_) => out.push_str("joint_state{"),
+                    ValueKind::Possibility(value) => {
+                        out.push_str(if value.weights.is_some() { "distribution{" } else { "possibility{" });
+                    }
+                    ValueKind::PathSet(_) => out.push_str("paths{"),
+                    ValueKind::Adt(adt) => {
+                        use std::fmt::Write;
+                        let _ = write!(out, "adt(variant={}){{", adt.variant);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let index = frame.next;
+            let (child, key, guard) = match &frame.value.kind {
+                ValueKind::Array(value) => (value.lock().unwrap().items.get(index).cloned(), None, None),
+                ValueKind::Set(value) => (value.lock().unwrap().items.get(index).cloned(), None, None),
+                ValueKind::Map(value) => {
+                    let value = value.lock().unwrap();
+                    match value.entries.get(index) {
+                        Some(entry) => (Some(entry.value.clone()), Some(entry.key.clone()), None),
+                        None => (None, None, None),
+                    }
+                }
+                ValueKind::Joint(value) => match value.names.get(index) {
+                    Some(key) => (Some(value.values.get(index).cloned().unwrap_or_else(|| Value::string(Arc::from("<finite-law>")))), Some(key.clone()), None),
+                    None => (None, None, None),
+                },
+                ValueKind::Possibility(value) => (value.values.get(index).cloned(), None, None),
+                ValueKind::PathSet(value) => match value.alternatives.get(index) {
+                    Some(alternative) => (Some(alternative.result.clone()), None, Some(alternative.guard)),
+                    None => (None, None, None),
+                },
+                ValueKind::Adt(value) => (value.fields.get(index).cloned(), None, None),
+                _ => unreachable!(),
+            };
+            if let Some(child) = child {
+                if index != 0 { out.push_str(", "); }
+                if let Some(key) = key {
+                    let quoted = matches!(frame.value.kind, ValueKind::Map(_));
+                    if quoted { out.push('"'); }
+                    out.push_str(&key);
+                    if quoted { out.push('"'); }
+                    out.push_str(": ");
+                }
+                if let Some(guard) = guard { out.push_str(if guard { "true => " } else { "false => " }); }
+                frame.next += 1;
+                if stack.len() == stack.capacity() {
+                    let capacity = stack.capacity().checked_mul(2).ok_or(LanaError::Oom)?;
+                    let bytes = capacity.checked_mul(frame_size).ok_or(LanaError::Oom)?;
+                    if bytes > limit.saturating_sub(out.text.capacity()) { return Err(LanaError::Oom); }
+                    stack.try_reserve_exact(capacity - stack.len()).map_err(|_| LanaError::Oom)?;
+                }
+                stack.push(PrintFrame { value: child, next: 0, identity: None });
+            } else {
+                out.push(if matches!(frame.value.kind, ValueKind::Array(_)) { ']' } else { '}' });
+                stack.pop();
+            }
+        }
+        if out.failed { Err(LanaError::Oom) } else { Ok(out.text) }
+    }
+
+    fn print_into(&self, out: &mut PrintOutput) {
+>>>>>>> Stashed changes
         use std::fmt::Write;
         match &self.kind {
             ValueKind::Null => out.push_str("null"),

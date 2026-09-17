@@ -9,12 +9,24 @@ use crate::chunk::{Chunk, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
 use crate::opcode::{OpCode, LANA_MAX_REGISTERS};
 
+<<<<<<< Updated upstream
 /// Maximum host-call id. The C11 reference caps this at 56 (55 built-in host
 /// calls, ids 0-55); the Rust VM adds 11 durable-pipeline host calls
 /// (store/policy/ledger, ids 56-66) behind the host-call extension, so the
 /// Rust verifier accepts the wider range. This is a deliberate, documented
 /// divergence from the frozen C11 verifier.
 pub const LANA_HOST_COUNT: u32 = 67;
+=======
+/// Maximum host-call id. The C11 reference carries 141 host calls (ids 0-140,
+/// through the LIP-015 dataset calls); the Rust VM adds 11 durable-pipeline
+/// host calls (store/policy/ledger, ids 141-151) behind the host-call
+/// extension, so the Rust verifier accepts the wider range. This is a
+/// deliberate, documented divergence from the C11 verifier. LIP-024 async host
+/// calls (run_async/future_all/future_race/sleep) occupy ids 126-129 and the
+/// LIP-015 dataset calls ids 130-140, LIP-018 FFI calls 157-159, LIP-019 net
+/// calls 160-165, LIP-027 cast at 166, matching the C11 VM.
+pub const LANA_HOST_COUNT: u32 = 188;
+>>>>>>> Stashed changes
 
 const LANA_TRANSFORM_NEUTRALIZE: u32 = 1;
 const LANA_MEASURE_SAMPLE: u32 = 2;
@@ -83,7 +95,15 @@ pub fn verify(chunk: &Chunk) -> Result<(), LanaErrorInfo> {
         return Err(LanaErrorInfo::new(
             LanaError::Format, 0, OpCode::Nop as u8, 0, "chunk has no valid entry point"));
     }
+<<<<<<< Updated upstream
     if chunk.version != crate::opcode::LABC_VERSION && chunk.version != crate::opcode::LABC_VERSION_1 {
+=======
+    if chunk.version != crate::opcode::LABC_VERSION && chunk.version != crate::opcode::LABC_VERSION_1
+        && chunk.version != crate::opcode::LABC_VERSION_3
+        && chunk.version != crate::opcode::LABC_VERSION_4
+        && chunk.version != crate::opcode::LABC_VERSION_5
+    {
+>>>>>>> Stashed changes
         return Err(LanaErrorInfo::new(
             LanaError::Format, 0, OpCode::Nop as u8, 0,
             format!("unsupported LABC version {}", chunk.version)));
@@ -108,6 +128,18 @@ pub fn verify(chunk: &Chunk) -> Result<(), LanaErrorInfo> {
     Ok(())
 }
 
+<<<<<<< Updated upstream
+=======
+/// First invalid opcode for a given LABC version. New opcodes are appended, so
+/// each version accepts exactly the range it introduced.
+fn max_opcode_for_version(version: u32) -> u8 {
+    if version == crate::opcode::LABC_VERSION_5 { return OpCode::Count as u8; }
+    if version == crate::opcode::LABC_VERSION_4 { return OpCode::DistributionBuild as u8; }
+    if version == crate::opcode::LABC_VERSION_3 { return OpCode::Async as u8; }
+    OpCode::Generator as u8
+}
+
+>>>>>>> Stashed changes
 fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(), LanaError> {
     use OpCode::*;
     let mut error = LanaErrorInfo::new(LanaError::Ok, 0, 0, 0, "");
@@ -377,6 +409,14 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
                 result = Err(LanaError::Type);
             }
         }
+        JointConditionMap | ObserveMap => {
+            check(&mut result, &mut error, ip, ins, ins.a);
+            check(&mut result, &mut error, ip, ins, ins.b);
+            check(&mut result, &mut error, ip, ins, ins.c);
+            if result.is_ok() && ins.imm != 0 {
+                result = Err(LanaError::Format);
+            }
+        }
         JointSample | Resolve => {
             check(&mut result, &mut error, ip, ins, ins.a);
             check(&mut result, &mut error, ip, ins, ins.b);
@@ -410,7 +450,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
                 result = Err(LanaError::Type);
             }
         }
-        PossibilityBuild | InfoSample => {
+        PossibilityBuild | DistributionBuild | InfoSample => {
             check(&mut result, &mut error, ip, ins, ins.a);
             check(&mut result, &mut error, ip, ins, ins.b);
             if result.is_ok() && (ins.c != 0 || ins.imm != 0) {

@@ -1,0 +1,27 @@
+fn compute(n) {
+    let a = 40;
+    let b = a + 2;
+    let c = b * 2;
+    let f = c - 4;
+    if (true) {
+        let g = f + 1;
+        return g;
+    } else {
+        return 0;
+    }
+}
+
+fn fold_branch() {
+    let x = 10;
+    let y = 20;
+    let z = 0;
+    if (x < y) {
+        z = x + y;
+    } else {
+        z = x - y;
+    }
+    return z;
+}
+
+print(compute(0));
+print(fold_branch());

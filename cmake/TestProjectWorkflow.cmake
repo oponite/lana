@@ -16,8 +16,9 @@ if(NOT EXISTS "${ROOT}/src/main.lana" OR
 endif()
 file(READ "${ROOT}/src/main.lana" main_source)
 file(READ "${ROOT}/tests/main_test.lana" test_source)
-if(NOT main_source MATCHES "import \"./belief.lana\" as belief" OR
-   NOT test_source MATCHES "import \"../src/belief.lana\" as belief")
+if(NOT main_source MATCHES "core.distribution" OR
+   NOT test_source MATCHES "import \"../src/belief.lana\" as belief" OR
+   NOT test_source MATCHES "first program Core distribution")
     message(FATAL_ERROR "generated project does not exercise module imports")
 endif()
 foreach(command IN ITEMS build check test run doc)
