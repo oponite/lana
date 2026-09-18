@@ -8,12 +8,11 @@ description = "Differential fuzz targets for the Lana Rust runtime boundary"
 [dependencies]
 lana-bytecode = { path = "../../../vm/rust/lana-bytecode" }
 
-# `rlib` lets the `fuzz-driver` / `fuzz-diff` binaries reuse the shared check
-# logic; `staticlib` exports `LLVMFuzzerTestOneInput` for linking with libFuzzer
-# (e.g. `clang -fsanitize=fuzzer target/.../liblana_fuzz.a -o fuzzer`).
+# `rlib` lets the `fuzz-driver`, `fuzz-diff`, and cargo-fuzz target reuse the
+# shared loader/verifier check.
 [lib]
 name = "lana_fuzz"
-crate-type = ["rlib", "staticlib"]
+crate-type = ["rlib"]
 
 [[bin]]
 name = "fuzz-driver"

@@ -214,10 +214,12 @@ partial result.
 ## Native compiler and modules
 
 The production pipeline is `Lana source -> Lana lexer -> fixed-layout typed
-syntax -> semantic IR -> textual LABC -> C assembler/verifier -> C11 VM`. The
+syntax -> semantic IR -> textual LABC -> Rust assembler/verifier -> Rust VM`. The
 compiler sources live in `compiler/`; `compiler/bootstrap/compiler.lasm` is the
 reproducible textual bootstrap artifact. A normal build assembles that artifact
-with `lanavm` and does not invoke Python.
+and executes it in the Rust VM without invoking Python. The C11
+assembler/verifier and VM are frozen v1-v2 conformance references, not the
+production pipeline.
 
 Imports are relative `.lana` paths and must precede executable syntax. The
 native loader canonicalizes paths, rejects cycles and imported-module top-level

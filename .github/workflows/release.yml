@@ -1,14 +1,14 @@
-name: Release Lana 3.0.0
+name: Release Lana 3.0.1
 
 on:
   push:
-    tags: ["v3.0.0"]
+    tags: ["v3.0.1"]
 
 permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION: "3.0.0"
+  EXPECTED_VERSION: "3.0.1"
 
 jobs:
   linux:
@@ -30,6 +30,8 @@ jobs:
           ctest --test-dir build --output-on-failure
           build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           git diff --check
+      - name: Rust workspace tests
+        run: cargo test --workspace --no-fail-fast
       - name: Address and undefined behavior sanitizers
         run: |
           cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_SANITIZERS=ON
@@ -45,6 +47,18 @@ jobs:
           cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
           cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
           build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5
+      - name: Ten-minute Rust bytecode fuzz test
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup run nightly cargo install cargo-fuzz --version 0.13.2 --locked
+          cd fuzz
+          rustup run nightly cargo fuzz run lana_bytecode -- -max_total_time=600 -timeout=5
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: rust-fuzz-release-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
       - name: Optional integrations
         run: |
           cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release -DLANA_BUILD_INTEGRATIONS=ON
@@ -88,8 +102,8 @@ jobs:
         with:
           name: lana-macos-universal
           path: |
-            ${{ runner.temp }}/lana-3.0.0-macos-universal.tar.gz
-            ${{ runner.temp }}/lana-3.0.0-macos-universal.tar.gz.sha256
+            ${{ runner.temp }}/lana-3.0.1-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-3.0.1-macos-universal.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -160,6 +174,7 @@ jobs:
             license "Apache-2.0"
 
             depends_on "cmake" => :build
+            depends_on "rust" => :build
 
             def install
               system "cmake", "-S", ".", "-B", "build", *std_cmake_args

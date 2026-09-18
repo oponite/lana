@@ -132,10 +132,6 @@ else()
 endif()
 add_custom_target(lana_rust_cli ALL DEPENDS "${LANA_RUST_CLI}")
 
-add_executable(lana tools/c/cli.c)
-target_link_libraries(lana PRIVATE lanaruntime m)
-target_compile_options(lana PRIVATE -Wall -Wextra -Wpedantic -Werror)
-target_compile_definitions(lana PRIVATE LANA_VERSION="${LANA_VERSION}")
 target_compile_definitions(lanavm PRIVATE LANA_VERSION="${LANA_VERSION}")
 target_compile_definitions(lanavm_release PRIVATE LANA_VERSION="${LANA_VERSION}")
 
@@ -162,7 +158,12 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(lana_native_compiler ALL DEPENDS "${LANA_NATIVE_COMPILER}")
-add_dependencies(lana lana_native_compiler)
+add_custom_target(lana ALL
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${LANA_RUST_CLI}" "${CMAKE_CURRENT_BINARY_DIR}/lana"
+    DEPENDS lana_rust_cli lana_native_compiler
+    VERBATIM
+)
 
 install(TARGETS lanaruntime ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(TARGETS lanavm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

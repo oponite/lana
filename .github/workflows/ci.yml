@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  EXPECTED_VERSION: "3.0.0"
+  EXPECTED_VERSION: "3.0.1"
 
 jobs:
   native:
@@ -73,6 +73,15 @@ jobs:
           "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test]'
           "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pytest -q integrations/python/tests
 
+  rust:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build --parallel
+      - run: cargo test --workspace --no-fail-fast
+
   fuzz-pr:
     name: Fuzz smoke test
     if: github.event_name == 'pull_request'
@@ -94,3 +103,39 @@ jobs:
       - run: cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
       - run: cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
       - run: build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5
+
+  rust-fuzz-pr:
+    name: Rust fuzz smoke test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: rustup toolchain install nightly --profile minimal
+      - run: rustup run nightly cargo install cargo-fuzz --version 0.13.2 --locked
+      - run: rustup run nightly cargo fuzz run lana_bytecode -- -max_total_time=30 -timeout=5
+        working-directory: fuzz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: rust-fuzz-pr-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
+  rust-fuzz-scheduled:
+    name: Rust full fuzz test
+    if: github.event_name == 'schedule' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: rustup toolchain install nightly --profile minimal
+      - run: rustup run nightly cargo install cargo-fuzz --version 0.13.2 --locked
+      - run: rustup run nightly cargo fuzz run lana_bytecode -- -max_total_time=600 -timeout=5
+        working-directory: fuzz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: rust-fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

@@ -28,6 +28,10 @@ fn register_valid(value: u32) -> bool {
     value < LANA_MAX_REGISTERS
 }
 
+fn register_range_valid(start: u32, count: u32) -> bool {
+    start < LANA_MAX_REGISTERS && count <= LANA_MAX_REGISTERS - start
+}
+
 fn constant_valid(chunk: &Chunk, value: u32) -> bool {
     value < chunk.constants.len() as u32
 }
@@ -281,7 +285,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
         }
         AdtBuild => {
             check(&mut result, &mut error, ip, ins, ins.a);
-            if result.is_ok() && (ins.b >= LANA_MAX_REGISTERS || ins.b + ins.c > LANA_MAX_REGISTERS) {
+            if result.is_ok() && !register_range_valid(ins.b, ins.c) {
                 result = Err(LanaError::Register);
             }
             if result.is_ok() && !constant_valid(chunk, ins.imm) {
@@ -342,7 +346,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= chunk.functions.len() as u32 {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && !register_range_valid(ins.c, ins.imm) {
                 result = Err(LanaError::Register);
             }
         }
@@ -359,7 +363,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= chunk.functions.len() as u32 {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && !register_range_valid(ins.c, ins.imm) {
                 result = Err(LanaError::Register);
             }
         }
@@ -413,7 +417,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
         JointBuild => {
             check(&mut result, &mut error, ip, ins, ins.a);
             check(&mut result, &mut error, ip, ins, ins.b);
-            if result.is_ok() && (ins.c == 0 || ins.b + ins.c > LANA_MAX_REGISTERS) {
+            if result.is_ok() && (ins.c == 0 || !register_range_valid(ins.b, ins.c)) {
                 result = Err(LanaError::Register);
             }
             if result.is_ok() && !constant_valid(chunk, ins.imm) {
@@ -576,7 +580,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
         }
         ArrayNew => {
             check(&mut result, &mut error, ip, ins, ins.a);
-            if result.is_ok() && (ins.b >= LANA_MAX_REGISTERS || ins.b + ins.c > LANA_MAX_REGISTERS) {
+            if result.is_ok() && !register_range_valid(ins.b, ins.c) {
                 result = Err(LanaError::Register);
             }
         }
@@ -585,7 +589,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= chunk.functions.len() as u32 {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && !register_range_valid(ins.c, ins.imm) {
                 result = Err(LanaError::Register);
             }
         }
@@ -594,7 +598,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= chunk.functions.len() as u32 {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && !register_range_valid(ins.c, ins.imm) {
                 result = Err(LanaError::Register);
             }
             if result.is_ok() && ins.imm != chunk.functions[ins.b as usize].arity {
@@ -618,7 +622,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && ins.b >= LANA_HOST_COUNT {
                 result = Err(LanaError::Format);
             }
-            if result.is_ok() && (ins.c >= LANA_MAX_REGISTERS || ins.c + ins.imm > LANA_MAX_REGISTERS) {
+            if result.is_ok() && !register_range_valid(ins.c, ins.imm) {
                 result = Err(LanaError::Register);
             }
         }

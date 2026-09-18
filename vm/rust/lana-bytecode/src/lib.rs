@@ -80,6 +80,13 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_overflowing_register_range() {
+        let mut chunk = Chunk::new(opcode::LABC_VERSION, 0);
+        chunk.code.push(Instruction::new(OpCode::HostCall, 0, 0, 0, u32::MAX, 1));
+        assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Register);
+    }
+
+    #[test]
     fn verifier_rejects_opcodes_introduced_after_the_chunk_version() {
         let mut chunk = sample_chunk();
         chunk.version = opcode::LABC_VERSION_3;

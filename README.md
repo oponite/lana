@@ -39,7 +39,7 @@ build/lanavm run build/belief.labc --trace
 
 ## Integrations
 
-The source-install integrations connect Lana 3.0.0 to JSON subprocess callers,
+The source-install integrations connect Lana 3.0.1 to JSON subprocess callers,
 MCP hosts, Jupyter, VS Code, Neovim, and a narrow native C ABI without adding
 dependencies to the normal Lana build. Start with
 [`integrations/README.md`](integrations/README.md).
