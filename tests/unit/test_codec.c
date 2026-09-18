@@ -30,6 +30,7 @@ static void test_basic_values(void) {
         if (decoded.type == VAL_NUMBER) assert(decoded.as.number == vals[i].as.number);
         if (decoded.type == VAL_BOOL) assert(decoded.as.boolean == vals[i].as.boolean);
         if (decoded.type == VAL_STRING) assert(strcmp(decoded.as.string, vals[i].as.string) == 0);
+        lana_codec_free_value(decoded);
     }
 
     free(buf.data);
@@ -56,6 +57,7 @@ static void test_canonical_json_and_rejection(void) {
     assert(buf.length == strlen("{\"a\":false,\"z\":1}"));
     assert(memcmp(buf.data, "{\"a\":false,\"z\":1}", buf.length) == 0);
     assert(lana_codec_decode_document(&buf, &decoded) == LANA_OK);
+    lana_codec_free_value(decoded);
     free(buf.data);
 
     buf = (LanaBuffer){(unsigned char *)"1 true", 6u, 6u};

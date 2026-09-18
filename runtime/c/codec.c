@@ -273,3 +273,25 @@ LanaError lana_codec_decode_document(LanaBuffer *buffer, Value *out_value) {
     while (offset < buffer->length && isspace(buffer->data[offset])) ++offset;
     return offset == buffer->length ? LANA_OK : LANA_ERR_PARSE;
 }
+
+void lana_codec_free_value(Value value) {
+    size_t index;
+    if (value.type == VAL_STRING) {
+        free((void *)value.as.string);
+    } else if (value.type == VAL_ARRAY && value.as.array != NULL) {
+        for (index = 0u; index < value.as.array->count; ++index)
+            lana_codec_free_value(value.as.array->items[index]);
+        free(value.as.array->items);
+        free(value.as.array);
+    } else if (value.type == VAL_MAP && value.as.map != NULL) {
+        for (index = 0u; index < value.as.map->count; ++index) {
+            free((void *)value.as.map->entries[index].key);
+            if (value.as.map->entries[index].value != NULL) {
+                lana_codec_free_value(*value.as.map->entries[index].value);
+                free(value.as.map->entries[index].value);
+            }
+        }
+        free(value.as.map->entries);
+        free(value.as.map);
+    }
+}
