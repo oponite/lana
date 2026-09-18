@@ -32,7 +32,8 @@ set(LANA_RUNTIME_SOURCES
 
 set_source_files_properties(runtime/c/vendor/tweetnacl.c PROPERTIES
     COMPILE_OPTIONS "-Wno-sign-compare")
-if(CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
+if(CMAKE_C_COMPILER_ID STREQUAL "AppleClang" AND
+   CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 21)
     set_property(SOURCE runtime/c/vendor/tweetnacl.c APPEND PROPERTY
         COMPILE_OPTIONS "-Wno-unterminated-string-initialization")
 endif()
@@ -61,7 +62,10 @@ target_compile_options(lanavm PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_library(lanaruntime_release STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime_release PUBLIC ${LANA_INCLUDE_DIRS})
-target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-format-truncation -O3 -DNDEBUG)
+target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -O3 -DNDEBUG)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(lanaruntime_release PRIVATE -Wno-format-truncation)
+endif()
 target_compile_definitions(lanaruntime_release PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
     LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
