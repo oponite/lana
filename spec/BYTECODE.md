@@ -1,12 +1,12 @@
 # Lana Bytecode
 
-Lana 2.0 uses one binary format: **LABC v2**. `LABC` is the four-byte file
-magic. The next 32-bit little-endian field is `2` for new artifacts. The
-dual-version loader accepts both v1 and v2 chunks and rejects every other magic
-or version before execution.
+Lana 3.0 uses the `LABC` binary format. `LABC` is the four-byte file magic.
+The next 32-bit little-endian field selects bytecode v1 through v5. The
+canonical Rust loader accepts these versions and rejects every other magic or
+version before execution. The frozen C11 reference accepts v1 and v2 only.
 
-This is a clean compatibility boundary. Lana 2.0 neither reads nor converts
-artifacts made by pre-release toolchains. Recompile source with Lana 2.0.
+This is a clean compatibility boundary. Lana does not convert pre-release
+artifacts. Recompile source with Lana 3.0.
 
 ## Layout
 
@@ -18,21 +18,21 @@ serialized.
 
 ## Instruction set
 
-LABC v2 includes the complete Lana 2.0 runtime surface: state construction and
-transformation, lazy state distributions, basis measurement and estimation,
-arrays and maps, functions, tasks, host boundaries, Information values,
-provenance, claims, planned effects, and shared Information capabilities.
+LABC v2 includes the Lana 2.0 runtime surface. LABC v3 and v4 add the
+documented autodiff, generator, and async operations. LABC v5 adds the Core
+information operations. The source compiler selects the lowest required
+version for each program.
 
-Opcodes have stable numeric values within Lana 2.0. Their names and operands
+Opcodes have stable numeric values within each LABC version. Their names and operands
 are defined by `vm/include/bytecode.h`; the verifier checks register ranges,
 constant types, function metadata, jump targets, host-call IDs, and every
 instruction-specific operand rule before the VM executes a chunk.
 
 ## Assembly
 
-Textual assembly uses `.lasm` and may begin with `.version 1` or `.version 2`
-when a version directive is supplied. The assembler emits LABC v2 by default.
-The native compiler and its bootstrap artifact follow the same rule.
+Textual assembly uses `.lasm` and may begin with `.version 1` through
+`.version 5`. The assembler emits LABC v2 by default. The source compiler
+selects a later version when a program needs later operations.
 
 ```text
 .version 2

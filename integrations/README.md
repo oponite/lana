@@ -1,7 +1,7 @@
 # Lana integrations
 
-These optional adapters preserve the Lana 2.0 language, LABC v2, and default
-dependency-free runtime.
+These optional adapters support Lana 3.0 without dependencies in the normal
+Lana build.
 
 ## JSON, MCP, and Jupyter
 
@@ -9,7 +9,7 @@ dependency-free runtime.
 python3 -m venv /tmp/lana-integrations-venv
 /tmp/lana-integrations-venv/bin/python -m pip install -e integrations/python
 printf '{"hello":"lana"}' |
-  LANA_EXECUTABLE="$PWD/build/lana" \
+  LANA_EXECUTABLE="$PWD/build/lana-rust" \
   /tmp/lana-integrations-venv/bin/lana-bridge run \
   integrations/lana/echo_bridge.lana
 ```
@@ -45,8 +45,8 @@ This produces `liblana_bridge` and its ABI-v1 header. The facade runs
 precompiled LABC only. Python can load it through
 `lana_integrations.native.NativeBridge`.
 
-The integrations require Lana 2.0 with LABC v2. Source installation
-remains supported; packaged publication follows the corresponding Lana release.
+The JSON, MCP, Jupyter, and editor adapters accept Lana 3.0 with LABC v2
+through v5. The native ABI remains v1 and uses the frozen C11 LABC v2 path.
 
 ## Evidence lifecycle contract
 

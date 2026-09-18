@@ -30,6 +30,7 @@ static const char *status_text(int status) {
 
 static void send_response(int client, int status, const char *body, size_t length) {
     char header[512];
+    ssize_t written = 0;
     int header_length = snprintf(header, sizeof(header),
         "HTTP/1.1 %d %s\r\n"
         "Content-Type: application/json\r\n"
@@ -38,8 +39,9 @@ static void send_response(int client, int status, const char *body, size_t lengt
         "Connection: close\r\n"
         "\r\n",
         status, status_text(status), length);
-    if (header_length > 0) (void)write(client, header, (size_t)header_length);
-    if (length != 0u) (void)write(client, body, length);
+    if (header_length > 0) written = write(client, header, (size_t)header_length);
+    if (length != 0u) written = write(client, body, length);
+    (void)written;
 }
 
 static void send_json_error(int client, int status, const char *code, const char *message) {

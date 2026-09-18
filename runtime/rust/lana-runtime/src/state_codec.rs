@@ -99,7 +99,7 @@ const PROVENANCE_KEYS: [&str; 5] =
 /// Whether `map` has exactly the keys in `keys` (and no others), mirroring
 /// `map_has_exact_keys`.
 fn map_has_exact_keys(map: &Map, keys: &[&str]) -> bool {
-    if map.entries.len() != keys.len() {
+    if map.entries().len() != keys.len() {
         return false;
     }
     keys.iter().all(|key| map.has(key))
@@ -173,7 +173,8 @@ pub fn persistent_state_encode(state: &PersistentState) -> Result<Vec<u8>, LanaE
         return Err(LanaError::Schema);
     }
 
-    let mut metadata = Map::new(4);
+    let heap = lana_vm::heap::Heap::new(256 * 1024 * 1024);
+    let mut metadata = Map::new(&heap, 4)?;
     metadata
         .set(
             Arc::from("confidence"),
@@ -184,7 +185,7 @@ pub fn persistent_state_encode(state: &PersistentState) -> Result<Vec<u8>, LanaE
             },
             false,
         )
-        .unwrap();
+        ?;
     metadata
         .set(
             Arc::from("source"),
@@ -195,7 +196,7 @@ pub fn persistent_state_encode(state: &PersistentState) -> Result<Vec<u8>, LanaE
             },
             false,
         )
-        .unwrap();
+        ?;
     metadata
         .set(
             Arc::from("timestamp"),
@@ -206,7 +207,7 @@ pub fn persistent_state_encode(state: &PersistentState) -> Result<Vec<u8>, LanaE
             },
             false,
         )
-        .unwrap();
+        ?;
     metadata
         .set(
             Arc::from("weight"),
@@ -217,55 +218,55 @@ pub fn persistent_state_encode(state: &PersistentState) -> Result<Vec<u8>, LanaE
             },
             false,
         )
-        .unwrap();
+        ?;
 
-    let mut top = Map::new(6);
-    top.set(Arc::from("d_im"), Value::number(state.state.d_im), false).unwrap();
-    top.set(Arc::from("d_re"), Value::number(state.state.d_re), false).unwrap();
-    top.set(Arc::from("metadata"), Value::map(Arc::new(Mutex::new(metadata))), false).unwrap();
-    top.set(Arc::from("p"), Value::number(state.state.p), false).unwrap();
+    let mut top = Map::new(&heap, 6)?;
+    top.set(Arc::from("d_im"), Value::number(state.state.d_im), false)?;
+    top.set(Arc::from("d_re"), Value::number(state.state.d_re), false)?;
+    top.set(Arc::from("metadata"), Value::map(Arc::new(Mutex::new(metadata))), false)?;
+    top.set(Arc::from("p"), Value::number(state.state.p), false)?;
     if state.has_provenance {
-        let mut provenance = Map::new(5);
+        let mut provenance = Map::new(&heap, 5)?;
         provenance
             .set(
                 Arc::from("captured_inputs"),
                 Value::string(state.provenance.captured_inputs.clone().unwrap()),
                 false,
             )
-            .unwrap();
+            ?;
         provenance
             .set(
                 Arc::from("derivation_id"),
                 Value::string(Arc::from(state.provenance.derivation_id.to_string())),
                 false,
             )
-            .unwrap();
+            ?;
         provenance
             .set(
                 Arc::from("input_revision"),
                 Value::string(Arc::from(state.provenance.input_revision.to_string())),
                 false,
             )
-            .unwrap();
+            ?;
         provenance
             .set(
                 Arc::from("kind"),
                 Value::string(state.provenance.kind.clone().unwrap()),
                 false,
             )
-            .unwrap();
+            ?;
         provenance
             .set(
                 Arc::from("operation"),
                 Value::string(state.provenance.operation.clone().unwrap()),
                 false,
             )
-            .unwrap();
-        top.set(Arc::from("provenance"), Value::map(Arc::new(Mutex::new(provenance))), false).unwrap();
+            ?;
+        top.set(Arc::from("provenance"), Value::map(Arc::new(Mutex::new(provenance))), false)?;
     } else {
-        top.set(Arc::from("provenance"), Value::null(), false).unwrap();
+        top.set(Arc::from("provenance"), Value::null(), false)?;
     }
-    top.set(Arc::from("schema"), Value::number(STATE_CODEC_SCHEMA as f64), false).unwrap();
+    top.set(Arc::from("schema"), Value::number(STATE_CODEC_SCHEMA as f64), false)?;
 
     let encoded = encode_value(&Value::map(Arc::new(Mutex::new(top))))?;
     Ok(encoded.into_bytes())

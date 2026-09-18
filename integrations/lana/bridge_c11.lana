@@ -1,0 +1,12 @@
+fn read_request() {
+    let argv = args();
+    assert(array_length(argv) == 2, "bridge expects request and response paths");
+    return json_parse(read_text(argv[0]));
+}
+
+fn write_response(value) {
+    let argv = args();
+    assert(array_length(argv) == 2, "bridge expects request and response paths");
+    write_text(argv[1], json_stringify(value));
+    return true;
+}

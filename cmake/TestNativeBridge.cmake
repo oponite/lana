@@ -1,4 +1,4 @@
-if(NOT DEFINED LANAVM OR NOT DEFINED COMPILER OR NOT DEFINED SOURCE OR
+if(NOT DEFINED LANAVM OR NOT DEFINED COMPILER_RUNNER OR NOT DEFINED COMPILER OR NOT DEFINED SOURCE OR
    NOT DEFINED TEST OR NOT DEFINED ROOT)
     message(FATAL_ERROR "native bridge test paths are required")
 endif()
@@ -9,7 +9,7 @@ set(request "${ROOT}/bridge-request.json")
 set(response "${ROOT}/bridge-response.json")
 
 execute_process(
-    COMMAND "${LANAVM}" run "${COMPILER}" -- "${SOURCE}" "${assembly}"
+    COMMAND "${COMPILER_RUNNER}" run "${COMPILER}" -- "${SOURCE}" "${assembly}"
     RESULT_VARIABLE compile_result
 )
 if(NOT compile_result EQUAL 0)

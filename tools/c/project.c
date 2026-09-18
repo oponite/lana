@@ -192,21 +192,20 @@ int lana_project_new(const char *directory) {
     }
     if (path_join(path, sizeof(path), directory, "src/belief.lana") != 0 ||
         write_text(path,
-            "fn probability() {\n"
-            "    state belief = state(p: 0.75, d: 0.25);\n"
-            "    return measure belief as probability;\n"
-            "}\n") != 0)
+            "fn label() { return \"confirmed\"; }\n") != 0)
         return 1;
     if (path_join(path, sizeof(path), directory, "src/main.lana") != 0 ||
         write_text(path,
-            "import \"./belief.lana\" as belief;\n\n"
-            "fn main() { print(belief.probability()); }\n"
+            "import \"std/core\" as core;\n\n"
+            "fn main() { let options = core.distribution([[\"confirmed\", 1.0]]); print(\"Core distribution ready\"); }\n"
             "main();\n") != 0)
         return 1;
     if (path_join(path, sizeof(path), directory, "tests/main_test.lana") != 0 ||
         write_text(path,
             "import \"../src/belief.lana\" as belief;\n\n"
-            "assert(belief.probability() == 0.75, \"first program probability\");\n") != 0)
+            "import \"std/core\" as core;\n\n"
+            "let options = core.distribution([[\"confirmed\", 1.0]]);\n"
+            "print(\"first program Core distribution\");\n") != 0)
         return 1;
     (void)printf("created %s\n", directory);
     return 0;

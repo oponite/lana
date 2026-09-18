@@ -87,9 +87,9 @@ metadata propagation rule for APPEND.
 ```lana
 let dist = append(a, b);
 let concrete = sample(dist);
-let bernoulli = measure dist;
-let probability = measure dist as probability;
-let bit = measure dist as sample;
+let bernoulli = measure(dist, result: "distribution");
+let probability = measure(dist, result: "probability");
+let bit = measure(dist, result: "sample");
 ```
 
 `append()` accepts every `STATE`/`STATE_DIST` pair and returns an immutable lazy
@@ -108,9 +108,9 @@ to compile to `MEASURE`. The computational basis is ordered as
 Concrete states may be measured in one of three named ordered bases:
 
 ```lana
-let px = measure belief in x as probability;
-let dy = measure belief in y as distribution;
-let bit = measure belief in x as sample;
+let px = measure(belief, basis: "x", result: "probability");
+let dy = measure(belief, basis: "y", result: "distribution");
+let bit = measure(belief, basis: "x", result: "sample");
 ```
 
 The basis names and outcome ordering are:
@@ -158,7 +158,8 @@ involving `STATE_DIST` raises `LANA_ERR_UNSUPPORTED_OPERATION`.
 
 ## Information and named joints
 
-The source-level Information forms are lowered to LABC v2:
+The source-level Information forms use LABC v5 when they require the balanced
+Core surface; existing v1-v4 forms retain their established encodings:
 
 ```lana
 let product = joint independent { x: a, y: b };
@@ -169,10 +170,16 @@ let correlated = joint correlated (x, y) with support: [
 let relation = joint conditional { x: a, y: kernel };
 let joint_value = rename(product, "x", "subject");
 let one_variable = project(joint_value, "subject");
-let refined = condition(joint_value, "subject", a);
+let refined = condition(joint_value, a);
 let sampled_assignment = sample(one_variable);
 let definite = resolve(refined); // succeeds only for singleton support
 ```
+
+`condition(info, evidence)` and `observe(info, evidence)` are the public
+refinement forms. The historical three-argument named-joint condition spelling
+is a compatibility alias. `std/core.distribution([[value, weight], ...])`
+constructs finite weighted support; `possibility([value, ...])` remains
+unweighted and cannot be sampled.
 
 Source uses typed joint forms; descriptor strings are rejected. Each correlated
 support row contains one value per declared variable followed by a positive
@@ -217,6 +224,60 @@ native loader canonicalizes paths, rejects cycles and imported-module top-level
 statements, deduplicates modules, and resolves local and alias-qualified calls.
 Compiler execution uses explicit 256 MiB memory and 50,000,000-instruction
 policies; exhaustion is an error and never emits partial bytecode.
+
+## Decision surface
+
+The **Decision** surface turns definite information into a policy recommendation
+or a durable claim. Decisions are pure computations that produce a
+`Decision<T>` value, where `T` is the type of the recommendation.
+
+### Primitive constructors
+
+```lana
+let d = decision(value: "approve", reason: "threshold met");
+```
+
+* `decision(value: <literal>, reason: <string>)` creates a deterministic decision.
+* `decision_if(info, then: <literal>, else: <literal>)` selects a decision based on a
+    boolean `Information`.
+
+### Accessors
+
+* `decision_value(d)` – returns the underlying literal.
+* `decision_reason(d)` – returns the explanatory string.
+
+### Failure modes
+
+* If the guard information is unresolved, the constructor raises
+    `LANA_ERR_UNRESOLVED_VALUE`.
+* Invalid reason strings raise `LANA_ERR_INVALID_ARGUMENT`.
+
+## Execution surface
+
+The **Execution** surface authorizes and performs narrow real‑world actions.
+Execution plans are built from `Capability` objects and run via `execute_effect`.
+
+### Primitive constructors
+
+```lana
+let exec = execution(plan: "http_get", args: {url: "https://example.com"});
+```
+
+* `execution(plan: <string>, args: <map>)` builds an execution request.
+* `execution_if(info, then: <plan>, else: <plan>)` conditionally selects a plan.
+
+### Accessors
+
+* `execute_effect(exec)` – runs the plan and returns an `ExecutionResult`.
+* `execution_status(res)` – yields `"success"`, `"failure"`, or `"unknown"`.
+* `execution_output(res)` – returns the raw UTF‑8 output on success.
+
+### Failure modes
+
+* Missing capability raises `LANA_ERR_CAPABILITY_NOT_FOUND`.
+* Network or I/O errors propagate as `LANA_ERR_EXECUTION_FAILURE` with a cause
+    string.
+* Unresolved guard information raises `LANA_ERR_UNRESOLVED_VALUE`.
 
 ## Transforms
 

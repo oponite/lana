@@ -1,0 +1,38 @@
+// Correlated-row constant propagation: `x` and `y` are assigned together inside
+// one branch, so `x / y` is 10 on every path (10/1 and 20/2) even though `x`
+// and `y` are not individually constant. The optimizer must fold it.
+fn corr_ratio(c) {
+    let x = 0;
+    let y = 0;
+    if (c) {
+        x = 10;
+        y = 1;
+    } else {
+        x = 20;
+        y = 2;
+    }
+    let z = x / y;
+    return z;
+}
+
+// Two independent branches on the same unknown condition: the optimizer must
+// NOT fold `z = x / y`, because the four path combinations admit x/y = 10, 5,
+// 20, 10. Only the independent `base + 5` fold is allowed here.
+fn independent(c) {
+    let x = 0;
+    let y = 0;
+    if (c) {
+        x = 10;
+    } else {
+        x = 20;
+    }
+    if (c) {
+        y = 1;
+    } else {
+        y = 2;
+    }
+    let z = x / y;
+    let base = 100;
+    let w = base + 5;
+    return z + w;
+}

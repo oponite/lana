@@ -1,0 +1,5 @@
+state belief = state(p: 0.75, d: 0.25);
+assert(measure(belief, result: "probability") == 0.75, "canonical probability");
+let x_probability = measure(belief, basis: "x", result: "probability");
+assert(x_probability > 0, "canonical basis lower bound");
+assert(x_probability < 1, "canonical basis upper bound");

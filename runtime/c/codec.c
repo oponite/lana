@@ -211,16 +211,23 @@ static LanaError parse_value(Parser *parser, Value *out) {
         if (take(parser, ']')) { *out = lana_value_array(array); return LANA_OK; }
         for (;;) {
             Value item; LanaError error = parse_value(parser, &item);
-            if (error != LANA_OK) { free(array->items); free(array); return error; }
+            if (error != LANA_OK) {
+                lana_codec_free_value(lana_value_array(array)); return error;
+            }
             if (array->count == array->capacity) {
                 size_t capacity = array->capacity == 0u ? 4u : array->capacity * 2u;
                 Value *items = realloc(array->items, capacity * sizeof(*items));
-                if (items == NULL) { free(array->items); free(array); return LANA_ERR_OOM; }
+                if (items == NULL) {
+                    lana_codec_free_value(item);
+                    lana_codec_free_value(lana_value_array(array)); return LANA_ERR_OOM;
+                }
                 array->items = items; array->capacity = capacity;
             }
             array->items[array->count++] = item; skip_space(parser);
             if (take(parser, ']')) { *out = lana_value_array(array); return LANA_OK; }
-            if (!take(parser, ',')) { free(array->items); free(array); return LANA_ERR_PARSE; }
+            if (!take(parser, ',')) {
+                lana_codec_free_value(lana_value_array(array)); return LANA_ERR_PARSE;
+            }
         }
     }
     if (parser->data[parser->offset] == '{') {
@@ -230,24 +237,44 @@ static LanaError parse_value(Parser *parser, Value *out) {
         if (take(parser, '}')) { *out = lana_value_map(map); return LANA_OK; }
         for (;;) {
             Value key, value; LanaError error = parse_value(parser, &key);
-            if (error != LANA_OK || key.type != VAL_STRING) { free(map->entries); free(map); return error == LANA_OK ? LANA_ERR_SCHEMA : error; }
-            skip_space(parser); if (!take(parser, ':')) { free(map->entries); free(map); return LANA_ERR_PARSE; }
+            if (error != LANA_OK || key.type != VAL_STRING) {
+                if (error == LANA_OK) lana_codec_free_value(key);
+                lana_codec_free_value(lana_value_map(map));
+                return error == LANA_OK ? LANA_ERR_SCHEMA : error;
+            }
+            skip_space(parser); if (!take(parser, ':')) {
+                lana_codec_free_value(key); lana_codec_free_value(lana_value_map(map));
+                return LANA_ERR_PARSE;
+            }
             error = parse_value(parser, &value);
-            if (error != LANA_OK) { free(map->entries); free(map); return error; }
+            if (error != LANA_OK) {
+                lana_codec_free_value(key); lana_codec_free_value(lana_value_map(map)); return error;
+            }
             if (map->count == map->capacity) {
                 size_t capacity = map->capacity == 0u ? 4u : map->capacity * 2u;
                 LanaMapEntry *entries = realloc(map->entries, capacity * sizeof(*entries));
-                if (entries == NULL) { free(map->entries); free(map); return LANA_ERR_OOM; }
+                if (entries == NULL) {
+                    lana_codec_free_value(key); lana_codec_free_value(value);
+                    lana_codec_free_value(lana_value_map(map)); return LANA_ERR_OOM;
+                }
                 map->entries = entries; map->capacity = capacity;
             }
             for (size_t index = 0u; index < map->count; ++index)
-                if (strcmp(map->entries[index].key, key.as.string) == 0) { free(map->entries); free(map); return LANA_ERR_SCHEMA; }
+                if (strcmp(map->entries[index].key, key.as.string) == 0) {
+                    lana_codec_free_value(key); lana_codec_free_value(value);
+                    lana_codec_free_value(lana_value_map(map)); return LANA_ERR_SCHEMA;
+                }
             map->entries[map->count].key = key.as.string;
             map->entries[map->count].value = malloc(sizeof(Value));
-            if (map->entries[map->count].value == NULL) { free(map->entries); free(map); return LANA_ERR_OOM; }
+            if (map->entries[map->count].value == NULL) {
+                lana_codec_free_value(key); lana_codec_free_value(value);
+                lana_codec_free_value(lana_value_map(map)); return LANA_ERR_OOM;
+            }
             *map->entries[map->count++].value = value; skip_space(parser);
             if (take(parser, '}')) { *out = lana_value_map(map); return LANA_OK; }
-            if (!take(parser, ',')) { free(map->entries); free(map); return LANA_ERR_PARSE; }
+            if (!take(parser, ',')) {
+                lana_codec_free_value(lana_value_map(map)); return LANA_ERR_PARSE;
+            }
         }
     }
     number = strtod((const char *)parser->data + parser->offset, &end);
@@ -271,5 +298,30 @@ LanaError lana_codec_decode_document(LanaBuffer *buffer, Value *out_value) {
     LanaError error = lana_codec_decode_value(buffer, &offset, out_value);
     if (error != LANA_OK) return error;
     while (offset < buffer->length && isspace(buffer->data[offset])) ++offset;
-    return offset == buffer->length ? LANA_OK : LANA_ERR_PARSE;
+    if (offset == buffer->length) return LANA_OK;
+    lana_codec_free_value(*out_value);
+    *out_value = lana_value_null();
+    return LANA_ERR_PARSE;
+}
+
+void lana_codec_free_value(Value value) {
+    size_t index;
+    if (value.type == VAL_STRING) {
+        free((void *)value.as.string);
+    } else if (value.type == VAL_ARRAY && value.as.array != NULL) {
+        for (index = 0u; index < value.as.array->count; ++index)
+            lana_codec_free_value(value.as.array->items[index]);
+        free(value.as.array->items);
+        free(value.as.array);
+    } else if (value.type == VAL_MAP && value.as.map != NULL) {
+        for (index = 0u; index < value.as.map->count; ++index) {
+            free((void *)value.as.map->entries[index].key);
+            if (value.as.map->entries[index].value != NULL) {
+                lana_codec_free_value(*value.as.map->entries[index].value);
+                free(value.as.map->entries[index].value);
+            }
+        }
+        free(value.as.map->entries);
+        free(value.as.map);
+    }
 }

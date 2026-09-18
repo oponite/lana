@@ -1,0 +1,508 @@
+import "./cfg.lana" as cfg;
+
+// SSA construction (Batch 2): dominance, iterated-dominance-frontier phi
+// placement, and renaming over the Phase-1 CFG. Every SSA value has exactly
+// one definition; join points receive phi functions. The CFG is mutated in
+// place: name nodes are rewritten to `<var>.<version>` strings and a `phis`
+// table is attached to the CFG for dumping.
+//
+// Scope note: `for` loop bindings are modeled as a single definition at the
+// loop header (no loop-carried iteration phi); `while`/`if`/`return` and
+// straight-line code are fully SSA. Iteration-variable phi construction is
+// deferred to the Phase-6 construct-by-construct pass.
+
+// --- small integer-set helpers over arrays of block ids ---
+
+fn ssa_set_has(set, x) {
+    let i = 0;
+    while (i < array_length(set)) { if (set[i] == x) { return true; } i = i + 1; }
+    return false;
+}
+
+fn ssa_set_add(set, x) { if (!ssa_set_has(set, x)) { array_push(set, x); } return set; }
+
+fn ssa_set_copy(set) {
+    let r = array_new(0); let i = 0;
+    while (i < array_length(set)) { array_push(r, set[i]); i = i + 1; }
+    return r;
+}
+
+fn ssa_set_intersect(a, b) {
+    let r = array_new(0); let i = 0;
+    while (i < array_length(a)) { if (ssa_set_has(b, a[i])) { array_push(r, a[i]); } i = i + 1; }
+    return r;
+}
+
+fn ssa_set_equal(a, b) {
+    if (array_length(a) != array_length(b)) { return false; }
+    let i = 0;
+    while (i < array_length(a)) { if (!ssa_set_has(b, a[i])) { return false; } i = i + 1; }
+    return true;
+}
+
+fn ssa_set_all(n) {
+    let r = array_new(0); let i = 0;
+    while (i < n) { array_push(r, i); i = i + 1; }
+    return r;
+}
+
+// --- predecessors ---
+
+fn ssa_preds(cfg, n) {
+    let preds = array_new(0); let b = 0;
+    while (b < n) { array_push(preds, array_new(0)); b = b + 1; }
+    b = 0;
+    while (b < n) {
+        let term = cfg["blocks"][b]["terminator"];
+        let kind = term[0];
+        if (kind == "jump") { array_push(preds[term[1]], b); }
+        if (kind == "branch") { array_push(preds[term[2]], b); array_push(preds[term[3]], b); }
+        if (kind == "for") { array_push(preds[term[3]], b); array_push(preds[term[4]], b); }
+        b = b + 1;
+    }
+    return preds;
+}
+
+// --- dominators (iterative set intersection to fixed point) ---
+
+fn ssa_dominators(n, entry, preds) {
+    let dom = array_new(0); let b = 0;
+    while (b < n) {
+        if (b == entry) { array_push(dom, ssa_set_add(array_new(0), entry)); }
+        else { array_push(dom, ssa_set_all(n)); }
+        b = b + 1;
+    }
+    let changed = true;
+    while (changed) {
+        changed = false;
+        b = 0;
+        while (b < n) {
+            if (b != entry) {
+                let first = true; let nd = array_new(0); let p = 0;
+                while (p < array_length(preds[b])) {
+                    let pd = dom[preds[b][p]];
+                    if (first) { nd = ssa_set_copy(pd); first = false; }
+                    else { nd = ssa_set_intersect(nd, pd); }
+                    p = p + 1;
+                }
+                ssa_set_add(nd, b);
+                if (!ssa_set_equal(dom[b], nd)) { dom[b] = nd; changed = true; }
+            }
+            b = b + 1;
+        }
+    }
+    return dom;
+}
+
+// --- immediate dominators (closest strict dominator = largest dominator set) ---
+
+fn ssa_idom(n, entry, dom) {
+    let idom = array_new(0); let b = 0;
+    while (b < n) {
+        if (b == entry) { array_push(idom, entry); }
+        else {
+            let best = -1; let best_size = -1; let d = 0;
+            while (d < array_length(dom[b])) {
+                let cand = dom[b][d];
+                if (cand != b) {
+                    let sz = array_length(dom[cand]);
+                    if (sz > best_size) { best_size = sz; best = cand; }
+                }
+                d = d + 1;
+            }
+            array_push(idom, best);
+        }
+        b = b + 1;
+    }
+    return idom;
+}
+
+// --- dominance frontiers (Cooper/Harvey/Kennedy idom walk, correct for loops) ---
+
+fn ssa_frontiers(n, idom, preds) {
+    let df = array_new(0); let b = 0;
+    while (b < n) { array_push(df, array_new(0)); b = b + 1; }
+    let nb = 0;
+    while (nb < n) {
+        if (array_length(preds[nb]) >= 2) {
+            let p = 0;
+            while (p < array_length(preds[nb])) {
+                let runner = preds[nb][p];
+                while (runner != idom[nb]) {
+                    ssa_set_add(df[runner], nb);
+                    runner = idom[runner];
+                }
+                p = p + 1;
+            }
+        }
+        nb = nb + 1;
+    }
+    return df;
+}
+
+// --- dominator-tree children ---
+
+fn ssa_children(n, entry, idom) {
+    let children = array_new(0); let b = 0;
+    while (b < n) { array_push(children, array_new(0)); b = b + 1; }
+    b = 0;
+    while (b < n) {
+        if (b != entry) {
+            let p = idom[b];
+            if (p >= 0) { array_push(children[p], b); }
+        }
+        b = b + 1;
+    }
+    return children;
+}
+
+// --- variable definitions and uses ---
+
+fn ssa_stmt_def(stmt) {
+    let tag = stmt[1]; let node = stmt[3];
+    if (tag == 2) { return node[1]; }
+    if (tag == 3) { if (node[1][0] == 21) { return node[1][1]; } return ""; }
+    return "";
+}
+
+fn ssa_expr_uses(node, uses) {
+    if (node == null) { return null; }
+    let tag = node[0];
+    if (tag == 21) { array_push(uses, node[1]); return null; }
+    if (tag == 22) { ssa_expr_uses(node[2], uses); ssa_expr_uses(node[3], uses); return null; }
+    if (tag == 23) { ssa_expr_uses(node[2], uses); return null; }
+    if (tag == 24) { ssa_expr_array_uses(node[2], uses); return null; }
+    if (tag == 25) { ssa_expr_array_uses(node[1], uses); return null; }
+    if (tag == 26) { ssa_expr_uses(node[1], uses); ssa_expr_uses(node[2], uses); return null; }
+    if (tag == 27) { ssa_expr_uses(node[1], uses); return null; }
+    if (tag == 31) { ssa_expr_array_uses(node[2], uses); return null; }
+    if (tag == 35) { ssa_expr_array_uses(node[2], uses); return null; }
+    if (tag == 45) { ssa_expr_uses(node[1], uses); return null; }
+    return null;
+}
+
+fn ssa_expr_array_uses(items, uses) {
+    let i = 0;
+    while (i < array_length(items)) { ssa_expr_uses(items[i], uses); i = i + 1; }
+    return null;
+}
+
+fn ssa_stmt_uses(stmt, uses) {
+    let tag = stmt[1]; let node = stmt[3];
+    if (tag == 2) { ssa_expr_uses(node[3], uses); return null; }
+    if (tag == 3) { if (node[1][0] != 21) { ssa_expr_uses(node[1], uses); } ssa_expr_uses(node[2], uses); return null; }
+    if (tag == 6) { ssa_expr_uses(node[1], uses); return null; }
+    if (tag == 7) { ssa_expr_uses(node[1], uses); return null; }
+    if (tag == 8) { ssa_expr_uses(node[1], uses); return null; }
+    return null;
+}
+
+fn ssa_collect_defs(cfg, n) {
+    let defs = map_new(); let b = 0;
+    while (b < n) {
+        let block = cfg["blocks"][b];
+        let instrs = block["instructions"];
+        let i = 0;
+        while (i < array_length(instrs)) {
+            let d = ssa_stmt_def(instrs[i]);
+            if (d != "") {
+                if (!map_has(defs, d)) { map_set(defs, d, array_new(0)); }
+                ssa_set_add(map_get(defs, d), b);
+            }
+            i = i + 1;
+        }
+        b = b + 1;
+    }
+    return defs;
+}
+
+// --- phi placement (iterated dominance frontier) ---
+
+fn ssa_place_phis(n, defs, df) {
+    let phis = array_new(0); let b = 0;
+    while (b < n) { array_push(phis, array_new(0)); b = b + 1; }
+    let names = map_keys(defs);
+    let v = 0;
+    while (v < array_length(names)) {
+        let name = names[v];
+        let worklist = ssa_set_copy(map_get(defs, name));
+        let processed = array_new(0);
+        let w = 0;
+        while (w < array_length(worklist)) {
+            let dblock = worklist[w];
+            let f = 0;
+            while (f < array_length(df[dblock])) {
+                let nb = df[dblock][f];
+                if (!ssa_set_has(processed, nb)) {
+                    array_push(phis[nb], [name, "", array_new(0)]);
+                    ssa_set_add(processed, nb);
+                    array_push(worklist, nb);
+                }
+                f = f + 1;
+            }
+            w = w + 1;
+        }
+        v = v + 1;
+    }
+    return phis;
+}
+
+// --- version stack (manual, rebuilt on pop) ---
+
+fn ssa_push(stack_map, counters, v) {
+    if (!map_has(counters, v)) { map_set(counters, v, 0); }
+    let c = map_get(counters, v);
+    let ver = string_concat(v, ".", number_to_string(c));
+    map_set(counters, v, c + 1);
+    if (!map_has(stack_map, v)) { map_set(stack_map, v, array_new(0)); }
+    array_push(map_get(stack_map, v), ver);
+    return ver;
+}
+
+fn ssa_top(stack_map, v) {
+    if (!map_has(stack_map, v)) { return "undef"; }
+    let st = map_get(stack_map, v);
+    if (array_length(st) == 0) { return "undef"; }
+    return st[array_length(st) - 1];
+}
+
+fn ssa_pop(stack_map, v) {
+    let st = map_get(stack_map, v);
+    let r = array_new(0); let i = 0;
+    while (i < array_length(st) - 1) { array_push(r, st[i]); i = i + 1; }
+    map_set(stack_map, v, r);
+    return null;
+}
+
+// --- renaming ---
+
+fn ssa_rename_expr(node, stack_map) {
+    if (node == null) { return null; }
+    let tag = node[0];
+    if (tag == 21) {
+        let name = node[1];
+        if (map_has(stack_map, name)) {
+            let st = map_get(stack_map, name);
+            if (array_length(st) > 0) { index_set(node, 1, st[array_length(st) - 1]); }
+        }
+        return null;
+    }
+    if (tag == 22) { ssa_rename_expr(node[2], stack_map); ssa_rename_expr(node[3], stack_map); return null; }
+    if (tag == 23) { ssa_rename_expr(node[2], stack_map); return null; }
+    if (tag == 24) { ssa_rename_expr_array(node[2], stack_map); return null; }
+    if (tag == 25) { ssa_rename_expr_array(node[1], stack_map); return null; }
+    if (tag == 26) { ssa_rename_expr(node[1], stack_map); ssa_rename_expr(node[2], stack_map); return null; }
+    if (tag == 27) { ssa_rename_expr(node[1], stack_map); return null; }
+    if (tag == 31) { ssa_rename_expr_array(node[2], stack_map); return null; }
+    if (tag == 35) { ssa_rename_expr_array(node[2], stack_map); return null; }
+    if (tag == 45) { ssa_rename_expr(node[1], stack_map); return null; }
+    return null;
+}
+
+fn ssa_rename_expr_array(items, stack_map) {
+    let i = 0;
+    while (i < array_length(items)) { ssa_rename_expr(items[i], stack_map); i = i + 1; }
+    return null;
+}
+
+fn ssa_rename_def(stmt, ver) {
+    let tag = stmt[1]; let node = stmt[3];
+    if (tag == 2) { index_set(node, 1, ver); return null; }
+    if (tag == 3) { if (node[1][0] == 21) { index_set(node[1], 1, ver); } return null; }
+    return null;
+}
+
+fn ssa_rename_stmt(stmt, stack_map, counters, pushed) {
+    let tag = stmt[1]; let node = stmt[3];
+    if (tag == 2) { ssa_rename_expr(node[3], stack_map); }
+    if (tag == 3) { if (node[1][0] != 21) { ssa_rename_expr(node[1], stack_map); } ssa_rename_expr(node[2], stack_map); }
+    if (tag == 6) { ssa_rename_expr(node[1], stack_map); }
+    if (tag == 7) { ssa_rename_expr(node[1], stack_map); }
+    if (tag == 8) { ssa_rename_expr(node[1], stack_map); }
+    let defname = ssa_stmt_def(stmt);
+    if (defname != "") {
+        let ver = ssa_push(stack_map, counters, defname);
+        array_push(pushed, defname);
+        ssa_rename_def(stmt, ver);
+    }
+    return null;
+}
+
+fn ssa_rename_term(term, stack_map, counters, pushed) {
+    if (term[0] == "branch") { ssa_rename_expr(term[1], stack_map); return null; }
+    if (term[0] == "ret") { ssa_rename_expr(term[1], stack_map); return null; }
+    if (term[0] == "for") {
+        ssa_rename_expr(term[2], stack_map);
+        let binding = term[1];
+        let ver = ssa_push(stack_map, counters, binding);
+        array_push(pushed, binding);
+        index_set(term, 1, ver);
+        return null;
+    }
+    return null;
+}
+
+fn ssa_rename_block(block, stack_map, counters, phis, children, cfg) {
+    let pushed = array_new(0);
+    // assign versions to phis at this block
+    let pv = phis[block];
+    let i = 0;
+    while (i < array_length(pv)) {
+        let phi_rec = pv[i];
+        let ver = ssa_push(stack_map, counters, phi_rec[0]);
+        index_set(phi_rec, 1, ver);
+        array_push(pushed, phi_rec[0]);
+        i = i + 1;
+    }
+    // rename instructions
+    let block_map = cfg["blocks"][block];
+    let instrs = block_map["instructions"];
+    let j = 0;
+    while (j < array_length(instrs)) { ssa_rename_stmt(instrs[j], stack_map, counters, pushed); j = j + 1; }
+    // rename terminator
+    ssa_rename_term(block_map["terminator"], stack_map, counters, pushed);
+    // fill phi operands in successors
+    let succs = ssa_block_succs(cfg, block);
+    let s = 0;
+    while (s < array_length(succs)) {
+        let sp = phis[succs[s]];
+        let k = 0;
+        while (k < array_length(sp)) {
+            let rec = sp[k];
+            array_push(rec[2], [block, ssa_top(stack_map, rec[0])]);
+            k = k + 1;
+        }
+        s = s + 1;
+    }
+    // recurse into dominator children
+    let kids = children[block];
+    let c = 0;
+    while (c < array_length(kids)) { ssa_rename_block(kids[c], stack_map, counters, phis, children, cfg); c = c + 1; }
+    // pop versions pushed here
+    let p = array_length(pushed) - 1;
+    while (p >= 0) { ssa_pop(stack_map, pushed[p]); p = p - 1; }
+    return null;
+}
+
+fn ssa_block_succs(cfg, block) {
+    let term = cfg["blocks"][block]["terminator"];
+    let kind = term[0];
+    let r = array_new(0);
+    if (kind == "jump") { array_push(r, term[1]); }
+    if (kind == "branch") { array_push(r, term[2]); array_push(r, term[3]); }
+    if (kind == "for") { array_push(r, term[3]); array_push(r, term[4]); }
+    return r;
+}
+
+// --- driver ---
+
+fn ssa_build(cfg, params) {
+    let n = array_length(cfg["order"]);
+    let entry = cfg["entry"];
+    let preds = ssa_preds(cfg, n);
+    let dom = ssa_dominators(n, entry, preds);
+    let idom = ssa_idom(n, entry, dom);
+    let df = ssa_frontiers(n, idom, preds);
+    let children = ssa_children(n, entry, idom);
+    let defs = ssa_collect_defs(cfg, n);
+    // parameters are definitions at entry
+    let pi = 0;
+    while (pi < array_length(params)) {
+        let pv = params[pi];
+        if (!map_has(defs, pv)) { map_set(defs, pv, array_new(0)); }
+        ssa_set_add(map_get(defs, pv), entry);
+        pi = pi + 1;
+    }
+    let phis = ssa_place_phis(n, defs, df);
+    let stack_map = map_new(); let counters = map_new();
+    pi = 0;
+    while (pi < array_length(params)) { ssa_push(stack_map, counters, params[pi]); pi = pi + 1; }
+    ssa_rename_block(entry, stack_map, counters, phis, children, cfg);
+    map_set(cfg, "phis", phis);
+    return cfg;
+}
+
+// --- dumping ---
+
+fn ssa_uses_text(uses) {
+    if (array_length(uses) == 0) { return ""; }
+    return string_join(uses, " ");
+}
+
+fn ssa_dump_phi(rec) {
+    let text = string_concat("  phi ", rec[1], " = ");
+    let ops = rec[2]; let i = 0;
+    while (i < array_length(ops)) {
+        if (i > 0) { text = string_concat(text, ", "); }
+        text = string_concat(text, "b", number_to_string(ops[i][0]), ":", ops[i][1]);
+        i = i + 1;
+    }
+    return text;
+}
+
+fn ssa_dump_stmt(stmt) {
+    let tag = stmt[1];
+    let defname = ssa_stmt_def(stmt);
+    let uses = array_new(0);
+    ssa_stmt_uses(stmt, uses);
+    let text = cfg.stmt_name(tag);
+    if (defname != "") { text = string_concat(text, " ", defname); }
+    let ut = ssa_uses_text(uses);
+    if (ut != "") { text = string_concat(text, " uses ", ut); }
+    return text;
+}
+
+fn ssa_dump_term(term) {
+    let kind = term[0];
+    if (kind == "jump") { return string_concat("jump -> b", number_to_string(term[1])); }
+    if (kind == "branch") {
+        let uses = array_new(0); ssa_expr_uses(term[1], uses);
+        return string_concat("branch [", ssa_uses_text(uses), "] -> b", number_to_string(term[2]), " b", number_to_string(term[3]));
+    }
+    if (kind == "ret") {
+        let uses = array_new(0); ssa_expr_uses(term[1], uses);
+        return string_concat("ret [", ssa_uses_text(uses), "]");
+    }
+    if (kind == "for") {
+        let uses = array_new(0); ssa_expr_uses(term[2], uses);
+        return string_concat("for ", term[1], " in [", ssa_uses_text(uses), "] -> b", number_to_string(term[3]), " b", number_to_string(term[4]));
+    }
+    return "none";
+}
+
+fn ssa_dump_cfg(cfg) {
+    let text = "";
+    let blocks = cfg["blocks"];
+    let order = cfg["order"];
+    let phis = cfg["phis"];
+    let index = 0;
+    while (index < array_length(order)) {
+        let id = order[index];
+        let block = blocks[id];
+        text = string_concat(text, "b", number_to_string(id), ":\n");
+        let p = phis[id]; let pi = 0;
+        while (pi < array_length(p)) { text = string_concat(text, ssa_dump_phi(p[pi]), "\n"); pi = pi + 1; }
+        let instrs = block["instructions"]; let ii = 0;
+        while (ii < array_length(instrs)) { text = string_concat(text, "  ", ssa_dump_stmt(instrs[ii]), "\n"); ii = ii + 1; }
+        text = string_concat(text, "  ", ssa_dump_term(block["terminator"]), "\n");
+        index = index + 1;
+    }
+    return text;
+}
+
+fn ssa_dump_function(statements, params) {
+    let c = cfg.build_function_cfg(statements);
+    ssa_build(c, params);
+    return ssa_dump_cfg(c);
+}
+
+fn ssa_dump_program(program) {
+    let text = "";
+    text = string_concat(text, "=== top-level ===\n", ssa_dump_function(program[2], array_new(0)), "\n");
+    let functions = program[1]; let index = 0;
+    while (index < array_length(functions)) {
+        text = string_concat(text, "=== function ", functions[index][1], " ===\n", ssa_dump_function(functions[index][4], functions[index][3]), "\n");
+        index = index + 1;
+    }
+    return text;
+}

@@ -1,0 +1,39 @@
+// Correlated const-prop differential: `x` and `y` assigned together in one
+// branch give a provably-constant `x / y`. Independent branches on different
+// conditions must NOT be folded (the ratio genuinely varies). Optimized output
+// must equal unoptimized output.
+fn corr_ratio(c) {
+    let x = 0;
+    let y = 0;
+    if (c) {
+        x = 30;
+        y = 3;
+    } else {
+        x = 60;
+        y = 6;
+    }
+    return x / y;
+}
+
+fn independent(c, d) {
+    let x = 0;
+    let y = 0;
+    if (c) {
+        x = 30;
+    } else {
+        x = 60;
+    }
+    if (d) {
+        y = 3;
+    } else {
+        y = 6;
+    }
+    return x / y;
+}
+
+print(corr_ratio(1));
+print(corr_ratio(0));
+print(independent(1, 1));
+print(independent(1, 0));
+print(independent(0, 1));
+print(independent(0, 0));

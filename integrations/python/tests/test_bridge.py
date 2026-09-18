@@ -13,7 +13,7 @@ def test_round_trip_and_separate_logs(fake_lana: Path, program: Path) -> None:
     assert envelope["ok"] is True
     assert envelope["result"] == {"message": "hello", "value": 3}
     assert envelope["stdout"] == "program log\n"
-    assert envelope["execution"]["lana_version"] == "2.0.0"
+    assert envelope["execution"]["lana_version"] == "3.0.0"
 
 
 @pytest.mark.parametrize(
@@ -62,17 +62,17 @@ def test_evidence_input_is_validated_before_execution(
 
 def test_rejects_incompatible_version(tmp_path: Path) -> None:
     executable = tmp_path / "lana"
-    executable.write_text("#!/bin/sh\necho 'Lana 2.0.0 (LABC v1)'\n", encoding="utf-8")
+    executable.write_text("#!/bin/sh\necho 'Lana 3.0.0 (LABC v1)'\n", encoding="utf-8")
     executable.chmod(0o755)
     with pytest.raises(LanaCompatibilityError):
         BridgeRunner(executable)
 
 
-@pytest.mark.parametrize("version", ["2.0.0", "2.1.0", "2.2.0"])
-def test_accepts_compatible_labc_v2_versions(tmp_path: Path, version: str) -> None:
+@pytest.mark.parametrize("version", ["3.0.0", "3.1.0", "3.2.0"])
+def test_accepts_compatible_labc_versions(tmp_path: Path, version: str) -> None:
     executable = tmp_path / "lana"
     executable.write_text(
-        f"#!/bin/sh\necho 'Lana {version} (LABC v2, fake)'\n", encoding="utf-8"
+        f"#!/bin/sh\necho 'Lana {version} (LABC v5, fake)'\n", encoding="utf-8"
     )
     executable.chmod(0o755)
     assert BridgeRunner(executable).version == version

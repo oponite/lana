@@ -16,7 +16,7 @@
 
 use crate::chunk::{Chunk, Function, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
-use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1};
+use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1, LABC_VERSION_3, LABC_VERSION_4, LABC_VERSION_5};
 use crate::value::{Value, ValueType};
 
 /// Maximum serialized chunk size, matching the C11 loader's 64 MiB cap.
@@ -82,7 +82,9 @@ pub fn load(bytes: &[u8]) -> Result<Chunk, LanaErrorInfo> {
     let instructions = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
     let entry = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
 
-    if version != LABC_VERSION && version != LABC_VERSION_1 {
+    if version != LABC_VERSION && version != LABC_VERSION_1 && version != LABC_VERSION_3
+        && version != LABC_VERSION_4 && version != LABC_VERSION_5
+    {
         return Err(LanaErrorInfo::new(
             LanaError::IncompatibleFormat, 0, 0, 0,
             format!("unsupported LABC version {version}")));
@@ -151,10 +153,15 @@ pub fn load(bytes: &[u8]) -> Result<Chunk, LanaErrorInfo> {
         chunk.functions.push(Function { name, entry: function_entry, register_count, arity });
     }
 
-    for _ in 0..instructions {
+    let mut unknown_opcode = None;
+    for ip in 0..instructions {
         let opcode_byte = reader.read_u8().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        let opcode = OpCode::try_from(opcode_byte)
-            .map_err(|_| format_error(LanaError::Format, 0, 0, 0))?;
+        // Finish decoding before verification, as C does. A later truncation
+        // or invalid entry takes precedence over an unknown opcode.
+        let opcode = OpCode::try_from(opcode_byte).unwrap_or_else(|_| {
+            unknown_opcode.get_or_insert((ip as usize, opcode_byte));
+            OpCode::Count
+        });
         let a = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
         let b = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
         let c = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
@@ -170,6 +177,15 @@ pub fn load(bytes: &[u8]) -> Result<Chunk, LanaErrorInfo> {
             LanaError::Format, 0, 0, 0, "trailing bytes after LABC chunk"));
     }
 
+    crate::verifier::verify(&chunk).map_err(|mut error| {
+        if let Some((ip, opcode)) = unknown_opcode {
+            if error.code == LanaError::Opcode && error.ip == ip {
+                error.opcode = opcode;
+                error.message = format!("unknown opcode {opcode}");
+            }
+        }
+        error
+    })?;
     Ok(chunk)
 }
 

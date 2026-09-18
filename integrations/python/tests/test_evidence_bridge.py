@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def built_lana() -> Path:
-    executable = ROOT / "build" / "lana"
+    executable = ROOT / "build" / "lana-rust"
     if not executable.is_file():
         pytest.skip("requires a built Lana executable")
     return executable

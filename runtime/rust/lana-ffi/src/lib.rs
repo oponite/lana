@@ -156,6 +156,46 @@ pub struct Buffer {
     data: Vec<u8>,
 }
 
+/// Opaque LIP-029 record handle. Records remain JSON at this narrow bridge;
+/// callers cannot borrow Rust value graphs or layouts.
+pub struct RecordHandle { json: Vec<u8> }
+
+#[repr(C)]
+pub struct LanaRecordBuffer { pub struct_size: usize, pub data: *mut u8, pub length: usize }
+
+pub const LANA_RECORD_ABI_VERSION: u32 = 1;
+
+#[no_mangle]
+pub extern "C" fn lana_record_abi_version() -> u32 { LANA_RECORD_ABI_VERSION }
+
+#[no_mangle]
+pub unsafe extern "C" fn lana_record_parse(data: *const u8, length: usize, out: *mut *mut RecordHandle) -> i32 {
+    if data.is_null() || out.is_null() { return LanaError::Type as i32; }
+    let bytes = std::slice::from_raw_parts(data, length);
+    let Ok(text) = std::str::from_utf8(bytes) else { return LanaError::Schema as i32; };
+    if json_parse(text).is_err() { return LanaError::Schema as i32; }
+    *out = Box::into_raw(Box::new(RecordHandle { json: bytes.to_vec() }));
+    LanaError::Ok as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lana_record_json(record: *const RecordHandle, out: *mut LanaRecordBuffer) -> i32 {
+    if record.is_null() || out.is_null() || (*out).struct_size != std::mem::size_of::<LanaRecordBuffer>() { return LanaError::Type as i32; }
+    let data = leak_bytes(&(*record).json) as *mut u8;
+    (*out).data = data; (*out).length = (*record).json.len();
+    LanaError::Ok as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lana_record_free(record: *mut RecordHandle) { if !record.is_null() { drop(Box::from_raw(record)); } }
+
+#[no_mangle]
+pub unsafe extern "C" fn lana_record_buffer_free(buffer: *mut LanaRecordBuffer) {
+    if buffer.is_null() { return; }
+    if !(*buffer).data.is_null() { drop(Box::from_raw(std::slice::from_raw_parts_mut((*buffer).data, (*buffer).length))); }
+    (*buffer).data = ptr::null_mut(); (*buffer).length = 0;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -884,18 +924,27 @@ pub unsafe extern "C" fn lana_vm_destroy(vm: *mut VmHandle) {
 // data.h
 // ---------------------------------------------------------------------------
 
-/// Mirrors `lana_map_new` (the VM argument is unused; Rust maps are GC-free).
+/// Mirrors `lana_map_new`; the map retains its VM heap reservation.
 #[no_mangle]
 pub unsafe extern "C" fn lana_map_new(
-    _vm: *mut VmHandle,
+    vm: *mut VmHandle,
     capacity: usize,
     out: *mut *mut Map,
 ) -> i32 {
     if out.is_null() {
         return LanaError::InvalidState as i32;
     }
-    *out = Box::into_raw(Box::new(Map::new(capacity)));
-    LanaError::Ok as i32
+    *out = ptr::null_mut();
+    if vm.is_null() {
+        return LanaError::InvalidState as i32;
+    }
+    match Map::new(&(*vm).vm.heap(), capacity) {
+        Ok(map) => {
+            *out = Box::into_raw(Box::new(map));
+            LanaError::Ok as i32
+        }
+        Err(error) => error as i32,
+    }
 }
 
 /// Mirrors `lana_map_get` (writes an opaque value).
@@ -927,7 +976,7 @@ pub unsafe extern "C" fn lana_map_has(map: *const Map, key: *const c_char) -> is
     }
     let m = &*map;
     let key = cstr(key);
-    match m.entries.iter().position(|e| &*e.key == key) {
+    match m.entries().iter().position(|e| &*e.key == key) {
         Some(i) => i as isize,
         None => -1,
     }
@@ -1426,6 +1475,26 @@ mod tests {
             return String::new();
         }
         CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn map_allocation_failure_clears_output_and_preserves_budget() {
+        let chunk = lana_bytecode::assembler::assemble("HALT\n").unwrap();
+        let chunk = Box::into_raw(Box::new(chunk));
+        let mut handle = VmHandle { vm: Vm::new(unsafe { &*chunk }) };
+        handle.vm.set_memory_limit(1);
+        let mut output = std::ptr::NonNull::<Map>::dangling().as_ptr();
+        unsafe {
+            assert_eq!(lana_map_new(&mut handle, 4, &mut output), LanaError::Oom as i32);
+            assert!(output.is_null());
+            assert_eq!(handle.vm.allocated_bytes(), 0);
+            assert_eq!(lana_map_new(&mut handle, usize::MAX, &mut output), LanaError::Oom as i32);
+            assert!(output.is_null());
+            assert_eq!(lana_map_new(ptr::null_mut(), 0, &mut output), LanaError::InvalidState as i32);
+            assert!(output.is_null());
+        }
+        drop(handle);
+        unsafe { drop(Box::from_raw(chunk)); }
     }
 
     #[test]

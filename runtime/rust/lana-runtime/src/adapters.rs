@@ -125,7 +125,7 @@ mod tests {
         match &value.kind {
             ValueKind::Array(array) => {
                 let array = array.lock().unwrap();
-                assert_eq!(array.items.len(), 1);
+                assert_eq!(array.items().len(), 1);
             }
             _ => panic!("expected array"),
         }

@@ -3,10 +3,9 @@
 //!
 //! The C11 VM uses a tagged union with heap pointers and a mark-sweep GC. The
 //! Rust VM uses an owned/shared representation: `Arc` for shared heap objects,
-//! `Mutex` where the C code mutates in place (arrays, maps). The value graph
-//! is acyclic — derivations are immutable records forming a DAG, state dists
-//! form a tree, reactives form a dependency DAG — so `Arc` without cycle
-//! collection is sound. `Arc`/`Mutex` (rather than `Rc`/`RefCell`) keep every
+//! `Mutex` where the C code mutates in place (arrays, maps). Mutable containers
+//! and reactive histories can form cycles; Arc alone does not reclaim them.
+//! `Arc`/`Mutex` (rather than `Rc`/`RefCell`) keep every
 //! value `Send`, so a child VM's value graph can cross a task boundary.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +15,42 @@ use lana_bytecode::{LanaError, ValueType};
 
 use crate::derivation::{Derivation, DerivationExactness};
 use crate::state::StateValue;
+use crate::tensor::{tensor_get_imag, tensor_get_real};
+
+struct PrintOutput {
+    text: String,
+    limit: usize,
+    failed: bool,
+}
+
+impl std::fmt::Write for PrintOutput {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        if self.failed || text.len() > self.limit.saturating_sub(self.text.len())
+            || self.text.try_reserve_exact(text.len()).is_err()
+        {
+            self.failed = true;
+            return Err(std::fmt::Error);
+        }
+        self.text.push_str(text);
+        Ok(())
+    }
+}
+
+impl PrintOutput {
+    fn push_str(&mut self, text: &str) {
+        let _ = std::fmt::Write::write_str(self, text);
+    }
+
+    fn push(&mut self, character: char) {
+        self.push_str(character.encode_utf8(&mut [0; 4]));
+    }
+}
+
+struct PrintFrame {
+    value: Value,
+    next: usize,
+    identity: Option<usize>,
+}
 
 /// A runtime failure, mirroring the fields `lana_vm_run` records before
 /// returning an error code. Defined here (rather than in `vm`) so the shared
@@ -142,15 +177,29 @@ pub enum DistOperand {
 }
 
 /// A mutable array of values.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct Array {
-    pub items: Vec<Value>,
+    pub(crate) items: crate::heap::Buffer<Value>,
+}
+
+impl Array {
+    pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
+        Ok(Self { items: crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())? })
+    }
+
+    pub fn from_items(heap: &crate::heap::Heap, items: Vec<Value>) -> Result<Self, LanaError> {
+        Ok(Self { items: crate::heap::Buffer::from_vec(heap, items, std::mem::size_of::<Self>())? })
+    }
+
+    pub fn items(&self) -> &[Value] { &self.items }
+
+    pub fn push(&mut self, item: Value) -> Result<(), LanaError> { self.items.push(item) }
 }
 
 /// A key/value map (increment 2).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct Map {
-    pub entries: Vec<MapEntry>,
+    pub(crate) entries: crate::heap::Buffer<MapEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,9 +210,11 @@ pub struct MapEntry {
 
 impl Map {
     /// Create an empty map, mirroring `lana_map_new`.
-    pub fn new(capacity: usize) -> Self {
-        Self { entries: Vec::with_capacity(capacity) }
+    pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
+        Ok(Self { entries: crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())? })
     }
+
+    pub fn entries(&self) -> &[MapEntry] { &self.entries }
 
     /// Look up a key, mirroring `lana_map_get`. Returns `None` when absent.
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -185,13 +236,16 @@ impl Map {
             entry.value = value;
             return Ok(());
         }
-        self.entries.push(MapEntry { key, value });
-        Ok(())
+        let heap = self.entries.heap().clone();
+        let key = heap.string(&key)?;
+        let result = self.entries.push(MapEntry { key, value });
+        if result.is_err() { heap.collect_strings(); }
+        result
     }
 }
 
-/// An equipossible support set, mirroring `struct LanaPossibility`. `weights`
-/// is `None` for a non-probabilistic, equipossible support.
+/// A finite Core support set. `weights == None` is a non-probabilistic
+/// Possibility; positive normalized weights denote a Distribution.
 #[derive(Debug, Clone)]
 pub struct Possibility {
     pub values: Vec<Value>,
@@ -220,6 +274,267 @@ pub struct PathAlternative {
 pub struct Adt {
     pub variant: u32,
     pub fields: Vec<Value>,
+}
+
+/// A suspended generator frame (LIP-022 §2), mirroring `struct LanaGenerator`
+/// in `vm/include/value.h`. `registers` is the snapshot of the generator's
+/// frame registers; register 0 is reserved for the generator value itself and
+/// is never part of the saved state.
+#[derive(Debug, Clone)]
+pub struct Generator {
+    pub function: u32,
+    pub ip: usize,
+    pub registers: Vec<Value>,
+    pub exhausted: bool,
+}
+
+/// A suspended async frame (LIP-024 §5), mirroring `struct LanaFuture` in
+/// `vm/include/value.h`. `registers` is the snapshot of the async frame's
+/// registers; register 0 is reserved for the future value itself and is never
+/// part of the saved state. `ready` is false while the future is suspended on
+/// an `OP_AWAIT`; the event loop only schedules futures with `ready == true`.
+#[derive(Debug, Clone)]
+pub struct Future {
+    pub function: u32,
+    pub ip: usize,
+    pub registers: Vec<Value>,
+    pub exhausted: bool,
+    pub ready: bool,
+    /// Rust-internal event-loop state (not part of the C11 `LanaFuture`
+    /// contract): true while the future sits in the ready queue, so a future
+    /// is never enqueued twice.
+    pub queued: bool,
+}
+
+/// An immutable set of ordinary values (LIP-022 §1), mirroring `struct LanaSet`
+/// in `vm/include/value.h`. Membership is linear over `items` (no hash
+/// function), matching the C11 VM. `STATE`, `STATE_DIST`, and `Information` are
+/// not set members.
+#[derive(Debug)]
+pub struct Set {
+    pub(crate) items: crate::heap::Buffer<Value>,
+}
+
+impl Set {
+    pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
+        Ok(Self { items: crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())? })
+    }
+
+    pub fn items(&self) -> &[Value] { &self.items }
+}
+
+/// A compiled regular expression (LIP-021 §2), mirroring `struct LanaRegex` in
+/// `vm/include/value.h`: a Thompson NFA program plus its character classes.
+/// No `Value` references inside, so it is shared immutably through `Arc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegexOp {
+    Char,
+    Any,
+    Class,
+    Bol,
+    Eol,
+    Split,
+    Jmp,
+    Match,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RegexInst {
+    pub op: RegexOp,
+    pub c: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegexClass {
+    pub bitmap: [u32; 8],
+    pub negated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Regex {
+    pub insts: Vec<RegexInst>,
+    pub classes: Vec<RegexClass>,
+}
+
+/// LIP-006 optimizer descriptor, mirroring `struct LanaOptimizer` in
+/// `vm/include/value.h`. `name` is "sgd" or "adam". For SGD, `learning_rate`
+/// and `momentum` are used and the Adam fields are zero; for Adam,
+/// `learning_rate`, `beta1`, `beta2`, and `epsilon` are used and `momentum` is
+/// zero.
+#[derive(Debug, Clone)]
+pub struct Optimizer {
+    pub name: Arc<str>,
+    pub learning_rate: f64,
+    pub momentum: f64,
+    pub beta1: f64,
+    pub beta2: f64,
+    pub epsilon: f64,
+}
+
+/// LIP-006 training result, mirroring `struct LanaTrainingResult` in
+/// `vm/include/value.h`: the trained parameters plus the per-step history.
+/// LIP-010 adds the model/loss function indices and the optimizer descriptor so
+/// an incremental `update` (or a reactive recomputation) can resume the
+/// optimizer from the last step map. LIP-014 adds the resolved dataset and the
+/// effective batch size so `resume` can continue the run from any step.
+#[derive(Debug, Clone)]
+pub struct TrainingResult {
+    pub params: Arc<Tensor>,
+    pub steps: Arc<Mutex<Array>>,
+    pub model_function: u32,
+    pub loss_function: u32,
+    pub optimizer: Arc<Optimizer>,
+    pub data: Value,
+    pub batch_size: usize,
+}
+
+/// LIP-009 inference algorithm descriptor, mirroring
+/// `struct LanaInferenceAlgorithm` in `vm/include/value.h`. `name` is "mcmc",
+/// "vi", or "smc". For MCMC, `samples` and `burn_in` are used; for VI, `family`
+/// ("gaussian"/"mean_field") and `iterations` are used; for SMC, `samples` is
+/// the particle count. Unused fields are zero (or `None` for `family`).
+#[derive(Debug, Clone)]
+pub struct InferenceAlgorithm {
+    pub name: Arc<str>,
+    pub family: Option<Arc<str>>,
+    pub samples: f64,
+    pub burn_in: f64,
+    pub iterations: f64,
+}
+
+/// LIP-009 posterior, mirroring `struct LanaPosterior` in `vm/include/value.h`:
+/// a distribution over parameters produced by `infer`. `mean` is the point
+/// estimate, `variance` the per-element uncertainty, `samples` the sample
+/// matrix (None for VI), `steps` the per-step provenance, and `seed` the RNG
+/// seed the run used.
+#[derive(Debug, Clone)]
+pub struct Posterior {
+    pub mean: Arc<Tensor>,
+    pub variance: Arc<Tensor>,
+    pub samples: Option<Arc<Tensor>>,
+    pub steps: Arc<Mutex<Array>>,
+    pub seed: u64,
+}
+
+/// LIP-015 lazy relational-algebra plan node, mirroring `struct LanaDataset` in
+/// `vm/include/value.h`. `op` selects the operator; `source` is the upstream
+/// plan (a `Lazy` value for `Source`, otherwise another `Dataset`). `function`
+/// is the predicate/transform function index for `Filter`/`Map`. `columns` is
+/// the column-name array for `Select`; `key` is the column name for
+/// `Sort`/`GroupBy`/`Join`; `limit` is the row cap for `Limit`; `other` is the
+/// right-hand dataset for `Join`; `aggregate` is the aggregate descriptor
+/// (e.g. `["sum","v"]` or `["count"]`) for `Aggregate`.
+#[derive(Debug, Clone)]
+pub struct Dataset {
+    pub op: DatasetOp,
+    pub source: Value,
+    pub function: u32,
+    pub columns: Value,
+    pub key: Value,
+    pub limit: Value,
+    pub other: Value,
+    pub aggregate: Value,
+}
+
+/// The dataset operator, matching `LanaDatasetOp` in `vm/include/value.h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatasetOp {
+    Source,
+    Filter,
+    Map,
+    Select,
+    Limit,
+    Sort,
+    GroupBy,
+    Aggregate,
+    Join,
+}
+
+/// A first-class tensor, mirroring `struct LanaTensor` in `vm/include/tensor.h`.
+///
+/// `data` is a row-major buffer of `f64` values; for a complex tensor the real
+/// and imaginary parts are interleaved `[re, im, re, im, …]`, so the buffer
+/// length is `prod(shape) * (is_complex ? 2 : 1)`. `offset` is the first
+/// element in elements (0 for a base tensor). A slicing view shares the source
+/// buffer through `Arc` and carries its own shape, strides, and offset, so
+/// strides may be non-contiguous; every element access goes through `offset`
+/// and `strides`. Tensors are immutable once constructed, so `Arc` sharing
+/// (matching the C11 VM's GC-rooted base chain) is sound.
+/// LIP-027: tensor numeric dtype. `is_complex` is derived from this: a
+/// `Complex` tensor has `is_complex == true`, every other dtype has it false.
+/// The default is `F64`, so existing programs are unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorDtype {
+    F64,
+    F32,
+    F16,
+    Bf16,
+    Complex,
+}
+
+impl TensorDtype {
+    /// The dtype's string name, matching the C11 VM's `dtype_to_string`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TensorDtype::F64 => "f64",
+            TensorDtype::F32 => "f32",
+            TensorDtype::F16 => "f16",
+            TensorDtype::Bf16 => "bf16",
+            TensorDtype::Complex => "complex",
+        }
+    }
+
+    /// Parse a dtype string; `None` for an unknown string (the caller maps
+    /// that to `LanaError::InvalidParameters`).
+    pub fn from_str(s: &str) -> Option<TensorDtype> {
+        match s {
+            "f64" => Some(TensorDtype::F64),
+            "f32" => Some(TensorDtype::F32),
+            "f16" => Some(TensorDtype::F16),
+            "bf16" => Some(TensorDtype::Bf16),
+            "complex" => Some(TensorDtype::Complex),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TensorDevice {
+    Cpu,
+    Metal,
+}
+
+#[derive(Debug)]
+pub struct Tensor {
+    pub(crate) ndim: usize,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) strides: Vec<usize>,
+    pub(crate) is_complex: bool,
+    /// LIP-027: numeric dtype (F64 default).
+    pub(crate) dtype: TensorDtype,
+    pub(crate) device: TensorDevice,
+    pub(crate) metal_buffer: Option<Arc<crate::metal::ResidentBuffer>>,
+    /// LIP-027: compact byte buffer, `prod(shape) * element_width` bytes.
+    /// Element access goes through the `tensor_get_*`/`tensor_set_*` helpers
+    /// in `tensor.rs`, which convert between the storage dtype and f64.
+    pub(crate) data: Arc<crate::heap::Buffer<u8>>,
+    pub(crate) offset: usize,
+    /// LIP-007: a STATE tensor (each element is a density matrix).
+    pub(crate) is_state: bool,
+    pub(crate) _owner: crate::heap::Reservation,
+    pub(crate) metal_charge: Option<Arc<crate::heap::Reservation>>,
+}
+
+impl Tensor {
+    pub fn shape(&self) -> &[usize] { &self.shape }
+    pub fn strides(&self) -> &[usize] { &self.strides }
+    pub fn ndim(&self) -> usize { self.ndim }
+    pub fn dtype(&self) -> TensorDtype { self.dtype }
+    pub fn device(&self) -> TensorDevice { self.device }
+    pub fn is_complex(&self) -> bool { self.is_complex }
+    pub fn is_state(&self) -> bool { self.is_state }
 }
 
 /// The reserved `unknown` variant tag, matching the C11 `0xFFFFFFFF`.
@@ -285,6 +600,7 @@ pub enum ReactiveKind {
     Binary,
     Compare,
     Unary,
+    Train,
 }
 
 /// The relationship kind, matching `LanaRelationshipKind`.
@@ -304,8 +620,8 @@ pub struct ReactiveVersion {
 }
 
 /// A reactive dependency node, matching `struct LanaReactive` in
-/// `vm/include/value.h`. Nodes form a DAG (`inputs` reference pre-existing
-/// nodes), so `Arc` without cycle collection is sound. The node is wrapped in a
+/// `vm/include/value.h`. Inputs reference pre-existing nodes, but captured
+/// values and history can contain cyclic containers. The node is wrapped in a
 /// `Mutex` because `reactive_recompute_transaction` mutates `current`,
 /// `history`, and `revision` in place, and a value graph carrying a reactive
 /// node can cross a task boundary.
@@ -322,6 +638,9 @@ pub struct Reactive {
     pub constants: [Option<Value>; 2],
     pub current: Option<Value>,
     pub history: Vec<ReactiveVersion>,
+    /// LIP-010: a training data root accepts a single [x, target] observation
+    /// on `observe` (its support is structural, not a membership test).
+    pub is_training_data: bool,
 }
 
 /// A claim, matching `struct LanaClaim` in `vm/include/value.h`.
@@ -370,7 +689,7 @@ pub struct CapabilityToken {
     pub shared: Arc<SharedInformation>,
     pub id: u64,
     pub permissions: u32,
-    pub revoked: bool,
+    pub revoked: AtomicBool,
 }
 
 /// Capability permission bits, matching `LanaCapability` in
@@ -461,7 +780,21 @@ pub enum ValueKind {
     PathSet(Arc<PathSet>),
     Capability(Arc<CapabilityToken>),
     Adt(Arc<Adt>),
+    Tensor(Arc<Tensor>),
+    NQubitState(Arc<Tensor>),
+    Povm(Arc<Tensor>),
+    Channel(Arc<Tensor>),
+    Observable(Arc<Tensor>),
     Lazy { function: u32, bound: usize },
+    Generator(Arc<Mutex<Generator>>),
+    Future(Arc<Mutex<Future>>),
+    Set(Arc<Mutex<Set>>),
+    Regex(Arc<Regex>),
+    Optimizer(Arc<Optimizer>),
+    TrainingResult(Arc<TrainingResult>),
+    InferenceAlgorithm(Arc<InferenceAlgorithm>),
+    Posterior(Arc<Posterior>),
+    Dataset(Arc<Dataset>),
 }
 
 impl Value {
@@ -533,8 +866,64 @@ impl Value {
         Self { kind: ValueKind::Adt(adt), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
+    pub fn tensor(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::Tensor(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn nqubit_state(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::NQubitState(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn povm(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::Povm(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn channel(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::Channel(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn observable(tensor: Arc<Tensor>) -> Self {
+        Self { kind: ValueKind::Observable(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
     pub fn lazy(function: u32, bound: usize) -> Self {
         Self { kind: ValueKind::Lazy { function, bound }, derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn generator(generator: Arc<Mutex<Generator>>) -> Self {
+        Self { kind: ValueKind::Generator(generator), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn future(future: Arc<Mutex<Future>>) -> Self {
+        Self { kind: ValueKind::Future(future), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn set(set: Arc<Mutex<Set>>) -> Self {
+        Self { kind: ValueKind::Set(set), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn regex(regex: Arc<Regex>) -> Self {
+        Self { kind: ValueKind::Regex(regex), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn optimizer(optimizer: Arc<Optimizer>) -> Self {
+        Self { kind: ValueKind::Optimizer(optimizer), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn training_result(result: Arc<TrainingResult>) -> Self {
+        Self { kind: ValueKind::TrainingResult(result), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn inference_algorithm(algorithm: Arc<InferenceAlgorithm>) -> Self {
+        Self { kind: ValueKind::InferenceAlgorithm(algorithm), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn posterior(posterior: Arc<Posterior>) -> Self {
+        Self { kind: ValueKind::Posterior(posterior), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn dataset(dataset: Arc<Dataset>) -> Self {
+        Self { kind: ValueKind::Dataset(dataset), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
     /// The stable type tag, matching `ValueType` in `vm/include/value.h`.
@@ -553,11 +942,27 @@ impl Value {
             ValueKind::Task(_) => ValueType::Task,
             ValueKind::StateDist(_) => ValueType::StateDist,
             ValueKind::Map(_) => ValueType::Map,
-            ValueKind::Possibility(_) => ValueType::Possibility,
+            ValueKind::Possibility(ref value) => {
+                if value.weights.is_some() { ValueType::Distribution } else { ValueType::Possibility }
+            }
             ValueKind::PathSet(_) => ValueType::PathSet,
             ValueKind::Capability(_) => ValueType::SharedCapability,
             ValueKind::Adt(_) => ValueType::Adt,
+            ValueKind::Tensor(_) => ValueType::Tensor,
+            ValueKind::NQubitState(_) => ValueType::NQubitState,
+            ValueKind::Povm(_) => ValueType::Povm,
+            ValueKind::Channel(_) => ValueType::Channel,
+            ValueKind::Observable(_) => ValueType::Observable,
             ValueKind::Lazy { .. } => ValueType::Lazy,
+            ValueKind::Generator(_) => ValueType::Generator,
+            ValueKind::Future(_) => ValueType::Future,
+            ValueKind::Set(_) => ValueType::Set,
+            ValueKind::Regex(_) => ValueType::Regex,
+            ValueKind::Optimizer(_) => ValueType::Optimizer,
+            ValueKind::TrainingResult(_) => ValueType::TrainingResult,
+            ValueKind::InferenceAlgorithm(_) => ValueType::InferenceAlgorithm,
+            ValueKind::Posterior(_) => ValueType::Posterior,
+            ValueKind::Dataset(_) => ValueType::Dataset,
         }
     }
 
@@ -577,11 +982,27 @@ impl Value {
             ValueKind::Task(_) => "task",
             ValueKind::StateDist(_) => "state_dist",
             ValueKind::Map(_) => "map",
-            ValueKind::Possibility(_) => "possibility",
+            ValueKind::Possibility(ref value) => {
+                if value.weights.is_some() { "distribution" } else { "possibility" }
+            }
             ValueKind::PathSet(_) => "paths",
             ValueKind::Capability(_) => "shared_capability",
             ValueKind::Adt(_) => "adt",
+            ValueKind::Tensor(_) => "tensor",
+            ValueKind::NQubitState(_) => "nqubit_state",
+            ValueKind::Povm(_) => "povm",
+            ValueKind::Channel(_) => "channel",
+            ValueKind::Observable(_) => "observable",
             ValueKind::Lazy { .. } => "lazy",
+            ValueKind::Generator(_) => "generator",
+            ValueKind::Future(_) => "future",
+            ValueKind::Set(_) => "set",
+            ValueKind::Regex(_) => "regex",
+            ValueKind::Optimizer(_) => "optimizer",
+            ValueKind::TrainingResult(_) => "training_result",
+            ValueKind::InferenceAlgorithm(_) => "inference_algorithm",
+            ValueKind::Posterior(_) => "posterior",
+            ValueKind::Dataset(_) => "dataset",
         }
     }
 
@@ -619,26 +1040,205 @@ impl Value {
         }
     }
 
-    /// Whether the value is unresolved, mirroring `value_is_unresolved` in
-    /// `vm/c/vm.c`. Possibilities and path sets are always unresolved; arrays
-    /// and maps are unresolved if any element is.
+    /// Conservative convenience query. VM boundaries use the fallible check.
     pub fn is_unresolved(&self) -> bool {
+        self.check_resolved(256 * 1024 * 1024).is_err()
+    }
+
+    pub fn has_revoked_capability(&self) -> bool {
+        self.check_capabilities(256 * 1024 * 1024).is_err()
+    }
+
+    pub fn check_resolved(&self, limit: usize) -> Result<(), LanaError> {
+        self.check_graph(limit, LanaError::UnresolvedValue)
+    }
+
+    pub fn check_capabilities(&self, limit: usize) -> Result<(), LanaError> {
+        self.check_graph(limit, LanaError::ClaimRevoked)
+    }
+
+    fn container_identity(&self) -> Option<usize> {
         match &self.kind {
-            ValueKind::Possibility(_) | ValueKind::PathSet(_) => true,
-            ValueKind::Array(array) => array.lock().unwrap().items.iter().any(|item| item.is_unresolved()),
-            ValueKind::Map(map) => map.lock().unwrap().entries.iter().any(|entry| entry.value.is_unresolved()),
-            _ => false,
+            ValueKind::Array(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Map(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Set(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Joint(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Possibility(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::PathSet(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::Adt(v) => Some(Arc::as_ptr(v) as usize),
+            _ => None,
         }
+    }
+
+    fn inspection_child(&self, index: usize) -> Option<Value> {
+        match &self.kind {
+            ValueKind::Array(v) => v.lock().unwrap().items.get(index).cloned(),
+            ValueKind::Map(v) => v.lock().unwrap().entries.get(index).map(|e| e.value.clone()),
+            ValueKind::Set(v) => v.lock().unwrap().items.get(index).cloned(),
+            ValueKind::Adt(v) => v.fields.get(index).cloned(),
+            ValueKind::Possibility(v) => v.values.get(index).cloned(),
+            ValueKind::PathSet(v) => v.alternatives.get(index).map(|a| a.result.clone()),
+            ValueKind::Joint(v) => {
+                if let Some(value) = v.values.get(index) { return Some(value.clone()); }
+                let index = index - v.values.len();
+                let width = v.names.len();
+                if width == 0 { return None; }
+                v.rows.get(index / width).and_then(|r| r.values.get(index % width)).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    fn check_graph(&self, limit: usize, rejected: LanaError) -> Result<(), LanaError> {
+        fn resolved(value: &Value) -> Value {
+            value.reactive.as_ref().and_then(|r| r.lock().unwrap().current.clone())
+                .unwrap_or_else(|| value.clone())
+        }
+        fn check(value: &Value, rejected: LanaError) -> Result<(), LanaError> {
+            let bad = match &value.kind {
+                ValueKind::Possibility(_) | ValueKind::PathSet(_) => rejected == LanaError::UnresolvedValue,
+                ValueKind::Capability(v) => rejected == LanaError::ClaimRevoked && v.revoked.load(Ordering::Acquire),
+                _ => false,
+            };
+            if bad { Err(rejected) } else { Ok(()) }
+        }
+        let root = resolved(self);
+        check(&root, rejected)?;
+        if root.container_identity().is_none() { return Ok(()); }
+        let budget = crate::heap::Heap::new(limit);
+        let mut stack = crate::heap::Buffer::new(&budget, 1, 0)?;
+        let mut seen = crate::heap::Buffer::new(&budget, 0, 0)?;
+        stack.push(PrintFrame { value: root, next: 0, identity: None })?;
+        while let Some(frame) = stack.last_mut() {
+            if frame.identity.is_none() {
+                check(&frame.value, rejected)?;
+                let Some(identity) = frame.value.container_identity() else { stack.pop(); continue; };
+                // ponytail: bounded linear identity lookup; use a budgeted hash
+                // table if graph inspection becomes a measured bottleneck.
+                if seen.contains(&identity) { stack.pop(); continue; }
+                seen.push(identity)?;
+                frame.identity = Some(identity);
+            }
+            if let Some(child) = frame.value.inspection_child(frame.next) {
+                frame.next += 1;
+                stack.push(PrintFrame { value: resolved(&child), next: 0, identity: None })?;
+            } else {
+                stack.pop();
+            }
+        }
+        Ok(())
     }
 
     /// Render the value exactly as `lana_value_print` in `vm/c/value.c`.
     pub fn print(&self) -> String {
-        let mut out = String::new();
-        self.print_into(&mut out);
-        out
+        self.try_print(usize::MAX).unwrap_or_else(|_| "<out-of-memory>".into())
     }
 
-    fn print_into(&self, out: &mut String) {
+    /// Render without recursively locking containers or traversing cycles.
+    pub fn try_print(&self, limit: usize) -> Result<String, LanaError> {
+        let mut out = PrintOutput { text: String::new(), limit, failed: false };
+        let mut stack = Vec::new();
+        let frame_size = std::mem::size_of::<PrintFrame>();
+        if frame_size > limit { return Err(LanaError::Oom); }
+        stack.try_reserve_exact(1).map_err(|_| LanaError::Oom)?;
+        stack.push(PrintFrame { value: self.clone(), next: 0, identity: None });
+        while !stack.is_empty() {
+            out.limit = limit.saturating_sub(stack.capacity() * frame_size);
+            if out.failed { return Err(LanaError::Oom); }
+            let frame_index = stack.len() - 1;
+            let identity = match &stack[frame_index].value.kind {
+                ValueKind::Array(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Map(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Set(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Joint(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Possibility(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::PathSet(value) => Some(Arc::as_ptr(value) as usize),
+                ValueKind::Adt(value) => Some(Arc::as_ptr(value) as usize),
+                _ => None,
+            };
+            let Some(identity) = identity else {
+                stack[frame_index].value.print_into(&mut out);
+                stack.pop();
+                continue;
+            };
+            // ponytail: linear ancestor scan; replace with a budgeted index if
+            // deep-graph rendering becomes a measured performance bottleneck.
+            if stack[frame_index].identity.is_none()
+                && stack[..frame_index].iter().any(|frame| frame.identity == Some(identity))
+            {
+                out.push_str("<cycle>");
+                stack.pop();
+                continue;
+            }
+            let frame = &mut stack[frame_index];
+            if frame.identity.is_none() {
+                frame.identity = Some(identity);
+                match &frame.value.kind {
+                    ValueKind::Array(_) => out.push('['),
+                    ValueKind::Map(_) => out.push('{'),
+                    ValueKind::Set(_) => out.push_str("set{"),
+                    ValueKind::Joint(_) => out.push_str("joint_state{"),
+                    ValueKind::Possibility(value) => {
+                        out.push_str(if value.weights.is_some() { "distribution{" } else { "possibility{" });
+                    }
+                    ValueKind::PathSet(_) => out.push_str("paths{"),
+                    ValueKind::Adt(adt) => {
+                        use std::fmt::Write;
+                        let _ = write!(out, "adt(variant={}){{", adt.variant);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let index = frame.next;
+            let (child, key, guard) = match &frame.value.kind {
+                ValueKind::Array(value) => (value.lock().unwrap().items.get(index).cloned(), None, None),
+                ValueKind::Set(value) => (value.lock().unwrap().items.get(index).cloned(), None, None),
+                ValueKind::Map(value) => {
+                    let value = value.lock().unwrap();
+                    match value.entries.get(index) {
+                        Some(entry) => (Some(entry.value.clone()), Some(entry.key.clone()), None),
+                        None => (None, None, None),
+                    }
+                }
+                ValueKind::Joint(value) => match value.names.get(index) {
+                    Some(key) => (Some(value.values.get(index).cloned().unwrap_or_else(|| Value::string(Arc::from("<finite-law>")))), Some(key.clone()), None),
+                    None => (None, None, None),
+                },
+                ValueKind::Possibility(value) => (value.values.get(index).cloned(), None, None),
+                ValueKind::PathSet(value) => match value.alternatives.get(index) {
+                    Some(alternative) => (Some(alternative.result.clone()), None, Some(alternative.guard)),
+                    None => (None, None, None),
+                },
+                ValueKind::Adt(value) => (value.fields.get(index).cloned(), None, None),
+                _ => unreachable!(),
+            };
+            if let Some(child) = child {
+                if index != 0 { out.push_str(", "); }
+                if let Some(key) = key {
+                    let quoted = matches!(frame.value.kind, ValueKind::Map(_));
+                    if quoted { out.push('"'); }
+                    out.push_str(&key);
+                    if quoted { out.push('"'); }
+                    out.push_str(": ");
+                }
+                if let Some(guard) = guard { out.push_str(if guard { "true => " } else { "false => " }); }
+                frame.next += 1;
+                if stack.len() == stack.capacity() {
+                    let capacity = stack.capacity().checked_mul(2).ok_or(LanaError::Oom)?;
+                    let bytes = capacity.checked_mul(frame_size).ok_or(LanaError::Oom)?;
+                    if bytes > limit.saturating_sub(out.text.capacity()) { return Err(LanaError::Oom); }
+                    stack.try_reserve_exact(capacity - stack.len()).map_err(|_| LanaError::Oom)?;
+                }
+                stack.push(PrintFrame { value: child, next: 0, identity: None });
+            } else {
+                out.push(if matches!(frame.value.kind, ValueKind::Array(_)) { ']' } else { '}' });
+                stack.pop();
+            }
+        }
+        if out.failed { Err(LanaError::Oom) } else { Ok(out.text) }
+    }
+
+    fn print_into(&self, out: &mut PrintOutput) {
         use std::fmt::Write;
         match &self.kind {
             ValueKind::Null => out.push_str("null"),
@@ -663,32 +1263,8 @@ impl Value {
             ValueKind::Sample(sample) => {
                 let _ = write!(out, "{sample}");
             }
-            ValueKind::Joint(joint) => {
-                out.push_str("joint_state{");
-                for (index, name) in joint.names.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    let _ = write!(out, "{name}: ");
-                    if let Some(value) = joint.values.get(index) {
-                        value.print_into(out);
-                    } else {
-                        out.push_str("<finite-law>");
-                    }
-                }
-                out.push('}');
-            }
-            ValueKind::Array(array) => {
-                out.push('[');
-                let array = array.lock().unwrap();
-                for (index, item) in array.items.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    item.print_into(out);
-                }
-                out.push(']');
-            }
+            ValueKind::Joint(_) => unreachable!("container handled by iterative renderer"),
+            ValueKind::Array(_) => unreachable!("container handled by iterative renderer"),
             ValueKind::Function(function) => {
                 let _ = write!(out, "function({function})");
             }
@@ -696,52 +1272,83 @@ impl Value {
                 let _ = write!(out, "task({})", task.id);
             }
             ValueKind::StateDist(_) => out.push_str("state_dist"),
-            ValueKind::Map(map) => {
-                out.push('{');
-                let map = map.lock().unwrap();
-                for (index, entry) in map.entries.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    let _ = write!(out, "\"{}\": ", entry.key);
-                    entry.value.print_into(out);
-                }
-                out.push('}');
-            }
-            ValueKind::Possibility(possibility) => {
-                out.push_str("possibility{");
-                for (index, value) in possibility.values.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    value.print_into(out);
-                }
-                out.push('}');
-            }
-            ValueKind::PathSet(paths) => {
-                out.push_str("paths{");
-                for (index, alternative) in paths.alternatives.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    let _ = write!(out, "{} => ", if alternative.guard { "true" } else { "false" });
-                    alternative.result.print_into(out);
-                }
-                out.push('}');
-            }
+            ValueKind::Map(_) => unreachable!("container handled by iterative renderer"),
+            ValueKind::Possibility(_) => unreachable!("container handled by iterative renderer"),
+            ValueKind::PathSet(_) => unreachable!("container handled by iterative renderer"),
             ValueKind::Capability(_) => out.push_str("shared_capability"),
-            ValueKind::Adt(adt) => {
-                let _ = write!(out, "adt(variant={}){{", adt.variant);
-                for (index, field) in adt.fields.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    field.print_into(out);
-                }
-                out.push('}');
+            ValueKind::Adt(_) => unreachable!("container handled by iterative renderer"),
+            ValueKind::Tensor(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
+            }
+            ValueKind::NQubitState(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
+            }
+            ValueKind::Povm(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
+            }
+            ValueKind::Channel(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
+            }
+            ValueKind::Observable(tensor) => {
+                tensor_print_rec(tensor, 0, tensor.offset, out);
             }
             ValueKind::Lazy { function, bound } => {
                 let _ = write!(out, "lazy(function={function}, bound={bound})");
+            }
+            ValueKind::Generator(generator) => {
+                let generator = generator.lock().unwrap();
+                let _ = write!(
+                    out,
+                    "generator(function={}, exhausted={})",
+                    generator.function,
+                    generator.exhausted
+                );
+            }
+            ValueKind::Future(future) => {
+                let future = future.lock().unwrap();
+                let _ = write!(
+                    out,
+                    "future(function={}, exhausted={}, ready={})",
+                    future.function,
+                    future.exhausted,
+                    future.ready
+                );
+            }
+            ValueKind::Set(_) => unreachable!("container handled by iterative renderer"),
+            ValueKind::Regex(regex) => {
+                let _ = write!(out, "regex(insts={})", regex.insts.len());
+            }
+            ValueKind::Optimizer(optimizer) => {
+                let _ = write!(
+                    out,
+                    "optimizer(name={}, learning_rate={}, momentum={}, beta1={}, beta2={}, epsilon={})",
+                    optimizer.name,
+                    lana_bytecode::format_g(optimizer.learning_rate),
+                    lana_bytecode::format_g(optimizer.momentum),
+                    lana_bytecode::format_g(optimizer.beta1),
+                    lana_bytecode::format_g(optimizer.beta2),
+                    lana_bytecode::format_g(optimizer.epsilon)
+                );
+            }
+            ValueKind::TrainingResult(result) => {
+                let _ = write!(out, "training_result(steps={})", result.steps.lock().unwrap().items.len());
+            }
+            ValueKind::InferenceAlgorithm(algorithm) => {
+                let _ = write!(
+                    out,
+                    "inference_algorithm(name={}, family={}, samples={}, burn_in={}, iterations={})",
+                    algorithm.name,
+                    algorithm.family.as_deref().unwrap_or(""),
+                    lana_bytecode::format_g(algorithm.samples),
+                    lana_bytecode::format_g(algorithm.burn_in),
+                    lana_bytecode::format_g(algorithm.iterations)
+                );
+            }
+            ValueKind::Posterior(posterior) => {
+                let _ = write!(out, "posterior(steps={})", posterior.steps.lock().unwrap().items.len());
+            }
+            ValueKind::Dataset(dataset) => {
+                let _ = write!(out, "dataset(op={})", dataset.op as i32);
             }
         }
     }
@@ -759,9 +1366,96 @@ impl From<&lana_bytecode::Value> for Value {
     }
 }
 
+/// Recursively render a tensor, mirroring `tensor_print_rec` in `vm/c/value.c`.
+/// Nested `[...]` with `, ` separators; real elements use `%.12g`, complex
+/// elements render as `[re, im]` with `%.12g` each. A 0-d tensor prints its
+/// single scalar (or `[re, im]` pair) with no brackets.
+fn tensor_print_rec(tensor: &Tensor, dim: usize, offset: usize, out: &mut PrintOutput) {
+    if out.failed { return; }
+    use std::fmt::Write;
+    if dim == tensor.ndim {
+        if tensor.is_complex {
+            let _ = write!(
+                out,
+                "[{}, {}]",
+                lana_bytecode::format_g(tensor_get_real(&tensor, offset)),
+                lana_bytecode::format_g(tensor_get_imag(&tensor, offset))
+            );
+        } else {
+            out.push_str(&lana_bytecode::format_g(tensor_get_real(&tensor, offset)));
+        }
+        return;
+    }
+    out.push('[');
+    for i in 0..tensor.shape[dim] {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        tensor_print_rec(tensor, dim + 1, offset + i * tensor.strides[dim], out);
+    }
+    out.push(']');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_keys_cannot_bypass_the_heap_budget() {
+        let heap = crate::heap::Heap::new(std::mem::size_of::<Map>() + std::mem::size_of::<MapEntry>());
+        let mut map = Map::new(&heap, 1).unwrap();
+        let before = heap.live_bytes();
+        assert_eq!(map.set(Arc::from("retained key"), Value::number(1.0), false), Err(LanaError::Oom));
+        assert!(map.entries().is_empty());
+        assert_eq!(heap.live_bytes(), before);
+    }
+
+    #[test]
+    fn map_key_alias_owns_its_string_after_the_map_dies() {
+        let heap = crate::heap::Heap::new(4096);
+        let mut map = Map::new(&heap, 1).unwrap();
+        map.set(Arc::from("key"), Value::null(), false).unwrap();
+        let alias = map.entries()[0].key.clone();
+        drop(map);
+        heap.collect_strings();
+        assert_eq!(heap.live_bytes(), 4);
+        assert_eq!(&*alias, "key");
+        drop(alias);
+        heap.collect_strings();
+        assert_eq!(heap.live_bytes(), 0);
+    }
+
+    #[test]
+    fn print_cycles_aliases_and_deep_graphs() {
+        let heap = crate::heap::Heap::new(4 * 1024 * 1024);
+        let array = Arc::new(Mutex::new(Array::new(&heap, 0).unwrap()));
+        let value = Value::array(array.clone());
+        array.lock().unwrap().items.push(value.clone()).unwrap();
+        assert_eq!(value.print(), "[<cycle>]");
+        assert_eq!(value.check_resolved(4096), Ok(()));
+        assert_eq!(value.check_capabilities(4096), Ok(()));
+        array.lock().unwrap().items.clear();
+        array.lock().unwrap().items.push(Value::number(1.0)).unwrap();
+        let aliases = Value::array(Arc::new(Mutex::new(Array::from_items(&heap, vec![value.clone(), value]).unwrap())));
+        assert_eq!(aliases.print(), "[[1], [1]]");
+        assert_eq!(aliases.try_print(4).unwrap_err(), LanaError::Oom);
+        let mut roots = vec![Arc::new(Mutex::new(Array::from_items(&heap, vec![Value::number(1.0)]).unwrap()))];
+        for _ in 0..5000 {
+            roots.push(Arc::new(Mutex::new(Array::from_items(&heap, vec![Value::array(roots.last().unwrap().clone())]).unwrap())));
+        }
+        let root = Value::array(roots.last().unwrap().clone());
+        let rendered = root.try_print(4 * 1024 * 1024).unwrap();
+        assert_eq!(rendered.len(), 10003);
+        assert_eq!(root.check_resolved(4 * 1024 * 1024), Ok(()));
+        assert_eq!(root.check_capabilities(4 * 1024 * 1024), Ok(()));
+        assert_eq!(root.check_resolved(16), Err(LanaError::Oom));
+        let unknown = Value::possibility(Arc::new(Possibility {
+            values: vec![Value::number(1.), Value::number(2.)], weights: None, dependency_id: 1,
+        }));
+        roots[0].lock().unwrap().items[0] = Value::adt(Arc::new(Adt { variant: 0, fields: vec![unknown] }));
+        assert_eq!(root.check_resolved(4 * 1024 * 1024), Err(LanaError::UnresolvedValue));
+        for root in &roots { root.lock().unwrap().items.clear(); }
+    }
 
     #[test]
     fn type_names_match_c11() {
@@ -788,7 +1482,7 @@ mod tests {
             shared,
             id: 1,
             permissions: LANA_CAPABILITY_ADMIN,
-            revoked: false,
+            revoked: AtomicBool::new(false),
         });
         assert_eq!(Value::capability(token).type_name(), "shared_capability");
     }
@@ -816,9 +1510,9 @@ mod tests {
 
     #[test]
     fn print_matches_c11_array() {
-        let array = Arc::new(Mutex::new(Array {
-            items: vec![Value::number(1.0), Value::boolean(true)],
-        }));
+        let heap = crate::heap::Heap::new(4096);
+        let array = Arc::new(Mutex::new(Array::from_items(&heap,
+            vec![Value::number(1.0), Value::boolean(true)]).unwrap()));
         assert_eq!(Value::array(array).print(), "[1, true]");
     }
 }

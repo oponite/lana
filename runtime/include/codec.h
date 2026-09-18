@@ -17,5 +17,6 @@ typedef struct {
 LanaError lana_codec_encode_value(LanaBuffer *buf, Value value);
 LanaError lana_codec_decode_value(LanaBuffer *buf, size_t *offset, Value *out_value);
 LanaError lana_codec_decode_document(LanaBuffer *buf, Value *out_value);
+void lana_codec_free_value(Value value);
 
 #endif

@@ -1,0 +1,14 @@
+import "std/decision" as decision;
+
+let context = decision.decision_context(
+    [{id: "act", tags: ["act"]}], [], ["evidence-1"], ["source-1"], ["stable demand"], 1,
+    {expected_utility: 4}
+);
+let review = decision.review_outcome(context, {status: "observed", realized_utility: 5});
+assert(review.decision_quality.status == "complete", "complete decision context");
+assert(review.outcome_quality.status == "met_or_exceeded", "observed outcome comparison");
+let deliberation = decision.value_of_deliberation(8, 2, 1);
+assert(deliberation.net_value == 5, "net deliberation value");
+let alternatives = decision.validate_alternative_set([{id: "wait", tags: ["delay"]}]);
+assert(array_length(alternatives.missing) == 3, "missing alternatives are reported");
+print("DECISION_REVIEW_PASS");

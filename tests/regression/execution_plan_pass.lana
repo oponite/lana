@@ -1,0 +1,6 @@
+import "std/execution" as execution;
+
+let plan = execution.plan_webhook("/events", {event: "approved", values: [1, true, null]});
+assert(plan.kind == "webhook", "plan kind");
+assert(plan.path == "/events", "plan path");
+assert(plan.payload.event == "approved", "plan payload");

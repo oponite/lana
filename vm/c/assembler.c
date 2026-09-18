@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define LANA_ASSEMBLER_MAX_FIXUPS 4096u
+#define LANA_ASSEMBLER_MAX_FIXUPS 8192u
 #define LANA_ASSEMBLER_INDEX_CAPACITY (LANA_ASSEMBLER_MAX_FIXUPS * 2u)
 
 typedef struct {

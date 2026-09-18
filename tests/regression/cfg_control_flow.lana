@@ -1,0 +1,17 @@
+fn classify(n) {
+    if (n > 10) {
+        let big = true;
+        return 1;
+    } else {
+        let small = true;
+    }
+    let count = 0;
+    while (count < 3) {
+        count = count + 1;
+    }
+    let total = 0;
+    for x in [1, 2, 3] {
+        total = total + x;
+    }
+    return total;
+}
