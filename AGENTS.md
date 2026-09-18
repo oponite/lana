@@ -174,7 +174,8 @@ a clean directory, and runs the example before publication. Homebrew Core
 submission is an external publication step; the release workflow publishes a
 checksum-backed formula artifact. Signing and notarization remain deferred.
 
-The compiler emits LABC v2; the dual-version loader accepts v1 and v2.
+The compiler emits LABC v2 by default; the Rust loader accepts v1-v5 and the
+frozen C reference accepts v1-v2.
 Pre-release bytecode and textual assembly are not accepted or converted; rebuild
 them from source.
 

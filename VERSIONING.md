@@ -13,13 +13,13 @@ Lana has three independent version axes.
 
 The 1.x line targets LABC v1. Lana 2.0 introduced LABC v2. Lana 3.0 adds the
 Rust-owned Core surface in LABC v5; its Rust loader accepts v1-v5, while the
-frozen C reference backend accepts v1-v4.
+frozen C reference backend accepts v1-v2.
 
 ## LABC version (integer)
 
 The bytecode format version, independent of the language version. It is bumped
 only when the encoding changes. The Rust loader accepts LABC v1-v5; the C
-reference loader accepts v1-v4 and rejects v5 with a migration diagnostic. The
+reference loader accepts v1-v2. The
 `LABC` magic is unchanged. The compiler emits the lowest version that supports
 the source form: v2-v4 for established forms and v5 for Core distribution and
 map refinement forms.

@@ -17,15 +17,16 @@ use std::io::{BufRead, BufReader, Read, Write};
 
 use lana_bytecode::{Chunk, LanaError, LanaErrorInfo, OpCode, Value};
 use lana_runtime::brain::Brain;
+use lana_runtime::execution::ExecutionConfig;
 use lana_vm::{Vm, ValueKind as RuntimeValueKind};
 
-const LANA_VERSION: &str = "3.0.0";
+const LANA_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Full usage text, mirroring `usage()` in `tools/c/cli.c` (with `lanavm` folded
 /// into the single `lana` binary).
 fn usage(program: &str) {
     eprintln!(
-        "usage:\n  {program} compile program.lana -o program.labc\n  {program} new directory\n  {program} brain new|train|evaluate|save|load|inspect|chat\n  {program} lsp\n  {program} debug program.lana\n  {program} build|run|test|check|fmt|doc\n  {program} check program.lana\n  {program} asm program.lasm -o program.labc\n  {program} run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} dis program.labc\n  {program} verify program.labc\n  {program} inspect program.lana [--format json|dot]"
+        "usage:\n  {program} compile program.lana -o program.labc\n  {program} new directory\n  {program} brain new|train|evaluate|save|load|inspect|chat\n  {program} lsp\n  {program} debug program.lana\n  {program} build|run|test|check|fmt|doc\n  {program} check program.lana\n  {program} asm program.lasm -o program.labc\n  {program} run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} dis program.labc\n  {program} verify program.labc\n  {program} inspect program.lana [--format json|dot]\n  {program} execution-config init --metadata PATH --key PATH --capability-id ID --origin HTTPS_ORIGIN --credential-key-id ID [--ca-file PATH]"
     );
 }
 
@@ -34,6 +35,37 @@ fn run_usage(program: &str) {
     eprintln!(
         "usage: {program} run <file.labc> [--seed N] [--workers N] [--max-tasks N] [--memory-limit-mib N] [--instruction-limit N] [--stats]"
     );
+}
+
+fn execution_config_command(args: &[String]) -> ExitCode {
+    if args.first().map(String::as_str) != Some("init") { usage("lana"); return ExitCode::from(2); }
+    let mut metadata = None;
+    let mut key = None;
+    let mut capability_id = None;
+    let mut origin = None;
+    let mut credential_key_id = None;
+    let mut ca_file = None;
+    let mut index = 1;
+    while index < args.len() {
+        let Some(value) = args.get(index + 1) else { usage("lana"); return ExitCode::from(2); };
+        let slot = match args[index].as_str() {
+            "--metadata" => &mut metadata,
+            "--key" => &mut key,
+            "--capability-id" => &mut capability_id,
+            "--origin" => &mut origin,
+            "--credential-key-id" => &mut credential_key_id,
+            "--ca-file" => &mut ca_file,
+            _ => { usage("lana"); return ExitCode::from(2); }
+        };
+        if slot.replace(value.as_str()).is_some() { usage("lana"); return ExitCode::from(2); }
+        index += 2;
+    }
+    let (Some(metadata), Some(key), Some(capability_id), Some(origin), Some(credential_key_id)) =
+        (metadata, key, capability_id, origin, credential_key_id) else { usage("lana"); return ExitCode::from(2); };
+    match ExecutionConfig::write(Path::new(metadata), Path::new(key), capability_id, origin, credential_key_id, ca_file) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => { eprintln!("execution-config: initialization failed"); ExitCode::from(1) }
+    }
 }
 
 fn report_error(error: &lana_vm::VmError) {
@@ -1228,6 +1260,7 @@ fn main() -> ExitCode {
     }
     match args[1].as_str() {
         "brain" => brain_command(&args[2..]),
+        "execution-config" => execution_config_command(&args[2..]),
         "version" => {
             println!("Lana {LANA_VERSION} (LABC v2, Rust VM, native compiler)");
             ExitCode::SUCCESS

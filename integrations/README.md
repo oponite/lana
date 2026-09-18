@@ -1,6 +1,6 @@
 # Lana integrations
 
-These optional adapters support Lana 3.0 without dependencies in the normal
+These optional adapters support Lana 3.0.1 without dependencies in the normal
 Lana build.
 
 ## JSON, MCP, and Jupyter
@@ -45,8 +45,9 @@ This produces `liblana_bridge` and its ABI-v1 header. The facade runs
 precompiled LABC only. Python can load it through
 `lana_integrations.native.NativeBridge`.
 
-The JSON, MCP, Jupyter, and editor adapters accept Lana 3.0 with LABC v2
-through v5. The native ABI remains v1 and uses the frozen C11 LABC v2 path.
+The JSON, MCP, Jupyter, and editor adapters use the Rust CLI and accept Lana
+3.0.1 source with LABC v2 through v5. The native ABI remains v1 and uses the
+frozen C11 LABC v2 path.
 
 ## Evidence lifecycle contract
 

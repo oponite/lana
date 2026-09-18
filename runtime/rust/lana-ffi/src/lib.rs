@@ -1,6 +1,6 @@
-//! C ABI for the Rust Lana runtime, mirroring the C11 public API headers
-//! (`vm/include/`, `runtime/include/`, `tools/include/`) so existing C hosts can
-//! link against the Rust runtime without source changes.
+//! Documented C-ABI subset for the Rust Lana runtime. It is not an ABI-v1
+//! replacement for the frozen C bridge; existing ABI-v1 hosts remain on that
+//! bridge until a complete replacement is shipped.
 //!
 //! # Representation decisions
 //!

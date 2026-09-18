@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.0.1
+
+- Make the Rust CLI/VM release gates, bytecode fuzzing, execution configuration,
+  support matrix, and migration path explicit.
+- Harden execution configuration and temporary credential-file handling.
+- Keep the C11 v1-v2 reference and native ABI-v1 bridge frozen and supported.
+
+## 3.0.0
+
+- Establish the Rust CLI/VM as the canonical runtime for LABC v1-v5.
+- Add LABC v5 Core information distribution and map-refinement support.
+
 ## 2.0.0
 
 - Introduce LABC v2, the Rust canonical VM, algebraic data types, evidence, and lazy datasets.

@@ -15,6 +15,7 @@ integrations/editors/vscode/out/
 integrations/editors/vscode/*.vsix
 *.labc
 target/
+fuzz/artifacts/
 benchmark/results/
 vijay-docs/
 archive

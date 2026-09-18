@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "$root"
+root="${LANA_SOURCE_DIR:?LANA_SOURCE_DIR must name the source tree}"
+build="${LANA_BUILD_DIR:?LANA_BUILD_DIR must name the build tree}"
 lana="${LANA:?LANA must name the Rust CLI}"
 work="$(mktemp -d /tmp/lana-execution.XXXXXX)"
-trap 'kill "${server:-}" 2>/dev/null || true; rm -rf "$work" "$root/build/execution-live-success-store" "$root/build/execution-live-failure-store"' EXIT
+trap 'kill "${server:-}" 2>/dev/null || true; rm -rf "$work"' EXIT
 
 openssl req -x509 -newkey rsa:2048 -keyout "$work/key.pem" -out "$work/cert.pem" \
     -sha256 -days 1 -nodes -subj '/CN=127.0.0.1' \
@@ -45,8 +45,9 @@ port="$(cat "$work/port")"
 export LANA_EXECUTION_METADATA="$work/metadata.lxe"
 export LANA_EXECUTION_KEY="$work/key"
 export LANA_EXECUTION_CREDENTIAL_live="Bearer test-token"
-export LANA_COMPILER_LABC="$root/build/lana-compiler.labc"
+export LANA_COMPILER_LABC="$build/lana-compiler.labc"
 export LANA_STDLIB_DIR="$root/stdlib"
+cd "$work"
 "$lana" run "$root/tests/regression/execution_live_success_pass.lana"
 "$lana" run "$root/tests/regression/execution_live_failure_pass.lana"
 test "$(wc -l < "$work/requests.log" | tr -d ' ')" = 2

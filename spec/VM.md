@@ -1,4 +1,4 @@
-# C Virtual Machine
+# Runtime architecture
 
 ## Derivation ownership
 
@@ -104,7 +104,7 @@ resource-limit failures record the resource, limit, and observed amount.
 Failure clears the public result before returning. Child-task errors are copied
 without publishing a partial child value.
 
-The canonical runtime is a C11 register VM. `STATE` values store canonical
+The canonical runtime is a Rust register VM. `STATE` values store canonical
 binary64 `p`, `d_re`, and `d_im` inline with metadata. `STATE_DIST` is a pointer
 to an immutable VM-owned node:
 

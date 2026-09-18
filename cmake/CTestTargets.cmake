@@ -134,6 +134,18 @@ add_test(NAME native_inspect_dot COMMAND "${LANA_RUST_CLI}" inspect "${CMAKE_CUR
 set_tests_properties(native_inspect_dot PROPERTIES PASS_REGULAR_EXPRESSION "digraph state_dist")
 add_test(NAME native_external_prediction_data COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/examples/external_prediction_data.lana")
 add_test(NAME native_imports COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/import_main.lana")
+add_test(NAME native_core_import COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_import_only.lana")
+add_test(NAME native_core_distribution COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_distribution.lana")
+add_test(NAME native_core_refinement_map COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_refinement_map.lana")
+add_test(NAME native_execution_plan COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/execution_plan_pass.lana")
+add_test(NAME native_execution_plan_absolute_url_rejected COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/execution_plan_absolute_url_rejected.lana")
+set_tests_properties(native_execution_plan_absolute_url_rejected PROPERTIES WILL_FAIL TRUE)
+set_tests_properties(
+    native_core_import
+    native_core_distribution
+    native_execution_plan
+    native_execution_plan_absolute_url_rejected
+    PROPERTIES ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
 
 add_test(NAME native_compiler_bootstrap
     COMMAND "${CMAKE_COMMAND}"
@@ -165,6 +177,16 @@ add_test(NAME lana_source_debugger
         -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m10_inspector_pass.lana
         -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/debugger-test-output.txt
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestDebugger.cmake")
+if(UNIX AND LANA_PYTHON3)
+    add_test(NAME lana_execution_live
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "LANA=${LANA_RUST_CLI}"
+            "LANA_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+            "LANA_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance/run_execution_live.sh")
+    set_tests_properties(lana_execution_live PROPERTIES
+        PASS_REGULAR_EXPRESSION "EXECUTION_SUCCESS_PASS;EXECUTION_FAILURE_PASS")
+endif()
 if(CMAKE_OSX_ARCHITECTURES)
     set(LANA_INSTALL_EXPECTED_ARCH -DEXPECTED_ARCH=${CMAKE_OSX_ARCHITECTURES})
 endif()

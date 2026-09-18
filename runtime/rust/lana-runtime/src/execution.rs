@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::io::Write;
 use std::fs::{self, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
@@ -39,6 +39,40 @@ fn private_file(path: &Path) -> Result<(), LanaError> {
     Ok(())
 }
 
+fn create_private_file(path: &Path) -> Result<fs::File, LanaError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map_err(|_| LanaError::Io)
+}
+
+struct TemporaryCredentialFile(PathBuf);
+
+impl TemporaryCredentialFile {
+    fn create(credential: &str) -> Result<Self, LanaError> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| LanaError::Io)?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("lana-curl-{}-{nanos}", std::process::id()));
+        let escaped = credential.replace('\\', "\\\\").replace('"', "\\\"");
+        let result = (|| {
+            let mut file = create_private_file(&path)?;
+            file.write_all(format!("header = \"Authorization: {escaped}\"\n").as_bytes())
+                .map_err(|_| LanaError::Io)
+        })();
+        if result.is_err() { let _ = fs::remove_file(&path); }
+        result.map(|_| Self(path))
+    }
+}
+
+impl Drop for TemporaryCredentialFile {
+    fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
+}
+
 fn config_key(path: &Path) -> Result<LessSafeKey, LanaError> {
     private_file(path)?;
     let key = fs::read(path).map_err(|_| LanaError::Io)?;
@@ -49,7 +83,7 @@ fn config_key(path: &Path) -> Result<LessSafeKey, LanaError> {
 impl ExecutionConfig {
     pub fn write(metadata: &Path, key_path: &Path, id: &str, origin: &str, credential_key_id: &str, ca_file: Option<&str>) -> Result<(), LanaError> {
         let capability = ExecutionCapability::new(Arc::<str>::from(id), Arc::<str>::from(origin))?;
-        if credential_key_id.is_empty() || credential_key_id.contains(['\n', '\r', '\t']) { return Err(LanaError::Schema); }
+        if metadata == key_path || credential_key_id.is_empty() || credential_key_id.contains(['\n', '\r', '\t']) { return Err(LanaError::Schema); }
         let rng = SystemRandom::new();
         let mut key = [0u8; 32]; let mut nonce = [0u8; 12];
         rng.fill(&mut key).map_err(|_| LanaError::Io)?;
@@ -59,13 +93,26 @@ impl ExecutionConfig {
         let cipher = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key).map_err(|_| LanaError::Schema)?);
         cipher.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::empty(), &mut sealed).map_err(|_| LanaError::Io)?;
         let mut output = b"LXE1".to_vec(); output.extend_from_slice(&nonce); output.extend_from_slice(&sealed);
-        let mut key_file = OpenOptions::new().write(true).create_new(true).open(key_path).map_err(|_| LanaError::Io)?;
-        key_file.write_all(&key).map_err(|_| LanaError::Io)?;
-        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; fs::set_permissions(key_path, fs::Permissions::from_mode(0o600)).map_err(|_| LanaError::Io)?; }
-        let mut metadata_file = OpenOptions::new().write(true).create_new(true).open(metadata).map_err(|_| LanaError::Io)?;
-        metadata_file.write_all(&output).map_err(|_| LanaError::Io)?;
-        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; fs::set_permissions(metadata, fs::Permissions::from_mode(0o600)).map_err(|_| LanaError::Io)?; }
-        Ok(())
+        let mut key_created = false;
+        let mut metadata_created = false;
+        let result = (|| {
+            {
+                let mut key_file = create_private_file(key_path)?;
+                key_created = true;
+                key_file.write_all(&key).map_err(|_| LanaError::Io)?;
+            }
+            {
+                let mut metadata_file = create_private_file(metadata)?;
+                metadata_created = true;
+                metadata_file.write_all(&output).map_err(|_| LanaError::Io)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            if metadata_created { let _ = fs::remove_file(metadata); }
+            if key_created { let _ = fs::remove_file(key_path); }
+        }
+        result
     }
 
     pub fn load(metadata: &Path, key_path: &Path) -> Result<Self, LanaError> {
@@ -134,23 +181,22 @@ impl WebhookTransport for CurlTransport {
         if let Some(ca_file) = &self.ca_file {
             command.args(["--cacert", ca_file]);
         }
-        let config_path = if let Some(credential) = &self.credential {
+        let config_file = if let Some(credential) = &self.credential {
             if credential.is_empty() || credential.contains(['\r', '\n']) { return Err(LanaError::Capability); }
-            let path = std::env::temp_dir().join(format!("lana-curl-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| LanaError::Io)?.as_nanos()));
-            let escaped = credential.replace('\\', "\\\\").replace('"', "\\\"");
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&path).map_err(|_| LanaError::Io)?;
-            file.write_all(format!("header = \"Authorization: {escaped}\"\n").as_bytes()).map_err(|_| LanaError::Io)?;
-            #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|_| LanaError::Io)?; }
-            command.args(["--config", path.to_str().ok_or(LanaError::Io)?]);
-            Some(path)
+            Some(TemporaryCredentialFile::create(credential)?)
         } else { None };
+        if let Some(file) = &config_file { command.arg("--config").arg(&file.0); }
         let mut child = command
             .arg(format!("{origin}{path}"))
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .spawn().map_err(|_| LanaError::Io)?;
-        child.stdin.as_mut().ok_or(LanaError::Io)?.write_all(body.as_bytes()).map_err(|_| LanaError::Io)?;
+        let write_result = child.stdin.as_mut().ok_or(LanaError::Io).and_then(|stdin| stdin.write_all(body.as_bytes()).map_err(|_| LanaError::Io));
+        if write_result.is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(LanaError::Io);
+        }
         let output = child.wait_with_output().map_err(|_| LanaError::Io)?;
-        if let Some(path) = config_path { let _ = fs::remove_file(path); }
         if !output.status.success() { return Err(LanaError::Io); }
         std::str::from_utf8(&output.stdout).ok().and_then(|s| s.parse::<u16>().ok()).ok_or(LanaError::Io)
     }
@@ -223,7 +269,9 @@ mod tests {
     use super::*;
     use crate::store::{store_open, StoreOptions};
     use lana_vm::value::Map;
-    use std::sync::Mutex;
+    use std::sync::{atomic::{AtomicUsize, Ordering}, Mutex};
+
+    static NEXT_STORE: AtomicUsize = AtomicUsize::new(0);
 
     struct Response(Result<u16, LanaError>);
     impl WebhookTransport for Response {
@@ -231,7 +279,11 @@ mod tests {
     }
 
     fn store() -> Store {
-        let path = std::env::temp_dir().join(format!("lana_execution_{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "lana_execution_{}_{}",
+            std::process::id(),
+            NEXT_STORE.fetch_add(1, Ordering::Relaxed),
+        ));
         let _ = std::fs::remove_dir_all(&path);
         store_open(&StoreOptions { schema_version: 1, path: path.to_string_lossy().into_owned(), timeout_ms: 0 }).unwrap()
     }
@@ -261,5 +313,38 @@ mod tests {
         let plan = plan();
         let authorization = Authorization { decision_id: 8, capability_id: Arc::from("hook-b"), plan_digest: plan_digest(&plan).unwrap(), authorized: true };
         assert_eq!(execute(&mut store, &capability, &authorization, &plan, "/events", &Response(Err(LanaError::Io))).unwrap(), ReceiptStatus::Unknown);
+    }
+
+    #[test]
+    fn config_write_is_private_and_transactional() {
+        let root = std::env::temp_dir().join(format!("lana_execution_config_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let metadata = root.join("metadata.lxe");
+        let key = root.join("key");
+        ExecutionConfig::write(&metadata, &key, "hook", "https://example.test", "credential", None).unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&metadata).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let missing_parent = root.join("missing").join("metadata.lxe");
+        let rollback_key = root.join("rollback-key");
+        assert_eq!(ExecutionConfig::write(&missing_parent, &rollback_key, "hook", "https://example.test", "credential", None), Err(LanaError::Io));
+        assert!(!rollback_key.exists());
+        assert_eq!(ExecutionConfig::write(&metadata, &metadata, "hook", "https://example.test", "credential", None), Err(LanaError::Schema));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn temporary_credentials_are_private_and_removed() {
+        let file = TemporaryCredentialFile::create("Bearer test-token").unwrap();
+        let path = file.0.clone();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        drop(file);
+        assert!(!path.exists());
     }
 }
