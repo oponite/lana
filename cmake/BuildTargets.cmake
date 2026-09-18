@@ -28,52 +28,24 @@ set(LANA_RUNTIME_SOURCES
     runtime/c/vendor/tweetnacl_random.c
     runtime/c/effects.c
     runtime/c/adapters.c
-    vm/c/backend.c
 )
 
-if(APPLE)
-    list(APPEND LANA_RUNTIME_SOURCES vm/c/metal.m)
-else()
-    list(APPEND LANA_RUNTIME_SOURCES vm/c/metal_stub.c)
+set_source_files_properties(runtime/c/vendor/tweetnacl.c PROPERTIES
+    COMPILE_OPTIONS "-Wno-sign-compare")
+if(CMAKE_C_COMPILER_ID STREQUAL "AppleClang" AND
+   CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 21)
+    set_property(SOURCE runtime/c/vendor/tweetnacl.c APPEND PROPERTY
+        COMPILE_OPTIONS "-Wno-unterminated-string-initialization")
 endif()
-
-# Native matmul backend selection (LIP-004 section 5). Every runtime variant
-# must select the same backend on a platform so the C11 VM stays byte-identical
-# between Debug, Release, sanitizer, and fuzz builds.
-if(APPLE)
-    set(LANA_BLAS_LIBS "-framework Accelerate")
-    set(LANA_BLAS_DEFINES LANA_BLAS_ACCELERATE)
-    # Metal backend (LIP-004 section 5): the Objective-C wrapper links the
-    # Metal framework plus Foundation and the Objective-C runtime (NSString,
-    # objc_msgSend). Accelerate stays the CPU binary64 path.
-    set(LANA_METAL_LIBS "-framework Metal" "-framework Foundation" "-lobjc")
-else()
-    set(LANA_BLAS_LIBS "")
-    set(LANA_BLAS_DEFINES "")
-    set(LANA_METAL_LIBS "")
-endif()
-
-include(CheckCCompilerFlag)
-check_c_compiler_flag("-Wno-unterminated-string-initialization" LANA_HAS_UNTERMINATED_STRING_FLAG)
-if(LANA_HAS_UNTERMINATED_STRING_FLAG)
-    set_source_files_properties(runtime/c/vendor/tweetnacl.c PROPERTIES
-        COMPILE_OPTIONS "-Wno-sign-compare;-Wno-unterminated-string-initialization")
-else()
-    set_source_files_properties(runtime/c/vendor/tweetnacl.c PROPERTIES
-        COMPILE_OPTIONS "-Wno-sign-compare")
-endif()
-
-check_c_compiler_flag("-Wno-format-truncation" LANA_HAS_FORMAT_TRUNCATION_FLAG)
 
 add_library(lanaruntime STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime PUBLIC ${LANA_INCLUDE_DIRS})
-target_link_libraries(lanaruntime PUBLIC Threads::Threads PkgConfig::FFI OpenSSL::SSL ${LANA_BLAS_LIBS} ${LANA_METAL_LIBS})
+target_link_libraries(lanaruntime PUBLIC Threads::Threads)
 target_compile_options(lanaruntime PRIVATE -Wall -Wextra -Wpedantic -Werror)
 # Adapter facade locates dlopen plugins in the build directory.
 target_compile_definitions(lanaruntime PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
-    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}"
-    ${LANA_BLAS_DEFINES})
+    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
 
 if(LANA_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(lanaruntime PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -90,22 +62,13 @@ target_compile_options(lanavm PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 add_library(lanaruntime_release STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime_release PUBLIC ${LANA_INCLUDE_DIRS})
-target_link_libraries(lanaruntime_release PUBLIC PkgConfig::FFI OpenSSL::SSL)
-if(LANA_HAS_FORMAT_TRUNCATION_FLAG)
-    target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-format-truncation -O3 -DNDEBUG)
-else()
-    target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -O3 -DNDEBUG)
+target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -O3 -DNDEBUG)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(lanaruntime_release PRIVATE -Wno-format-truncation)
 endif()
 target_compile_definitions(lanaruntime_release PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
-    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}"
-    ${LANA_BLAS_DEFINES})
-if(LANA_BLAS_LIBS)
-    target_link_libraries(lanaruntime_release PUBLIC ${LANA_BLAS_LIBS})
-endif()
-if(LANA_METAL_LIBS)
-    target_link_libraries(lanaruntime_release PUBLIC ${LANA_METAL_LIBS})
-endif()
+    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
 
 add_executable(lanavm_release tools/c/cli.c)
 target_link_libraries(lanavm_release PRIVATE lanaruntime_release m)
@@ -113,6 +76,61 @@ target_compile_options(lanavm_release PRIVATE -Wall -Wextra -Wpedantic -Werror -
 
 set(LANA_COMPILER_BUNDLE "${CMAKE_CURRENT_BINARY_DIR}/compiler-bootstrap.lana")
 set(LANA_NATIVE_COMPILER "${CMAKE_CURRENT_BINARY_DIR}/lana-compiler.labc")
+set(LANA_RUST_CLI "${CMAKE_CURRENT_BINARY_DIR}/lana-rust")
+
+find_program(LANA_CARGO_EXECUTABLE cargo
+    HINTS "$ENV{HOME}/.cargo/bin"
+    REQUIRED)
+find_program(LANA_RUSTC_EXECUTABLE rustc
+    HINTS "$ENV{HOME}/.cargo/bin"
+    REQUIRED)
+
+if(APPLE AND "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+    find_program(LANA_LIPO_EXECUTABLE lipo REQUIRED)
+    add_custom_command(
+        OUTPUT "${LANA_RUST_CLI}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}/cargo-target"
+                "RUSTC=${LANA_RUSTC_EXECUTABLE}"
+                "${LANA_CARGO_EXECUTABLE}" build --manifest-path
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-cli/Cargo.toml" --release --target aarch64-apple-darwin
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}/cargo-target"
+                "RUSTC=${LANA_RUSTC_EXECUTABLE}"
+                "${LANA_CARGO_EXECUTABLE}" build --manifest-path
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-cli/Cargo.toml" --release --target x86_64-apple-darwin
+        COMMAND "${LANA_LIPO_EXECUTABLE}" -create
+                "${CMAKE_CURRENT_BINARY_DIR}/cargo-target/aarch64-apple-darwin/release/lana"
+                "${CMAKE_CURRENT_BINARY_DIR}/cargo-target/x86_64-apple-darwin/release/lana"
+                -output "${LANA_RUST_CLI}"
+        DEPENDS
+            Cargo.toml Cargo.lock
+            vm/rust/lana-bytecode/src/lib.rs vm/rust/lana-bytecode/src/opcode.rs
+            vm/rust/lana-vm/src/lib.rs vm/rust/lana-vm/src/vm.rs
+            runtime/rust/lana-runtime/src/lib.rs
+            tools/rust/lana-cli/src/main.rs
+        VERBATIM
+    )
+else()
+    add_custom_command(
+        OUTPUT "${LANA_RUST_CLI}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}/cargo-target"
+                "RUSTC=${LANA_RUSTC_EXECUTABLE}"
+                "${LANA_CARGO_EXECUTABLE}" build --manifest-path
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-cli/Cargo.toml" --release
+        COMMAND "${CMAKE_COMMAND}" -E copy
+                "${CMAKE_CURRENT_BINARY_DIR}/cargo-target/release/lana" "${LANA_RUST_CLI}"
+        DEPENDS
+            Cargo.toml Cargo.lock
+            vm/rust/lana-bytecode/src/lib.rs vm/rust/lana-bytecode/src/opcode.rs
+            vm/rust/lana-vm/src/lib.rs vm/rust/lana-vm/src/vm.rs
+            runtime/rust/lana-runtime/src/lib.rs
+            tools/rust/lana-cli/src/main.rs
+        VERBATIM
+    )
+endif()
+add_custom_target(lana_rust_cli ALL DEPENDS "${LANA_RUST_CLI}")
 
 add_executable(lana tools/c/cli.c)
 target_link_libraries(lana PRIVATE lanaruntime m)
@@ -137,20 +155,19 @@ add_custom_target(lana_compiler_bundle ALL DEPENDS "${LANA_COMPILER_BUNDLE}")
 
 add_custom_command(
     OUTPUT "${LANA_NATIVE_COMPILER}"
-    COMMAND $<TARGET_FILE:lanavm> asm
+    COMMAND "${LANA_RUST_CLI}" asm
             "${CMAKE_CURRENT_SOURCE_DIR}/compiler/bootstrap/compiler.lasm"
             -o "${LANA_NATIVE_COMPILER}"
-    DEPENDS lanavm compiler/bootstrap/compiler.lasm
+    DEPENDS lana_rust_cli compiler/bootstrap/compiler.lasm
     VERBATIM
 )
 add_custom_target(lana_native_compiler ALL DEPENDS "${LANA_NATIVE_COMPILER}")
 add_dependencies(lana lana_native_compiler)
 
 install(TARGETS lanaruntime ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(TARGETS lanavm lana RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS lanavm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS "${LANA_RUST_CLI}" DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME lana)
 install(FILES "${LANA_NATIVE_COMPILER}" DESTINATION ${CMAKE_INSTALL_BINDIR})
-# Installed standard library (LIP-016): the compiler resolves the reserved
-# `std/` import prefix to `${DATADIR}/lana/stdlib` via LANA_STDLIB_DIR.
 install(DIRECTORY stdlib/ DESTINATION ${CMAKE_INSTALL_DATADIR}/lana/stdlib)
 # Public headers keep the `lana/` install prefix; the three layer include dirs
 # are flattened into a single `${INCLUDEDIR}/lana` namespace.

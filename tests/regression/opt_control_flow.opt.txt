@@ -1,0 +1,7 @@
+compute: fold b = 42
+compute: fold c = 84
+compute: fold f = 80
+compute: simplify branch true
+compute: fold g = 81
+fold_branch: simplify branch true
+fold_branch: fold z = 30

@@ -1,0 +1,5 @@
+// std/core — information constructors that do not need a second language form.
+
+fn distribution(rows) {
+    return possibility(rows);
+}

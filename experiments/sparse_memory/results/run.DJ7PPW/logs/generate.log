@@ -1,0 +1,1 @@
+{"data_seed":2109014,"features":16,"lazy_source":"common.example(index)","model_api":"Lana 2.1.0 std/ml neural_dense and logistic_multiclass","regimes":8,"schema":1,"target":"deterministic regime-specific binary boundary","test_rows":99744,"test_start":256,"total_rows":100000,"train_rows":128,"validation_rows":128}

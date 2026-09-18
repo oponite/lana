@@ -80,6 +80,18 @@ mod tests {
     }
 
     #[test]
+    fn verifier_rejects_opcodes_introduced_after_the_chunk_version() {
+        let mut chunk = sample_chunk();
+        chunk.version = opcode::LABC_VERSION_3;
+        chunk.code[0] = Instruction::new(OpCode::Async, 0, 0, 0, 0, 1);
+        assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Opcode);
+
+        chunk.version = opcode::LABC_VERSION_4;
+        chunk.code[0] = Instruction::new(OpCode::DistributionBuild, 0, 0, 0, 0, 1);
+        assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Opcode);
+    }
+
+    #[test]
     fn verify_rejects_bad_jump_target() {
         let mut chunk = sample_chunk();
         chunk.code[0] = Instruction::new(OpCode::Jump, 0, 0, 0, 99, 1);

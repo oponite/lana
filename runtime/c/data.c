@@ -40,12 +40,7 @@ static char *vm_string(LanaVM *vm, const char *text, size_t length) {
 }
 
 LanaError lana_map_new(LanaVM *vm, size_t capacity, LanaMap **out) {
-    LanaMap *map;
-    if (out == NULL) return LANA_ERR_INVALID_STATE;
-    *out = NULL;
-    if (vm == NULL) return LANA_ERR_INVALID_STATE;
-    if (capacity > SIZE_MAX / sizeof(*map->entries)) return LANA_ERR_OOM;
-    map = lana_vm_alloc(vm, sizeof(*map));
+    LanaMap *map = lana_vm_alloc(vm, sizeof(*map));
     if (map == NULL) return LANA_ERR_OOM;
     map->count = 0u; map->capacity = capacity;
     map->entries = capacity == 0u ? NULL : lana_vm_alloc(vm, capacity * sizeof(*map->entries));
@@ -86,10 +81,7 @@ LanaError lana_map_set(LanaVM *vm, LanaMap *map, const char *key, const Value *v
         return LANA_OK;
     }
     if (map->count == map->capacity) {
-        size_t capacity;
-        if (map->capacity > SIZE_MAX / 2u) return LANA_ERR_OOM;
-        capacity = map->capacity == 0u ? 4u : map->capacity * 2u;
-        if (capacity > SIZE_MAX / sizeof(LanaMapEntry)) return LANA_ERR_OOM;
+        size_t capacity = map->capacity == 0u ? 4u : map->capacity * 2u;
         LanaMapEntry *entries = lana_vm_alloc(vm, capacity * sizeof(*entries));
         if (entries == NULL) return LANA_ERR_OOM;
         if (map->count > 0u) memcpy(entries, map->entries, map->count * sizeof(*entries));
@@ -104,7 +96,7 @@ LanaError lana_map_set(LanaVM *vm, LanaMap *map, const char *key, const Value *v
     return LANA_OK;
 }
 
-typedef struct { LanaVM *vm; const unsigned char *cursor; const unsigned char *end; const unsigned char *start; } JsonParser;
+typedef struct { LanaVM *vm; const unsigned char *cursor; const unsigned char *end; } JsonParser;
 
 static bool utf8_valid(const unsigned char *text, size_t length) {
     size_t i = 0u;
@@ -177,33 +169,6 @@ static LanaError json_string(JsonParser *parser, char **out) {
     *out = buffer.data; return LANA_OK;
 }
 
-LanaError lana_json_decode_string(const unsigned char *data, size_t length, size_t *offset, char **out) {
-    JsonParser parser;
-    LanaError error;
-    if (data == NULL || offset == NULL || out == NULL || *offset > length) return LANA_ERR_INVALID_STATE;
-    parser = (JsonParser){NULL, data + *offset, data + length, data};
-    error = json_string(&parser, out);
-    *offset = (size_t)(parser.cursor - data);
-    return error;
-}
-
-/* An integer literal whose magnitude exceeds 2^53 is not exactly representable
- * in binary64; LIP-023 §3 preserves it as a string rather than silently
- * rounding. Returns false for any token with a fraction or exponent. */
-static bool json_large_integer(const char *start, const char *end) {
-    const char *p = start; const char *q; size_t digits = 0u; const char *first;
-    for (q = start; q < end; ++q) if (*q == '.' || *q == 'e' || *q == 'E') return false;
-    if (p < end && *p == '-') ++p;
-    while (p < end && *p == '0') ++p;
-    first = p;
-    while (p < end && isdigit((unsigned char)*p)) { ++p; ++digits; }
-    if (digits < 16u) return false;
-    if (digits > 16u) return true;
-    { static const char limit[] = "9007199254740992"; size_t i;
-      for (i = 0u; i < 16u; ++i) { if (first[i] > limit[i]) return true; if (first[i] < limit[i]) return false; } }
-    return false;
-}
-
 static LanaError json_value(JsonParser *parser, unsigned depth, Value *out) {
     LanaError error;
     if (depth > LANA_DATA_DEPTH_LIMIT) return LANA_ERR_LIMIT;
@@ -246,8 +211,8 @@ static LanaError json_value(JsonParser *parser, unsigned depth, Value *out) {
             error = json_string(parser, &key); if (error != LANA_OK) return error; json_space(parser);
             if (parser->cursor >= parser->end || *parser->cursor++ != ':') { free(key); return LANA_ERR_PARSE; }
             error = json_value(parser, depth + 1u, &item);
-            if (error == LANA_OK) error = lana_map_set(parser->vm, map, key, &item, false);
-            free(key); if (error != LANA_OK) return error; json_space(parser);
+            if (error == LANA_OK) error = lana_map_set(parser->vm, map, key, &item, true);
+            free(key); if (error != LANA_OK) return error == LANA_ERR_KEY ? LANA_ERR_PARSE : error; json_space(parser);
             if (parser->cursor < parser->end && *parser->cursor == ',') { ++parser->cursor; json_space(parser); if (parser->cursor < parser->end && *parser->cursor == '}') return LANA_ERR_PARSE; }
             else break;
         }
@@ -262,29 +227,18 @@ static LanaError json_value(JsonParser *parser, unsigned depth, Value *out) {
         if (end == (char *)parser->cursor || errno != 0 || !isfinite(number)) return LANA_ERR_PARSE;
         if (*parser->cursor == '+' || (*parser->cursor == '0' && end > (char *)parser->cursor + 1 && isdigit(parser->cursor[1])) ||
             (parser->cursor[0] == '-' && parser->cursor + 2 < (const unsigned char *)end && parser->cursor[1] == '0' && isdigit(parser->cursor[2]))) return LANA_ERR_PARSE;
-        if (json_large_integer((const char *)parser->cursor, end)) {
-            char *stored = vm_string(parser->vm, (const char *)parser->cursor, (size_t)(end - (char *)parser->cursor));
-            if (stored == NULL) return LANA_ERR_OOM;
-            parser->cursor = (const unsigned char *)end; *out = lana_value_string(stored); return LANA_OK;
-        }
         parser->cursor = (const unsigned char *)end; *out = lana_value_number(number); return LANA_OK;
     }
 }
 
-LanaError lana_json_parse_offset(LanaVM *vm, const char *text, Value *out, size_t *error_offset) {
+LanaError lana_json_parse(LanaVM *vm, const char *text, Value *out) {
     JsonParser parser; LanaError error; size_t length;
     if (text == NULL) return LANA_ERR_TYPE;
     length = strlen(text);
-    if (!utf8_valid((const unsigned char *)text, length)) { if (error_offset != NULL) *error_offset = 0u; return LANA_ERR_PARSE; }
-    parser.vm = vm; parser.cursor = (const unsigned char *)text; parser.end = parser.cursor + length; parser.start = parser.cursor;
+    if (!utf8_valid((const unsigned char *)text, length)) return LANA_ERR_PARSE;
+    parser.vm = vm; parser.cursor = (const unsigned char *)text; parser.end = parser.cursor + length;
     error = json_value(&parser, 0u, out); json_space(&parser);
-    if (error == LANA_OK && parser.cursor != parser.end) error = LANA_ERR_PARSE;
-    if (error != LANA_OK && error_offset != NULL) *error_offset = (size_t)(parser.cursor - parser.start);
-    return error;
-}
-
-LanaError lana_json_parse(LanaVM *vm, const char *text, Value *out) {
-    return lana_json_parse_offset(vm, text, out, NULL);
+    return error == LANA_OK && parser.cursor != parser.end ? LANA_ERR_PARSE : error;
 }
 
 static bool json_escape(Buffer *buffer, const char *text) {
@@ -296,18 +250,6 @@ static bool json_escape(Buffer *buffer, const char *text) {
         else if (!buffer_add(buffer, (const char *)&c, 1u)) return false;
     }
     return buffer_add(buffer, "\"", 1u);
-}
-
-/* Sort map entry indices by key (byte order) so stringify is deterministic
- * (LIP-023 §1). Insertion sort: maps are small and this is portable. */
-static void sort_map_indices(const LanaMap *map, size_t *order, size_t count) {
-    size_t i, j;
-    for (i = 1u; i < count; ++i) {
-        size_t key = order[i];
-        j = i;
-        while (j > 0u && strcmp(map->entries[order[j - 1u]].key, map->entries[key].key) > 0) { order[j] = order[j - 1u]; --j; }
-        order[j] = key;
-    }
 }
 
 static LanaError json_emit(const Value *value, Buffer *buffer, const void **stack, unsigned depth) {
@@ -330,16 +272,10 @@ static LanaError json_emit(const Value *value, Buffer *buffer, const void **stac
             if (!buffer_add(buffer, "[", 1u)) return LANA_ERR_OOM;
             for (index = 0; index < value->as.array->count; ++index) { LanaError error; if (index > 0u && !buffer_add(buffer, ",", 1u)) return LANA_ERR_OOM; error = json_emit(&value->as.array->items[index], buffer, stack, depth + 1u); if (error != LANA_OK) return error; }
             return buffer_add(buffer, "]", 1u) ? LANA_OK : LANA_ERR_OOM;
-        case VAL_MAP: {
-            size_t count = value->as.map->count; size_t *order = count == 0u ? NULL : malloc(count * sizeof(*order)); size_t i;
-            if (count > 0u && order == NULL) return LANA_ERR_OOM;
-            for (i = 0u; i < count; ++i) order[i] = i;
-            sort_map_indices(value->as.map, order, count);
-            if (!buffer_add(buffer, "{", 1u)) { free(order); return LANA_ERR_OOM; }
-            for (i = 0u; i < count; ++i) { LanaError error; size_t entry = order[i]; if (i > 0u && !buffer_add(buffer, ",", 1u)) { free(order); return LANA_ERR_OOM; } if (!json_escape(buffer, value->as.map->entries[entry].key) || !buffer_add(buffer, ":", 1u)) { free(order); return LANA_ERR_OOM; } error = json_emit(value->as.map->entries[entry].value, buffer, stack, depth + 1u); if (error != LANA_OK) { free(order); return error; } }
-            free(order);
+        case VAL_MAP:
+            if (!buffer_add(buffer, "{", 1u)) return LANA_ERR_OOM;
+            for (index = 0; index < value->as.map->count; ++index) { LanaError error; if (index > 0u && !buffer_add(buffer, ",", 1u)) return LANA_ERR_OOM; if (!json_escape(buffer, value->as.map->entries[index].key) || !buffer_add(buffer, ":", 1u)) return LANA_ERR_OOM; error = json_emit(value->as.map->entries[index].value, buffer, stack, depth + 1u); if (error != LANA_OK) return error; }
             return buffer_add(buffer, "}", 1u) ? LANA_OK : LANA_ERR_OOM;
-        }
         default: return LANA_ERR_UNSUPPORTED_OPERATION;
     }
 }

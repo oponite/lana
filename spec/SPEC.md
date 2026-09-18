@@ -60,101 +60,6 @@ links. Serialization materializes the current revision. Combining two finite
 uncertain values requires the same dependency identity or an explicit joint;
 Lana does not silently form a Cartesian product.
 
-## Tensor construction and reduction boundaries (LIP-004)
-
-Ordinary tensors contain binary64 numbers or interleaved complex components;
-they do not implicitly acquire ML uncertainty wrappers. Rank is at most 32.
-Shape dimensions and `eye(n)` require finite nonnegative integers representable
-as a native index; invalid dimensions and excess rank raise
-`LANA_ERR_INVALID_PARAMETERS`. Cyclic and over-deep nested constructor inputs
-are invalid parameters. Allocation-size overflow fails with `LANA_ERR_OOM`
-before accessing a buffer. A zero-sized dimension produces an empty tensor.
-
-`sum` over an empty tensor is zero (complex zero for complex tensors).
-`mean`, `max`, and `min` over an empty reduction domain raise
-`LANA_ERR_INVALID_PARAMETERS`; complex `max` and `min` raise `LANA_ERR_TYPE`.
-Every reduction rejects non-finite components or a non-finite result with
-`LANA_ERR_INVALID_PARAMETERS`. Passing the same array as both components to
-`tensor_complex(a, a)` is valid and does not mutate the array.
-
-An optional reduction axis is a finite integer in `[-ndim, ndim)`; negative
-axes count from the last dimension. Invalid axes raise
-`LANA_ERR_INVALID_PARAMETERS`, and non-number axes raise `LANA_ERR_TYPE`.
-Axis reductions remove that dimension and return a tensor, including a rank-zero
-tensor for a reduced vector. Each output element reduces the corresponding input
-fiber. An empty reduced dimension permits only `sum` (zero); other reductions
-fail even when another dimension makes the output empty. Without an axis, real
-reductions return a number; complex sum/mean return a rank-zero complex tensor.
-
-Source calls accept `sum(t, axis: 0)` and the positional equivalent `sum(t, 0)`;
-the same forms apply to `mean`, `max`, and `min`. The `axis:` label is restricted
-to the second and final argument of these builtins. Unknown, repeated, or
-misplaced labels are compile errors. Omission always means a full reduction.
-This follows the existing `name: value` convention: the axis is easy to scan
-and recall, errors identify the expected label or position, and omission keeps
-the established behavior (the five `spec/SYNTAX.md` acceptance checks).
-
-## Tensor indexing and slicing boundaries (LIP-004)
-
-An index expression `t[...]` holds a comma-separated list of positions, one per
-axis from axis 0. A position is an integer expression or a slice `start:end`
-(end-exclusive). Fewer positions than the rank keep the remaining trailing axes
-whole. Arrays still accept exactly one integer index; more positions or any
-slice on an array source is a compile error.
-
-An integer position must be a finite integer-valued number (`LANA_ERR_TYPE`
-otherwise); negative values count from the end. An adjusted position outside
-`[0, dim)` raises `LANA_ERR_KEY`. Each integer position reduces the rank by one;
-a full set of integer positions returns a `number` for a real tensor or the
-established rank-zero complex tensor for a complex tensor.
-
-Slice bounds must be finite integer-valued numbers (`LANA_ERR_TYPE` otherwise).
-Negative bounds count from the end, then clamp to `[0, dim]`; `start > end`
-yields an empty dimension. Slice bounds never raise range errors. A slice
-position that is not a `[start, end]` pair, and a non-number position, raise
-`LANA_ERR_TYPE`. More positions than the rank raise
-`LANA_ERR_INVALID_PARAMETERS`.
-
-Any position list that is not fully integer produces a view: the same buffer,
-dtype, and base tensor, with derived shape, strides, and element offset. No
-copy is made. Arithmetic, `matmul`, and reductions operate directly on strided
-views, and a full reduction traverses the strided layout instead of assuming a
-contiguous buffer. A view roots its source tensor, so the shared buffer outlives
-every view of it. Views are read-only: tensor element assignment is not specified
-and `index_set` on a tensor raises `LANA_ERR_TYPE`.
-
-## Tensor backend and resource boundaries (LIP-004)
-
-`matmul` lowers to the platform CBLAS `dgemm`/`zgemm` family behind a single
-backend dispatch point shared by both VMs; one-dimensional operands are
-promoted to matrices and each batch element issues one call. A build without a
-linked BLAS runs the native loop through the same dispatch point. Element-wise
-arithmetic, indexing, and reductions stay native loops; reductions keep their
-own error contract (non-finite rejection, complex `max`/`min` typing) rather
-than using BLAS. An operand whose core is not row-major contiguous is packed
-into contiguous scratch first.
-
-A tensor's buffer counts against the 256 MiB memory limit, and so does every
-per-operation temporary: shape/stride scratch and packing buffers route
-through the VM allocator in both VMs. A native tensor call is bounded by its
-operand buffers and is not interruptible mid-call; mid-call interruption is a
-v3 suspension concern, not part of this contract.
-
-### Resident Metal tensors (LIP-028)
-
-`device(t)` returns `"cpu"` or `"metal"`. `to_device(t, "metal", token)`
-requires a live `"gpu"` use capability and returns a new Metal-resident tensor;
-`to_cpu(t)` returns a CPU-resident copy. Transfers never change dtype. An
-unknown device, a revoked or wrong capability, or mixed-device arithmetic
-fails before producing a result. Views remain on their base tensor's device.
-
-Metal tensors support the tensor operations enumerated by LIP-028. F64 is not
-silently downcast and therefore remains CPU-only. All Metal buffers, staging
-buffers, autodiff intermediates, optimizer state, and master weights count
-against the existing memory limit. `device: "auto"` is an ML-library policy,
-not an implicit tensor transfer: it uses Metal only when capability, device,
-dtype, and operation support are all present.
-
 ## STATE
 
 ```lana
@@ -182,9 +87,9 @@ metadata propagation rule for APPEND.
 ```lana
 let dist = append(a, b);
 let concrete = sample(dist);
-let bernoulli = measure dist;
-let probability = measure dist as probability;
-let bit = measure dist as sample;
+let bernoulli = measure(dist, result: "distribution");
+let probability = measure(dist, result: "probability");
+let bit = measure(dist, result: "sample");
 ```
 
 `append()` accepts every `STATE`/`STATE_DIST` pair and returns an immutable lazy
@@ -203,9 +108,9 @@ to compile to `MEASURE`. The computational basis is ordered as
 Concrete states may be measured in one of three named ordered bases:
 
 ```lana
-let px = measure belief in x as probability;
-let dy = measure belief in y as distribution;
-let bit = measure belief in x as sample;
+let px = measure(belief, basis: "x", result: "probability");
+let dy = measure(belief, basis: "y", result: "distribution");
+let bit = measure(belief, basis: "x", result: "sample");
 ```
 
 The basis names and outcome ordering are:
@@ -253,7 +158,8 @@ involving `STATE_DIST` raises `LANA_ERR_UNSUPPORTED_OPERATION`.
 
 ## Information and named joints
 
-The source-level Information forms are lowered to LABC v2:
+The source-level Information forms use LABC v5 when they require the balanced
+Core surface; existing v1-v4 forms retain their established encodings:
 
 ```lana
 let product = joint independent { x: a, y: b };
@@ -264,10 +170,16 @@ let correlated = joint correlated (x, y) with support: [
 let relation = joint conditional { x: a, y: kernel };
 let joint_value = rename(product, "x", "subject");
 let one_variable = project(joint_value, "subject");
-let refined = condition(joint_value, "subject", a);
+let refined = condition(joint_value, a);
 let sampled_assignment = sample(one_variable);
 let definite = resolve(refined); // succeeds only for singleton support
 ```
+
+`condition(info, evidence)` and `observe(info, evidence)` are the public
+refinement forms. The historical three-argument named-joint condition spelling
+is a compatibility alias. `std/core.distribution([[value, weight], ...])`
+constructs finite weighted support; `possibility([value, ...])` remains
+unweighted and cannot be sampled.
 
 Source uses typed joint forms; descriptor strings are rejected. Each correlated
 support row contains one value per declared variable followed by a positive
@@ -312,6 +224,60 @@ native loader canonicalizes paths, rejects cycles and imported-module top-level
 statements, deduplicates modules, and resolves local and alias-qualified calls.
 Compiler execution uses explicit 256 MiB memory and 50,000,000-instruction
 policies; exhaustion is an error and never emits partial bytecode.
+
+## Decision surface
+
+The **Decision** surface turns definite information into a policy recommendation
+or a durable claim. Decisions are pure computations that produce a
+`Decision<T>` value, where `T` is the type of the recommendation.
+
+### Primitive constructors
+
+```lana
+let d = decision(value: "approve", reason: "threshold met");
+```
+
+* `decision(value: <literal>, reason: <string>)` creates a deterministic decision.
+* `decision_if(info, then: <literal>, else: <literal>)` selects a decision based on a
+    boolean `Information`.
+
+### Accessors
+
+* `decision_value(d)` – returns the underlying literal.
+* `decision_reason(d)` – returns the explanatory string.
+
+### Failure modes
+
+* If the guard information is unresolved, the constructor raises
+    `LANA_ERR_UNRESOLVED_VALUE`.
+* Invalid reason strings raise `LANA_ERR_INVALID_ARGUMENT`.
+
+## Execution surface
+
+The **Execution** surface authorizes and performs narrow real‑world actions.
+Execution plans are built from `Capability` objects and run via `execute_effect`.
+
+### Primitive constructors
+
+```lana
+let exec = execution(plan: "http_get", args: {url: "https://example.com"});
+```
+
+* `execution(plan: <string>, args: <map>)` builds an execution request.
+* `execution_if(info, then: <plan>, else: <plan>)` conditionally selects a plan.
+
+### Accessors
+
+* `execute_effect(exec)` – runs the plan and returns an `ExecutionResult`.
+* `execution_status(res)` – yields `"success"`, `"failure"`, or `"unknown"`.
+* `execution_output(res)` – returns the raw UTF‑8 output on success.
+
+### Failure modes
+
+* Missing capability raises `LANA_ERR_CAPABILITY_NOT_FOUND`.
+* Network or I/O errors propagate as `LANA_ERR_EXECUTION_FAILURE` with a cause
+    string.
+* Unresolved guard information raises `LANA_ERR_UNRESOLVED_VALUE`.
 
 ## Transforms
 
@@ -362,79 +328,6 @@ creates a distinct token; `shared_revoke` requires admin authority. Reads use
 exact nonnegative integers. `shared_identity` and `shared_revision` expose
 process-local metadata. `inspect_information` returns an ordinary map and
 reuses canonical derivation/runtime metadata rather than defining new inference.
-
-`capability(name)` compiles to `shared_information(name)` and returns an admin
-capability token. `grant(capability, "use"|"admin")` creates a distinct token
-(`"use"` maps to read, `"admin"` to admin); `revoke(token)` invalidates a token
-in place. A revoked token fails the next `execute_effect` with
-`LANA_ERR_CLAIM_REVOKED` before the executor runs. `grant`/`revoke` are host
-calls (`LANA_HOST_GRANT` = 74, `LANA_HOST_REVOKE` = 75); `revoke` is a
-single-argument invalidation, distinct from the two-argument
-`shared_revoke(admin, target)`.
-
-## Generators (LIP-022 §2)
-
-A function whose body contains `yield` is a generator. Calling it returns a
-`Generator<T>` value and does not execute the body; the frame is suspended at
-the function entry. `next(it)` resumes the generator from its saved instruction
-pointer and returns `Result<T, E>`: `result_ok(value)` for the next yielded
-value, or `result_error("exhausted")` once the generator returns. Generators
-are lazy by default — no value is computed until `next` is called — matching
-the `STATE_DIST`/`Dataset` laziness contract.
-
-```lana
-fn count(n) {
-    let i = 0;
-    while (i < n) {
-        yield i;
-        i = i + 1;
-    }
-}
-
-let it = count(3);
-let first = next(it);   // result_ok(0)
-```
-
-A generator is a first-class `VAL_GENERATOR` value owning a suspended frame
-snapshot (function, saved `ip`, registers, and an `exhausted` flag). Programs
-containing generators are emitted as LABC v3; the v3-only opcodes
-(`GENERATOR`, `YIELD`, `NEXT`) are rejected by the verifier in v1/v2 chunks.
-`yield` outside a generator function and `next` on a non-generator are
-compile-time type errors.
-
-## Async functions (LIP-024)
-
-A function whose body contains `await` is an async function. Calling it returns
-a `Future<T>` value and does not execute the body; the frame is suspended at the
-function entry. `run_async(future)` runs the single-threaded cooperative event
-loop to completion on the given future and returns its result. `await` is an
-expression: it suspends the current async frame until the awaited future
-completes, then evaluates to that future's result.
-
-```lana
-async fn work(n) {
-    let acc = 0;
-    let i = 0;
-    while (i < n) { acc = acc + 1; i = i + 1; }
-    return acc;
-}
-
-let r = run_async(work(3));   // 3
-```
-
-A future is a first-class `VAL_FUTURE` value owning a suspended frame snapshot
-(function, saved `ip`, registers, and an `exhausted` flag). The event loop
-schedules ready futures FIFO by creation order, so the same async computation
-run twice yields the same resumption order and the same result (determinism).
-`await` outside an async function is a compile-time type error.
-
-Three composite futures complete without running an async body:
-`future_all(futures)` completes when every input future completes, yielding an
-array of their results in input order; `future_race(futures)` completes with
-the first input future to complete, yielding that future's result; and
-`sleep(ms)` completes after `ms` milliseconds, yielding `null`. Programs
-containing async functions are emitted as LABC v4; the v4-only opcodes
-(`ASYNC`, `AWAIT`, `RUN_ASYNC`) are rejected by the verifier in v1/v2/v3 chunks.
 
 A project is rooted by schema-1 `lana.toml`; `lana.lock` records the content
 identity used by the build cache. `lana new`, `build`, `run`, `test`, `check`,

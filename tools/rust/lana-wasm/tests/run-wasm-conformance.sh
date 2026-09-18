@@ -9,18 +9,8 @@
 #
 # The wasm-bindgen CLI version must match the `wasm-bindgen` crate version
 # pinned in tools/rust/lana-wasm/Cargo.toml.
-#
-# The `cargo` on PATH must be a toolchain with the wasm32-unknown-unknown std
-# installed (`rustup target add wasm32-unknown-unknown`). If the toolchain's
-# `rust-lld` cannot find `libLLVM.dylib` (a rustup packaging quirk on macOS),
-# set DYLD_LIBRARY_PATH to the toolchain's `lib/` directory.
 
 set -euo pipefail
-
-# Prefer the rustup-managed cargo/rustc (which has the wasm32 std installed)
-# over any Homebrew rust on PATH, so the build targets the same toolchain that
-# the WASI runner uses. Mirrors run-wasi-conformance.sh.
-export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 cd "$REPO_ROOT"
@@ -35,18 +25,6 @@ if [[ ! -f "$LANA_COMPILER_LABC" ]]; then
     echo "lana-compiler.labc not found at $LANA_COMPILER_LABC (cmake --build build first)" >&2
     exit 1
 fi
-if ! command -v "$WASM_BINDGEN" >/dev/null 2>&1; then
-    echo "SKIP: wasm-bindgen is not installed"
-    exit 77
-fi
-if ! command -v cargo >/dev/null 2>&1 || ! command -v rustup >/dev/null 2>&1; then
-    echo "SKIP: Rust toolchain is not installed"
-    exit 77
-fi
-if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
-    echo "SKIP: wasm32-unknown-unknown target is not installed"
-    exit 77
-fi
 
 cargo build -p lana-wasm --target wasm32-unknown-unknown
 
@@ -54,8 +32,4 @@ mkdir -p "$OUT_DIR"
 "$WASM_BINDGEN" --target nodejs --out-dir "$OUT_DIR" \
     "$REPO_ROOT/target/wasm32-unknown-unknown/debug/lana_wasm.wasm"
 
-# Copy the JS wrapper next to the generated bindings so it can import them.
-cp "$REPO_ROOT/tools/rust/lana-wasm/js/lana-wasm.js" "$OUT_DIR/"
-
 LANA_WASM_JS="$OUT_DIR/lana_wasm.js" node "$REPO_ROOT/tools/rust/lana-wasm/tests/conformance.mjs"
-LANA_WASM_WRAPPER_JS="$OUT_DIR/lana-wasm.js" node "$REPO_ROOT/tools/rust/lana-wasm/tests/wrapper.mjs"

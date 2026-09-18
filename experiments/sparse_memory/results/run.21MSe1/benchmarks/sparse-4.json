@@ -1,0 +1,1 @@
+{"cache_hit_rate":0.99479166666666663,"cache_size":4,"cold_latency_ns":333875.41770935059,"cold_loads":8,"mode":"learned","router_overhead_ns":123309.9028468132,"throughput":2810.540816299821,"throughput_loads":4,"timed_predictions":768,"warm_latency_ns":337268.22584867477,"warm_loads":4}

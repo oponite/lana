@@ -1,24 +1,5 @@
 # Changelog
 
-## 2.1.0
-
-- Complete the accepted 2.1 improvement proposals, including tensors and Metal,
-  autodiff and training, inference, capabilities, networking, FFI, async,
-  generators, the REPL, WASM targets, and expanded standard-library modules.
-- Preserve Lana 2.0 source behavior, bridge ABI v1, and LABC v1/v2 loading while
-  using versioned LABC v3/v4 only for generators and async functions.
-- Add C11/Rust differential coverage, clean-install checks, sanitizer gates, and
-  malformed-bytecode fuzzing for the expanded runtime surface.
-
-## 2.0.1
-
-- Restore state-core throughput: safepoint fast path, throttled proactive
-  young collection, and gated opcode profiling in the C11 VM.
-- Unfreeze the C11 VM: it is now actively developed and versioned under the
-  language version (LABC bytecode format and language contract unchanged).
-- Add `PERFORMANCE.md` documenting state-core, DRAM-transfer, compiler-bootstrap,
-  GC-pause, and dispatch-fix measurements.
-
 ## 2.0.0
 
 - Introduce LABC v2, the Rust canonical VM, algebraic data types, evidence, and lazy datasets.

@@ -1,3 +1,0 @@
-// dtype: on a non-tensor constructor is a parse error (named arg not allowed).
-let x = floor(1.5, dtype: "f32");
-print(x);

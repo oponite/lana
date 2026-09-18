@@ -576,6 +576,10 @@ pub const LANA_HOST_RANDOM_NORMAL: u32 = 181;
 pub const LANA_HOST_TENSOR_DEVICE: u32 = 182;
 pub const LANA_HOST_TENSOR_TO_DEVICE: u32 = 183;
 pub const LANA_HOST_TENSOR_TO_CPU: u32 = 184;
+// LIP-029 execution boundary. Rust-only: the C11 VM remains frozen at v1-v4.
+pub const LANA_HOST_EXECUTION_CAPABILITY: u32 = 185;
+pub const LANA_HOST_EXECUTION_AUTHORIZE: u32 = 186;
+pub const LANA_HOST_EXECUTION_EXECUTE: u32 = 187;
 
 // LIP-024 async/await. Present in both the C11 VM and the Rust VM at ids
 // 126-129 (matching the C11 assembler's host-call table and the
@@ -815,6 +819,8 @@ pub struct Vm<'a> {
     /// against this map instead of `std::fs`, so the self-hosted compiler can
     /// run on targets without a filesystem (e.g. `wasm32-unknown-unknown`).
     virtual_fs: Option<HashMap<String, String>>,
+    breakpoint_line: Option<u32>,
+    breakpoint_hit: bool,
     /// LIP-018 two-way FFI: declared signatures and the single loaded library.
     /// `libloading` is unavailable on `wasm32`, so the loaded library is
     /// compiled out there and `ffi_load`/`ffi_call` return `UnsupportedOperation`.
@@ -1389,6 +1395,8 @@ impl<'a> Vm<'a> {
             event_loop_base_depth: 0,
             host_call_extension: None,
             virtual_fs: None,
+            breakpoint_line: None,
+            breakpoint_hit: false,
             ffi_sigs: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             ffi_lib: None,
@@ -1408,6 +1416,17 @@ impl<'a> Vm<'a> {
     pub fn result(&self) -> &Value {
         &self.result
     }
+
+    pub fn set_breakpoint_line(&mut self, line: u32) { self.breakpoint_line = Some(line); self.breakpoint_hit = false; }
+    pub fn debug_location(&self) -> Option<(usize, u32, String, usize)> {
+        let instruction = self.chunk.code.get(self.ip)?;
+        let function = self.frames.last().map(|frame| frame.function)
+            .and_then(|index| self.chunk.functions.get(index as usize))
+            .map(|function| function.name.clone()).unwrap_or_else(|| "<entry>".to_string());
+        Some((self.ip, instruction.line, function, self.frames.len()))
+    }
+    pub fn debug_step(&mut self) -> LanaError { self.breakpoint_line = None; self.running = true; self.dispatch_loop() }
+    pub fn debug_continue(&mut self) -> LanaError { self.breakpoint_line = None; self.running = true; self.run() }
 
     /// The error recorded by the last failed run.
     pub fn error(&self) -> &VmError {
@@ -1508,6 +1527,11 @@ impl<'a> Vm<'a> {
                 return self.fail(LanaError::Jump, self.ip, 0, 0, "execute", "instruction pointer is out of range");
             }
             let instruction = self.chunk.code[self.ip];
+            if self.breakpoint_line == Some(instruction.line) {
+                self.breakpoint_hit = true;
+                self.running = false;
+                break;
+            }
             self.ip += 1;
             self.opcode_counts[instruction.opcode as usize] += 1;
             let error = self.execute(&instruction);
@@ -6339,6 +6363,21 @@ impl<'a> Vm<'a> {
                 self.attach_derivation(ins.b, DerivationKind::Operation, "condition", &inputs, "",
                                        ins.line, DerivationExactness::Exact, &descriptor)
             }
+            JointConditionMap => {
+                let source = self.current_frame().registers[ins.a as usize].clone();
+                let evidence = self.current_frame().registers[ins.c as usize].clone();
+                let ValueKind::Joint(joint) = &source.kind else {
+                    return LanaError::Type;
+                };
+                let joint = match self.joint_condition_map(joint, &evidence) {
+                    Ok(joint) => joint,
+                    Err(error) => return error,
+                };
+                self.current_frame_mut().registers[ins.b as usize] = Value::joint(joint);
+                let inputs = [&source, &evidence];
+                self.attach_derivation(ins.b, DerivationKind::Operation, "condition", &inputs, "",
+                                       ins.line, DerivationExactness::Exact, "evidence_map")
+            }
             JointSample => {
                 let source = self.current_frame().registers[ins.a as usize].clone();
                 let ValueKind::Joint(joint) = &source.kind else {
@@ -6416,6 +6455,21 @@ impl<'a> Vm<'a> {
                 self.attach_derivation(ins.b, DerivationKind::Operation, "possibility", &inputs, "",
                                        ins.line, DerivationExactness::Exact, "equipossible_support")
             }
+            DistributionBuild => {
+                let source = self.current_frame().registers[ins.a as usize].clone();
+                let ValueKind::Array(array) = &source.kind else {
+                    return LanaError::Type;
+                };
+                let items = array.lock().unwrap().items.to_vec();
+                let distribution = match self.distribution_build(&items) {
+                    Ok(distribution) => distribution,
+                    Err(error) => return error,
+                };
+                self.current_frame_mut().registers[ins.b as usize] = Value::possibility(distribution);
+                let inputs = [&source];
+                self.attach_derivation(ins.b, DerivationKind::Operation, "distribution", &inputs, "",
+                                       ins.line, DerivationExactness::Exact, "finite_weighted_support")
+            }
             PathSplit => {
                 let condition = self.current_frame().registers[ins.a as usize].clone();
                 self.path_split(&condition, ins.imm as usize)
@@ -6453,6 +6507,32 @@ impl<'a> Vm<'a> {
                     self.attach_derivation(ins.b, DerivationKind::Observation, "observe", &inputs, "",
                                            ins.line, DerivationExactness::Exact, &descriptor)
                 }
+            }
+            ObserveMap => {
+                if self.active_path_count > 1 {
+                    return LanaError::UnsupportedOperation;
+                }
+                let source = self.current_frame().registers[ins.a as usize].clone();
+                let evidence = self.current_frame().registers[ins.c as usize].clone();
+                let result = if source.reactive.is_some() {
+                    match self.reactive_observe(&source, &evidence, ins.b) {
+                        Ok(result) => result,
+                        Err(error) => return error,
+                    }
+                } else {
+                    let ValueKind::Joint(joint) = &source.kind else {
+                        return LanaError::Type;
+                    };
+                    let joint = match self.joint_observe_map(joint, &evidence) {
+                        Ok(joint) => joint,
+                        Err(error) => return error,
+                    };
+                    Value::joint(joint)
+                };
+                self.current_frame_mut().registers[ins.b as usize] = result;
+                let inputs = [&source, &evidence];
+                self.attach_derivation(ins.b, DerivationKind::Observation, "observe", &inputs, "",
+                                       ins.line, DerivationExactness::Exact, "evidence_map")
             }
             InfoSample => {
                 if self.active_path_count > 1 {
@@ -8158,12 +8238,37 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn joint_condition_map(&mut self, source: &JointState, evidence: &Value) -> Result<Arc<JointState>, LanaError> {
+        let ValueKind::Map(map) = &evidence.kind else {
+            return Err(LanaError::Type);
+        };
+        let entries = map.lock().unwrap().entries().iter()
+            .map(|entry| (entry.key.to_string(), entry.value.clone()))
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            return Err(LanaError::InvalidConditioning);
+        }
+        let mut conditioned = None;
+        for (name, value) in entries {
+            let input = conditioned.as_deref().unwrap_or(source);
+            conditioned = Some(self.joint_condition(input, &name, &value)?);
+        }
+        Ok(conditioned.unwrap())
+    }
+
     /// Observe evidence on a joint, mirroring `lana_vm_joint_observe`.
     fn joint_observe(&mut self, source: &JointState, name: &str, evidence: &Value) -> Result<Arc<JointState>, LanaError> {
         if self.active_path_count > 1 {
             return Err(LanaError::UnsupportedOperation);
         }
         let joint = self.joint_condition(source, name, evidence)?;
+        self.observation_count += 1;
+        self.revision += 1;
+        Ok(joint)
+    }
+
+    fn joint_observe_map(&mut self, source: &JointState, evidence: &Value) -> Result<Arc<JointState>, LanaError> {
+        let joint = self.joint_condition_map(source, evidence)?;
         self.observation_count += 1;
         self.revision += 1;
         Ok(joint)
@@ -8306,8 +8411,57 @@ impl<'a> Vm<'a> {
         }))
     }
 
+    /// Build a finite weighted Core distribution from `[[value, weight], ...]`.
+    fn distribution_build(&mut self, rows: &[Value]) -> Result<Arc<Possibility>, LanaError> {
+        if rows.is_empty() {
+            return Err(LanaError::InvalidDistribution);
+        }
+        let mut values = Vec::with_capacity(rows.len());
+        let mut weights = Vec::with_capacity(rows.len());
+        let mut total = 0.0;
+        for row in rows {
+            let ValueKind::Array(pair) = &row.kind else {
+                return Err(LanaError::Type);
+            };
+            let pair = pair.lock().unwrap();
+            if pair.items.len() != 2 || !joint_value_is_definite(&pair.items[0]) {
+                return Err(LanaError::Type);
+            }
+            let ValueKind::Number(weight) = pair.items[1].kind else {
+                return Err(LanaError::Type);
+            };
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(LanaError::InvalidDistribution);
+            }
+            if values.iter().any(|value| joint_value_equal(value, &pair.items[0])) {
+                return Err(LanaError::InvalidDistribution);
+            }
+            total += weight;
+            values.push(pair.items[0].clone());
+            weights.push(weight);
+        }
+        if !total.is_finite() || (total - 1.0).abs() > 1e-12 {
+            return Err(LanaError::InvalidDistribution);
+        }
+        if self.alloc_bytes(std::mem::size_of::<Possibility>()) != LanaError::Ok {
+            return Err(LanaError::Oom);
+        }
+        let mut memo = DeepCloneMemo::default();
+        let mut cloned = Vec::with_capacity(values.len());
+        for value in &values {
+            cloned.push(self.deep_clone_value(value, &mut memo)?);
+        }
+        let dependency_id = self.next_dependency_id;
+        self.next_dependency_id += 1;
+        Ok(Arc::new(Possibility { values: cloned, weights: Some(weights), dependency_id }))
+    }
+
     /// Resolve any information value, mirroring `lana_vm_information_resolve`.
     fn information_resolve(&mut self, source: &Value) -> Result<Value, LanaError> {
+        if source.reactive.is_some() {
+            let current = self.reactive_value(source);
+            return self.information_resolve(&current);
+        }
         match &source.kind {
             ValueKind::Joint(joint) => self.joint_resolve(joint),
             ValueKind::Possibility(possibility) => {
@@ -8348,6 +8502,26 @@ impl<'a> Vm<'a> {
                 Ok(Value::state(state))
             }
             ValueKind::Possibility(possibility) => {
+                if let Some(weights) = &possibility.weights {
+                    if self.consume_sampling_budget() != LanaError::Ok {
+                        return Err(LanaError::BudgetExhausted);
+                    }
+                    let draw = self.rng.random() as f64 / 4294967296.0;
+                    let mut cumulative = 0.0;
+                    let mut selected = possibility.values.len() - 1;
+                    for (index, weight) in weights.iter().enumerate() {
+                        cumulative += weight;
+                        if draw < cumulative {
+                            selected = index;
+                            break;
+                        }
+                    }
+                    let mut memo = DeepCloneMemo::default();
+                    return self.deep_clone_value(&possibility.values[selected], &mut memo);
+                }
+                if self.chunk.version == lana_bytecode::opcode::LABC_VERSION_5 {
+                    return Err(LanaError::UnsupportedOperation);
+                }
                 if self.consume_sampling_budget() != LanaError::Ok {
                     return Err(LanaError::BudgetExhausted);
                 }
@@ -8470,10 +8644,96 @@ impl<'a> Vm<'a> {
         self.string_value(&rendered)
     }
 
+    fn reactive_derived_value(
+        &mut self,
+        left: &Value,
+        right: Option<&Value>,
+        kind: ReactiveKind,
+        operation: u32,
+        out: &mut Value,
+    ) -> LanaError {
+        let left_reactive = left.reactive.clone();
+        let right_reactive = right.and_then(|value| value.reactive.clone());
+        if let (Some(left), Some(right)) = (&left_reactive, &right_reactive) {
+            let left_dependency_id = left.lock().unwrap().dependency_id;
+            let right_dependency_id = right.lock().unwrap().dependency_id;
+            if left_dependency_id != right_dependency_id {
+                return LanaError::UnsupportedOperation;
+            }
+        }
+        let (dependency_id, exactness) = left_reactive
+            .as_ref()
+            .or(right_reactive.as_ref())
+            .map(|node| {
+                let node = node.lock().unwrap();
+                (node.dependency_id, node.exactness)
+            })
+            .unwrap();
+        let exactness = right_reactive.as_ref().map_or(exactness, |node| {
+            exactness.max(node.lock().unwrap().exactness)
+        });
+        let constant0 = if left_reactive.is_none() {
+            match self.clone_without_runtime_metadata(left) {
+                Ok(value) => Some(value),
+                Err(error) => return error,
+            }
+        } else {
+            None
+        };
+        let constant1 = match (right, &right_reactive) {
+            (Some(value), None) => match self.clone_without_runtime_metadata(value) {
+                Ok(value) => Some(value),
+                Err(error) => return error,
+            },
+            _ => None,
+        };
+        let current = match self.clone_without_runtime_metadata(out) {
+            Ok(value) => value,
+            Err(error) => return error,
+        };
+        let node = Arc::new(Mutex::new(Reactive {
+            id: self.next_reactive_id,
+            dependency_id,
+            revision: self.revision,
+            kind,
+            relationship: if left_reactive.is_some() && right_reactive.is_some() {
+                RelationshipKind::SameDependency
+            } else {
+                RelationshipKind::Exact
+            },
+            exactness,
+            operation,
+            inputs: [left_reactive, right_reactive],
+            constants: [constant0, constant1],
+            current: Some(current),
+            history: Vec::new(),
+            is_training_data: false,
+        }));
+        self.next_reactive_id += 1;
+        out.reactive = Some(node);
+        LanaError::Ok
+    }
+
     /// Lift a binary operation over paths/possibilities, mirroring `lift_binary`
-    /// in `vm/c/vm.c`. Reactives land in increment 5.
+    /// in `vm/c/vm.c`.
     fn lift_binary(&mut self, left: &Value, right: &Value, kind: PureKind, operation: u32, out: &mut Value) -> LanaError {
-        self.lift_binary_raw(left, right, kind, operation, out)
+        let error = self.lift_binary_raw(
+            &self.reactive_value(left),
+            &self.reactive_value(right),
+            kind,
+            operation,
+            out,
+        );
+        if error != LanaError::Ok || (left.reactive.is_none() && right.reactive.is_none()) {
+            return error;
+        }
+        self.reactive_derived_value(
+            left,
+            Some(right),
+            if kind == PureKind::Compare { ReactiveKind::Compare } else { ReactiveKind::Binary },
+            operation,
+            out,
+        )
     }
 
     /// The recursive core of `lift_binary`, mirroring `lift_binary_raw`.
@@ -8668,14 +8928,23 @@ impl<'a> Vm<'a> {
     }
 
     /// Lift a unary operation over paths/possibilities, mirroring `lift_unary`
-    /// in `vm/c/vm.c`. Reactives land in increment 5.
+    /// in `vm/c/vm.c`.
     fn lift_unary(&mut self, source: &Value, operation: u32, out: &mut Value) -> LanaError {
+        let current = self.reactive_value(source);
+        let error = self.lift_unary_raw(&current, operation, out);
+        if error != LanaError::Ok || source.reactive.is_none() {
+            return error;
+        }
+        self.reactive_derived_value(source, None, ReactiveKind::Unary, operation, out)
+    }
+
+    fn lift_unary_raw(&mut self, source: &Value, operation: u32, out: &mut Value) -> LanaError {
         match &source.kind {
             ValueKind::PathSet(paths) => {
                 let mut alternatives = Vec::with_capacity(paths.alternatives.len());
                 for alternative in &paths.alternatives {
                     let mut result = Value::null();
-                    let error = self.lift_unary(&alternative.result, operation, &mut result);
+                    let error = self.lift_unary_raw(&alternative.result, operation, &mut result);
                     if error != LanaError::Ok {
                         return error;
                     }
@@ -8696,7 +8965,7 @@ impl<'a> Vm<'a> {
                 let mut results = Vec::with_capacity(possibility.values.len());
                 for value in &possibility.values {
                     let mut result = Value::null();
-                    let error = self.lift_unary(value, operation, &mut result);
+                    let error = self.lift_unary_raw(value, operation, &mut result);
                     if error != LanaError::Ok {
                         return error;
                     }
@@ -17019,6 +17288,15 @@ mod tests {
     }
 
     #[test]
+    fn joint_condition_map_refines_named_evidence() {
+        let (error, result) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 2\nJOINT_BUILD R2 R0 2 independent:a;b\nLOAD_STRING R3 61\nLOAD_CONST R4 1\nHOST_CALL map_new R3 2 R5\nJOINT_CONDITION_MAP R2 R6 R5\nRESOLVE R6 R7\nRETURN R7\n",
+        );
+        assert_eq!(error, LanaError::Ok);
+        assert_eq!(result, "[1, 2]");
+    }
+
+    #[test]
     fn observe_increments_revision() {
         let (error, result) = run_chunk(
             "LOAD_CONST R0 1\nLOAD_CONST R1 2\nJOINT_BUILD R2 R0 2 independent:a;b\nLOAD_CONST R3 1\nOBSERVE R2 R4 a R3\nEXPLAIN R4 R5\nRETURN R5\n",
@@ -17073,12 +17351,40 @@ mod tests {
     }
 
     #[test]
-    fn info_sample_possibility_returns_element() {
+    fn info_sample_possibility_is_legacy_only() {
         let (error, result) = run_chunk(
             "LOAD_CONST R0 1\nLOAD_CONST R1 2\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nINFO_SAMPLE R3 R4\nRETURN R4\n",
         );
         assert_eq!(error, LanaError::Ok);
         assert!(result == "1" || result == "2", "expected 1 or 2, got {result}");
+
+        let (error, _) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 2\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nINFO_SAMPLE R3 R4\nRETURN R4\n",
+        );
+        assert_eq!(error, LanaError::UnsupportedOperation);
+    }
+
+    #[test]
+    fn distribution_build_samples_weighted_support() {
+        let (error, result) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 0.25\nARRAY_NEW R2 R0 2\nLOAD_CONST R3 2\nLOAD_CONST R4 0.75\nARRAY_NEW R5 R3 2\nMOVE R6 R2\nMOVE R7 R5\nARRAY_NEW R8 R6 2\nDISTRIBUTION_BUILD R8 R9\nINFO_SAMPLE R9 R10\nRETURN R10\n",
+        );
+        assert_eq!(error, LanaError::Ok);
+        assert!(result == "1" || result == "2", "expected supported value, got {result}");
+
+        let (error, _) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 0.2\nARRAY_NEW R2 R0 2\nARRAY_NEW R3 R2 1\nDISTRIBUTION_BUILD R3 R4\nRETURN R4\n",
+        );
+        assert_eq!(error, LanaError::InvalidDistribution);
+    }
+
+    #[test]
+    fn possibility_build_pair_rows_remains_unweighted() {
+        let (error, result) = run_chunk(
+            "LOAD_CONST R0 1\nLOAD_CONST R1 0.25\nARRAY_NEW R2 R0 2\nLOAD_CONST R3 2\nLOAD_CONST R4 0.75\nARRAY_NEW R5 R3 2\nMOVE R6 R2\nMOVE R7 R5\nARRAY_NEW R8 R6 2\nPOSSIBILITY_BUILD R8 R9\nRETURN R9\n",
+        );
+        assert_eq!(error, LanaError::Ok);
+        assert!(result.starts_with("possibility{"), "expected possibility, got {result}");
     }
 
     #[test]

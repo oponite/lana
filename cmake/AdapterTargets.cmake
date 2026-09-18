@@ -2,17 +2,16 @@
 # IntegrationTargets.cmake under LANA_BUILD_INTEGRATIONS.
 
 find_package(SQLite3)
-if(SQLite3_FOUND)
-    if(NOT TARGET SQLite3::SQLite3)
-        add_library(SQLite3::SQLite3 UNKNOWN IMPORTED)
-        set_target_properties(SQLite3::SQLite3 PROPERTIES
-            IMPORTED_LOCATION "${SQLite3_LIBRARIES}"
-            INTERFACE_INCLUDE_DIRECTORIES "${SQLite3_INCLUDE_DIRS}")
-    endif()
+if(SQLite3_FOUND AND TARGET SQLite3::SQLite3)
+    set(LANA_SQLITE_TARGET SQLite3::SQLite3)
+elseif(SQLite3_FOUND AND TARGET SQLite::SQLite3)
+    set(LANA_SQLITE_TARGET SQLite::SQLite3)
+endif()
+if(DEFINED LANA_SQLITE_TARGET)
     add_library(lana_adapter_sqlite SHARED runtime/c/adapters/sqlite_adapter.c)
     target_include_directories(lana_adapter_sqlite PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/runtime/c/adapters)
-    target_link_libraries(lana_adapter_sqlite PRIVATE lanaruntime SQLite3::SQLite3 m)
+    target_link_libraries(lana_adapter_sqlite PRIVATE lanaruntime ${LANA_SQLITE_TARGET} m)
     target_compile_options(lana_adapter_sqlite PRIVATE -Wall -Wextra -Wpedantic -Werror)
     set_target_properties(lana_adapter_sqlite PROPERTIES POSITION_INDEPENDENT_CODE ON)
     set(LANA_ADAPTER_SQLITE_AVAILABLE TRUE)
@@ -34,19 +33,18 @@ target_compile_options(lana_http_service PRIVATE -Wall -Wextra -Wpedantic -Werro
 # Shared runtime for the ctypes Python bindings.
 add_library(lanaruntime_shared SHARED ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime_shared PUBLIC ${LANA_INCLUDE_DIRS})
-target_link_libraries(lanaruntime_shared PUBLIC Threads::Threads PkgConfig::FFI OpenSSL::SSL ${LANA_BLAS_LIBS} ${LANA_METAL_LIBS} m)
+target_link_libraries(lanaruntime_shared PUBLIC Threads::Threads m)
 target_compile_options(lanaruntime_shared PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_compile_definitions(lanaruntime_shared PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
-    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}"
-    ${LANA_BLAS_DEFINES})
+    LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
 
 add_executable(lana_adapter_tests tests/unit/test_adapters.c)
 target_link_libraries(lana_adapter_tests PRIVATE lanaruntime m)
 target_compile_options(lana_adapter_tests PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
 if(LANA_ADAPTER_SQLITE_AVAILABLE)
     target_compile_definitions(lana_adapter_tests PRIVATE LANA_ADAPTER_SQLITE_AVAILABLE)
-    target_link_libraries(lana_adapter_tests PRIVATE SQLite3::SQLite3)
+    target_link_libraries(lana_adapter_tests PRIVATE ${LANA_SQLITE_TARGET})
 endif()
 if(LANA_ADAPTER_HTTP_AVAILABLE)
     target_compile_definitions(lana_adapter_tests PRIVATE LANA_ADAPTER_HTTP_AVAILABLE)

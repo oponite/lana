@@ -1,0 +1,5 @@
+let joint_value = joint correlated (x, y) with support: [[0, 0, 0.5], [1, 1, 0.5]];
+let conditioned = condition(joint_value, {x: 1, y: 1});
+let observed = observe(joint_value, {x: 1});
+assert(resolve(conditioned)[0] == 1, "map condition selects x");
+assert(resolve(observed)[1] == 1, "map observe selects y");

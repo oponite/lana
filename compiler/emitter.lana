@@ -1,6 +1,6 @@
 import "./syntax.lana" as syntax;
 
-fn emitter_new(namespace, registry, generators, asyncs) { return [array_new(0), map_new(), 0, 0, namespace, map_new(), map_new(), 0, registry, generators, asyncs]; }
+fn emitter_new(namespace, registry, generators, asyncs, features) { return [array_new(0), map_new(), 0, 0, namespace, map_new(), map_new(), 0, registry, generators, asyncs, features]; }
 fn emit(context, line) { array_push(context[0], line); return null; }
 fn reg(number) { return string_concat("R", number_to_string(number)); }
 
@@ -51,6 +51,7 @@ fn expression_is_information(context, node) {
         if (node[1] == "sample") { return false; }
         if (node[1] == "resolve") { return false; } return true;
     }
+    if (node[0] == 24) { return call_target(context, node[1]) == "__core_distribution__"; }
     return false;
 }
 
@@ -169,6 +170,8 @@ fn is_host_call(name) {
     if (name == "dataset_map") { return true; } if (name == "dataset_filter") { return true; }
     if (name == "dataset_explain") { return true; }
     if (name == "http_get") { return true; } if (name == "http_post") { return true; }
+    if (name == "execution_capability") { return true; } if (name == "execution_authorize") { return true; }
+    if (name == "execution_execute") { return true; }
     if (name == "socket_connect") { return true; } if (name == "socket_send") { return true; }
     if (name == "socket_recv") { return true; } if (name == "socket_close") { return true; } if (name == "dataset_materialize") { return true; }
     return false;
@@ -761,8 +764,12 @@ fn emit_append_relationship(context, opcode, arguments) {
 fn emit_joint_refinement(context, operation, arguments) {
     let source = emit_expression(context, arguments[0]); let destination = new_register(context);
     if (operation == "project") { emit(context, string_concat("JOINT_PROJECT ", reg(source), " ", reg(destination), " ", replace_commas(arguments[1][2]))); return destination; }
-    if (operation == "condition") { let evidence_value = emit_expression(context, arguments[2]); emit(context, string_concat("JOINT_CONDITION ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", reg(evidence_value))); return destination; }
+    if (operation == "condition") {
+        if (array_length(arguments) == 2) { let evidence_value = emit_expression(context, arguments[1]); emit(context, string_concat("JOINT_CONDITION_MAP ", reg(source), " ", reg(destination), " ", reg(evidence_value))); context[11][0] = true; return destination; }
+        let evidence_value = emit_expression(context, arguments[2]); emit(context, string_concat("JOINT_CONDITION ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", reg(evidence_value))); return destination;
+    }
     if (operation == "rename") { emit(context, string_concat("JOINT_RENAME ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", arguments[2][2])); return destination; }
+    if (array_length(arguments) == 2) { let evidence_value = emit_expression(context, arguments[1]); emit(context, string_concat("OBSERVE_MAP ", reg(source), " ", reg(destination), " ", reg(evidence_value))); context[11][0] = true; return destination; }
     let evidence_value = emit_expression(context, arguments[2]); emit(context, string_concat("OBSERVE ", reg(source), " ", reg(destination), " ", arguments[1][2], " ", reg(evidence_value))); return destination;
 }
 
@@ -804,10 +811,10 @@ fn emit_information(context, node) {
 }
 
 fn emit_measure(context, node) {
-    let destination = new_register(context); let source = symbol_find(context, node[1]);
+    let destination = new_register(context); let source = emit_expression(context, node[1]);
     if (node[2] == "") { emit(context, string_concat("MEASURE ", reg(source), " ", node[3], " ", reg(destination))); }
     else { emit(context, string_concat("MEASURE_BASIS ", reg(source), " ", reg(destination), " ", node[2], " ", node[3])); }
-    if (node[3] == "sample") { return emit_sample_record(context, destination, node[1], "measure"); }
+    if (node[3] == "sample") { return emit_sample_record(context, destination, "measure", "measure"); }
     return destination;
 }
 
@@ -868,7 +875,15 @@ fn emit_expression(context, node) {
     }
     if (node[0] == 22) { return emit_binary(context, node); }
     if (node[0] == 23) { return emit_unary(context, node); }
-    if (node[0] == 24) { return emit_call(context, node); }
+    if (node[0] == 24) {
+        if (call_target(context, node[1]) == "__core_distribution__") {
+            let source = emit_expression(context, node[2][0]); let destination = new_register(context);
+            emit(context, string_concat("DISTRIBUTION_BUILD ", reg(source), " ", reg(destination)));
+            context[11][0] = true;
+            return destination;
+        }
+        return emit_call(context, node);
+    }
     if (node[0] == 25) { return emit_array(context, node); }
     if (node[0] == 26) { return emit_index(context, node); }
     if (node[0] == 44) { return emit_comprehension(context, node); }
@@ -1195,8 +1210,8 @@ fn emit_statements(context, statements) {
     return null;
 }
 
-fn emit_function_named(node, emitted_name, mappings, registry, generators, asyncs) {
-    let context = emitter_new(emitted_name, registry, generators, asyncs); context[6] = mappings; let index = 0;
+fn emit_function_named(node, emitted_name, mappings, registry, generators, asyncs, features) {
+    let context = emitter_new(emitted_name, registry, generators, asyncs, features); context[6] = mappings; let index = 0;
     let offset = 0; if (node[6]) { offset = 1; } if (node[7]) { offset = 1; }
     context[2] = offset; context[7] = offset;
     while (index < array_length(node[3])) { symbol_add(context, node[3][index], index + offset, false); context[2] = index + offset + 1; index = index + 1; }
@@ -1207,8 +1222,6 @@ fn emit_function_named(node, emitted_name, mappings, registry, generators, async
     sb_push(header_sb, string_join(context[0], "\n"));
     return sb_join(header_sb);
 }
-
-fn emit_function(node, registry) { return emit_function_named(node, node[1], array_new(0), registry, map_new(), map_new()); }
 
 fn merge_mappings(left, right) {
     let merged = map_new();
@@ -1227,22 +1240,8 @@ fn merge_mappings(left, right) {
     return merged;
 }
 
-fn emit_program(program) {
-    let sections = sb_new();
-    if (program[5]) { sb_push(sections, ".version 3"); } else { sb_push(sections, ".version 2"); }
-    sb_push(sections, "\n");
-    if (array_length(program[1]) > 0) { sb_push(sections, "JUMP __main\n"); }
-    let index = 0;
-    while (index < array_length(program[1])) { sb_push(sections, emit_function(program[1][index], program[4])); sb_push(sections, "\n"); index = index + 1; }
-    if (array_length(program[1]) > 0) { sb_push(sections, "__main:\n"); }
-    let main = emitter_new("main", program[4], map_new(), map_new()); emit_statements(main, program[2]); emit(main, "HALT");
-    sb_push(sections, string_join(main[0], "\n"));
-    sb_push(sections, "\n");
-    return sb_join(sections);
-}
-
 fn emit_modules(modules, root_index) {
-    let sections = sb_new();
+    let sections = sb_new(); let features = [false];
     let items = modules["items"];
     let generators = map_new();
     let asyncs = map_new();
@@ -1262,8 +1261,6 @@ fn emit_modules(modules, root_index) {
         }
         module_index = module_index + 1;
     }
-    if (has_async) { sb_push(sections, ".version 4"); } else { if (has_generators) { sb_push(sections, ".version 3"); } else { if (has_ad) { sb_push(sections, ".version 3"); } else { sb_push(sections, ".version 2"); } } }
-    sb_push(sections, "\n");
     if (function_count > 0) { sb_push(sections, "JUMP __main\n"); }
     module_index = 0;
     while (module_index < array_length(items)) {
@@ -1274,13 +1271,16 @@ fn emit_modules(modules, root_index) {
         let mappings = merge_mappings(local_mappings, import_mappings);
         while (function_index < array_length(module[2][1])) {
             let function_node = module[2][1][function_index];
-            sb_push(sections, emit_function_named(function_node, string_concat(module[1], function_node[1]), mappings, module[2][4], generators, asyncs)); sb_push(sections, "\n"); function_index = function_index + 1;
+            sb_push(sections, emit_function_named(function_node, string_concat(module[1], function_node[1]), mappings, module[2][4], generators, asyncs, features)); sb_push(sections, "\n"); function_index = function_index + 1;
         }
         module_index = module_index + 1;
     }
     if (function_count > 0) { sb_push(sections, "__main:\n"); }
-    let root = items[root_index]; let main = emitter_new("main", root[2][4], generators, asyncs); main[6] = root[3]; emit_statements(main, root[2][2]); emit(main, "HALT");
+    let root = items[root_index]; let main = emitter_new("main", root[2][4], generators, asyncs, features); main[6] = root[3]; emit_statements(main, root[2][2]); emit(main, "HALT");
     sb_push(sections, string_join(main[0], "\n"));
     sb_push(sections, "\n");
-    return sb_join(sections);
+    let output = sb_join(sections); let version = ".version 2\n";
+    if (has_async) { version = ".version 4\n"; } else { if (has_generators) { version = ".version 3\n"; } else { if (has_ad) { version = ".version 3\n"; } } }
+    if (features[0]) { version = ".version 5\n"; }
+    return string_concat(version, output);
 }

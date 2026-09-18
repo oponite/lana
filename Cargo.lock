@@ -121,11 +121,11 @@ dependencies = [
 
 [[package]]
 name = "lana-bytecode"
-version = "0.2.0"
+version = "3.0.0"
 
 [[package]]
 name = "lana-cli"
-version = "0.2.0"
+version = "3.0.0"
 dependencies = [
  "lana-bytecode",
  "lana-runtime",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "lana-ffi"
-version = "0.2.0"
+version = "3.0.0"
 dependencies = [
  "lana-bytecode",
  "lana-runtime",
@@ -143,23 +143,24 @@ dependencies = [
 
 [[package]]
 name = "lana-fuzz"
-version = "0.2.0"
+version = "3.0.0"
 dependencies = [
  "lana-bytecode",
 ]
 
 [[package]]
 name = "lana-runtime"
-version = "0.2.0"
+version = "3.0.0"
 dependencies = [
  "ed25519-compact",
  "lana-bytecode",
  "lana-vm",
+ "ring",
 ]
 
 [[package]]
 name = "lana-vm"
-version = "0.2.0"
+version = "3.0.0"
 dependencies = [
  "lana-bytecode",
  "libloading",
@@ -170,20 +171,12 @@ dependencies = [
 
 [[package]]
 name = "lana-wasm"
-version = "0.2.0"
+version = "3.0.0"
 dependencies = [
  "lana-bytecode",
  "lana-runtime",
  "lana-vm",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "lana-wasm-wasi"
-version = "0.2.0"
-dependencies = [
- "lana-bytecode",
- "lana-vm",
 ]
 
 [[package]]

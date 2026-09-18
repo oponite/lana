@@ -10,7 +10,8 @@
 //! value to JSON immediately and `store_get` decodes a fresh value, so no
 //! aliasing between the VM's value graph and the store is possible.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Condvar};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use lana_bytecode::LanaError;
 use lana_vm::value::{Array, Map, Value, ValueKind};
@@ -20,12 +21,21 @@ use lana_vm::{
     LANA_HOST_STORE_COMMIT, LANA_HOST_STORE_COMMIT_IF, LANA_HOST_STORE_CURRENT_REVISION,
     LANA_HOST_STORE_DELETE, LANA_HOST_STORE_GET, LANA_HOST_STORE_GET_AT, LANA_HOST_STORE_OPEN,
     LANA_HOST_STORE_PUT, LANA_HOST_STORE_SCAN, LANA_HOST_STORE_SNAPSHOT,
+    LANA_HOST_EXECUTION_CAPABILITY, LANA_HOST_EXECUTION_AUTHORIZE, LANA_HOST_EXECUTION_EXECUTE,
 };
 
 use crate::adapters::{self, Adapter, AdapterKind, AdapterOptions};
 use crate::ledger::{self, Event, EventInput, LedgerQuery};
 use crate::policy::{self, Decision, Policy, PolicyEvaluation, PolicyOutcome, PolicyRule, PolicyRuleKind};
 use crate::store::{self, Store, StoreOptions};
+use crate::execution::{self, Authorization, CurlTransport, ExecutionCapability};
+
+static NEXT_EXECUTION_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+struct ExecutionAuthorization {
+    token: Arc<lana_vm::value::CapabilityToken>,
+    authorization: Authorization,
+}
 
 /// Owns the single durable store the VM drives, and dispatches the
 /// store/policy/ledger host calls against it.
@@ -33,6 +43,10 @@ pub struct StoreHost {
     store: Option<Store>,
     adapter: Option<Adapter>,
     heap: lana_vm::heap::Heap,
+    execution: Option<(Arc<lana_vm::value::CapabilityToken>, ExecutionCapability)>,
+    execution_credential: Option<Arc<str>>,
+    execution_ca_file: Option<Arc<str>>,
+    authorizations: Vec<ExecutionAuthorization>,
 }
 
 impl StoreHost {
@@ -41,7 +55,7 @@ impl StoreHost {
     }
 
     pub fn with_heap(heap: lana_vm::heap::Heap) -> Self {
-        Self { store: None, adapter: None, heap }
+        Self { store: None, adapter: None, heap, execution: None, execution_credential: None, execution_ca_file: None, authorizations: Vec::new() }
     }
 
     /// Dispatch one durable-pipeline host call. Returns `LanaError::Format` for
@@ -66,7 +80,75 @@ impl StoreHost {
             LANA_HOST_POLICY_STORE_DECISION => self.policy_store_decision(args, out),
             LANA_HOST_LEDGER_APPEND => self.ledger_append(args, out),
             LANA_HOST_LEDGER_QUERY => self.ledger_query(args, out),
+            LANA_HOST_EXECUTION_CAPABILITY => self.execution_capability(args, out),
+            LANA_HOST_EXECUTION_AUTHORIZE => self.execution_authorize(args, out),
+            LANA_HOST_EXECUTION_EXECUTE => self.execution_execute(args, out),
             _ => LanaError::Format,
+        }
+    }
+
+    fn opaque_token(&self) -> Arc<lana_vm::value::CapabilityToken> {
+        let id = NEXT_EXECUTION_TOKEN.fetch_add(1, Ordering::Relaxed);
+        let shared = Arc::new(lana_vm::value::SharedInformation {
+            identity: id,
+            base_snapshot: Value::null(),
+            state: Mutex::new(lana_vm::value::SharedState::default()),
+            condition: Condvar::new(),
+        });
+        Arc::new(lana_vm::value::CapabilityToken {
+            shared,
+            id,
+            permissions: lana_vm::value::LANA_CAPABILITY_ADMIN,
+            revoked: AtomicBool::new(false),
+        })
+    }
+
+    fn execution_capability(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+        if !args.is_empty() { return LanaError::Type; }
+        if self.execution.is_none() {
+            let metadata = match std::env::var("LANA_EXECUTION_METADATA") { Ok(value) => value, Err(_) => return LanaError::Capability };
+            let key = match std::env::var("LANA_EXECUTION_KEY") { Ok(value) => value, Err(_) => return LanaError::Capability };
+            let config = match execution::ExecutionConfig::load(std::path::Path::new(&metadata), std::path::Path::new(&key)) { Ok(config) => config, Err(error) => return error };
+            let credential_name = format!("LANA_EXECUTION_CREDENTIAL_{}", config.credential_key_id);
+            let credential = match std::env::var(&credential_name) { Ok(value) if !value.is_empty() && !value.contains(['\r', '\n']) => Arc::<str>::from(value), _ => return LanaError::Capability };
+            let capability = config.capability;
+            self.execution_credential = Some(credential);
+            self.execution_ca_file = config.ca_file;
+            self.execution = Some((self.opaque_token(), capability));
+        }
+        *out = Value::capability(self.execution.as_ref().unwrap().0.clone());
+        LanaError::Ok
+    }
+
+    fn execution_authorize(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+        if args.len() != 3 { return LanaError::Type; }
+        let ValueKind::Capability(token) = &args[0].kind else { return LanaError::Type; };
+        let Some((expected, capability)) = &self.execution else { return LanaError::Capability; };
+        if !Arc::ptr_eq(token, expected) { return LanaError::Capability; }
+        let decision = match decision_from_value(&args[1]) { Ok(decision) => decision, Err(error) => return error };
+        if decision.outcome != PolicyOutcome::Authorize { return LanaError::Capability; }
+        let digest = match execution::plan_digest(&args[2]) { Ok(digest) => digest, Err(error) => return error };
+        let authorization = Authorization { decision_id: decision.decision_id, capability_id: Arc::from(capability.id()), plan_digest: digest, authorized: true };
+        let token = self.opaque_token();
+        self.authorizations.push(ExecutionAuthorization { token: token.clone(), authorization });
+        *out = Value::capability(token);
+        LanaError::Ok
+    }
+
+    fn execution_execute(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+        if args.len() != 3 { return LanaError::Type; }
+        let ValueKind::Capability(capability_token) = &args[0].kind else { return LanaError::Type; };
+        let ValueKind::Capability(authorization_token) = &args[1].kind else { return LanaError::Type; };
+        let Some((expected, capability)) = &self.execution else { return LanaError::Capability; };
+        if !Arc::ptr_eq(capability_token, expected) { return LanaError::Capability; }
+        let Some(authorization) = self.authorizations.iter().find(|entry| Arc::ptr_eq(authorization_token, &entry.token)).map(|entry| entry.authorization.clone()) else { return LanaError::Capability; };
+        let ValueKind::Map(plan) = &args[2].kind else { return LanaError::Type; };
+        let path = match plan.lock().unwrap().get("path") { Some(Value { kind: ValueKind::String(path), .. }) => path.clone(), _ => return LanaError::Schema };
+        let Some(store) = self.store.as_mut() else { return LanaError::InvalidState; };
+        let transport = CurlTransport { credential: self.execution_credential.clone(), ca_file: self.execution_ca_file.clone() };
+        match execution::execute(store, capability, &authorization, &args[2], &path, &transport) {
+            Ok(status) => { *out = Value::string(Arc::from(status.name())); LanaError::Ok }
+            Err(error) => error,
         }
     }
 

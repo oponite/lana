@@ -2896,7 +2896,6 @@ pub fn unicode_upper(cp: u32) -> u32 {
         Err(_) => cp,
     }
 }
-
 pub fn unicode_lower(cp: u32) -> u32 {
     match LOWER_MAP.binary_search_by_key(&cp, |&(from, _)| from) {
         Ok(index) => LOWER_MAP[index].1,

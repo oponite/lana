@@ -45,7 +45,6 @@ fn run() -> Result<(), LanaError> {
     }
     Ok(())
 }
-
 fn main() {
     if let Err(error) = run() {
         println!("ERR {}", error.name());

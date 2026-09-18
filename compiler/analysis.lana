@@ -1,0 +1,308 @@
+// analysis.lana — Phase 3/4: forward dataflow framework over the SSA CFG.
+//
+// Phase 3 delivers the generic engine: a worklist-driven forward fixed point
+// with per-block IN/OUT states, a meet (join) operator, and an explicit
+// reachability lattice so `unreachable` blocks are distinguished from
+// `unknown` variables. Phase 4 instantiates the lattice over SSA values with
+// `Definite` (a known constant) and `Unknown` (anything), the two facts the
+// later optimization passes (Phase 5) consume.
+//
+// Abstract value (AV): ["unknown"] or ["definite", kind, value] where kind is
+// "number" | "string" | "bool". A per-variable state is a map from SSA name
+// (e.g. "count.0") to a *definite* AV only; absence means "unknown". This
+// keeps the join sound for a must-analysis: a variable is definite after a
+// merge only when every incoming edge agrees on the same constant.
+
+fn ana_unknown() { return ["unknown"]; }
+
+fn ana_definite(kind, value) { return ["definite", kind, value]; }
+
+fn ana_is_definite(av) { return av[0] == "definite"; }
+
+// Meet of two abstract values (greatest lower bound; "unknown" is top).
+fn ana_meet(a, b) {
+    if (a[0] == "unknown") { return ana_unknown(); }
+    if (b[0] == "unknown") { return ana_unknown(); }
+    if (a[1] == b[1]) { if (a[2] == b[2]) { return a; } }
+    return ana_unknown();
+}
+
+fn ana_state_get(state, var) {
+    if (map_has(state, var)) { return map_get(state, var); }
+    return ana_unknown();
+}
+
+fn ana_state_copy(state) {
+    let r = map_new(); let keys = map_keys(state); let i = 0;
+    while (i < array_length(keys)) { map_set(r, keys[i], map_get(state, keys[i])); i = i + 1; }
+    return r;
+}
+
+// Meet of two states; only definite results survive (absent = unknown).
+fn ana_state_meet(a, b) {
+    let r = map_new();
+    let ka = map_keys(a); let i = 0;
+    while (i < array_length(ka)) {
+        let k = ka[i];
+        let av = ana_meet(map_get(a, k), ana_state_get(b, k));
+        if (ana_is_definite(av)) { map_set(r, k, av); }
+        i = i + 1;
+    }
+    let kb = map_keys(b); let j = 0;
+    while (j < array_length(kb)) {
+        let k = kb[j];
+        if (!map_has(a, k)) {
+            let av = ana_meet(ana_state_get(a, k), map_get(b, k));
+            if (ana_is_definite(av)) { map_set(r, k, av); }
+        }
+        j = j + 1;
+    }
+    return r;
+}
+
+fn ana_av_equal(a, b) {
+    if (a[0] != b[0]) { return false; }
+    if (a[0] == "unknown") { return true; }
+    if (a[1] != b[1]) { return false; }
+    return a[2] == b[2];
+}
+
+fn ana_state_equal(a, b) {
+    let ka = map_keys(a); let kb = map_keys(b);
+    if (array_length(ka) != array_length(kb)) { return false; }
+    let i = 0;
+    while (i < array_length(ka)) {
+        let k = ka[i];
+        if (!map_has(b, k)) { return false; }
+        if (!ana_av_equal(map_get(a, k), map_get(b, k))) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+// --- constant folding over expressions ---
+
+fn ana_binop(op, left, right) {
+    if (!ana_is_definite(left)) { return ana_unknown(); }
+    if (!ana_is_definite(right)) { return ana_unknown(); }
+    let lk = left[1]; let lv = left[2]; let rk = right[1]; let rv = right[2];
+    if (lk == "number") { if (rk == "number") {
+        if (op == "+") { return ana_definite("number", lv + rv); }
+        if (op == "-") { return ana_definite("number", lv - rv); }
+        if (op == "*") { return ana_definite("number", lv * rv); }
+        if (op == "/") { return ana_definite("number", lv / rv); }
+        if (op == "<") { return ana_definite("bool", lv < rv); }
+        if (op == ">") { return ana_definite("bool", lv > rv); }
+        if (op == "<=") { return ana_definite("bool", lv <= rv); }
+        if (op == ">=") { return ana_definite("bool", lv >= rv); }
+        if (op == "==") { return ana_definite("bool", lv == rv); }
+        if (op == "!=") { return ana_definite("bool", lv != rv); }
+        return ana_unknown();
+    } }
+    if (lk == "string") { if (rk == "string") { if (op == "+") { return ana_definite("string", string_concat(lv, rv)); } } }
+    if (lk == "bool") { if (rk == "bool") { if (op == "==") { return ana_definite("bool", lv == rv); } if (op == "!=") { return ana_definite("bool", lv != rv); } } }
+    return ana_unknown();
+}
+
+fn ana_unop(op, v) {
+    if (!ana_is_definite(v)) { return ana_unknown(); }
+    if (v[1] == "bool") { if (op == "!") { return ana_definite("bool", !v[2]); } }
+    if (v[1] == "number") { if (op == "-") { return ana_definite("number", 0 - v[2]); } }
+    return ana_unknown();
+}
+
+fn ana_eval(node, state) {
+    let tag = node[0];
+    if (tag == 20) {
+        if (node[1] == "number") { return ana_definite("number", result_value(string_to_number(node[2]))); }
+        if (node[1] == "string") { return ana_definite("string", node[2]); }
+        if (node[1] == "bool") { return ana_definite("bool", node[2]); }
+        return ana_unknown();
+    }
+    if (tag == 21) { return ana_state_get(state, node[1]); }
+    if (tag == 22) { return ana_binop(node[1], ana_eval(node[2], state), ana_eval(node[3], state)); }
+    if (tag == 23) { return ana_unop(node[1], ana_eval(node[2], state)); }
+    return ana_unknown();
+}
+
+fn ana_stmt_value(stmt) {
+    let tag = stmt[1]; let node = stmt[3];
+    if (tag == 2) { return node[3]; }
+    if (tag == 3) { return node[2]; }
+    return node;
+}
+
+// --- phi handling (conservative: meet of merged operand values) ---
+
+fn ana_apply_phis(phis_block, state) {
+    let i = 0;
+    while (i < array_length(phis_block)) {
+        let rec = phis_block[i];
+        let ops = rec[2];
+        let result = ana_unknown(); let first = true; let j = 0;
+        while (j < array_length(ops)) {
+            let av = ana_state_get(state, ops[j][1]);
+            if (first) { result = av; first = false; }
+            else { result = ana_meet(result, av); }
+            j = j + 1;
+        }
+        if (ana_is_definite(result)) { map_set(state, rec[1], result); }
+        i = i + 1;
+    }
+    return null;
+}
+
+// --- transfer: phis then instructions ---
+
+fn ana_transfer(cfg, block, in_state) {
+    let state = ana_state_copy(in_state);
+    ana_apply_phis(cfg["phis"][block], state);
+    let instrs = cfg["blocks"][block]["instructions"];
+    let i = 0;
+    while (i < array_length(instrs)) {
+        let stmt = instrs[i];
+        let defname = ssa_stmt_def(stmt);
+        if (defname != "") {
+            let av = ana_eval(ana_stmt_value(stmt), state);
+            if (ana_is_definite(av)) { map_set(state, defname, av); }
+        }
+        i = i + 1;
+    }
+    return state;
+}
+
+// --- worklist engine ---
+
+fn ana_in_worklist(worklist, b) {
+    let i = 0;
+    while (i < array_length(worklist)) { if (worklist[i] == b) { return true; } i = i + 1; }
+    return false;
+}
+
+fn ana_meet_preds(out_states, reachable, pred_list) {
+    let result = map_new(); let first = true; let i = 0;
+    while (i < array_length(pred_list)) {
+        let p = pred_list[i];
+        if (reachable[p]) {
+            if (first) { result = ana_state_copy(out_states[p]); first = false; }
+            else { result = ana_state_meet(result, out_states[p]); }
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+fn ana_run(cfg) {
+    let n = array_length(cfg["order"]);
+    let entry = cfg["entry"];
+    let preds = ssa_preds(cfg, n);
+    let in_states = array_new(0); let out_states = array_new(0); let reachable = array_new(0);
+    let b = 0;
+    while (b < n) { array_push(in_states, map_new()); array_push(out_states, map_new()); array_push(reachable, false); b = b + 1; }
+    index_set(reachable, entry, true);
+    let worklist = array_new(0); array_push(worklist, entry);
+    while (array_length(worklist) > 0) {
+        let blk = worklist[0];
+        let rest = array_new(0); let w = 1;
+        while (w < array_length(worklist)) { array_push(rest, worklist[w]); w = w + 1; }
+        worklist = rest;
+        if (reachable[blk]) {
+            let out = ana_transfer(cfg, blk, in_states[blk]);
+            index_set(out_states, blk, out);
+            let succs = ssa_block_succs(cfg, blk);
+            let s = 0;
+            while (s < array_length(succs)) {
+                let succ = succs[s];
+                let new_in = ana_meet_preds(out_states, reachable, preds[succ]);
+                if (!reachable[succ]) { index_set(in_states, succ, new_in); index_set(reachable, succ, true); array_push(worklist, succ); }
+                else { if (!ana_state_equal(new_in, in_states[succ])) { index_set(in_states, succ, new_in); array_push(worklist, succ); } }
+                s = s + 1;
+            }
+        }
+    }
+    return [in_states, out_states, reachable];
+}
+
+// --- dumping ---
+
+fn ana_text_less(a, b) {
+    let la = string_length(a); let lb = string_length(b); let len = la; if (lb < len) { len = lb; }
+    let i = 0;
+    while (i < len) {
+        let ab = string_byte_at(a, i); let bb = string_byte_at(b, i);
+        if (ab < bb) { return true; }
+        if (bb < ab) { return false; }
+        i = i + 1;
+    }
+    return la < lb;
+}
+
+fn ana_sort(keys) {
+    let i = 1;
+    while (i < array_length(keys)) {
+        let value = keys[i]; let cursor = i; let dest = i; let scanning = true;
+        while (cursor > 0) {
+            if (scanning) {
+                if (ana_text_less(value, keys[cursor - 1])) { index_set(keys, cursor, keys[cursor - 1]); dest = cursor - 1; }
+                else { scanning = false; }
+            }
+            cursor = cursor - 1;
+        }
+        index_set(keys, dest, value); i = i + 1;
+    }
+    return keys;
+}
+
+fn ana_fmt_av(av) {
+    if (av[0] == "unknown") { return "unknown"; }
+    if (av[1] == "number") { return number_to_string(av[2]); }
+    if (av[1] == "string") { return av[2]; }
+    if (av[1] == "bool") { if (av[2]) { return "true"; } return "false"; }
+    return "unknown";
+}
+
+fn ana_dump_state(state) {
+    let keys = ana_sort(map_keys(state));
+    let text = ""; let i = 0;
+    while (i < array_length(keys)) {
+        if (i > 0) { text = string_concat(text, ", "); }
+        text = string_concat(text, keys[i], " = ", ana_fmt_av(map_get(state, keys[i])));
+        i = i + 1;
+    }
+    return text;
+}
+
+fn ana_dump_cfg(cfg) {
+    let result = ana_run(cfg);
+    let in_states = result[0]; let out_states = result[1]; let reachable = result[2];
+    let text = ""; let order = cfg["order"]; let index = 0;
+    while (index < array_length(order)) {
+        let id = order[index];
+        if (reachable[id]) {
+            text = string_concat(text, "b", number_to_string(id), ": reachable\n");
+            text = string_concat(text, "  in:  ", ana_dump_state(in_states[id]), "\n");
+            text = string_concat(text, "  out: ", ana_dump_state(out_states[id]), "\n");
+        } else {
+            text = string_concat(text, "b", number_to_string(id), ": unreachable\n");
+        }
+        index = index + 1;
+    }
+    return text;
+}
+
+fn ana_dump_function(statements, params) {
+    let c = cfg.build_function_cfg(statements);
+    ssa_build(c, params);
+    return ana_dump_cfg(c);
+}
+
+fn ana_dump_program(program) {
+    let text = "";
+    text = string_concat(text, "=== top-level ===\n", ana_dump_function(program[2], array_new(0)), "\n");
+    let functions = program[1]; let index = 0;
+    while (index < array_length(functions)) {
+        text = string_concat(text, "=== function ", functions[index][1], " ===\n", ana_dump_function(functions[index][4], functions[index][3]), "\n");
+        index = index + 1;
+    }
+    return text;
+}

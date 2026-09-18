@@ -6,11 +6,11 @@
 
 use crate::chunk::{Chunk, Function, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
-use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1, LABC_VERSION_3, LABC_VERSION_4, LANA_MAX_REGISTERS};
+use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1, LABC_VERSION_3, LABC_VERSION_4, LABC_VERSION_5, LANA_MAX_REGISTERS};
 use crate::value::{Value, ValueType};
 
 const LANA_NO_OPERAND: u32 = u32::MAX;
-const LANA_ASSEMBLER_MAX_FIXUPS: usize = 4096;
+const LANA_ASSEMBLER_MAX_FIXUPS: usize = 8192;
 
 const LANA_TRANSFORM_INVERT: u32 = 0;
 const LANA_TRANSFORM_NEUTRALIZE: u32 = 1;
@@ -85,6 +85,7 @@ const HOST_CALL_NAMES: &[&str] = &[
     "tensor_compare", "tensor_select", "tensor_gather",
     "cholesky_solve", "random_uniform", "random_normal",
     "tensor_device", "tensor_to_device", "tensor_to_cpu",
+    "execution_capability", "execution_authorize", "execution_execute",
 ];
 
 struct Label {
@@ -991,6 +992,21 @@ fn emit_line(
             ins.c = c;
             ins.imm = imm;
         }
+        "JOINT_CONDITION_MAP" | "OBSERVE_MAP" => {
+            expect(4)?;
+            let a = reg(tokens[1])?;
+            let b = reg(tokens[2])?;
+            let c = reg(tokens[3])?;
+            ins.opcode = if tokens[0] == "JOINT_CONDITION_MAP" {
+                OpCode::JointConditionMap
+            } else {
+                OpCode::ObserveMap
+            };
+            ins.a = a;
+            ins.b = b;
+            ins.c = c;
+            ins.imm = 0;
+        }
         "JOINT_BUILD_FINITE" => {
             expect(4)?;
             let a = reg(tokens[1])?;
@@ -1014,15 +1030,13 @@ fn emit_line(
             ins.c = c;
             ins.imm = imm;
         }
-        "POSSIBILITY_BUILD" | "INFO_SAMPLE" => {
+        "POSSIBILITY_BUILD" | "DISTRIBUTION_BUILD" | "INFO_SAMPLE" => {
             expect(3)?;
             let a = reg(tokens[1])?;
             let b = reg(tokens[2])?;
-            ins.opcode = if tokens[0] == "POSSIBILITY_BUILD" {
-                OpCode::PossibilityBuild
-            } else {
-                OpCode::InfoSample
-            };
+            ins.opcode = if tokens[0] == "POSSIBILITY_BUILD" { OpCode::PossibilityBuild }
+                else if tokens[0] == "DISTRIBUTION_BUILD" { OpCode::DistributionBuild }
+                else { OpCode::InfoSample };
             ins.a = a;
             ins.b = b;
             ins.c = 0;
@@ -1586,7 +1600,7 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
                     )
                 })?;
                 if version != LABC_VERSION && version != LABC_VERSION_1 && version != LABC_VERSION_3
-                    && version != LABC_VERSION_4
+                    && version != LABC_VERSION_4 && version != LABC_VERSION_5
                 {
                     return Err(LanaErrorInfo::new(
                         LanaError::IncompatibleFormat,

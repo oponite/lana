@@ -1,0 +1,21 @@
+import "std/execution" as execution;
+
+store_open("build/execution-unknown-store-2");
+let plan = execution.plan_webhook("/events", {event: "approved"});
+let decision = {
+    decision_id: 41,
+    policy_id: "execution-test",
+    policy_version: "0000000000000000000000000000000000000000000000000000000000000000",
+    target: "webhook",
+    scope: "test",
+    input_revision: 0,
+    outcome: 0,
+    effect: "webhook",
+    evaluation_time: 0,
+    reason: "test"
+};
+let capability = execution.capability();
+let authorization = execution.authorize(capability, decision, plan);
+let status = execution.execute(capability, authorization, plan);
+assert(status == "Unknown", "connection ambiguity is unknown");
+print("EXECUTION_UNKNOWN_PASS");

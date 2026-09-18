@@ -1,0 +1,72 @@
+// std/execution — origin-bound webhook plans (LIP-029).
+// Planning is pure. A plan cannot send a request on its own.
+
+fn finite_number(value) {
+    if (type_of(value) != "number") { return false; }
+    return value - value == 0;
+}
+
+fn json_payload(value) {
+    let kind = type_of(value);
+    if (kind == "null") { return true; }
+    if (kind == "bool") { return true; }
+    if (kind == "string") { return true; }
+    if (kind == "number") { return finite_number(value); }
+    if (kind == "array") {
+        let index = 0;
+        while (index < array_length(value)) {
+            if (!json_payload(value[index])) { return false; }
+            index = index + 1;
+        }
+        return true;
+    }
+    if (kind == "map") {
+        let keys = map_keys(value);
+        let index = 0;
+        while (index < array_length(keys)) {
+            if (type_of(keys[index]) != "string") { return false; }
+            if (!json_payload(value[keys[index]])) { return false; }
+            index = index + 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+fn webhook_path(path) {
+    if (type_of(path) != "string") { return false; }
+    if (string_length(path) == 0) { return false; }
+    if (string_byte_at(path, 0) != 47) { return false; }
+    let index = 0;
+    while (index < string_length(path)) {
+        let byte = string_byte_at(path, index);
+        if (byte == 35) { return false; }
+        if (byte == 58) { return false; }
+        if (byte == 63) { return false; }
+        if (byte == 92) { return false; }
+        index = index + 1;
+    }
+    return true;
+}
+
+/// Return a pure, origin-relative webhook plan.
+fn plan_webhook(path, payload) {
+    assert(webhook_path(path), "webhook path must be an origin-relative path without URL components");
+    assert(json_payload(payload), "webhook payload must be definite JSON-compatible data");
+    return {kind: "webhook", path: path, payload: payload};
+}
+
+/// The host issues this opaque capability from its configured HTTPS origin.
+fn capability() {
+    return execution_capability();
+}
+
+/// Bind an Authorize decision, this capability, and this exact plan.
+fn authorize(capability, decision, plan) {
+    return execution_authorize(capability, decision, plan);
+}
+
+/// Send the one allowed webhook attempt and return Pending's terminal status.
+fn execute(capability, authorization, plan) {
+    return execution_execute(capability, authorization, plan);
+}

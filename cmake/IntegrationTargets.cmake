@@ -1,4 +1,13 @@
 if(LANA_BUILD_INTEGRATIONS)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/examples/reference-apps")
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/integrations/lana")
+    configure_file(integrations/lana/bridge_c11.lana
+                   "${CMAKE_CURRENT_BINARY_DIR}/integrations/lana/bridge.lana" COPYONLY)
+    foreach(app IN ITEMS sensor_fusion service_health doc_router advisory_forecast)
+        configure_file("examples/reference-apps/${app}.lana"
+                       "${CMAKE_CURRENT_BINARY_DIR}/examples/reference-apps/${app}.lana" COPYONLY)
+    endforeach()
+
     set_target_properties(lanaruntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
     add_library(lana_bridge SHARED integrations/native/lana_bridge.c)
     target_include_directories(lana_bridge PUBLIC
@@ -16,8 +25,9 @@ if(LANA_BUILD_INTEGRATIONS)
     add_test(NAME lana_native_bridge
         COMMAND "${CMAKE_COMMAND}"
             -DLANAVM=$<TARGET_FILE:lanavm>
+            -DCOMPILER_RUNNER=${LANA_RUST_CLI}
             -DCOMPILER=${LANA_NATIVE_COMPILER}
-            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/integrations/lana/echo_bridge.lana
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/integrations/lana/echo_bridge_c11.lana
             -DTEST=$<TARGET_FILE:lana_bridge_tests>
             -DROOT=${CMAKE_CURRENT_BINARY_DIR}
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestNativeBridge.cmake")
@@ -30,8 +40,9 @@ if(LANA_BUILD_INTEGRATIONS)
         add_test(NAME lana_reference_app_${app}
             COMMAND "${CMAKE_COMMAND}"
                 -DLANAVM=$<TARGET_FILE:lanavm>
+                -DCOMPILER_RUNNER=${LANA_RUST_CLI}
                 -DCOMPILER=${LANA_NATIVE_COMPILER}
-                -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/examples/reference-apps/${app}.lana
+                -DSOURCE=${CMAKE_CURRENT_BINARY_DIR}/examples/reference-apps/${app}.lana
                 -DTEST=$<TARGET_FILE:lana_bridge_pipeline_tests>
                 -DROOT=${CMAKE_CURRENT_BINARY_DIR}
                 -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/examples/reference-apps/fixtures/${app}

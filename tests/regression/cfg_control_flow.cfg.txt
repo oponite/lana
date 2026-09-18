@@ -1,0 +1,32 @@
+=== top-level ===
+b0:
+  none
+
+=== function classify ===
+b0:
+  branch -> b1 b2
+b1:
+  let
+  return
+b2:
+  let
+  jump -> b3
+b3:
+  let
+  jump -> b4
+b4:
+  branch -> b5 b6
+b5:
+  assign
+  jump -> b4
+b6:
+  let
+  jump -> b7
+b7:
+  for -> b8 b9
+b8:
+  assign
+  jump -> b7
+b9:
+  return
+

@@ -1,4 +1,4 @@
-if(NOT DEFINED LANAVM OR NOT DEFINED COMPILER OR NOT DEFINED SOURCE OR
+if(NOT DEFINED LANAVM OR NOT DEFINED COMPILER_RUNNER OR NOT DEFINED COMPILER OR NOT DEFINED SOURCE OR
    NOT DEFINED TEST OR NOT DEFINED ROOT OR NOT DEFINED FIXTURE_DIR OR
    NOT DEFINED APP_NAME)
     message(FATAL_ERROR "reference app test paths are required")
@@ -21,7 +21,7 @@ set(envelope_b "${ROOT}/${APP_NAME}-envelope-b.json")
 file(REMOVE_RECURSE "${store}" "${store_refuse}" "${store_determinism}")
 
 execute_process(
-    COMMAND "${LANAVM}" run "${COMPILER}" -- "${SOURCE}" "${assembly}"
+    COMMAND "${COMPILER_RUNNER}" run "${COMPILER}" -- "${SOURCE}" "${assembly}"
     RESULT_VARIABLE compile_result
 )
 if(NOT compile_result EQUAL 0)

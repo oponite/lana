@@ -10,9 +10,9 @@ from lana_integrations.native import NativeBridge, _is_supported_version
 
 
 def test_supported_version_pattern() -> None:
-    assert _is_supported_version("2.0.0")
-    assert _is_supported_version("2.1.0")
-    assert _is_supported_version("2.2.0")
+    assert _is_supported_version("3.0.0")
+    assert _is_supported_version("3.1.0")
+    assert _is_supported_version("3.2.0")
     assert not _is_supported_version("1.2.0")
 
 

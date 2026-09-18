@@ -235,9 +235,10 @@ def main():
                     "-DLANA_OUTPUT=" + str(output / "rust-bootstrap.lasm"),
                     "-P", ROOT / "cmake/VerifyNativeBootstrap.cmake"], timeout=300)
             version = (ROOT / "VERSION").read_text().strip()
-            for name, binary in (("c11", build / "lana"), ("rust", rust)):
+            for name, binary, labc in (("c11", build / "lana", "v1-v4"),
+                                       ("rust", rust, "v1-v5")):
                 step = command("version-" + name, [binary, "version"])
-                if not Path(step["log"]).read_text().startswith(f"Lana {version} (LABC v2,"):
+                if not Path(step["log"]).read_text().startswith(f"Lana {version} (LABC {labc},"):
                     step["status"] = "failed"
                     raise RuntimeError(f"{name} reports the wrong version")
             command("differential", [sys.executable, ROOT / "tests/conformance/differential/run.py",
