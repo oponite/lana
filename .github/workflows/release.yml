@@ -65,6 +65,8 @@ jobs:
           version="$(tr -d '\n' < VERSION)"
           test "$version" = "$EXPECTED_VERSION"
           test "$GITHUB_REF_NAME" = "v$version"
+      - name: Install x86_64 Rust target
+        run: rustup target add x86_64-apple-darwin
       - name: Build and install universal binaries
         run: |
           cmake -S . -B build-universal -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64'
