@@ -37,6 +37,9 @@ add_library(lanaruntime STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime PUBLIC ${LANA_INCLUDE_DIRS})
 target_link_libraries(lanaruntime PUBLIC Threads::Threads)
 target_compile_options(lanaruntime PRIVATE -Wall -Wextra -Wpedantic -Werror)
+if(NOT APPLE)
+    target_compile_definitions(lanaruntime PRIVATE _POSIX_C_SOURCE=200809L)
+endif()
 # Adapter facade locates dlopen plugins in the build directory.
 target_compile_definitions(lanaruntime PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
@@ -58,6 +61,9 @@ target_compile_options(lanavm PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_library(lanaruntime_release STATIC ${LANA_RUNTIME_SOURCES})
 target_include_directories(lanaruntime_release PUBLIC ${LANA_INCLUDE_DIRS})
 target_compile_options(lanaruntime_release PRIVATE -Wall -Wextra -Wpedantic -Werror -Wno-format-truncation -O3 -DNDEBUG)
+if(NOT APPLE)
+    target_compile_definitions(lanaruntime_release PRIVATE _POSIX_C_SOURCE=200809L)
+endif()
 target_compile_definitions(lanaruntime_release PRIVATE
     LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
     LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
