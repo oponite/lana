@@ -86,8 +86,6 @@ pub enum OpCode {
     Force,
     /* Lana 2.0 deterministic resampling. */
     Bootstrap,
-<<<<<<< Updated upstream
-=======
     /* Lana 2.1 reverse-mode autodiff (LIP-011): load a function value so it
      * can be passed to the `grad`/`vjp` host calls. */
     LoadFunction,
@@ -114,7 +112,6 @@ pub enum OpCode {
     JointConditionMap,
     /// LABC v5: record a map-based refinement event.
     ObserveMap,
->>>>>>> Stashed changes
     Count,
 }
 
@@ -197,8 +194,6 @@ impl OpCode {
             Lazy => "LAZY",
             Force => "FORCE",
             Bootstrap => "BOOTSTRAP",
-<<<<<<< Updated upstream
-=======
             Generator => "GENERATOR",
             Yield => "YIELD",
             Next => "NEXT",
@@ -209,7 +204,6 @@ impl OpCode {
             JointConditionMap => "JOINT_CONDITION_MAP",
             ObserveMap => "OBSERVE_MAP",
             LoadFunction => "LOAD_FUNCTION",
->>>>>>> Stashed changes
             Count => "COUNT",
         }
     }
@@ -231,13 +225,10 @@ impl TryFrom<u8> for OpCode {
 /// LABC version constants, mirroring `vm/include/bytecode.h`.
 pub const LABC_VERSION: u32 = 2;
 pub const LABC_VERSION_1: u32 = 1;
-<<<<<<< Updated upstream
-=======
 pub const LABC_VERSION_3: u32 = 3;
 pub const LABC_VERSION_4: u32 = 4;
 /// LABC v5 reserves the balanced Core information surface. It keeps the
 /// existing binary layout and adds no implicit compatibility conversion.
 pub const LABC_VERSION_5: u32 = 5;
->>>>>>> Stashed changes
 pub const LANA_MAX_REGISTERS: u32 = 256;
 pub const LANA_MAX_CALL_FRAMES: u32 = 64;

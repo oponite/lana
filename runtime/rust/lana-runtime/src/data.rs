@@ -13,7 +13,7 @@
 use std::sync::{Arc, Mutex};
 
 use lana_bytecode::LanaError;
-use lana_vm::value::{Array, Map, Value, ValueKind};
+use lana_vm::value::{Array, Map, MapEntry, Value, ValueKind};
 
 use crate::codec::format_17g;
 
@@ -67,7 +67,17 @@ fn json_string(parser: &mut JsonParser) -> Result<Arc<str>, LanaError> {
             return Err(LanaError::Parse);
         }
         if c != b'\\' {
-            out.push(c as char);
+            let start = parser.offset - 1;
+            while parser.offset < parser.data.len()
+                && parser.data[parser.offset] >= 0x20
+                && parser.data[parser.offset] != b'"'
+                && parser.data[parser.offset] != b'\\'
+            {
+                parser.offset += 1;
+            }
+            let text = std::str::from_utf8(&parser.data[start..parser.offset])
+                .map_err(|_| LanaError::Parse)?;
+            out.push_str(text);
             continue;
         }
         if parser.offset >= parser.data.len() {
@@ -131,7 +141,14 @@ fn json_string(parser: &mut JsonParser) -> Result<Arc<str>, LanaError> {
     Ok(Arc::from(out.as_str()))
 }
 
-fn json_value(parser: &mut JsonParser, depth: usize) -> Result<Value, LanaError> {
+pub(crate) fn decode_string(data: &[u8], offset: &mut usize) -> Result<Arc<str>, LanaError> {
+    let mut parser = JsonParser { data, offset: *offset };
+    let result = json_string(&mut parser);
+    *offset = parser.offset;
+    result
+}
+
+fn json_value(parser: &mut JsonParser, depth: usize, heap: &lana_vm::heap::Heap) -> Result<Value, LanaError> {
     if depth > DATA_DEPTH_LIMIT {
         return Err(LanaError::Limit);
     }
@@ -146,10 +163,10 @@ fn json_value(parser: &mut JsonParser, depth: usize) -> Result<Value, LanaError>
     if parser.data[parser.offset] == b'[' {
         parser.offset += 1;
         parser.space();
-        let mut items = Vec::new();
+        let mut array = Array::new(heap, 0)?;
         while parser.offset < parser.data.len() && parser.data[parser.offset] != b']' {
-            let item = json_value(parser, depth + 1)?;
-            items.push(item);
+            let item = json_value(parser, depth + 1, heap)?;
+            array.push(item)?;
             parser.space();
             if parser.offset < parser.data.len() && parser.data[parser.offset] == b',' {
                 parser.offset += 1;
@@ -165,12 +182,12 @@ fn json_value(parser: &mut JsonParser, depth: usize) -> Result<Value, LanaError>
             return Err(LanaError::Parse);
         }
         parser.offset += 1;
-        return Ok(Value::array(Arc::new(Mutex::new(Array { items }))));
+        return Ok(Value::array(Arc::new(Mutex::new(array))));
     }
     if parser.data[parser.offset] == b'{' {
         parser.offset += 1;
         parser.space();
-        let mut map = Map::new(4);
+        let mut map = Map::new(heap, 4)?;
         while parser.offset < parser.data.len() && parser.data[parser.offset] != b'}' {
             let key = json_string(parser)?;
             parser.space();
@@ -178,8 +195,8 @@ fn json_value(parser: &mut JsonParser, depth: usize) -> Result<Value, LanaError>
                 return Err(LanaError::Parse);
             }
             parser.offset += 1;
-            let item = json_value(parser, depth + 1)?;
-            if map.set(key, item, true).is_err() {
+            let item = json_value(parser, depth + 1, heap)?;
+            if map.set(key, item, false).is_err() {
                 return Err(LanaError::Parse);
             }
             parser.space();
@@ -213,9 +230,49 @@ fn json_value(parser: &mut JsonParser, depth: usize) -> Result<Value, LanaError>
         return Ok(Value::boolean(false));
     }
     // Number: `strtod` plus the strict leading `+`/`0` rejection.
+    let start = parser.offset;
     let (number, end) = parse_number_strict(parser.data, parser.offset)?;
     parser.offset = end;
-    Ok(Value::number(number))
+    if json_large_integer(&parser.data[start..end]) {
+        let text = std::str::from_utf8(&parser.data[start..end]).map_err(|_| LanaError::Parse)?;
+        Ok(Value::string(Arc::from(text)))
+    } else {
+        Ok(Value::number(number))
+    }
+}
+
+/// An integer literal whose magnitude exceeds 2^53 is not exactly representable
+/// in binary64; LIP-023 §3 preserves it as a string. Returns false for any
+/// token with a fraction or exponent.
+fn json_large_integer(token: &[u8]) -> bool {
+    if token.iter().any(|&b| b == b'.' || b == b'e' || b == b'E') {
+        return false;
+    }
+    let mut p = 0;
+    if p < token.len() && token[p] == b'-' {
+        p += 1;
+    }
+    while p < token.len() && token[p] == b'0' {
+        p += 1;
+    }
+    let first = p;
+    let digits = token.len() - p;
+    if digits < 16 {
+        return false;
+    }
+    if digits > 16 {
+        return true;
+    }
+    const LIMIT: &[u8] = b"9007199254740992";
+    for i in 0..16 {
+        if token[first + i] > LIMIT[i] {
+            return true;
+        }
+        if token[first + i] < LIMIT[i] {
+            return false;
+        }
+    }
+    false
 }
 
 fn parse_number_strict(data: &[u8], offset: usize) -> Result<(f64, usize), LanaError> {
@@ -275,8 +332,9 @@ fn parse_number_strict(data: &[u8], offset: usize) -> Result<(f64, usize), LanaE
 /// Parse a complete JSON document, mirroring `lana_json_parse`.
 pub fn json_parse(text: &str) -> Result<Value, LanaError> {
     let data = text.as_bytes();
+    let heap = lana_vm::heap::Heap::new(256 * 1024 * 1024);
     let mut parser = JsonParser { data, offset: 0 };
-    let value = json_value(&mut parser, 0)?;
+    let value = json_value(&mut parser, 0, &heap)?;
     parser.space();
     if parser.offset != data.len() {
         return Err(LanaError::Parse);
@@ -338,7 +396,7 @@ fn json_emit(value: &Value, out: &mut String, stack: &mut Vec<usize>, depth: usi
         ValueKind::Array(array) => {
             out.push('[');
             let array = array.lock().unwrap();
-            for (index, item) in array.items.iter().enumerate() {
+            for (index, item) in array.items().iter().enumerate() {
                 if index > 0 {
                     out.push(',');
                 }
@@ -349,7 +407,9 @@ fn json_emit(value: &Value, out: &mut String, stack: &mut Vec<usize>, depth: usi
         ValueKind::Map(map) => {
             out.push('{');
             let map = map.lock().unwrap();
-            for (index, entry) in map.entries.iter().enumerate() {
+            let mut entries: Vec<&MapEntry> = map.entries().iter().collect();
+            entries.sort_by(|a, b| a.key.cmp(&b.key));
+            for (index, entry) in entries.iter().enumerate() {
                 if index > 0 {
                     out.push(',');
                 }
@@ -440,6 +500,7 @@ fn csv_records(text: &str) -> Result<Vec<Vec<String>>, LanaError> {
 
 /// Read a CSV file into an array of maps, mirroring `lana_csv_read`.
 pub fn csv_read(path: &str) -> Result<Value, LanaError> {
+    let heap = lana_vm::heap::Heap::new(256 * 1024 * 1024);
     let mut text = std::fs::read_to_string(path).map_err(|_| LanaError::Io)?;
     if text.starts_with('\u{feff}') {
         text.drain(..3);
@@ -464,7 +525,7 @@ pub fn csv_read(path: &str) -> Result<Value, LanaError> {
             if row.len() != header.len() {
                 return Err(LanaError::Parse);
             }
-            let mut map = Map::new(header.len());
+            let mut map = Map::new(&heap, header.len())?;
             for (column, name) in header.iter().enumerate() {
                 let value = Value::string(Arc::from(row[column].as_str()));
                 map.set(Arc::from(name.as_str()), value, true).map_err(|_| LanaError::Parse)?;
@@ -472,7 +533,7 @@ pub fn csv_read(path: &str) -> Result<Value, LanaError> {
             items.push(Value::map(Arc::new(Mutex::new(map))));
         }
     }
-    Ok(Value::array(Arc::new(Mutex::new(Array { items }))))
+    Ok(Value::array(Arc::new(Mutex::new(Array::from_items(&heap, items)?))))
 }
 
 fn csv_scalar(value: &Value, field: &mut String) -> bool {
@@ -511,27 +572,27 @@ pub fn csv_write(path: &str, rows: &Value) -> Result<Value, LanaError> {
         _ => return Err(LanaError::Type),
     };
     let array = array.lock().unwrap();
-    if array.items.is_empty() {
+    if array.items().is_empty() {
         return Err(LanaError::Type);
     }
     // Extract the header keys up front (releasing the map lock) so the row
     // loop below can re-lock the same map without deadlocking.
-    let header_keys: Vec<Arc<str>> = match &array.items[0].kind {
-        ValueKind::Map(map) => map.lock().unwrap().entries.iter().map(|e| e.key.clone()).collect(),
+    let header_keys: Vec<Arc<str>> = match &array.items()[0].kind {
+        ValueKind::Map(map) => map.lock().unwrap().entries().iter().map(|e| e.key.clone()).collect(),
         _ => return Err(LanaError::Type),
     };
     let mut out = String::new();
-    for row in 0..=array.items.len() {
+    for row in 0..=array.items().len() {
         let row_map = if row == 0 {
             None
         } else {
-            match &array.items[row - 1].kind {
+            match &array.items()[row - 1].kind {
                 ValueKind::Map(map) => Some(map.lock().unwrap()),
                 _ => return Err(LanaError::Type),
             }
         };
         if let Some(map) = row_map.as_ref() {
-            if map.entries.len() != header_keys.len() {
+            if map.entries().len() != header_keys.len() {
                 return Err(LanaError::Type);
             }
         }
@@ -547,10 +608,10 @@ pub fn csv_write(path: &str, rows: &Value) -> Result<Value, LanaError> {
                 }
             } else {
                 let map = row_map.as_ref().unwrap();
-                if map.entries[column].key != *key {
+                if map.entries()[column].key != *key {
                     return Err(LanaError::Type);
                 }
-                if !csv_scalar(&map.entries[column].value, &mut field) {
+                if !csv_scalar(&map.entries()[column].value, &mut field) {
                     return Err(LanaError::Type);
                 }
             }
@@ -568,8 +629,9 @@ mod tests {
 
     #[test]
     fn json_parse_handles_unicode_escape() {
-        let value = json_parse(r#""A""#).unwrap();
-        assert_eq!(value.as_string(), Arc::from("A"));
+        for source in [r#""café 🦀""#, r#""caf\u00e9 \ud83e\udd80""#] {
+            assert_eq!(&*json_parse(source).unwrap().as_string(), "café 🦀");
+        }
     }
 
     #[test]
@@ -591,13 +653,40 @@ mod tests {
     }
 
     #[test]
+    fn json_preserves_large_integer_as_string() {
+        let value = json_parse("9007199254740993").unwrap();
+        assert_eq!(value.as_string(), Arc::from("9007199254740993"));
+        // At or below 2^53 stays a number.
+        let value = json_parse("9007199254740992").unwrap();
+        assert_eq!(value.as_number(), 9007199254740992.0);
+    }
+
+    #[test]
+    fn json_duplicate_keys_last_wins() {
+        let value = json_parse(r#"{"a":1,"a":2}"#).unwrap();
+        let ValueKind::Map(map) = &value.kind else { panic!("expected map") };
+        let map = map.lock().unwrap();
+        assert_eq!(map.entries().len(), 1);
+        assert_eq!(map.entries()[0].value.as_number(), 2.0);
+    }
+
+    #[test]
+    fn json_stringify_sorts_keys() {
+        let mut map = Map::new(&lana_vm::heap::Heap::default(), 2).unwrap();
+        map.set(Arc::from("b"), Value::number(2.0), false).unwrap();
+        map.set(Arc::from("a"), Value::number(1.0), false).unwrap();
+        let value = Value::map(Arc::new(Mutex::new(map)));
+        assert_eq!(json_stringify(&value).unwrap(), r#"{"a":1,"b":2}"#);
+    }
+
+    #[test]
     fn csv_round_trip() {
-        let mut map = Map::new(2);
+        let mut map = Map::new(&lana_vm::heap::Heap::default(), 2).unwrap();
         map.set(Arc::from("a"), Value::string(Arc::from("1")), false).unwrap();
         map.set(Arc::from("b"), Value::string(Arc::from("x,y")), false).unwrap();
-        let rows = Value::array(Arc::new(Mutex::new(Array {
-            items: vec![Value::map(Arc::new(Mutex::new(map)))],
-        })));
+        let heap = lana_vm::heap::Heap::new(4096);
+        let rows = Value::array(Arc::new(Mutex::new(Array::from_items(&heap,
+            vec![Value::map(Arc::new(Mutex::new(map)))]).unwrap())));
         let path = std::env::temp_dir().join("lana_csv_test.csv");
         let path = path.to_str().unwrap();
         csv_write(path, &rows).unwrap();
@@ -606,7 +695,7 @@ mod tests {
         match &read.kind {
             ValueKind::Array(array) => {
                 let array = array.lock().unwrap();
-                assert_eq!(array.items.len(), 1);
+                assert_eq!(array.items().len(), 1);
             }
             _ => panic!("expected array"),
         }

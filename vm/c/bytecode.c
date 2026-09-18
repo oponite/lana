@@ -608,19 +608,8 @@ LanaError lana_chunk_read_file(LanaChunk *chunk, const char *path, LanaErrorInfo
         !read_u32(file, &functions) || !read_u32(file, &instructions) || !read_u32(file, &chunk->entry)) {
         result = LANA_ERR_FORMAT; goto failure;
     }
-<<<<<<< Updated upstream
     if (chunk->version != LABC_VERSION && chunk->version != LABC_VERSION_1) {
         result = LANA_ERR_INCOMPATIBLE_FORMAT; goto failure;
-=======
-    if (chunk->version != LABC_VERSION && chunk->version != LABC_VERSION_1 &&
-        chunk->version != LABC_VERSION_3 && chunk->version != LABC_VERSION_4) {
-        lana_error_set(error, LANA_ERR_INCOMPATIBLE_FORMAT, 0, OP_NOP, 0,
-                       "unsupported LABC v%u: lanavm supports v1-v4; run this program with Lana's Rust CLI",
-                       chunk->version);
-        (void)fclose(file);
-        lana_chunk_free(chunk);
-        return LANA_ERR_INCOMPATIBLE_FORMAT;
->>>>>>> Stashed changes
     }
     if (constants > 100000u || functions > 10000u || instructions > 1000000u) {
         result = LANA_ERR_LIMIT; goto failure;

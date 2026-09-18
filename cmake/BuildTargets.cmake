@@ -68,6 +68,61 @@ target_compile_options(lanavm_release PRIVATE -Wall -Wextra -Wpedantic -Werror -
 
 set(LANA_COMPILER_BUNDLE "${CMAKE_CURRENT_BINARY_DIR}/compiler-bootstrap.lana")
 set(LANA_NATIVE_COMPILER "${CMAKE_CURRENT_BINARY_DIR}/lana-compiler.labc")
+set(LANA_RUST_CLI "${CMAKE_CURRENT_BINARY_DIR}/lana-rust")
+
+find_program(LANA_CARGO_EXECUTABLE cargo
+    HINTS "$ENV{HOME}/.cargo/bin"
+    REQUIRED)
+find_program(LANA_RUSTC_EXECUTABLE rustc
+    HINTS "$ENV{HOME}/.cargo/bin"
+    REQUIRED)
+
+if(APPLE AND "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
+    find_program(LANA_LIPO_EXECUTABLE lipo REQUIRED)
+    add_custom_command(
+        OUTPUT "${LANA_RUST_CLI}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}/cargo-target"
+                "RUSTC=${LANA_RUSTC_EXECUTABLE}"
+                "${LANA_CARGO_EXECUTABLE}" build --manifest-path
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-cli/Cargo.toml" --release --target aarch64-apple-darwin
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}/cargo-target"
+                "RUSTC=${LANA_RUSTC_EXECUTABLE}"
+                "${LANA_CARGO_EXECUTABLE}" build --manifest-path
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-cli/Cargo.toml" --release --target x86_64-apple-darwin
+        COMMAND "${LANA_LIPO_EXECUTABLE}" -create
+                "${CMAKE_CURRENT_BINARY_DIR}/cargo-target/aarch64-apple-darwin/release/lana"
+                "${CMAKE_CURRENT_BINARY_DIR}/cargo-target/x86_64-apple-darwin/release/lana"
+                -output "${LANA_RUST_CLI}"
+        DEPENDS
+            Cargo.toml Cargo.lock
+            vm/rust/lana-bytecode/src/lib.rs vm/rust/lana-bytecode/src/opcode.rs
+            vm/rust/lana-vm/src/lib.rs vm/rust/lana-vm/src/vm.rs
+            runtime/rust/lana-runtime/src/lib.rs
+            tools/rust/lana-cli/src/main.rs
+        VERBATIM
+    )
+else()
+    add_custom_command(
+        OUTPUT "${LANA_RUST_CLI}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+                "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}/cargo-target"
+                "RUSTC=${LANA_RUSTC_EXECUTABLE}"
+                "${LANA_CARGO_EXECUTABLE}" build --manifest-path
+                "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-cli/Cargo.toml" --release
+        COMMAND "${CMAKE_COMMAND}" -E copy
+                "${CMAKE_CURRENT_BINARY_DIR}/cargo-target/release/lana" "${LANA_RUST_CLI}"
+        DEPENDS
+            Cargo.toml Cargo.lock
+            vm/rust/lana-bytecode/src/lib.rs vm/rust/lana-bytecode/src/opcode.rs
+            vm/rust/lana-vm/src/lib.rs vm/rust/lana-vm/src/vm.rs
+            runtime/rust/lana-runtime/src/lib.rs
+            tools/rust/lana-cli/src/main.rs
+        VERBATIM
+    )
+endif()
+add_custom_target(lana_rust_cli ALL DEPENDS "${LANA_RUST_CLI}")
 
 add_executable(lana tools/c/cli.c)
 target_link_libraries(lana PRIVATE lanaruntime m)
@@ -84,51 +139,28 @@ add_custom_command(
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BundleCompiler.cmake"
     DEPENDS
         compiler/lexer.lana compiler/syntax.lana compiler/parser.lana
-        compiler/resolver.lana compiler/ir.lana compiler/cfg.lana
-        compiler/ssa.lana compiler/analysis.lana compiler/opt.lana
-        compiler/emitter.lana compiler/main.lana cmake/BundleCompiler.cmake
+        compiler/resolver.lana compiler/ir.lana compiler/emitter.lana
+        compiler/main.lana cmake/BundleCompiler.cmake
     VERBATIM
 )
 add_custom_target(lana_compiler_bundle ALL DEPENDS "${LANA_COMPILER_BUNDLE}")
 
 add_custom_command(
     OUTPUT "${LANA_NATIVE_COMPILER}"
-    COMMAND $<TARGET_FILE:lanavm> asm
+    COMMAND "${LANA_RUST_CLI}" asm
             "${CMAKE_CURRENT_SOURCE_DIR}/compiler/bootstrap/compiler.lasm"
             -o "${LANA_NATIVE_COMPILER}"
-    DEPENDS lanavm compiler/bootstrap/compiler.lasm
+    DEPENDS lana_rust_cli compiler/bootstrap/compiler.lasm
     VERBATIM
 )
 add_custom_target(lana_native_compiler ALL DEPENDS "${LANA_NATIVE_COMPILER}")
 add_dependencies(lana lana_native_compiler)
 
-find_program(LANA_CARGO cargo REQUIRED)
-set(LANA_RUST_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo")
-set(LANA_RUST_CLI "${LANA_RUST_TARGET_DIR}/release/lana")
-set(LANA_RUST_FFI "${LANA_RUST_TARGET_DIR}/release/${CMAKE_SHARED_LIBRARY_PREFIX}lana_ffi${CMAKE_SHARED_LIBRARY_SUFFIX}")
-add_custom_target(lana_rust_cli ALL
-    COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${LANA_RUST_TARGET_DIR}"
-            "${LANA_CARGO}" build --locked --release --manifest-path
-            "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/lana-cli/Cargo.toml" --bin lana
-    BYPRODUCTS "${LANA_RUST_CLI}"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    VERBATIM
-)
-add_dependencies(lana_rust_cli lana_native_compiler)
-add_custom_target(lana_rust_ffi ALL
-    COMMAND "${CMAKE_COMMAND}" -E env "CARGO_TARGET_DIR=${LANA_RUST_TARGET_DIR}"
-            "${LANA_CARGO}" build --locked --release --manifest-path
-            "${CMAKE_CURRENT_SOURCE_DIR}/runtime/rust/lana-ffi/Cargo.toml" --lib
-    BYPRODUCTS "${LANA_RUST_FFI}"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    VERBATIM
-)
-
 install(TARGETS lanaruntime ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(TARGETS lanavm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS "${LANA_RUST_CLI}" DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME lana)
-install(FILES "${LANA_RUST_FFI}" DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES "${LANA_NATIVE_COMPILER}" DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY stdlib/ DESTINATION ${CMAKE_INSTALL_DATADIR}/lana/stdlib)
 # Public headers keep the `lana/` install prefix; the three layer include dirs
 # are flattened into a single `${INCLUDEDIR}/lana` namespace.
 install(DIRECTORY vm/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/lana)

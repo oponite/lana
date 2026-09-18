@@ -6,6 +6,7 @@
 //! portable core.
 
 pub mod adapters;
+pub mod brain;
 pub mod claims;
 pub mod codec;
 pub mod data;

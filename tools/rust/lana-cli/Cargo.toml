@@ -11,5 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 lana-bytecode = { workspace = true }
-lana-vm = { workspace = true }
+lana-vm = { workspace = true, features = ["net-tls"] }
 lana-runtime = { workspace = true }

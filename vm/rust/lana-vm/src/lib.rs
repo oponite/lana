@@ -9,11 +9,17 @@
 //! Increments 2-5 add state dists and the 2.0 ISA ops, information types,
 //! tasks, and host calls; increment 6 is the differential conformance harness.
 
+pub mod backend;
 pub mod derivation;
+pub mod heap;
 pub mod inspect;
+pub mod metal;
 pub mod rng;
+pub mod sha256;
 pub mod state;
 pub mod state_dist;
+pub mod tensor;
+pub mod unicode_case;
 pub mod value;
 pub mod vm;
 
@@ -25,7 +31,7 @@ pub use value::{
     Adt, CapabilityToken, Claim, EffectReceipt, JointKind, JointRow, JointState, PathAlternative,
     PathSet, PlannedEffect, Possibility, Reactive, ReactiveKind, ReactiveVersion,
     RelationshipKind, SharedCommit, SharedInformation, SharedObservation, SharedState,
-    SharedVersion, Task, Value, ValueKind, VmError, ADT_UNKNOWN_VARIANT, LANA_CAPABILITY_ADMIN,
+    SharedVersion, Task, Tensor, TensorDevice, Value, ValueKind, VmError, ADT_UNKNOWN_VARIANT, LANA_CAPABILITY_ADMIN,
     LANA_CAPABILITY_OBSERVE, LANA_CAPABILITY_READ,
 };
 pub use vm::{
@@ -39,9 +45,6 @@ pub use vm::{
     LANA_RESOURCE_TASKS, LANA_RESOURCE_TIME, LANA_HOST_STORE_OPEN, LANA_HOST_STORE_PUT,
     LANA_HOST_STORE_GET, LANA_HOST_STORE_DELETE, LANA_HOST_STORE_COMMIT, LANA_HOST_STORE_SCAN,
     LANA_HOST_STORE_CURRENT_REVISION, LANA_HOST_POLICY_EVALUATE, LANA_HOST_POLICY_STORE_DECISION,
-<<<<<<< Updated upstream
-    LANA_HOST_LEDGER_APPEND, LANA_HOST_LEDGER_QUERY,
-=======
     LANA_HOST_LEDGER_APPEND, LANA_HOST_LEDGER_QUERY, LANA_HOST_STORE_GET_AT,
     LANA_HOST_STORE_SNAPSHOT, LANA_HOST_STORE_COMMIT_IF, LANA_HOST_ADAPTER_LOAD,
     LANA_HOST_ADAPTER_FETCH, LANA_HOST_FFI_DECLARE, LANA_HOST_FFI_LOAD, LANA_HOST_FFI_CALL,
@@ -51,5 +54,4 @@ pub use vm::{
     LANA_HOST_TRACE_DISTANCE, LANA_HOST_IS_SEPARABLE, LANA_HOST_TO_STATE,
     LANA_HOST_STATE_TENSOR, LANA_HOST_APPEND, LANA_HOST_MEASURE, LANA_HOST_TRANSFORM,
     LANA_HOST_EXECUTION_CAPABILITY, LANA_HOST_EXECUTION_AUTHORIZE, LANA_HOST_EXECUTION_EXECUTE,
->>>>>>> Stashed changes
 };

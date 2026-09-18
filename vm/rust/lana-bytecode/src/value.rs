@@ -25,15 +25,29 @@ pub enum ValueType {
     PathSet,
     SharedCapability,
     Adt,
+    Tensor,
+    NQubitState,
+    Povm,
+    Channel,
+    Observable,
     Lazy,
+    Generator,
+    Set,
+    Regex,
+    Optimizer,
+    TrainingResult,
+    InferenceAlgorithm,
+    Posterior,
+    Future,
+    Dataset,
 }
 
 impl TryFrom<u8> for ValueType {
     type Error = ();
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value <= Self::Lazy as u8 {
-            // SAFETY: every discriminant up to Lazy is valid.
+        if value <= Self::Future as u8 {
+            // SAFETY: every discriminant up to Future is valid.
             Ok(unsafe { core::mem::transmute::<u8, ValueType>(value) })
         } else {
             Err(())

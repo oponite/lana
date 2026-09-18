@@ -21,7 +21,6 @@ pub struct ExecutionCapability {
     id: Arc<str>,
     origin: Arc<str>,
 }
-
 /// Host-only execution metadata. Its on-disk form is `LXE1 || nonce || AES-GCM`.
 /// Neither source nor bytecode receives the origin or credential identifier.
 #[derive(Clone)]
