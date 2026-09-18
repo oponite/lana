@@ -1,0 +1,1 @@
+{"brier_sum":38.28717064105944,"confusion":[],"correct":224,"evaluation":"batched","mode":"dense","offset":5376,"router_correct":0,"router_total":0,"rows":256}

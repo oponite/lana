@@ -17,7 +17,7 @@ use crate::opcode::{OpCode, LANA_MAX_REGISTERS};
 /// calls (run_async/future_all/future_race/sleep) occupy ids 126-129 and the
 /// LIP-015 dataset calls ids 130-140, LIP-018 FFI calls 157-159, LIP-019 net
 /// calls 160-165, LIP-027 cast at 166, matching the C11 VM.
-pub const LANA_HOST_COUNT: u32 = 167;
+pub const LANA_HOST_COUNT: u32 = 188;
 
 const LANA_TRANSFORM_NEUTRALIZE: u32 = 1;
 const LANA_MEASURE_SAMPLE: u32 = 2;
@@ -89,6 +89,7 @@ pub fn verify(chunk: &Chunk) -> Result<(), LanaErrorInfo> {
     if chunk.version != crate::opcode::LABC_VERSION && chunk.version != crate::opcode::LABC_VERSION_1
         && chunk.version != crate::opcode::LABC_VERSION_3
         && chunk.version != crate::opcode::LABC_VERSION_4
+        && chunk.version != crate::opcode::LABC_VERSION_5
     {
         return Err(LanaErrorInfo::new(
             LanaError::Format, 0, OpCode::Nop as u8, 0,
@@ -119,14 +120,13 @@ pub fn verify(chunk: &Chunk) -> Result<(), LanaErrorInfo> {
     Ok(())
 }
 
-/// Highest valid opcode for a given LABC version. v1/v2 predate the generator
-/// opcodes, so they must reject `Generator`/`Yield`/`Next`; v3 accepts them.
+/// First invalid opcode for a given LABC version. New opcodes are appended, so
+/// each version accepts exactly the range it introduced.
 fn max_opcode_for_version(version: u32) -> u8 {
-    if version == crate::opcode::LABC_VERSION_3 || version == crate::opcode::LABC_VERSION_4 {
-        OpCode::Count as u8
-    } else {
-        OpCode::Generator as u8
-    }
+    if version == crate::opcode::LABC_VERSION_5 { return OpCode::Count as u8; }
+    if version == crate::opcode::LABC_VERSION_4 { return OpCode::DistributionBuild as u8; }
+    if version == crate::opcode::LABC_VERSION_3 { return OpCode::Async as u8; }
+    OpCode::Generator as u8
 }
 
 fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(), LanaError> {
@@ -444,6 +444,14 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
                 result = Err(LanaError::Type);
             }
         }
+        JointConditionMap | ObserveMap => {
+            check(&mut result, &mut error, ip, ins, ins.a);
+            check(&mut result, &mut error, ip, ins, ins.b);
+            check(&mut result, &mut error, ip, ins, ins.c);
+            if result.is_ok() && ins.imm != 0 {
+                result = Err(LanaError::Format);
+            }
+        }
         JointSample | Resolve => {
             check(&mut result, &mut error, ip, ins, ins.a);
             check(&mut result, &mut error, ip, ins, ins.b);
@@ -477,7 +485,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
                 result = Err(LanaError::Type);
             }
         }
-        PossibilityBuild | InfoSample => {
+        PossibilityBuild | DistributionBuild | InfoSample => {
             check(&mut result, &mut error, ip, ins, ins.a);
             check(&mut result, &mut error, ip, ins, ins.b);
             if result.is_ok() && (ins.c != 0 || ins.imm != 0) {

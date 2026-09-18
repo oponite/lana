@@ -51,6 +51,7 @@ static void test_persistent_state_roundtrip(void) {
     assert(lana_persistent_state_decode(buffer, length, &decoded) == LANA_OK);
     assert(decoded.metadata.has_source && strcmp(decoded.metadata.source, "sensor") == 0);
     assert(decoded.has_provenance && decoded.provenance.derivation_id == 42u);
+    lana_persistent_state_free(&decoded);
     ((unsigned char *)buffer)[0] = '[';
     assert(lana_persistent_state_decode(buffer, length, &decoded) == LANA_ERR_SCHEMA);
     lana_persistent_state_free(&decoded);

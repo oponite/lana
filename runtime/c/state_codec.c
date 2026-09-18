@@ -186,6 +186,6 @@ LanaError lana_persistent_state_decode(const void *buf, size_t len,
 bad:
     error = LANA_ERR_SCHEMA;
 done:
-    lana_persistent_state_free(&decoded); lana_value_free(root);
+    lana_persistent_state_free(&decoded); lana_codec_free_value(root);
     return error;
 }

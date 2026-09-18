@@ -1,0 +1,9 @@
+import "std/decision" as decision;
+
+let policy = {policy_id: "recommend", rule_kind: 0, rule_field: "p", rule_threshold: 0.5, rule_effect: "grant"};
+let input = {p: 0.75};
+let evaluation = {decision_id: 1, target: "target", scope: "scope", input_revision: 0, evaluation_time: 0, reason: "test"};
+let recommendation = decision.recommend_information(policy, input, evaluation);
+assert(recommendation.mode == "information", "recommendation mode");
+assert(recommendation.advisory, "recommendations are advisory");
+assert(recommendation.outcome == 0, "policy outcome is preserved");

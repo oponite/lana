@@ -1,7 +1,6 @@
 #ifndef LANA_VM_H
 #define LANA_VM_H
 
-#include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -36,23 +35,12 @@ typedef struct {
     size_t return_ip;
     uint32_t return_register;
     uint32_t function;
-    bool is_generator;
-    bool is_async;
 } LanaFrame;
 
 typedef struct LanaVM LanaVM;
 typedef struct LanaScheduler LanaScheduler;
 typedef struct LanaPathExecution LanaPathExecution;
 typedef struct LanaSharedReference LanaSharedReference;
-typedef struct LanaStore LanaStore;
-typedef struct LanaLedger LanaLedger;
-/* LIP-019 networking: an open socket. `ssl` is an `SSL*` for TLS
- * connections and NULL for plain TCP. */
-typedef struct {
-    int fd;
-    void *ssl;
-    bool is_tls;
-} LanaSocket;
 typedef bool (*LanaDebugHook)(LanaVM *vm, size_t instruction,
                              uint32_t source_line, void *context);
 typedef LanaError (*LanaEffectExecutor)(LanaVM *vm, const char *kind,
@@ -91,7 +79,6 @@ struct LanaVM {
     uint64_t instruction_limit;
     uint64_t instruction_count;
     uint64_t opcode_counts[OP_COUNT];
-    bool profile_opcodes;
     uint64_t state_transition_count;
     uint64_t allocation_count;
     size_t memory_limit;
@@ -125,36 +112,11 @@ struct LanaVM {
     size_t observation_count;
     uint64_t revision;
     uint64_t derivation_sequence;
-    bool ad_recording; /* LIP-011: true while running the differentiated function */
     LanaFrame frames[LANA_MAX_CALL_FRAMES];
     size_t frame_count;
     LanaGC gc;
     LanaErrorInfo error;
     Value result;
-    /* LIP-024 async/await: the single-threaded cooperative event loop's ready
-     * queue. Futures are scheduled FIFO by creation order. */
-    LanaFuture **ready_queue;
-    size_t ready_count;
-    size_t ready_capacity;
-    /* LIP-015 §3 durable pipeline: the single store opened by `store_open`
-     * (NULL until opened) and the ledger layered over it. */
-    LanaStore *store;
-    LanaLedger *ledger;
-    /* LIP-015 §5: the single loaded adapter (NULL until `adapter_load`). */
-    void *adapter;
-    /* LIP-018 two-way FFI: declared signatures (owned strings) and the single
-     * loaded shared library handle (NULL until `ffi_load`). */
-    char **ffi_sigs;
-    size_t ffi_sig_count;
-    void *ffi_lib;
-    /* Crash containment: a sigsetjmp guard around the FFI call. */
-    sigjmp_buf ffi_jmp;
-    volatile bool ffi_faulted;
-    /* LIP-019 networking: open sockets, indexed by handle. `ssl` is an
-     * `SSL*` for TLS connections and NULL for plain TCP. */
-    LanaSocket *sockets;
-    size_t socket_count;
-    size_t socket_capacity;
 };
 
 void lana_vm_init(LanaVM *vm, const LanaChunk *chunk);
@@ -164,7 +126,6 @@ void lana_vm_seed(LanaVM *vm, uint64_t seed);
 void lana_vm_set_program_args(LanaVM *vm, int argc, const char **argv);
 LanaError lana_vm_set_worker_count(LanaVM *vm, size_t workers);
 LanaError lana_vm_set_task_limit(LanaVM *vm, size_t tasks);
-void lana_vm_set_memory_limit(LanaVM *vm, size_t memory_limit);
 void lana_vm_free(LanaVM *vm);
 LanaError lana_vm_run(LanaVM *vm);
 void *lana_vm_alloc(LanaVM *vm, size_t size);
@@ -189,7 +150,7 @@ LanaError lana_vm_state_dist_attenuate(LanaVM *vm, LanaStateDist *child, double 
 LanaError lana_vm_state_dist_append_relationship(LanaVM *vm, const Value *left,
                                    const Value *right, uint32_t mode, double strength,
                                    LanaStateDist **out);
-LanaError lana_vm_state_dist_expected_probability(LanaVM *vm, const LanaStateDist *distribution,
+LanaError lana_vm_state_dist_expected_probability(const LanaStateDist *distribution,
                                               double *out);
 LanaError lana_vm_state_dist_sample(LanaVM *vm, const LanaStateDist *distribution,
                                 LanaStateValue *out);

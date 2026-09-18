@@ -1,0 +1,21 @@
+fn analyze(n) {
+    let a = 40;
+    let b = a + 2;
+    let c = b * 2;
+    if (n > 0) {
+        let d = 1;
+    } else {
+        let e = 5;
+    }
+    let f = c - 4;
+    return f;
+}
+
+fn dead(n) {
+    if (n > 0) {
+        return 1;
+    } else {
+        return 2;
+    }
+    let unreachable = 99;
+}

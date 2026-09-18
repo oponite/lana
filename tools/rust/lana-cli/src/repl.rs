@@ -62,7 +62,6 @@ pub fn run_repl(compiler: &Path) -> ExitCode {
     }
     ExitCode::SUCCESS
 }
-
 /// True when the accumulated input is a complete statement (balanced brackets,
 /// no unterminated string literal).
 fn is_complete(buffer: &str) -> bool {

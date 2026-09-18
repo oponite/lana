@@ -1,0 +1,318 @@
+import "./analysis.lana" as analysis;
+
+// opt.lana — Phase 5: a legality-checked constant-propagation + branch-
+// simplification pass over the lowered typed AST. It reuses the Phase-3/4
+// abstract-value helpers (Definite/Unknown lattice) from analysis.lana.
+//
+// Soundness rule (must-analysis): a variable is only considered constant when
+// every reaching definition agrees. To preserve cross-variable correlation
+// (papers/compiler-analysis-findings.md §2), the environment is a *path set*:
+// a list of rows, each a map from plain name to a Definite abstract value.
+// A branch on an unknown condition splits the path set into two copies; the
+// join concatenates them. This keeps `(c → x=10,y=1) / (!c → x=20,y=2)` as two
+// correlated rows, so a later `x / y` folds to 10 without inventing correlation
+// (independent branches still multiply into all combinations).
+//
+// The path set is bounded (16 rows); past that it collapses to a single
+// meet-row, which stays sound but loses correlation. Anything unproven stays
+// unoptimized.
+//
+// Rewrites, both deterministic:
+//   * constant fold — replace an expression whose value is the same Definite
+//     across every path with a literal node;
+//   * branch simplify — inline the taken arm of a literal-bool `if`.
+// Each rewrite appends one structured record for `--dump-optimizations`.
+
+fn opt_path_cap() { return 16; }
+
+fn opt_array_copy(a) {
+    let r = array_new(0); let i = 0;
+    while (i < array_length(a)) { array_push(r, a[i]); i = i + 1; }
+    return r;
+}
+
+// Convert a folded literal node back to an abstract value.
+fn opt_node_av(node) {
+    if (node[0] != 20) { return analysis.ana_unknown(); }
+    let kind = node[1];
+    if (kind == "number") { return analysis.ana_definite("number", result_value(string_to_number(node[2]))); }
+    if (kind == "string") { return analysis.ana_definite("string", node[2]); }
+    if (kind == "bool") { return analysis.ana_definite("bool", node[2]); }
+    return analysis.ana_unknown();
+}
+
+// Convert a Definite abstract value back to a literal node.
+fn opt_av_literal(av, line, col) {
+    if (av[1] == "number") { return [20, "number", number_to_string(av[2]), line, col]; }
+    if (av[1] == "string") { return [20, "string", av[2], line, col]; }
+    if (av[1] == "bool") { return [20, "bool", av[2], line, col]; }
+    return [20, "number", "0", line, col];
+}
+
+fn opt_is_literal(node) { return node[0] == 20; }
+
+// Every syntax node trails with `..., line, col` (syntax.lana constructors).
+fn opt_node_line(node) { return node[array_length(node) - 2]; }
+fn opt_node_col(node) { return node[array_length(node) - 1]; }
+
+// --- path-set helpers ---
+
+fn opt_paths_one() { return [map_new()]; }
+
+fn opt_paths_copy(paths) {
+    let r = array_new(0); let i = 0;
+    while (i < array_length(paths)) { array_push(r, analysis.ana_state_copy(paths[i])); i = i + 1; }
+    return r;
+}
+
+// Collapse a path set to a single meet-row (sound, loses correlation).
+fn opt_paths_meet_all(all) {
+    let result = map_new(); let first = true; let i = 0;
+    while (i < array_length(all)) {
+        if (first) { result = analysis.ana_state_copy(all[i]); first = false; }
+        else { result = analysis.ana_state_meet(result, all[i]); }
+        i = i + 1;
+    }
+    return result;
+}
+
+fn opt_paths_concat(a, b) {
+    if (array_length(a) + array_length(b) > opt_path_cap()) {
+        let all = array_new(0);
+        let i = 0;
+        while (i < array_length(a)) { array_push(all, a[i]); i = i + 1; }
+        let j = 0;
+        while (j < array_length(b)) { array_push(all, b[j]); j = j + 1; }
+        return [opt_paths_meet_all(all)];
+    }
+    let r = array_new(0);
+    let i = 0;
+    while (i < array_length(a)) { array_push(r, a[i]); i = i + 1; }
+    let j = 0;
+    while (j < array_length(b)) { array_push(r, b[j]); j = j + 1; }
+    return r;
+}
+
+// The abstract value of `name`: Definite only when equal across every path.
+fn opt_paths_get(paths, name) {
+    let result = analysis.ana_unknown(); let first = true; let i = 0;
+    while (i < array_length(paths)) {
+        let av = analysis.ana_state_get(paths[i], name);
+        if (first) { result = av; first = false; }
+        else { result = analysis.ana_meet(result, av); }
+        i = i + 1;
+    }
+    return result;
+}
+
+fn opt_paths_set(paths, name, av) {
+    let i = 0;
+    while (i < array_length(paths)) { map_set(paths[i], name, av); i = i + 1; }
+    return null;
+}
+
+// Whole-expression evaluation over every path: Definite when the expression
+// yields the same constant in all paths (the correlated-fold case).
+fn opt_expr_av(node, paths) {
+    let result = analysis.ana_unknown(); let first = true; let i = 0;
+    while (i < array_length(paths)) {
+        let av = analysis.ana_eval(node, paths[i]);
+        if (first) { result = av; first = false; }
+        else { result = analysis.ana_meet(result, av); }
+        i = i + 1;
+    }
+    return result;
+}
+
+// Recursive partial fold: folds globally-definite names and sub-expressions,
+// leaving non-constant parts intact. Returns a new node, never mutates input.
+fn opt_fold_expr(node, paths) {
+    let tag = node[0];
+    if (tag == 20) { return node; }
+    if (tag == 21) {
+        let av = opt_paths_get(paths, node[1]);
+        if (analysis.ana_is_definite(av)) { return opt_av_literal(av, node[2], node[3]); }
+        return node;
+    }
+    if (tag == 22) {
+        let left = opt_fold_expr(node[2], paths);
+        let right = opt_fold_expr(node[3], paths);
+        let av = analysis.ana_binop(node[1], opt_node_av(left), opt_node_av(right));
+        if (analysis.ana_is_definite(av)) { return opt_av_literal(av, node[4], node[5]); }
+        return [22, node[1], left, right, node[4], node[5]];
+    }
+    if (tag == 23) {
+        let value = opt_fold_expr(node[2], paths);
+        let av = analysis.ana_unop(node[1], opt_node_av(value));
+        if (analysis.ana_is_definite(av)) { return opt_av_literal(av, node[3], node[4]); }
+        return [23, node[1], value, node[3], node[4]];
+    }
+    return node;
+}
+
+// Collect every name defined anywhere in a statement list (recursing into
+// nested control flow), for conservative loop kills.
+fn opt_collect_defs(stmts, out) {
+    let i = 0;
+    while (i < array_length(stmts)) {
+        let stmt = stmts[i]; let tag = stmt[1]; let node = stmt[3];
+        if (tag == 2) { array_push(out, node[1]); }
+        if (tag == 3) { if (node[1][0] == 21) { array_push(out, node[1][1]); } }
+        if (tag == 4) { opt_collect_defs(node[2], out); opt_collect_defs(node[3], out); }
+        if (tag == 5) { opt_collect_defs(node[2], out); }
+        if (tag == 15) { array_push(out, node[1]); opt_collect_defs(node[3], out); }
+        i = i + 1;
+    }
+    return null;
+}
+
+fn opt_record(records, text) { array_push(records, text); return null; }
+
+// Fold a statement list. Returns `[new_statements, out_paths]`. The incoming
+// `paths` is only mutated in place for straight-line statements; control-flow
+// joins return a fresh path set via the tuple so the caller rebinds it.
+fn opt_fold_statements(statements, paths, records, ctx) {
+    let result = array_new(0);
+    let i = 0;
+    while (i < array_length(statements)) {
+        let stmt = statements[i]; let tag = stmt[1]; let node = stmt[3];
+        if (tag == 2) {
+            let value = node[3];
+            let av = opt_expr_av(value, paths);
+            let folded = opt_fold_expr(value, paths);
+            if (analysis.ana_is_definite(av)) {
+                folded = opt_av_literal(av, opt_node_line(value), opt_node_col(value));
+                if (!opt_is_literal(value)) { opt_record(records, string_concat(ctx, ": fold ", node[1], " = ", analysis.ana_fmt_av(av))); }
+                opt_paths_set(paths, node[1], av);
+            } else {
+                opt_paths_set(paths, node[1], analysis.ana_unknown());
+            }
+            let newnode = opt_array_copy(node); index_set(newnode, 3, folded);
+            array_push(result, [201, 2, stmt[2], newnode, stmt[4]]);
+        } else {
+        if (tag == 3) {
+            let value = node[2];
+            let av = opt_expr_av(value, paths);
+            let folded = opt_fold_expr(value, paths);
+            if (analysis.ana_is_definite(av)) {
+                folded = opt_av_literal(av, opt_node_line(value), opt_node_col(value));
+                if (node[1][0] == 21) {
+                    if (!opt_is_literal(value)) { opt_record(records, string_concat(ctx, ": fold ", node[1][1], " = ", analysis.ana_fmt_av(av))); }
+                    opt_paths_set(paths, node[1][1], av);
+                }
+            } else {
+                if (node[1][0] == 21) { opt_paths_set(paths, node[1][1], analysis.ana_unknown()); }
+            }
+            let newnode = opt_array_copy(node); index_set(newnode, 2, folded);
+            array_push(result, [201, 3, stmt[2], newnode, stmt[4]]);
+        } else {
+        if (tag == 4) {
+            let cond = opt_fold_expr(node[1], paths);
+            if (cond[0] == 20) {
+                if (cond[1] == "bool") {
+                    opt_record(records, string_concat(ctx, ": simplify branch ", analysis.ana_fmt_av(opt_node_av(cond))));
+                    let chosen = node[3];
+                    if (cond[2]) { chosen = node[2]; }
+                    let sub = opt_fold_statements(chosen, paths, records, ctx);
+                    paths = sub[1];
+                    let k = 0;
+                    while (k < array_length(sub[0])) { array_push(result, sub[0][k]); k = k + 1; }
+                } else {
+                    let newnode = opt_array_copy(node); index_set(newnode, 1, cond);
+                    array_push(result, [201, 4, stmt[2], newnode, stmt[4]]);
+                }
+            } else {
+                let then_paths = opt_paths_copy(paths);
+                let else_paths = opt_paths_copy(paths);
+                let then_out = opt_fold_statements(node[2], then_paths, records, ctx);
+                let else_out = opt_fold_statements(node[3], else_paths, records, ctx);
+                paths = opt_paths_concat(then_out[1], else_out[1]);
+                let newnode = opt_array_copy(node);
+                index_set(newnode, 1, cond); index_set(newnode, 2, then_out[0]); index_set(newnode, 3, else_out[0]);
+                array_push(result, [201, 4, stmt[2], newnode, stmt[4]]);
+            }
+        } else {
+        if (tag == 5) {
+            let cond = opt_fold_expr(node[1], paths);
+            let body_paths = opt_paths_copy(paths);
+            let new_body = opt_fold_statements(node[2], body_paths, records, ctx)[0];
+            let defs = array_new(0); opt_collect_defs(node[2], defs);
+            let d = 0;
+            while (d < array_length(defs)) { opt_paths_set(paths, defs[d], analysis.ana_unknown()); d = d + 1; }
+            let newnode = opt_array_copy(node); index_set(newnode, 1, cond); index_set(newnode, 2, new_body);
+            array_push(result, [201, 5, stmt[2], newnode, stmt[4]]);
+        } else {
+        if (tag == 15) {
+            let iter = opt_fold_expr(node[2], paths);
+            let body_paths = opt_paths_copy(paths);
+            opt_paths_set(body_paths, node[1], analysis.ana_unknown());
+            let new_body = opt_fold_statements(node[3], body_paths, records, ctx)[0];
+            let defs = array_new(0); opt_collect_defs(node[3], defs);
+            opt_paths_set(paths, node[1], analysis.ana_unknown());
+            let d = 0;
+            while (d < array_length(defs)) { opt_paths_set(paths, defs[d], analysis.ana_unknown()); d = d + 1; }
+            let newnode = opt_array_copy(node);
+            index_set(newnode, 2, iter); index_set(newnode, 3, new_body);
+            array_push(result, [201, 15, stmt[2], newnode, stmt[4]]);
+        } else {
+        if (tag == 6) {
+            let newnode = opt_array_copy(node); index_set(newnode, 1, opt_fold_expr(node[1], paths));
+            array_push(result, [201, 6, stmt[2], newnode, stmt[4]]);
+        } else {
+        if (tag == 7) {
+            let newnode = opt_array_copy(node); index_set(newnode, 1, opt_fold_expr(node[1], paths));
+            array_push(result, [201, 7, stmt[2], newnode, stmt[4]]);
+        } else {
+        if (tag == 8) {
+            let newnode = opt_array_copy(node); index_set(newnode, 1, opt_fold_expr(node[1], paths));
+            array_push(result, [201, 8, stmt[2], newnode, stmt[4]]);
+        } else {
+            // Unhandled/extended statement: keep as-is, drop all tracked
+            // constants (conservative — we cannot prove it rebinds nothing).
+            let keys = map_keys(paths[0]); let k = 0;
+            while (k < array_length(keys)) { opt_paths_set(paths, keys[k], analysis.ana_unknown()); k = k + 1; }
+            array_push(result, stmt);
+        }
+        }
+        }
+        }
+        }
+        }
+        }
+        }
+        i = i + 1;
+    }
+    return [result, paths];
+}
+
+fn opt_optimize_function(fn_node, records) {
+    let new_body = opt_fold_statements(fn_node[4], opt_paths_one(), records, fn_node[1])[0];
+    let newfn = opt_array_copy(fn_node); index_set(newfn, 4, new_body);
+    return newfn;
+}
+
+fn opt_optimize_program(program, records) {
+    let functions = array_new(0); let i = 0;
+    while (i < array_length(program[1])) { array_push(functions, opt_optimize_function(program[1][i], records)); i = i + 1; }
+    let new_top = opt_fold_statements(program[2], opt_paths_one(), records, "top")[0];
+    let newprog = opt_array_copy(program);
+    index_set(newprog, 1, functions); index_set(newprog, 2, new_top);
+    return newprog;
+}
+
+fn opt_optimize_modules(modules) {
+    let items = modules["items"]; let i = 0;
+    while (i < array_length(items)) {
+        let rec = items[i];
+        let records = array_new(0);
+        index_set(rec, 2, opt_optimize_program(rec[2], records));
+        i = i + 1;
+    }
+    return null;
+}
+
+fn opt_dump_records(records) {
+    let text = ""; let i = 0;
+    while (i < array_length(records)) { text = string_concat(text, records[i], "\n"); i = i + 1; }
+    return text;
+}

@@ -1,5 +1,24 @@
 // std/decision — pure, advisory decision helpers.
 
+fn recommendation(mode, policy, input, evaluation) {
+    let decision = policy_evaluate(policy, input, evaluation);
+    map_set(decision, "mode", mode);
+    map_set(decision, "advisory", true);
+    return decision;
+}
+
+fn recommend_information(policy, input, evaluation) {
+    return recommendation("information", policy, input, evaluation);
+}
+
+fn recommend_definite(policy, input, evaluation) {
+    return recommendation("definite", policy, input, evaluation);
+}
+
+fn recommend_sampled(policy, input, evaluation) {
+    return recommendation("sampled", policy, input, evaluation);
+}
+
 fn finite_number(value) {
     if (type_of(value) != "number") { return false; }
     return value - value == 0;
@@ -431,4 +450,67 @@ fn value_of_information(current_information, candidate_observations, actions, ut
     }
     let result = {baseline: baseline, candidates: ranked, recommended: recommended, exactness: exactness};
     return evidence(result, "std/decision.value_of_information");
+}
+
+fn decision_context(alternatives, utility_table, evidence_ids, provenance_ids, assumptions, evaluated_at, recommendation) {
+    assert(type_of(alternatives) == "array", "alternatives must be an array");
+    assert(type_of(utility_table) == "array", "utility_table must be an array");
+    assert(type_of(evidence_ids) == "array", "evidence_ids must be an array");
+    assert(type_of(provenance_ids) == "array", "provenance_ids must be an array");
+    assert(type_of(assumptions) == "array", "assumptions must be an array");
+    assert(finite_number(evaluated_at), "evaluated_at must be finite");
+    return {schema: 1, alternatives: alternatives, utility_table: utility_table,
+        evidence_ids: evidence_ids, provenance_ids: provenance_ids, assumptions: assumptions,
+        evaluated_at: evaluated_at, recommendation: recommendation, advisory: true};
+}
+
+fn review_outcome(context, outcome) {
+    assert(type_of(context) == "map", "context must be a map");
+    assert(type_of(outcome) == "map", "outcome must be a map");
+    let decision_status = "complete";
+    if (array_length(context.evidence_ids) == 0) { decision_status = "incomplete"; }
+    if (array_length(context.assumptions) == 0) { decision_status = "incomplete"; }
+    let outcome_status = "not_observed";
+    if (outcome.status == "observed") {
+        outcome_status = "not_comparable";
+        if (map_has(context.recommendation, "expected_utility")) {
+            if (map_has(outcome, "realized_utility")) {
+                outcome_status = "below_expected";
+                if (outcome.realized_utility >= context.recommendation.expected_utility) { outcome_status = "met_or_exceeded"; }
+            }
+        }
+    }
+    return {decision_quality: {status: decision_status}, outcome_quality: {status: outcome_status}, advisory: true};
+}
+
+fn value_of_deliberation(information_value, direct_cost, delay_cost) {
+    assert(finite_number(information_value), "information_value must be finite");
+    assert(finite_number(direct_cost), "direct_cost must be finite");
+    assert(direct_cost >= 0, "direct_cost must be nonnegative");
+    assert(finite_number(delay_cost), "delay_cost must be finite");
+    assert(delay_cost >= 0, "delay_cost must be nonnegative");
+    return {information_value: information_value, direct_cost: direct_cost, delay_cost: delay_cost,
+        net_value: information_value - direct_cost - delay_cost, advisory: true};
+}
+
+fn validate_alternative_set(alternatives) {
+    assert(type_of(alternatives) == "array", "alternatives must be an array");
+    let required = ["act", "do_nothing", "delay", "smaller_trial"];
+    let present = array_new(0);
+    let index = 0;
+    while (index < array_length(alternatives)) {
+        let alternative = alternatives[index];
+        assert(type_of(alternative) == "map", "alternatives must be maps");
+        assert(type_of(alternative.id) == "string", "alternative ids must be strings");
+        assert(type_of(alternative.tags) == "array", "alternative tags must be arrays");
+        let tag_index = 0;
+        while (tag_index < array_length(alternative.tags)) {
+            if (!string_in(present, alternative.tags[tag_index])) { array_push(present, alternative.tags[tag_index]); }
+            tag_index = tag_index + 1;
+        }
+        index = index + 1;
+    }
+    let missing = array_new(0); index = 0;
+    while (index < array_length(required)) { if (!string_in(present, required[index])) { array_push(missing, required[index]); } index = index + 1; }
+    return {missing: missing, complete: array_length(missing) == 0, advisory: true};
 }

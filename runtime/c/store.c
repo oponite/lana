@@ -10,7 +10,6 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <time.h>
 
 #define STORE_SCHEMA 1u
 #define STORE_LIMIT (256u * 1024u * 1024u)
@@ -243,18 +242,15 @@ static void revision_digest(uint64_t revision, uint64_t previous, uint32_t count
 static LanaError parse_payload(const unsigned char *data, size_t length,
                                uint32_t count, StoreMutation **out) {
     const unsigned char *cursor = data, *end = data + length;
-    StoreMutation *mutations;
+    StoreMutation *mutations = calloc(count, sizeof(*mutations));
     uint32_t index;
-    /* Even a delete needs an opcode, key length, and one non-NUL key byte. */
-    if ((size_t)count > length / 6u) return LANA_ERR_CORRUPTION;
-    mutations = calloc(count, sizeof(*mutations));
     if (count != 0u && mutations == NULL) return LANA_ERR_OOM;
     for (index = 0u; index < count; ++index) {
         uint32_t key_length;
         if (cursor == end || (*cursor != 'P' && *cursor != 'D')) goto corrupt;
         mutations[index].deleted = *cursor++ == 'D';
         if (!read_u32(&cursor, end, &key_length) || key_length == 0u ||
-            (size_t)(end - cursor) < key_length || memchr(cursor, '\0', key_length) != NULL) goto corrupt;
+            (size_t)(end - cursor) < key_length) goto corrupt;
         mutations[index].key = malloc((size_t)key_length + 1u);
         if (mutations[index].key == NULL) goto oom;
         memcpy(mutations[index].key, cursor, key_length);
@@ -265,7 +261,7 @@ static LanaError parse_payload(const unsigned char *data, size_t length,
             if ((size_t)(end - cursor) < 32u) goto corrupt;
             const unsigned char *expected = cursor; cursor += 32u;
             if (!read_u64(&cursor, end, &value_length) || value_length > STORE_LIMIT ||
-                value_length > (uint64_t)(end - cursor) || memchr(cursor, '\0', (size_t)value_length) != NULL) goto corrupt;
+                value_length > (uint64_t)(end - cursor)) goto corrupt;
             lana_sha256(cursor, (size_t)value_length, actual);
             if (memcmp(actual, expected, 32u) != 0) goto corrupt;
             mutations[index].data = malloc((size_t)value_length + 1u);
@@ -327,7 +323,7 @@ static LanaError load_snapshot(LanaStore *store) {
     buffer = (LanaBuffer){payload, (size_t)length, (size_t)length};
     error = lana_codec_decode_document(&buffer, &value);
     if (error != LANA_OK || value.type != VAL_MAP) {
-        free(payload); lana_value_free(value); return error == LANA_OK ? LANA_ERR_CORRUPTION : error;
+        free(payload); lana_codec_free_value(value); return error == LANA_OK ? LANA_ERR_CORRUPTION : error;
     }
     for (index = 0u; index < value.as.map->count && error == LANA_OK; ++index) {
         LanaBuffer encoded = {0};
@@ -340,7 +336,7 @@ static LanaError load_snapshot(LanaStore *store) {
         }
         free(encoded.data);
     }
-    lana_value_free(value); free(payload);
+    lana_codec_free_value(value); free(payload);
     if (error == LANA_OK) store->current_rev = store->snapshot_rev;
     return error;
 }
@@ -364,7 +360,7 @@ static LanaError replay(LanaStore *store) {
             return (!saw_record && store->snapshot_rev != 0u) ||
                    journal_revision >= store->snapshot_rev ? LANA_OK : LANA_ERR_CORRUPTION;
         }
-        if (read != 4u) goto partial;
+        if (read != 4u) { clearerr(store->journal); (void)fseek(store->journal, start, SEEK_SET); return LANA_OK; }
         if (memcmp(magic, "LREV", 4u) != 0) return LANA_ERR_CORRUPTION;
         unsigned char header[28];
         if (fread(header, 1u, sizeof(header), store->journal) != sizeof(header) ||
@@ -386,7 +382,7 @@ static LanaError replay(LanaStore *store) {
             journal_revision = store->snapshot_rev;
         if (memcmp(magic, "LCMT", 4u) != 0 || !read_u64(&cursor, end, &commit_revision) ||
             commit_revision != revision || previous != journal_revision ||
-            previous == UINT64_MAX || revision != previous + 1u || memcmp(digest, commit_digest, 32u) != 0) {
+            revision != previous + 1u || memcmp(digest, commit_digest, 32u) != 0) {
             free(payload); return LANA_ERR_CORRUPTION;
         }
         payload_view = (Bytes){payload, (size_t)payload_length, (size_t)payload_length};
@@ -407,63 +403,28 @@ static LanaError replay(LanaStore *store) {
         store->journal_offset = ftell(store->journal);
     }
 partial:
-        if (ferror(store->journal)) return LANA_ERR_IO;
         clearerr(store->journal);
-        if (fseek(store->journal, start, SEEK_SET) != 0) return LANA_ERR_IO;
+        (void)fseek(store->journal, start, SEEK_SET);
         return LANA_OK;
-}
-
-static LanaError sync_directory(const LanaStore *store) {
-    int fd = open(store->path, O_RDONLY);
-    int result;
-    if (fd < 0) return LANA_ERR_IO;
-    result = fsync(fd);
-    if (close(fd) != 0) result = -1;
-    return result == 0 ? LANA_OK : LANA_ERR_IO;
 }
 
 static LanaError write_manifest(LanaStore *store) {
     char *path = store_path(store, "manifest");
-    char *temporary = store_path(store, "manifest.tmp");
     FILE *file;
     int result;
-    LanaError error = LANA_OK;
-    if (path == NULL || temporary == NULL) { free(path); free(temporary); return LANA_ERR_OOM; }
-    file = fopen(temporary, "wb");
-    if (file == NULL) { free(path); free(temporary); return LANA_ERR_IO; }
+    if (path == NULL) return LANA_ERR_OOM;
+    file = fopen(path, "wb"); free(path);
+    if (file == NULL) return LANA_ERR_IO;
     result = fprintf(file, "LANA_STORE %u\ncurrent %llu\nsnapshot %llu\nretention %llu\n",
                      STORE_SCHEMA, (unsigned long long)store->current_rev,
                      (unsigned long long)store->snapshot_rev,
                      (unsigned long long)store->retention_boundary);
     if (result < 0 || fflush(file) != 0 || fsync(fileno(file)) != 0) result = -1;
     if (fclose(file) != 0) result = -1;
-    if (result < 0 || rename(temporary, path) != 0) error = LANA_ERR_IO;
-    if (error == LANA_OK) error = sync_directory(store);
-    if (error != LANA_OK) (void)unlink(temporary);
-    free(path); free(temporary);
-    return error;
+    return result < 0 ? LANA_ERR_IO : LANA_OK;
 }
 
-static LanaError lock_journal(int fd, uint32_t timeout_ms) {
-    struct timespec start, now, pause = {0, 1000000L};
-    if (timeout_ms == 0u) {
-        while (flock(fd, LOCK_EX) != 0) { if (errno != EINTR) return LANA_ERR_IO; }
-        return LANA_OK;
-    }
-    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) return LANA_ERR_IO;
-    for (;;) {
-        int64_t elapsed;
-        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return LANA_OK;
-        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) return LANA_ERR_IO;
-        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return LANA_ERR_IO;
-        elapsed = (int64_t)(now.tv_sec - start.tv_sec) * INT64_C(1000000000)
-                + now.tv_nsec - start.tv_nsec;
-        if (elapsed >= (int64_t)timeout_ms * INT64_C(1000000)) return LANA_ERR_TIMEOUT;
-        (void)nanosleep(&pause, NULL);
-    }
-}
-
-static LanaError read_manifest(LanaStore *store, uint64_t *acknowledged) {
+static LanaError read_manifest(LanaStore *store) {
     char *path = store_path(store, "manifest");
     FILE *file;
     unsigned int schema;
@@ -477,7 +438,6 @@ static LanaError read_manifest(LanaStore *store, uint64_t *acknowledged) {
     if (fclose(file) != 0) return LANA_ERR_IO;
     if (result != 4 || schema != STORE_SCHEMA || snapshot > current || retention > current)
         return LANA_ERR_CORRUPTION;
-    *acknowledged = (uint64_t)current;
     store->snapshot_rev = (uint64_t)snapshot;
     store->retention_boundary = (uint64_t)retention;
     return LANA_OK;
@@ -486,7 +446,6 @@ static LanaError read_manifest(LanaStore *store, uint64_t *acknowledged) {
 LanaError lana_store_open(const LanaStoreOptions *options, LanaStore **out_store) {
     LanaStore *store;
     char *journal_path;
-    uint64_t acknowledged = 0u;
     LanaError error;
     if (options == NULL || out_store == NULL || options->path == NULL) return LANA_ERR_INVALID_STATE;
     *out_store = NULL;
@@ -495,24 +454,21 @@ LanaError lana_store_open(const LanaStoreOptions *options, LanaStore **out_store
     if (mkdir(options->path, 0755) != 0 && errno != EEXIST) return LANA_ERR_IO;
     store = calloc(1u, sizeof(*store));
     if (store == NULL) return LANA_ERR_OOM;
-    if (pthread_mutex_init(&store->lock, NULL) != 0) { free(store); return LANA_ERR_IO; }
-    store->journal_fd = -1;
     store->path = strdup(options->path); store->index_size = 1024u;
     store->index = calloc(store->index_size, sizeof(*store->index));
-    if (store->path == NULL || store->index == NULL) { (void)lana_store_close(store); return LANA_ERR_OOM; }
     journal_path = store_path(store, "journal");
-    if (journal_path == NULL) { (void)lana_store_close(store); return LANA_ERR_OOM; }
+    if (store->path == NULL || store->index == NULL || journal_path == NULL) { free(journal_path); return LANA_ERR_OOM; }
     store->journal = fopen(journal_path, "a+b"); free(journal_path);
-    if (store->journal == NULL) { (void)lana_store_close(store); return LANA_ERR_IO; }
+    if (store->journal == NULL) return LANA_ERR_IO;
     store->journal_fd = fileno(store->journal);
-    error = lock_journal(store->journal_fd, options->timeout_ms);
-    if (error != LANA_OK) { (void)lana_store_close(store); return error; }
-    error = read_manifest(store, &acknowledged);
+    if (pthread_mutex_init(&store->lock, NULL) != 0) return LANA_ERR_IO;
+    if (flock(store->journal_fd, LOCK_EX) != 0) return LANA_ERR_IO;
+    error = read_manifest(store);
     if (error == LANA_OK && store->snapshot_rev != 0u) error = load_snapshot(store);
     rewind(store->journal);
     if (error == LANA_OK) error = replay(store);
-    if (error == LANA_OK && store->current_rev < acknowledged) error = LANA_ERR_CORRUPTION;
     if (error != LANA_OK) { (void)lana_store_close(store); return error; }
+    store->journal_offset = ftell(store->journal);
     error = write_manifest(store);
     if (error != LANA_OK) { (void)lana_store_close(store); return error; }
     *out_store = store;
@@ -565,7 +521,6 @@ LanaError lana_store_commit(LanaStore *store, LanaStoreRevisionInfo *out_revisio
     if (store->staged_count == 0u) { pthread_mutex_unlock(&store->lock); return LANA_ERR_UNSUPPORTED_OPERATION; }
     error = build_payload(store->staged, store->staged_count, &payload);
     if (error != LANA_OK) goto done;
-    if (store->current_rev == UINT64_MAX) { error = LANA_ERR_LIMIT; goto done; }
     revision = store->current_rev + 1u;
     revision_digest(revision, store->current_rev, (uint32_t)store->staged_count, &payload, digest);
     if ((error = bytes_add(&header, "LREV", 4u)) != LANA_OK ||
@@ -672,7 +627,7 @@ LanaError lana_store_put_persistent_state(LanaStore *store, const char *key,
     buffer = (LanaBuffer){encoded, length, length};
     error = lana_codec_decode_document(&buffer, &value);
     if (error == LANA_OK) error = lana_store_put(store, key, value);
-    lana_value_free(value); free(encoded);
+    lana_codec_free_value(value); free(encoded);
     return error;
 }
 
@@ -705,6 +660,7 @@ LanaError lana_store_get_persistent_state_at(LanaStore *store, LanaVM *vm,
 LanaError lana_store_history(LanaStore *store, const char *key,
                              LanaStoreHistory *out_history) {
     size_t i, j, count = 0u;
+    LanaError error = LANA_OK;
     if (store == NULL || key == NULL || out_history == NULL) return LANA_ERR_INVALID_STATE;
     memset(out_history, 0, sizeof(*out_history));
     pthread_mutex_lock(&store->lock);
@@ -721,19 +677,22 @@ LanaError lana_store_history(LanaStore *store, const char *key,
             if (strcmp(mutation->key, key) != 0) continue;
             out_history->records[count].revision = store->revisions[i].id;
             out_history->records[count].key = strdup(key);
+            if (out_history->records[count].key == NULL) { error = LANA_ERR_OOM; goto done; }
             if (mutation->deleted) out_history->records[count].value = lana_value_null();
             else {
                 LanaBuffer buffer = {mutation->data, mutation->length, mutation->length};
                 if (lana_codec_decode_document(&buffer, &out_history->records[count].value) != LANA_OK) {
-                    pthread_mutex_unlock(&store->lock); return LANA_ERR_CORRUPTION;
+                    error = LANA_ERR_CORRUPTION; ++count; goto done;
                 }
             }
             ++count;
         }
     }
+done:
     out_history->count = count;
     pthread_mutex_unlock(&store->lock);
-    return LANA_OK;
+    if (error != LANA_OK) lana_store_history_free(out_history);
+    return error;
 }
 
 void lana_store_history_free(LanaStoreHistory *history) {
@@ -741,10 +700,11 @@ void lana_store_history_free(LanaStoreHistory *history) {
     if (history == NULL) return;
     for (index = 0u; index < history->count; ++index) {
         free(history->records[index].key);
-        lana_value_free(history->records[index].value);
+        lana_codec_free_value(history->records[index].value);
     }
     free(history->records);
-    memset(history, 0, sizeof(*history));
+    history->records = NULL;
+    history->count = 0u;
 }
 
 static int scan_record_compare(const void *left, const void *right) {
@@ -797,7 +757,7 @@ void lana_store_scan_free(LanaStoreScanRecord *records, size_t count) {
     free(records);
 }
 
-static LanaError store_snapshot_locked(LanaStore *store, LanaVM *vm, Value *out_value,
+LanaError lana_store_snapshot(LanaStore *store, LanaVM *vm, Value *out_value,
                               LanaStoreRevisionInfo *out_revision) {
     LanaMap *map;
     LanaBuffer encoded = {0};
@@ -808,6 +768,7 @@ static LanaError store_snapshot_locked(LanaStore *store, LanaVM *vm, Value *out_
     LanaError error;
     size_t bucket;
     if (store == NULL || vm == NULL || out_value == NULL) return LANA_ERR_INVALID_STATE;
+    pthread_mutex_lock(&store->lock);
     error = lana_map_new(vm, store->index_size, &map);
     for (bucket = 0u; error == LANA_OK && bucket < store->index_size; ++bucket) {
         StoreEntry *entry;
@@ -841,7 +802,6 @@ static LanaError store_snapshot_locked(LanaStore *store, LanaVM *vm, Value *out_
     }
     if (file != NULL && fclose(file) != 0) error = LANA_ERR_IO;
     if (error == LANA_OK && rename(temporary, published) != 0) error = LANA_ERR_IO;
-    if (error == LANA_OK) error = sync_directory(store);
     if (error == LANA_OK) {
         store->snapshot_rev = store->current_rev;
         error = write_manifest(store);
@@ -855,15 +815,6 @@ static LanaError store_snapshot_locked(LanaStore *store, LanaVM *vm, Value *out_
 done:
     if (error != LANA_OK && temporary != NULL) (void)unlink(temporary);
     free(temporary); free(published); free(header.data); free(encoded.data);
-    return error;
-}
-
-LanaError lana_store_snapshot(LanaStore *store, LanaVM *vm, Value *out_value,
-                              LanaStoreRevisionInfo *out_revision) {
-    LanaError error;
-    if (store == NULL) return LANA_ERR_INVALID_STATE;
-    pthread_mutex_lock(&store->lock);
-    error = store_snapshot_locked(store, vm, out_value, out_revision);
     pthread_mutex_unlock(&store->lock);
     return error;
 }
@@ -873,19 +824,17 @@ LanaError lana_store_compact(LanaStore *store, uint64_t retention,
     uint64_t boundary;
     LanaError error;
     if (store == NULL) return LANA_ERR_INVALID_STATE;
-    pthread_mutex_lock(&store->lock);
     if (retention == 0u) {
         LanaVM vm;
         Value snapshot;
         lana_vm_init(&vm, NULL);
-        error = store_snapshot_locked(store, &vm, &snapshot, NULL);
+        error = lana_store_snapshot(store, &vm, &snapshot, NULL);
         lana_vm_free(&vm);
-        if (error != LANA_OK) { pthread_mutex_unlock(&store->lock); return error; }
+        if (error != LANA_OK) return error;
     }
+    pthread_mutex_lock(&store->lock);
     boundary = retention >= store->current_rev ? 0u : store->current_rev - retention;
-    if (boundary > store->retention_boundary) store->retention_boundary = boundary;
-    error = write_manifest(store);
-    if (error != LANA_OK) { pthread_mutex_unlock(&store->lock); return error; }
+    store->retention_boundary = boundary;
     if (retention == 0u) {
         size_t index, mutation;
         if (fflush(store->journal) != 0 || ftruncate(store->journal_fd, 0) != 0 ||
@@ -916,7 +865,7 @@ LanaError lana_store_compact(LanaStore *store, uint64_t retention,
 LanaError lana_store_close(LanaStore *store) {
     size_t bucket, index, mutation;
     if (store == NULL) return LANA_OK;
-    for (bucket = 0u; store->index != NULL && bucket < store->index_size; ++bucket) {
+    for (bucket = 0u; bucket < store->index_size; ++bucket) {
         StoreEntry *entry = store->index[bucket];
         while (entry != NULL) { StoreEntry *next = entry->next; free(entry->key); free(entry->data); free(entry); entry = next; }
     }

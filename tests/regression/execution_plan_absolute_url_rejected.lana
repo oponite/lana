@@ -1,0 +1,3 @@
+import "std/execution" as execution;
+
+execution.plan_webhook("https://example.invalid/events", {event: "approved"});

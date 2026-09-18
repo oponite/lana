@@ -26,9 +26,6 @@ typedef enum {
     LANA_GC_CLAIM,
     LANA_GC_PLANNED_EFFECT,
     LANA_GC_EFFECT_RECEIPT,
-    LANA_GC_GENERATOR,
-    LANA_GC_FUTURE,
-    LANA_GC_SET,
     LANA_GC_RUNTIME_INTERNAL
 } LanaGCObjectKind;
 
@@ -46,7 +43,6 @@ typedef enum {
 } LanaGCGeneration;
 
 typedef void (*LanaGCTraceFn)(LanaGC *gc, void *payload);
-typedef void (*LanaGCFinalizeFn)(void *payload);
 typedef void (*LanaGCRootsFn)(LanaGC *gc, void *context);
 
 typedef struct {
@@ -96,7 +92,6 @@ void *lana_gc_alloc(LanaGC *gc, size_t size, LanaGCObjectKind kind,
 bool lana_gc_publish(LanaGC *gc, void *payload);
 bool lana_gc_configure(LanaGC *gc, void *payload, LanaGCObjectKind kind,
                        LanaGCOwnership ownership, LanaGCTraceFn trace);
-bool lana_gc_set_finalizer(LanaGC *gc, void *payload, LanaGCFinalizeFn finalize);
 bool lana_gc_mark(LanaGC *gc, void *payload);
 size_t lana_gc_root_push(LanaGC *gc, void *root, LanaGCTraceFn trace);
 void lana_gc_root_pop(LanaGC *gc, size_t previous_count);

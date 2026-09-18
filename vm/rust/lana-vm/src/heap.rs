@@ -14,7 +14,6 @@ struct State {
     allocations: u64,
     strings: HashMap<usize, (Weak<str>, usize)>,
 }
-
 impl State {
     fn collect_strings(&mut self) {
         let live = &mut self.live;

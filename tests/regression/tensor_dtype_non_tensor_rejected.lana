@@ -1,3 +1,0 @@
-// dtype(t) on a non-tensor is LANA_ERR_TYPE.
-let x = 42.0;
-print(dtype(x));

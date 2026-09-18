@@ -1,0 +1,5 @@
+import "std/core" as info;
+
+let weighted = info.distribution([[1, 0.25], [2, 0.75]]);
+let picked = sample(weighted);
+print(sample_value(picked));

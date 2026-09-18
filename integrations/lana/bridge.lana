@@ -1,7 +1,9 @@
 fn read_request() {
     let argv = args();
     assert(array_length(argv) == 2, "bridge expects request and response paths");
-    return result_value(json_parse(read_text(argv[0])));
+    let parsed = json_parse(read_text(argv[0]));
+    assert(parsed[0], "bridge request is invalid JSON");
+    return parsed[1];
 }
 
 fn write_response(value) {

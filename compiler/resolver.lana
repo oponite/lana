@@ -405,6 +405,9 @@ fn host_effect(name) {
     if (name == "sleep") { return effects("io"); }
     if (name == "http_get") { return effects("io"); }
     if (name == "http_post") { return effects("io"); }
+    if (name == "execution_capability") { return effects("external_call"); }
+    if (name == "execution_authorize") { return effects("pure"); }
+    if (name == "execution_execute") { return effects("io"); }
     if (name == "socket_connect") { return effects("io"); }
     if (name == "socket_send") { return effects("io"); }
     if (name == "socket_recv") { return effects("io"); }
@@ -448,6 +451,9 @@ fn host_type(name) {
     if (name == "json_stringify") { return type_ordinary("string"); }
     if (name == "http_get") { return type_result(type_information(type_unknown()), type_ordinary("string")); }
     if (name == "http_post") { return type_result(type_information(type_unknown()), type_ordinary("string")); }
+    if (name == "execution_capability") { return type_unknown(); }
+    if (name == "execution_authorize") { return type_unknown(); }
+    if (name == "execution_execute") { return type_unknown(); }
     if (name == "socket_connect") { return type_result(type_ordinary("number"), type_ordinary("string")); }
     if (name == "socket_send") { return type_result(type_ordinary("number"), type_ordinary("string")); }
     if (name == "socket_recv") { return type_result(type_ordinary("string"), type_ordinary("string")); }
@@ -1486,6 +1492,12 @@ fn resolve_call(node, environment) {
     symbol_add_reference(environment, node[1], node[3], node[4]);
     let resolved = resolve_arguments(node[2], environment);
     let effect_value = arguments_effect(resolved);
+    if (map_has(environment, "__core_distribution_aliases__")) {
+        if (map_has(map_get(environment, "__core_distribution_aliases__"), node[1])) {
+            require_argument_count(node[1], resolved, 1);
+            return typed(node, type_information(type_unknown()), effect_value);
+        }
+    }
     let is_ad = false;
     if (node[1] == "grad") { is_ad = true; }
     if (node[1] == "vjp") { is_ad = true; }
@@ -1736,7 +1748,7 @@ fn resolve_information_expression(node, environment) {
 fn resolve_runtime_expression(node, environment) {
     if (node[0] == 32) {
         if (node[3] == "sample") {
-            return typed(node, type_sample(type_unknown(), node[1], "measure"), effects("stochastic"));
+            return typed(node, type_sample(type_unknown(), "measure", "measure"), effects("stochastic"));
         }
         return typed(node, type_unknown(), effects("pure"));
     }
@@ -2308,6 +2320,7 @@ fn resolve_program(program) {
     let function_effects = map_new();
     let uses_ad = map_new();
     let function_ops = map_new();
+    let core_distribution_aliases = map_new();
     let top_environment = environment_new();
     map_set(top_environment, "__symbols__", box);
     map_set(top_environment, "__types__", registry);
@@ -2316,6 +2329,13 @@ fn resolve_program(program) {
     map_set(top_environment, "__function_effects__", function_effects);
     map_set(top_environment, "__uses_ad__", uses_ad);
     map_set(top_environment, "__function_ops__", function_ops);
+    map_set(top_environment, "__core_distribution_aliases__", core_distribution_aliases);
+    let import_index = 0;
+    while (import_index < array_length(program[3])) {
+        let imported = program[3][import_index];
+        if (imported[0] == "std/core") { map_set(core_distribution_aliases, string_concat(imported[1], ".distribution"), true); }
+        import_index = import_index + 1;
+    }
     let index = 0;
     while (index < array_length(program[4])) {
         resolve_type_declaration(program[4][index], top_environment); index = index + 1;

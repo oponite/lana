@@ -106,6 +106,12 @@ pub enum OpCode {
     Async,
     Await,
     RunAsync,
+    /// LABC v5: build finite weighted Core information from `[[value, weight]]`.
+    DistributionBuild,
+    /// LABC v5: refine a named joint with a map of exact evidence.
+    JointConditionMap,
+    /// LABC v5: record a map-based refinement event.
+    ObserveMap,
     Count,
 }
 
@@ -194,6 +200,9 @@ impl OpCode {
             Async => "ASYNC",
             Await => "AWAIT",
             RunAsync => "RUN_ASYNC",
+            DistributionBuild => "DISTRIBUTION_BUILD",
+            JointConditionMap => "JOINT_CONDITION_MAP",
+            ObserveMap => "OBSERVE_MAP",
             LoadFunction => "LOAD_FUNCTION",
             Count => "COUNT",
         }
@@ -218,5 +227,8 @@ pub const LABC_VERSION: u32 = 2;
 pub const LABC_VERSION_1: u32 = 1;
 pub const LABC_VERSION_3: u32 = 3;
 pub const LABC_VERSION_4: u32 = 4;
+/// LABC v5 reserves the balanced Core information surface. It keeps the
+/// existing binary layout and adds no implicit compatibility conversion.
+pub const LABC_VERSION_5: u32 = 5;
 pub const LANA_MAX_REGISTERS: u32 = 256;
 pub const LANA_MAX_CALL_FRAMES: u32 = 64;

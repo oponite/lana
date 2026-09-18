@@ -1,0 +1,1 @@
+{"id":7,"kind":"logistic_binary","parameters":{"intercept":-0.8908076462634773,"weights":[1.321059837055077,-0.25646200992310753,-0.44763035155643777,0.28721506167736371,-0.38466172741066207]},"role":"expert","schema":1,"task":"classification","training":{"epochs":40,"learning_rate":0.20000000000000001,"ridge":0},"version":"2.1.0"}

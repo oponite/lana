@@ -51,7 +51,9 @@ fn load_module(path, prefix, modules, stack, root) {
         let exp_index = 0;
         while (exp_index < array_length(child_exports)) {
             let name = child_exports[exp_index][1];
-            map_set(import_names, string_concat(imported[1], ".", name), string_concat(child_record[1], name));
+            let mapped = string_concat(child_record[1], name);
+            if (imported[0] == "std/core") { if (name == "distribution") { mapped = "__core_distribution__"; } }
+            map_set(import_names, string_concat(imported[1], ".", name), mapped);
             exp_index = exp_index + 1;
         }
         import_index = import_index + 1;
@@ -84,11 +86,11 @@ fn project_new(directory) {
         "schema = 1\nname = \"", name,
         "\"\nversion = \"0.1.0\"\nentry = \"src/main.lana\"\n\n[dependencies]\n"));
     write_text_atomic(project_path(directory, "src/belief.lana"),
-        "fn probability() {\n    state belief = state(p: 0.75, d: 0.25);\n    return measure belief as probability;\n}\n");
+        "fn label() { return \"confirmed\"; }\n");
     write_text_atomic(project_path(directory, "src/main.lana"),
-        "import \"./belief.lana\" as belief;\n\nfn main() { print(belief.probability()); }\nmain();\n");
+        "import \"std/core\" as core;\n\nfn main() { let options = core.distribution([[\"confirmed\", 1.0]]); print(\"Core distribution ready\"); }\nmain();\n");
     write_text_atomic(project_path(directory, "tests/main_test.lana"),
-        "import \"../src/belief.lana\" as belief;\n\nassert(belief.probability() == 0.75, \"first program probability\");\n");
+        "import \"../src/belief.lana\" as belief;\nimport \"std/core\" as core;\n\nlet options = core.distribution([[\"confirmed\", 1.0]]);\nprint(\"first program Core distribution\");\n");
     print(string_concat("created ", directory));
 }
 

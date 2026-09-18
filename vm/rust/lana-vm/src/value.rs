@@ -244,8 +244,8 @@ impl Map {
     }
 }
 
-/// An equipossible support set, mirroring `struct LanaPossibility`. `weights`
-/// is `None` for a non-probabilistic, equipossible support.
+/// A finite Core support set. `weights == None` is a non-probabilistic
+/// Possibility; positive normalized weights denote a Distribution.
 #[derive(Debug, Clone)]
 pub struct Possibility {
     pub values: Vec<Value>,
@@ -942,7 +942,9 @@ impl Value {
             ValueKind::Task(_) => ValueType::Task,
             ValueKind::StateDist(_) => ValueType::StateDist,
             ValueKind::Map(_) => ValueType::Map,
-            ValueKind::Possibility(_) => ValueType::Possibility,
+            ValueKind::Possibility(ref value) => {
+                if value.weights.is_some() { ValueType::Distribution } else { ValueType::Possibility }
+            }
             ValueKind::PathSet(_) => ValueType::PathSet,
             ValueKind::Capability(_) => ValueType::SharedCapability,
             ValueKind::Adt(_) => ValueType::Adt,
@@ -980,7 +982,9 @@ impl Value {
             ValueKind::Task(_) => "task",
             ValueKind::StateDist(_) => "state_dist",
             ValueKind::Map(_) => "map",
-            ValueKind::Possibility(_) => "possibility",
+            ValueKind::Possibility(ref value) => {
+                if value.weights.is_some() { "distribution" } else { "possibility" }
+            }
             ValueKind::PathSet(_) => "paths",
             ValueKind::Capability(_) => "shared_capability",
             ValueKind::Adt(_) => "adt",
@@ -1174,7 +1178,9 @@ impl Value {
                     ValueKind::Map(_) => out.push('{'),
                     ValueKind::Set(_) => out.push_str("set{"),
                     ValueKind::Joint(_) => out.push_str("joint_state{"),
-                    ValueKind::Possibility(_) => out.push_str("possibility{"),
+                    ValueKind::Possibility(value) => {
+                        out.push_str(if value.weights.is_some() { "distribution{" } else { "possibility{" });
+                    }
                     ValueKind::PathSet(_) => out.push_str("paths{"),
                     ValueKind::Adt(adt) => {
                         use std::fmt::Write;

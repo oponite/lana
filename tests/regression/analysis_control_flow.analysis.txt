@@ -1,0 +1,31 @@
+=== top-level ===
+b0: reachable
+  in:  
+  out: 
+
+=== function analyze ===
+b0: reachable
+  in:  
+  out: a.0 = 40, b.0 = 42, c.0 = 84
+b1: reachable
+  in:  a.0 = 40, b.0 = 42, c.0 = 84
+  out: a.0 = 40, b.0 = 42, c.0 = 84, d.0 = 1
+b2: reachable
+  in:  a.0 = 40, b.0 = 42, c.0 = 84
+  out: a.0 = 40, b.0 = 42, c.0 = 84, e.0 = 5
+b3: reachable
+  in:  a.0 = 40, b.0 = 42, c.0 = 84
+  out: a.0 = 40, b.0 = 42, c.0 = 84, f.0 = 80
+
+=== function dead ===
+b0: reachable
+  in:  
+  out: 
+b1: reachable
+  in:  
+  out: 
+b2: reachable
+  in:  
+  out: 
+b3: unreachable
+

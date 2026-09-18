@@ -11,5 +11,5 @@ require("lana").setup({ cmd = { "/absolute/path/to/lana", "lsp" } })
 ```
 
 Diagnostics reflect files saved on disk.
-The plugin checks that the configured executable reports Lana 2.0 with LABC
+The plugin checks that the configured executable reports Lana 3.0 with LABC
 v2 before starting the server.

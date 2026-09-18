@@ -21,7 +21,6 @@ pub fn tensor_dimension(n: f64) -> Result<usize, LanaError> {
     }
     Ok(n as usize)
 }
-
 /// LIP-027: convert a double to a binary16 (f16) bit pattern,
 /// round-to-nearest-even. Mirrors `f64_to_f16_bits` in `vm/c/vm.c`.
 pub fn f64_to_f16_bits(x: f64) -> u16 {

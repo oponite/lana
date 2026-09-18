@@ -22,7 +22,7 @@ compatibility requires it.
 Example:
 
 ```lana
-measure x
+measure(x, result: "probability")
 ```
 
 rather than also supporting:
@@ -66,7 +66,7 @@ operation → target → modifier
 Examples:
 
 ```lana
-measure x
+measure(x, result: "probability")
 transform x with invert
 append a with b as redundant 0.8
 ```
@@ -141,7 +141,7 @@ state scenario =
     sample possibilities
 
 bit result =
-    measure scenario
+    measure(scenario, result: "probability")
 ```
 
 Important transitions such as:
@@ -195,19 +195,6 @@ Lana MUST NOT prefer shorter syntax when the shorter form materially reduces
 semantic clarity.
 
 A few additional keywords are acceptable when they make behavior explicit.
-
-## Async/await (LIP-024)
-
-`async fn` and `await` follow the same design principles as generators
-(LIP-022). `async` is a function modifier, so an async function is visually
-distinct at its declaration (SYNTAX-1, SYNTAX-3) and cannot be mistaken for a
-synchronous call. `await` is a keyword expression (SYNTAX-5) that reads as the
-suspension point it is; `run_async(future)` is the explicit, visible boundary
-where the event loop runs (SYNTAX-3, SYNTAX-9). Because `await` is only legal
-inside an `async fn`, an invalid state (awaiting outside an async context) is
-grammatically difficult to reach and produces a compile-time error (SYNTAX-7,
-SYNTAX-10). The syntax reuses the established `fn`/expression grammar rather
-than introducing novel symbols (SYNTAX-2, SYNTAX-5, SYNTAX-8).
 
 ## Acceptance Principle
 

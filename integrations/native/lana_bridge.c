@@ -136,7 +136,7 @@ static char *run_program(const char *labc_path, const char *request_path,
     if (options != NULL) {
         if (options->seed != 0u) lana_vm_seed(&vm, options->seed);
         if (options->instruction_limit != 0u) vm.instruction_limit = options->instruction_limit;
-        if (options->memory_limit_bytes != 0u) lana_vm_set_memory_limit(&vm, options->memory_limit_bytes);
+        if (options->memory_limit_bytes != 0u) vm.memory_limit = options->memory_limit_bytes;
         if ((options->workers != 0u &&
              lana_vm_set_worker_count(&vm, options->workers) != LANA_OK) ||
             (options->max_tasks != 0u &&
@@ -300,16 +300,11 @@ int lana_bridge_run_pipeline(const char *labc_path, const char *request_path,
                     "LANA_REQUEST_INVALID", "program wrote invalid decision-request JSON");
     }
 
-    /* Deterministic decision id from the request text. Mask to 53 bits so the
-     * id always round-trips as a JSON number: LIP-023 stores integers above
-     * 2^53 as strings to preserve precision, which would break the number-based
-     * reads of decision_id in the envelope, store, and ledger. 53 bits still
-     * gives ~9e15 unique ids, far more than a decision store needs. */
+    /* Deterministic decision id from the request text. */
     lana_sha256((const unsigned char *)response, strlen(response), digest);
     decision_id = 0u;
     for (index = 0u; index < 8u; ++index)
         decision_id |= (uint64_t)digest[index] << (8u * index);
-    decision_id &= ((uint64_t)1u << 53u) - 1u;
     if (decision_id == 0u) decision_id = 1u;
     free(response);
 

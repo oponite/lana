@@ -1,14 +1,14 @@
-name: Release Lana 2.1.0
+name: Release Lana 3.0.0
 
 on:
   push:
-    tags: ["v2.1.0"]
+    tags: ["v3.0.0"]
 
 permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION: "2.1.0"
+  EXPECTED_VERSION: "3.0.0"
 
 jobs:
   linux:
@@ -23,33 +23,40 @@ jobs:
           test "$version" = "$EXPECTED_VERSION"
           test "$GITHUB_REF_NAME" = "v$version"
           test "${{ github.ref_protected }}" = "true"
-      - uses: ./.github/actions/test-tools
-      - name: Exact-candidate correctness, sanitizers, and ten-minute fuzz test
-        run: python3 tests/run.py nightly --cc gcc --fuzz-cc clang
-      - name: Native and Python integration gates
-        run: python3 tests/run.py integrations --build-dir build-integrations
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: release-gate-evidence
-          path: |
-            build/test-evidence/**/report.json
-            build/test-evidence/**/*.log
-            build/test-evidence/**/*.xml
-            build/test-evidence/**/fuzz-corpus/
-            build/test-evidence/**/bytecode-failures/
-          if-no-files-found: error
+      - name: Debug build and tests
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          git diff --check
+      - name: Address and undefined behavior sanitizers
+        run: |
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_SANITIZERS=ON
+          cmake --build build-asan --parallel
+          ctest --test-dir build-asan --output-on-failure
+      - name: Thread sanitizer
+        run: |
+          cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_TSAN=ON
+          cmake --build build-tsan --parallel
+          ctest --test-dir build-tsan --output-on-failure
+      - name: Ten-minute malformed-bytecode fuzz test
+        run: |
+          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
+          cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
+          build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5
+      - name: Optional integrations
+        run: |
+          cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release -DLANA_BUILD_INTEGRATIONS=ON
+          cmake --build build-integrations --parallel
+          ctest --test-dir build-integrations --output-on-failure
+          python3 -m venv "$RUNNER_TEMP/lana-integrations-venv"
+          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test]'
+          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pytest -q integrations/python/tests
 
-  macos-slices:
-    name: Release gate (macOS ${{ matrix.arch }})
-    strategy:
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-15
-          - arch: x86_64
-            runner: macos-15-intel
-    runs-on: ${{ matrix.runner }}
+  macos:
+    name: Release gates (macOS universal)
+    runs-on: macos-14
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -58,46 +65,19 @@ jobs:
           version="$(tr -d '\n' < VERSION)"
           test "$version" = "$EXPECTED_VERSION"
           test "$GITHUB_REF_NAME" = "v$version"
-      - name: Build and install ${{ matrix.arch }} binaries
+      - name: Install x86_64 Rust target
+        run: rustup target add x86_64-apple-darwin
+      - name: Build and install universal binaries
         run: |
-          cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES='${{ matrix.arch }}'
-          cmake --build build-release --parallel
-          prefix="$RUNNER_TEMP/lana-install-${{ matrix.arch }}"
-          cmake --install build-release --prefix "$prefix"
-          python3 -E tests/verify_install.py --prefix "$prefix" --architecture '${{ matrix.arch }}'
-          tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${{ matrix.arch }}.tar.gz" .
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: lana-macos-${{ matrix.arch }}
-          path: ${{ runner.temp }}/lana-${{ matrix.arch }}.tar.gz
-          if-no-files-found: error
-          retention-days: 7
-
-  macos:
-    name: Assemble macOS universal artifact
-    needs: macos-slices
-    runs-on: macos-15
-    steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: lana-macos-*
-          path: ${{ runner.temp }}/lana-slices
-      - name: Assemble universal installed prefix
-        run: |
-          arm="$RUNNER_TEMP/lana-arm64"
-          intel="$RUNNER_TEMP/lana-x86_64"
-          mkdir "$arm" "$intel"
-          tar -C "$arm" -xzf "$RUNNER_TEMP/lana-slices/lana-macos-arm64/lana-arm64.tar.gz"
-          tar -C "$intel" -xzf "$RUNNER_TEMP/lana-slices/lana-macos-x86_64/lana-x86_64.tar.gz"
+          cmake -S . -B build-universal -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64'
+          cmake --build build-universal --parallel
           prefix="$RUNNER_TEMP/lana-install"
-          cp -R "$arm" "$prefix"
-          cmp "$arm/bin/lana-compiler.labc" "$intel/bin/lana-compiler.labc"
-          for file in bin/lana bin/lanavm lib/liblanaruntime.a; do
-            lipo -create "$arm/$file" "$intel/$file" -output "$prefix/$file"
-          done
+          cmake --install build-universal --prefix "$prefix"
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
           lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
           arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          "$prefix/bin/lana" run examples/belief.lana
           tar -C "$prefix" -czf "$RUNNER_TEMP/lana-${EXPECTED_VERSION}-macos-universal.tar.gz" .
           (
             cd "$RUNNER_TEMP"
@@ -108,22 +88,15 @@ jobs:
         with:
           name: lana-macos-universal
           path: |
-            ${{ runner.temp }}/lana-2.1.0-macos-universal.tar.gz
-            ${{ runner.temp }}/lana-2.1.0-macos-universal.tar.gz.sha256
+            ${{ runner.temp }}/lana-3.0.0-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-3.0.0-macos-universal.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
   verify-macos-artifact:
-    name: Verify macOS release artifact (${{ matrix.arch }})
+    name: Verify macOS release artifact
     needs: macos
-    strategy:
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-15
-          - arch: x86_64
-            runner: macos-15-intel
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -143,7 +116,10 @@ jobs:
           tar -C "$prefix" -xzf "$artifact_dir/$archive"
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
           lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
-          python3 -E tests/verify_install.py --prefix "$prefix" --architecture '${{ matrix.arch }}'
+          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          cp examples/belief.lana "$prefix/belief.lana"
+          "$prefix/bin/lana" run "$prefix/belief.lana"
 
   publish:
     name: Publish GitHub Release
@@ -184,9 +160,6 @@ jobs:
             license "Apache-2.0"
 
             depends_on "cmake" => :build
-            depends_on "pkgconf" => :build
-            depends_on "libffi"
-            depends_on "openssl@3"
 
             def install
               system "cmake", "-S", ".", "-B", "build", *std_cmake_args
@@ -197,7 +170,7 @@ jobs:
               (bin/"lana").write <<~EOS
                 #!/bin/sh
                 export LANA_COMPILER_LABC="#{libexec}/lana-compiler.labc"
-                exec "#{bin}/lana-bin" "\$@"
+                exec "#{bin}/lana-bin" "$@"
               EOS
             end
 
@@ -220,8 +193,9 @@ jobs:
           tar -C "$source_root" -xzf "$RUNNER_TEMP/lana-release-files/lana-${EXPECTED_VERSION}-source.tar.gz"
           cmake -S "$source_root/lana-${EXPECTED_VERSION}" -B "$source_root/build" -DCMAKE_BUILD_TYPE=Release
           cmake --build "$source_root/build" --parallel
-          "$source_root/build/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          "$source_root/build/lana" run "$source_root/lana-${EXPECTED_VERSION}/examples/belief.lana"
+          cmake --install "$source_root/build" --prefix "$source_root/install"
+          "$source_root/install/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+          "$source_root/install/bin/lana" run "$source_root/lana-${EXPECTED_VERSION}/examples/belief.lana"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

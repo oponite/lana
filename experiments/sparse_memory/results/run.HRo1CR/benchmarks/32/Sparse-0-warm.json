@@ -1,0 +1,1 @@
+{"cache_hit_rate":0,"cache_hits":0,"cache_loads":96,"cache_miss_rate":1,"cache_misses":96,"cache_size":0,"correct":96,"expert_count":32,"expert_load_latency_ns":33219.655354817711,"index_bytes":4484,"mode":"learned","phase":"warm","router_latency_ns":13120.472431182861,"throughput":12204.570320077595,"timed_predictions":96,"total_latency_ns":81936.518351236984}

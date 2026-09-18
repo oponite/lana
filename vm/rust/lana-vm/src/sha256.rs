@@ -22,7 +22,6 @@ const ROUND_CONSTANTS: [u32; 64] = [
 fn rotate_right(value: u32, count: u32) -> u32 {
     (value >> count) | (value << (32 - count))
 }
-
 /// One-shot SHA-256, mirroring `lana_sha256`.
 pub fn sha256(data: &[u8]) -> [u8; SHA256_DIGEST_SIZE] {
     let mut state: [u32; 8] = [
