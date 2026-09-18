@@ -30,9 +30,11 @@ set(LANA_RUNTIME_SOURCES
     runtime/c/adapters.c
 )
 
+set_source_files_properties(runtime/c/vendor/tweetnacl.c PROPERTIES
+    COMPILE_OPTIONS "-Wno-sign-compare")
 if(CMAKE_C_COMPILER_ID STREQUAL "AppleClang")
-    set_source_files_properties(runtime/c/vendor/tweetnacl.c PROPERTIES
-        COMPILE_OPTIONS "-Wno-sign-compare;-Wno-unterminated-string-initialization")
+    set_property(SOURCE runtime/c/vendor/tweetnacl.c APPEND PROPERTY
+        COMPILE_OPTIONS "-Wno-unterminated-string-initialization")
 endif()
 
 add_library(lanaruntime STATIC ${LANA_RUNTIME_SOURCES})
