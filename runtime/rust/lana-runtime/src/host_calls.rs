@@ -124,7 +124,7 @@ impl StoreHost {
         if args.len() != 3 { return LanaError::Type; }
         let ValueKind::Capability(token) = &args[0].kind else { return LanaError::Type; };
         let Some((expected, capability)) = &self.execution else { return LanaError::Capability; };
-        if !Arc::ptr_eq(token, expected) { return LanaError::Capability; }
+        if token.revoked.load(Ordering::Acquire) || !Arc::ptr_eq(token, expected) { return LanaError::Capability; }
         let decision = match decision_from_value(&args[1]) { Ok(decision) => decision, Err(error) => return error };
         if decision.outcome != PolicyOutcome::Authorize { return LanaError::Capability; }
         let digest = match execution::plan_digest(&args[2]) { Ok(digest) => digest, Err(error) => return error };
@@ -140,7 +140,7 @@ impl StoreHost {
         let ValueKind::Capability(capability_token) = &args[0].kind else { return LanaError::Type; };
         let ValueKind::Capability(authorization_token) = &args[1].kind else { return LanaError::Type; };
         let Some((expected, capability)) = &self.execution else { return LanaError::Capability; };
-        if !Arc::ptr_eq(capability_token, expected) { return LanaError::Capability; }
+        if capability_token.revoked.load(Ordering::Acquire) || authorization_token.revoked.load(Ordering::Acquire) || !Arc::ptr_eq(capability_token, expected) { return LanaError::Capability; }
         let Some(authorization) = self.authorizations.iter().find(|entry| Arc::ptr_eq(authorization_token, &entry.token)).map(|entry| entry.authorization.clone()) else { return LanaError::Capability; };
         let ValueKind::Map(plan) = &args[2].kind else { return LanaError::Type; };
         let path = match plan.lock().unwrap().get("path") { Some(Value { kind: ValueKind::String(path), .. }) => path.clone(), _ => return LanaError::Schema };
@@ -747,6 +747,21 @@ fn hex_decode(text: &str) -> Result<[u8; 32], LanaError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn execution_rejects_revoked_host_tokens_before_effects() {
+        use super::*;
+        let mut host = StoreHost::new();
+        let capability = host.opaque_token();
+        let authorization = host.opaque_token();
+        host.execution = Some((capability.clone(), ExecutionCapability::new("test", "https://example.test").unwrap()));
+        let mut output = Value::null();
+        capability.revoked.store(true, Ordering::Release);
+        assert_eq!(host.execution_authorize(&[Value::capability(capability.clone()), Value::null(), Value::null()], &mut output), LanaError::Capability);
+        assert_eq!(host.execution_execute(&[Value::capability(capability.clone()), Value::capability(authorization.clone()), Value::null()], &mut output), LanaError::Capability);
+        capability.revoked.store(false, Ordering::Release);
+        authorization.revoked.store(true, Ordering::Release);
+        assert_eq!(host.execution_execute(&[Value::capability(capability), Value::capability(authorization), Value::null()], &mut output), LanaError::Capability);
+    }
     #[test]
     fn numeric_ids_reject_truncation_saturation_and_nonfinite_values() {
         for number in [-1.0, 0.5, f64::NAN, f64::INFINITY, 18446744073709551616.0] {

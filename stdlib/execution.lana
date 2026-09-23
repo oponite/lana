@@ -37,9 +37,14 @@ fn webhook_path(path) {
     if (type_of(path) != "string") { return false; }
     if (string_length(path) == 0) { return false; }
     if (string_byte_at(path, 0) != 47) { return false; }
+    if (string_length(path) > 1) {
+        if (string_byte_at(path, 1) == 47) { return false; }
+    }
     let index = 0;
     while (index < string_length(path)) {
         let byte = string_byte_at(path, index);
+        if (byte <= 32) { return false; }
+        if (byte == 127) { return false; }
         if (byte == 35) { return false; }
         if (byte == 58) { return false; }
         if (byte == 63) { return false; }

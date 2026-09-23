@@ -1,6 +1,8 @@
-# Migrating to Lana 3.0.1
+# Migrating to Lana 3.0.2
 
-No source rewrite is required from 3.0.0 to 3.0.1.
+Valid 3.0.x programs retain their source syntax in 3.0.2. Unresolved dataset
+predicates/keys now fail explicitly; unsupported tokenizer processing and
+malformed webhook plans also fail instead of silently changing behavior.
 
 - Use `lana` for source programs and LABC v3-v5. It is the canonical Rust CLI
   and VM.
@@ -10,6 +12,6 @@ No source rewrite is required from 3.0.0 to 3.0.1.
   bytecode converter.
 - Keep C11 conformance consumers on `lanavm` with LABC v1-v2 only.
 
-C removal is not part of 3.0.1. It is a 4.0 migration only after ABI-v1 is
+C removal is not part of 3.0.2. It is a 4.0 migration only after ABI-v1 is
 replaced or retired, consumers have migrated, v1-v2 conformance is retained,
 and a release candidate passes without the C runtime.

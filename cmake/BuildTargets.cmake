@@ -85,6 +85,15 @@ find_program(LANA_RUSTC_EXECUTABLE rustc
     HINTS "$ENV{HOME}/.cargo/bin"
     REQUIRED)
 
+# Cargo must rerun when any crate source or manifest changes.
+file(GLOB_RECURSE LANA_RUST_INPUTS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/vm/rust/*.rs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/rust/*.rs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/*.rs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/vm/rust/Cargo.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/runtime/rust/Cargo.toml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/rust/Cargo.toml")
+
 if(APPLE AND "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_OSX_ARCHITECTURES)
     find_program(LANA_LIPO_EXECUTABLE lipo REQUIRED)
     add_custom_command(
@@ -104,11 +113,7 @@ if(APPLE AND "arm64" IN_LIST CMAKE_OSX_ARCHITECTURES AND "x86_64" IN_LIST CMAKE_
                 "${CMAKE_CURRENT_BINARY_DIR}/cargo-target/x86_64-apple-darwin/release/lana"
                 -output "${LANA_RUST_CLI}"
         DEPENDS
-            Cargo.toml Cargo.lock
-            vm/rust/lana-bytecode/src/lib.rs vm/rust/lana-bytecode/src/opcode.rs
-            vm/rust/lana-vm/src/lib.rs vm/rust/lana-vm/src/vm.rs
-            runtime/rust/lana-runtime/src/lib.rs
-            tools/rust/lana-cli/src/main.rs
+            Cargo.toml Cargo.lock ${LANA_RUST_INPUTS}
         VERBATIM
     )
 else()
@@ -122,11 +127,7 @@ else()
         COMMAND "${CMAKE_COMMAND}" -E copy
                 "${CMAKE_CURRENT_BINARY_DIR}/cargo-target/release/lana" "${LANA_RUST_CLI}"
         DEPENDS
-            Cargo.toml Cargo.lock
-            vm/rust/lana-bytecode/src/lib.rs vm/rust/lana-bytecode/src/opcode.rs
-            vm/rust/lana-vm/src/lib.rs vm/rust/lana-vm/src/vm.rs
-            runtime/rust/lana-runtime/src/lib.rs
-            tools/rust/lana-cli/src/main.rs
+            Cargo.toml Cargo.lock ${LANA_RUST_INPUTS}
         VERBATIM
     )
 endif()

@@ -1,4 +1,4 @@
-# Required 3.0.1 branch checks
+# Required 3.0.2 branch checks
 
 Protect `main` and `dev` in the GitHub repository. Require pull requests, a
 branch that is up to date before merge, and these status checks:
@@ -15,7 +15,7 @@ branch that is up to date before merge, and these status checks:
 Do not require `Full fuzz test` for ordinary pull requests. It runs on the
 weekly schedule and on version tags.
 
-Create a repository ruleset for the exact tag `v3.0.1` before pushing it.
+Create a repository ruleset for the exact tag `v3.0.2` before pushing it.
 Restrict tag creation and updates to release maintainers, and disallow tag
 deletion. The release workflow checks `github.ref_protected`, so it cannot
 publish unless GitHub reports that this tag is protected.

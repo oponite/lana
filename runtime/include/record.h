@@ -4,12 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LANA_RECORD_ABI_VERSION 2u
+#define LANA_RECORD_ABI_VERSION 1u
 
 typedef struct LanaRecord LanaRecord;
-typedef struct LanaDecisionRecord LanaDecisionRecord;
-typedef struct LanaExecution LanaExecution;
-typedef struct LanaValue LanaValue;
 typedef struct LanaRecordBuffer {
     size_t struct_size;
     uint8_t *data;
@@ -22,15 +19,9 @@ int lana_record_json(const LanaRecord *record, LanaRecordBuffer *out);
 void lana_record_free(LanaRecord *record);
 void lana_record_buffer_free(LanaRecordBuffer *buffer);
 
-int lana_value_inspect_json(const LanaValue *value, LanaRecordBuffer *out);
-
-int lana_decision_record_create(const char *value, const char *reason, LanaDecisionRecord **out);
-int lana_decision_record_json(const LanaDecisionRecord *decision, LanaRecordBuffer *out);
-void lana_decision_record_free(LanaDecisionRecord *decision);
-
-int lana_execution_create(const char *plan, const char *args_json, LanaExecution **out);
-int lana_execution_json(const LanaExecution *execution, LanaRecordBuffer *out);
-int lana_execute_effect(const LanaExecution *execution, LanaRecord **out);
-void lana_execution_free(LanaExecution *execution);
+/* This header describes the shipped Rust record subset. Decision, inspection,
+ * and Execution record APIs remain unimplemented; the native C bridge is a
+ * separate ABI. Free output buffers before reusing them. Input pointers must
+ * address at least length bytes; returned buffers belong to lana-ffi. */
 
 #endif

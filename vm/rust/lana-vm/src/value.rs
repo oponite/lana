@@ -1050,11 +1050,15 @@ impl Value {
     }
 
     pub fn check_resolved(&self, limit: usize) -> Result<(), LanaError> {
-        self.check_graph(limit, LanaError::UnresolvedValue)
+        self.check_graph(limit, LanaError::UnresolvedValue, false)
+    }
+
+    pub(crate) fn check_dataset_key(&self, limit: usize) -> Result<(), LanaError> {
+        self.check_graph(limit, LanaError::UnresolvedValue, true)
     }
 
     pub fn check_capabilities(&self, limit: usize) -> Result<(), LanaError> {
-        self.check_graph(limit, LanaError::ClaimRevoked)
+        self.check_graph(limit, LanaError::ClaimRevoked, false)
     }
 
     fn container_identity(&self) -> Option<usize> {
@@ -1089,13 +1093,14 @@ impl Value {
         }
     }
 
-    fn check_graph(&self, limit: usize, rejected: LanaError) -> Result<(), LanaError> {
+    fn check_graph(&self, limit: usize, rejected: LanaError, dataset_key: bool) -> Result<(), LanaError> {
         fn resolved(value: &Value) -> Value {
             value.reactive.as_ref().and_then(|r| r.lock().unwrap().current.clone())
                 .unwrap_or_else(|| value.clone())
         }
-        fn check(value: &Value, rejected: LanaError) -> Result<(), LanaError> {
+        fn check(value: &Value, rejected: LanaError, dataset_key: bool) -> Result<(), LanaError> {
             let bad = match &value.kind {
+                ValueKind::Joint(_) | ValueKind::StateDist(_) | ValueKind::Distribution { .. } => dataset_key,
                 ValueKind::Possibility(_) | ValueKind::PathSet(_) => rejected == LanaError::UnresolvedValue,
                 ValueKind::Capability(v) => rejected == LanaError::ClaimRevoked && v.revoked.load(Ordering::Acquire),
                 _ => false,
@@ -1103,7 +1108,7 @@ impl Value {
             if bad { Err(rejected) } else { Ok(()) }
         }
         let root = resolved(self);
-        check(&root, rejected)?;
+        check(&root, rejected, dataset_key)?;
         if root.container_identity().is_none() { return Ok(()); }
         let budget = crate::heap::Heap::new(limit);
         let mut stack = crate::heap::Buffer::new(&budget, 1, 0)?;
@@ -1111,7 +1116,7 @@ impl Value {
         stack.push(PrintFrame { value: root, next: 0, identity: None })?;
         while let Some(frame) = stack.last_mut() {
             if frame.identity.is_none() {
-                check(&frame.value, rejected)?;
+                check(&frame.value, rejected, dataset_key)?;
                 let Some(identity) = frame.value.container_identity() else { stack.pop(); continue; };
                 // ponytail: bounded linear identity lookup; use a budgeted hash
                 // table if graph inspection becomes a measured bottleneck.

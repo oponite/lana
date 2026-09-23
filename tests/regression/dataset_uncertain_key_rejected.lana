@@ -1,0 +1,3 @@
+let rows = dataset([{key: possibility([1, 2])}]);
+let result = materialize(sort(rows, "key"));
+print(result);

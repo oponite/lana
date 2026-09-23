@@ -1,0 +1,6 @@
+fn keep(row) { return row.key > 1; }
+let rows = dataset([{key: 1}, {key: 2}]);
+assert(array_length(materialize(filter(rows, keep))) == 1, "definite filter");
+assert(array_length(materialize(join(rows, rows, "key"))) == 2, "self join");
+assert(array_length(materialize(group_by(rows, "key"))) == 2, "definite groups");
+print("DATASET_DEFINITE_PASS");

@@ -1,0 +1,4 @@
+fn keep(row) { return possibility([true, false]); }
+let rows = dataset([1, 2]);
+let result = materialize(filter(rows, keep));
+print(result);

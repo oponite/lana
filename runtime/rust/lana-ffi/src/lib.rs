@@ -50,9 +50,7 @@
 //!
 //! # Memory notes
 //!
-//! * `lana_vm_create` leaks the (empty) `Chunk` it borrows; `lana_vm_free`
-//!   cannot reclaim it because the `Vm` holds a `&'static Chunk`. One small
-//!   chunk is leaked per VM, which is bounded and acceptable at an FFI edge.
+//! * VM handles own their chunk and destroy the VM before releasing the chunk.
 //! * Strings returned by `lana_store_get_path` must be released with
 //!   `lana_string_free` (not C `free`). Byte buffers returned by
 //!   `lana_state_encode` must be released with `lana_bytes_free`.
@@ -146,9 +144,19 @@ pub struct LanaPolicy {
 // Opaque handles
 // ---------------------------------------------------------------------------
 
-/// Owns a `Vm` that borrows a leaked `Chunk`.
+/// Field order ensures the VM is dropped before its owned, stable allocation.
 pub struct VmHandle {
     vm: Vm<'static>,
+    _chunk: Box<Chunk>,
+}
+
+impl VmHandle {
+    fn new(chunk: Box<Chunk>) -> Self {
+        // The Box allocation does not move. Both fields are private; the borrow
+        // cannot outlive this handle, and vm is dropped before _chunk.
+        let vm = Vm::new(unsafe { &*(&*chunk as *const Chunk) });
+        Self { vm, _chunk: chunk }
+    }
 }
 
 /// Growable byte buffer backing the codec functions (opaque `LanaBuffer`).
@@ -170,7 +178,10 @@ pub extern "C" fn lana_record_abi_version() -> u32 { LANA_RECORD_ABI_VERSION }
 
 #[no_mangle]
 pub unsafe extern "C" fn lana_record_parse(data: *const u8, length: usize, out: *mut *mut RecordHandle) -> i32 {
-    if data.is_null() || out.is_null() { return LanaError::Type as i32; }
+    if out.is_null() { return LanaError::Type as i32; }
+    *out = ptr::null_mut();
+    if data.is_null() { return LanaError::Type as i32; }
+    if length > 256 * 1024 * 1024 { return LanaError::Limit as i32; }
     let bytes = std::slice::from_raw_parts(data, length);
     let Ok(text) = std::str::from_utf8(bytes) else { return LanaError::Schema as i32; };
     if json_parse(text).is_err() { return LanaError::Schema as i32; }
@@ -180,7 +191,9 @@ pub unsafe extern "C" fn lana_record_parse(data: *const u8, length: usize, out: 
 
 #[no_mangle]
 pub unsafe extern "C" fn lana_record_json(record: *const RecordHandle, out: *mut LanaRecordBuffer) -> i32 {
-    if record.is_null() || out.is_null() || (*out).struct_size != std::mem::size_of::<LanaRecordBuffer>() { return LanaError::Type as i32; }
+    if out.is_null() || (*out).struct_size != std::mem::size_of::<LanaRecordBuffer>() { return LanaError::Type as i32; }
+    (*out).data = ptr::null_mut(); (*out).length = 0;
+    if record.is_null() { return LanaError::Type as i32; }
     let data = leak_bytes(&(*record).json) as *mut u8;
     (*out).data = data; (*out).length = (*record).json.len();
     LanaError::Ok as i32
@@ -191,7 +204,7 @@ pub unsafe extern "C" fn lana_record_free(record: *mut RecordHandle) { if !recor
 
 #[no_mangle]
 pub unsafe extern "C" fn lana_record_buffer_free(buffer: *mut LanaRecordBuffer) {
-    if buffer.is_null() { return; }
+    if buffer.is_null() || (*buffer).struct_size != std::mem::size_of::<LanaRecordBuffer>() { return; }
     if !(*buffer).data.is_null() { drop(Box::from_raw(std::slice::from_raw_parts_mut((*buffer).data, (*buffer).length))); }
     (*buffer).data = ptr::null_mut(); (*buffer).length = 0;
 }
@@ -798,22 +811,17 @@ pub extern "C" fn lana_opcode_name(opcode: u8) -> *const c_char {
 /// Mirrors `lana_vm_create` (creates a VM over an empty chunk).
 #[no_mangle]
 pub extern "C" fn lana_vm_create() -> *mut VmHandle {
-    let chunk: &'static Chunk = Box::leak(Box::new(Chunk::new(LABC_VERSION, 0)));
-    let vm = Vm::new(chunk);
-    Box::into_raw(Box::new(VmHandle { vm }))
+    Box::into_raw(Box::new(VmHandle::new(Box::new(Chunk::new(LABC_VERSION, 0)))))
 }
 
 /// Creates a VM over a caller-provided chunk (extension; the chunk handle's
-/// ownership transfers to the VM and is leaked on free).
+/// ownership transfers to the VM and is released on free).
 #[no_mangle]
 pub unsafe extern "C" fn lana_vm_create_with_chunk(chunk: *mut Chunk) -> *mut VmHandle {
     if chunk.is_null() {
         return ptr::null_mut();
     }
-    let chunk_box = Box::from_raw(chunk);
-    let chunk_ref: &'static Chunk = Box::leak(chunk_box);
-    let vm = Vm::new(chunk_ref);
-    Box::into_raw(Box::new(VmHandle { vm }))
+    Box::into_raw(Box::new(VmHandle::new(Box::from_raw(chunk))))
 }
 
 /// Mirrors `lana_vm_seed`.
@@ -1470,6 +1478,42 @@ pub unsafe extern "C" fn lana_bytes_free(ptr: *mut c_void, len: usize) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn record_failures_clear_outputs_and_free_is_idempotent() {
+        unsafe {
+            let mut record = ptr::NonNull::<RecordHandle>::dangling().as_ptr();
+            assert_eq!(lana_record_parse(b"{".as_ptr(), 1, &mut record), LanaError::Schema as i32);
+            assert!(record.is_null());
+            assert_eq!(lana_record_parse(b"{}".as_ptr(), usize::MAX, &mut record), LanaError::Limit as i32);
+            assert!(record.is_null());
+            assert_eq!(lana_record_parse(b"{}".as_ptr(), 2, &mut record), LanaError::Ok as i32);
+            let mut buffer = LanaRecordBuffer { struct_size: std::mem::size_of::<LanaRecordBuffer>(), data: ptr::null_mut(), length: 0 };
+            assert_eq!(lana_record_json(record, &mut buffer), LanaError::Ok as i32);
+            assert_eq!(std::slice::from_raw_parts(buffer.data, buffer.length), b"{}");
+            lana_record_buffer_free(&mut buffer);
+            lana_record_buffer_free(&mut buffer);
+            assert!(buffer.data.is_null());
+            lana_record_free(record);
+            assert_eq!(lana_record_json(ptr::null(), &mut buffer), LanaError::Type as i32);
+            assert_eq!(buffer.length, 0);
+        }
+    }
+
+    #[test]
+    fn vm_handle_owns_chunk_and_preserves_execution() {
+        unsafe {
+            let chunk = lana_bytecode::assembler::assemble("LOAD_CONST R0 \"owned\"\nRETURN R0\n").unwrap();
+            let owned_chunk = Box::into_raw(Box::new(chunk));
+            let handle = lana_vm_create_with_chunk(owned_chunk);
+            assert!(!handle.is_null());
+            assert_eq!(lana_vm_run(handle), LanaError::Ok as i32);
+            assert_eq!((*handle)._chunk.as_ref() as *const Chunk, owned_chunk);
+            lana_vm_free(handle);
+
+            lana_vm_destroy(lana_vm_create());
+        }
+    }
+
     unsafe fn cstr_to_string(ptr: *const c_char) -> String {
         if ptr.is_null() {
             return String::new();
@@ -1480,8 +1524,7 @@ mod tests {
     #[test]
     fn map_allocation_failure_clears_output_and_preserves_budget() {
         let chunk = lana_bytecode::assembler::assemble("HALT\n").unwrap();
-        let chunk = Box::into_raw(Box::new(chunk));
-        let mut handle = VmHandle { vm: Vm::new(unsafe { &*chunk }) };
+        let mut handle = VmHandle::new(Box::new(chunk));
         handle.vm.set_memory_limit(1);
         let mut output = std::ptr::NonNull::<Map>::dangling().as_ptr();
         unsafe {
@@ -1494,7 +1537,6 @@ mod tests {
             assert!(output.is_null());
         }
         drop(handle);
-        unsafe { drop(Box::from_raw(chunk)); }
     }
 
     #[test]

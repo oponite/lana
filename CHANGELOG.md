@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.0.2
+
+- Reject unresolved dataset predicates and keys; fix self-join locking.
+- Validate webhook authorization and receipt transitions before transport;
+  disable curl configuration, redirects, retries, and URL expansion.
+- Make Brain training transactional and file replacement atomic; validate
+  bounded model files and strict WordLevel/SafeTensors packages.
+- Correct CLI JSON escaping and Rust FFI chunk ownership and record headers.
+- Add Core matrix, compiler failure, bridge, Brain and C-consumer regressions;
+  document the actual supported operation and integration boundaries.
+
 ## 3.0.1
 
 - Make the Rust CLI/VM release gates, bytecode fuzzing, execution configuration,
