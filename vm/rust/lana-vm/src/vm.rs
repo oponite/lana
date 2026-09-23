@@ -12721,6 +12721,12 @@ impl<'a> Vm<'a> {
         map.lock().unwrap().get(key).cloned().ok_or(LanaError::Type)
     }
 
+    fn dataset_checked_key(&self, row: &Value, key: &str) -> Result<Value, LanaError> {
+        let value = Self::dataset_row_key(row, key)?;
+        value.check_dataset_key(self.memory_limit.saturating_sub(self.allocated_bytes()))?;
+        Ok(self.reactive_value(&value))
+    }
+
     /// Compare two values for sort ordering, mirroring `dataset_compare_values`.
     fn dataset_compare_values(a: &Value, b: &Value) -> i32 {
         match (&a.kind, &b.kind) {
@@ -12758,8 +12764,11 @@ impl<'a> Vm<'a> {
                     if error != LanaError::Ok {
                         return Err(error);
                     }
-                    if matches!(pred_result.kind, ValueKind::Bool(true)) {
-                        result.push(row);
+                    pred_result.check_dataset_key(self.memory_limit.saturating_sub(self.allocated_bytes()))?;
+                    match self.reactive_value(&pred_result).kind {
+                        ValueKind::Bool(true) => result.push(row),
+                        ValueKind::Bool(false) => {},
+                        _ => return Err(LanaError::Type),
                     }
                 }
                 Ok(result)
@@ -12818,13 +12827,14 @@ impl<'a> Vm<'a> {
                     return Err(LanaError::Type);
                 };
                 let mut result = self.dataset_materialize(&self.dataset_as(dataset)?, scratch)?;
+                for row in &result { self.dataset_checked_key(row, key)?; }
                 // Insertion sort by key value (rows are maps).
                 for i in 1..result.len() {
-                    let key_i = Self::dataset_row_key(&result[i], &**key)?;
+                    let key_i = self.dataset_checked_key(&result[i], key)?;
                     let pivot = result[i].clone();
                     let mut j = i;
                     while j > 0 {
-                        let key_j = Self::dataset_row_key(&result[j - 1], &**key)?;
+                        let key_j = self.dataset_checked_key(&result[j - 1], key)?;
                         if Self::dataset_compare_values(&key_j, &key_i) <= 0 {
                             break;
                         }
@@ -12842,7 +12852,7 @@ impl<'a> Vm<'a> {
                 let source_rows = self.dataset_materialize(&self.dataset_as(dataset)?, scratch)?;
                 let mut result: Vec<Value> = Vec::new();
                 for row in source_rows {
-                    let key_value = Self::dataset_row_key(&row, &**key)?;
+                    let key_value = self.dataset_checked_key(&row, key)?;
                     // Find an existing group record with this key.
                     let mut group_map: Option<Arc<Mutex<Map>>> = None;
                     for g in 0..result.len() {
@@ -12965,11 +12975,12 @@ impl<'a> Vm<'a> {
                 };
                 let left_rows = self.dataset_materialize(&self.dataset_as(dataset)?, scratch)?;
                 let right_rows = self.dataset_materialize(other, scratch)?;
+                for row in left_rows.iter().chain(&right_rows) { self.dataset_checked_key(row, key)?; }
                 let mut result = Vec::new();
                 for left in &left_rows {
-                    let left_key = Self::dataset_row_key(left, &**key)?;
+                    let left_key = self.dataset_checked_key(left, key)?;
                     for right in &right_rows {
-                        let right_key = Self::dataset_row_key(right, &**key)?;
+                        let right_key = self.dataset_checked_key(right, key)?;
                         if !set_value_equal(&left_key, &right_key) {
                             continue;
                         }
@@ -12980,13 +12991,14 @@ impl<'a> Vm<'a> {
                         let ValueKind::Map(right_map) = &right.kind else {
                             return Err(LanaError::Type);
                         };
-                        let left_guard = left_map.lock().unwrap();
-                        let right_guard = right_map.lock().unwrap();
-                        let mut merged = Map::new(&self.heap, left_guard.entries.len() + right_guard.entries.len())?;
-                        for entry in &left_guard.entries {
+                        // Snapshot separately: a self-join may reference the same mutex.
+                        let left_entries = left_map.lock().unwrap().entries.to_vec();
+                        let right_entries = right_map.lock().unwrap().entries.to_vec();
+                        let mut merged = Map::new(&self.heap, left_entries.len() + right_entries.len())?;
+                        for entry in &left_entries {
                             merged.set(entry.key.clone(), entry.value.clone(), false)?;
                         }
-                        for entry in &right_guard.entries {
+                        for entry in &right_entries {
                             merged.set(entry.key.clone(), entry.value.clone(), false)?;
                         }
                         result.push(Value::map(Arc::new(Mutex::new(merged))));
@@ -16634,6 +16646,63 @@ mod tests {
     }
 
     #[test]
+    fn dataset_filter_rejects_uncertain_and_non_boolean_results() {
+        for (predicate, expected) in [
+            ("LOAD_CONST R1 1\nRETURN R1\n", LanaError::Type),
+            ("LOAD_CONST R1 true\nLOAD_CONST R2 false\nARRAY_NEW R3 R1 2\nPOSSIBILITY_BUILD R3 R4\nRETURN R4\n", LanaError::UnresolvedValue),
+        ] {
+            let program = format!(".function main 0 8\nLOAD_CONST R0 2\nLAZY R1 gen R0\nHOST_CALL dataset R1 1 R2\nLOAD_FUNCTION R3 predicate\nHOST_CALL dataset_filter R2 2 R4\nHOST_CALL dataset_materialize R4 1 R5\nRETURN R5\n.function gen 1 3\nRETURN R0\n.function predicate 1 5\n{predicate}");
+            assert_eq!(run_chunk(&program).0, expected);
+        }
+    }
+
+    #[test]
+    fn dataset_keys_are_checked_before_comparison_and_self_join_works() {
+        let chunk = Chunk::new(lana_bytecode::opcode::LABC_VERSION, 0);
+        let mut vm = Vm::new(&chunk);
+        let uncertain = Value::possibility(vm.possibility_build(&[Value::number(1.0), Value::number(2.0)]).unwrap());
+        let nested = vm.array_value(vec![uncertain.clone()]).unwrap();
+        let make_source = |vm: &mut Vm, key: Option<Value>| {
+            let mut rows = Vec::new();
+            if let Some(key) = key {
+                let mut row = Map::new(&vm.heap, 1).unwrap();
+                row.set(Arc::from("key"), key, false).unwrap();
+                rows.push(Value::map(Arc::new(Mutex::new(row))));
+            }
+            let rows = vm.array_value(rows).unwrap();
+            let mut source = Value::null();
+            assert_eq!(vm.host_dataset(&[rows], &mut source), LanaError::Ok);
+            source
+        };
+        let empty = make_source(&mut vm, None);
+        for key in [uncertain, nested, Value::distribution(0.5, 0.5)] {
+            let source = make_source(&mut vm, Some(key));
+            for operation in [DatasetOp::Sort, DatasetOp::GroupBy, DatasetOp::Join] {
+                for reverse in [false, true] {
+                    let mut plan = Value::null();
+                    let key = Value::string(Arc::from("key"));
+                    let error = match operation {
+                        DatasetOp::Sort => vm.host_dataset_sort(&[source.clone(), key], &mut plan),
+                        DatasetOp::GroupBy => vm.host_dataset_group_by(&[source.clone(), key], &mut plan),
+                        _ if reverse => vm.host_dataset_join(&[empty.clone(), source.clone(), key], &mut plan),
+                        _ => vm.host_dataset_join(&[source.clone(), empty.clone(), key], &mut plan),
+                    };
+                    assert_eq!(error, LanaError::Ok);
+                    let mut output = Value::number(99.0);
+                    assert_eq!(vm.host_dataset_materialize(&[plan], &mut output), LanaError::UnresolvedValue);
+                    assert_eq!(output.as_number(), 99.0);
+                }
+            }
+        }
+        let source = make_source(&mut vm, Some(Value::number(1.0)));
+        let mut joined = Value::null();
+        assert_eq!(vm.host_dataset_join(&[source.clone(), source, Value::string(Arc::from("key"))], &mut joined), LanaError::Ok);
+        let mut output = Value::null();
+        assert_eq!(vm.host_dataset_materialize(&[joined], &mut output), LanaError::Ok);
+        assert_eq!(output.print(), "[{\"key\": 1}]");
+    }
+
+    #[test]
     fn dataset_explain_reports_plan() {
         // explain(filter(source)) -> {op: "filter", source: {op: "source", bound: 5}}.
         let (error, result) = run_chunk(
@@ -17376,6 +17445,31 @@ mod tests {
             ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 0.2\nARRAY_NEW R2 R0 2\nARRAY_NEW R3 R2 1\nDISTRIBUTION_BUILD R3 R4\nRETURN R4\n",
         );
         assert_eq!(error, LanaError::InvalidDistribution);
+    }
+
+    #[test]
+    fn v5_core_operation_matrix() {
+        // Exercise actual bytecode dispatch, including rejected cells.
+        let forms = [
+            ("definite", "LOAD_CONST R10 1\n", false, false, true),
+            ("possibility", "LOAD_CONST R0 1\nLOAD_CONST R1 2\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R10\n", false, false, false),
+            ("distribution", "LOAD_CONST R0 1\nLOAD_CONST R1 0.5\nARRAY_NEW R2 R0 2\nLOAD_CONST R3 2\nLOAD_CONST R4 0.5\nARRAY_NEW R5 R3 2\nMOVE R6 R2\nMOVE R7 R5\nARRAY_NEW R8 R6 2\nDISTRIBUTION_BUILD R8 R10\n", false, true, false),
+            ("joint", "LOAD_CONST R0 1\nJOINT_BUILD R10 R0 1 independent:x\n", true, true, true),
+            ("paths", "LOAD_CONST R0 true\nLOAD_CONST R1 false\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nPATH_SPLIT R3 other\nLOAD_CONST R4 1\nJUMP joined\nother:\nLOAD_CONST R4 2\njoined:\nPATH_JOIN\nMOVE R10 R4\n", false, true, false),
+        ];
+        for (name, prefix, joint, sample, resolve) in forms {
+            for (operation, instruction, expected) in [
+                ("project", "JOINT_PROJECT R10 R11 x\n", if joint { LanaError::Ok } else { LanaError::Type }),
+                ("condition", "LOAD_CONST R12 1\nJOINT_CONDITION R10 R11 x R12\n", if joint { LanaError::Ok } else { LanaError::Type }),
+                ("observe", "LOAD_CONST R12 1\nOBSERVE R10 R11 x R12\n", if joint { LanaError::Ok } else { LanaError::Type }),
+                ("sample", "INFO_SAMPLE R10 R11\n", if sample { LanaError::Ok } else if name == "possibility" { LanaError::UnsupportedOperation } else { LanaError::Type }),
+                ("resolve", "RESOLVE R10 R11\n", if resolve { LanaError::Ok } else { LanaError::UnresolvedValue }),
+                ("inspect", "HOST_CALL information_inspect R10 1 R11\n", LanaError::Ok),
+            ] {
+                let (actual, _) = run_chunk(&format!(".version 5\n{prefix}{instruction}RETURN R11\n"));
+                assert_eq!(actual, expected, "{name}/{operation}");
+            }
+        }
     }
 
     #[test]

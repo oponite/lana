@@ -85,7 +85,17 @@ fn append_string(out: &mut String, string: &str) -> Result<(), LanaError> {
     Ok(())
 }
 
-fn encode_value_into(out: &mut String, value: &Value) -> Result<(), LanaError> {
+fn encode_value_into(out: &mut String, value: &Value, ancestors: &mut Vec<usize>, depth: usize) -> Result<(), LanaError> {
+    if depth > 256 { return Err(LanaError::Limit); }
+    let identity = match &value.kind {
+        ValueKind::Array(value) => Some(Arc::as_ptr(value) as usize),
+        ValueKind::Map(value) => Some(Arc::as_ptr(value) as usize),
+        _ => None,
+    };
+    if let Some(identity) = identity {
+        if ancestors.contains(&identity) { return Err(LanaError::UnsupportedValue); }
+        ancestors.push(identity);
+    }
     match &value.kind {
         ValueKind::Null => out.push_str("null"),
         ValueKind::Bool(boolean) => out.push_str(if *boolean { "true" } else { "false" }),
@@ -103,7 +113,7 @@ fn encode_value_into(out: &mut String, value: &Value) -> Result<(), LanaError> {
                 if index != 0 {
                     out.push(',');
                 }
-                encode_value_into(out, item)?;
+                encode_value_into(out, item, ancestors, depth + 1)?;
             }
             out.push(']');
         }
@@ -118,20 +128,31 @@ fn encode_value_into(out: &mut String, value: &Value) -> Result<(), LanaError> {
                 }
                 append_string(out, &entry.key)?;
                 out.push(':');
-                encode_value_into(out, &entry.value)?;
+                encode_value_into(out, &entry.value, ancestors, depth + 1)?;
             }
             out.push('}');
         }
         _ => return Err(LanaError::UnsupportedValue),
     }
+    if identity.is_some() { ancestors.pop(); }
     Ok(())
 }
 
 /// Encode a value as JSON, mirroring `lana_codec_encode_value`.
 pub fn encode_value(value: &Value) -> Result<String, LanaError> {
     let mut out = String::new();
-    encode_value_into(&mut out, value)?;
+    encode_value_into(&mut out, value, &mut Vec::new(), 0)?;
     Ok(out)
+}
+
+#[test]
+fn cyclic_values_fail_without_recursive_locking() {
+    let heap = lana_vm::heap::Heap::new(4096);
+    let map = Arc::new(std::sync::Mutex::new(lana_vm::value::Map::new(&heap, 1).unwrap()));
+    let value = Value::map(map.clone());
+    map.lock().unwrap().set(Arc::from("self"), value.clone(), false).unwrap();
+    assert_eq!(encode_value(&value), Err(LanaError::UnsupportedValue));
+    map.lock().unwrap().set(Arc::from("self"), Value::null(), false).unwrap();
 }
 
 struct Parser<'a> {

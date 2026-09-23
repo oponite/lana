@@ -224,6 +224,16 @@ lowering. The current LABC and C VM implementation may support only a declared
 subset; it must report unsupported operations rather than silently approximate
 or collapse information.
 
+### 0.1.4 Definite dataset selection
+
+Dataset filtering requires a definite Boolean. An unresolved predicate is an
+error, not false. Sorting, grouping, and joining require definite keys, including
+their nested values. A distribution, joint, or path is not implicitly resolved
+or sampled to choose row membership or a key. This restriction also applies to
+singleton inputs and to either side of an empty join. Failed materialization
+publishes no partial result. These operations do not establish independence or
+provide uncertainty-preserving aggregation or durable evidence snapshots.
+
 ## 0.2 Static uncertainty, effect, and failure foundation
 
 The source type categories are disjoint tagged constructors:

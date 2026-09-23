@@ -3,7 +3,13 @@ set -eu
 
 example_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 lana_bin=${LANA_BIN:-lana}
-brain_path=${1:-"$example_dir/brain.lbrn"}
+if [ "$#" -gt 0 ]; then
+    brain_path=$1
+else
+    work=$(mktemp -d "${TMPDIR:-/tmp}/lana-brain.XXXXXX")
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    brain_path="$work/brain.lbrn"
+fi
 export LANA_HF=${LANA_HF:-"$example_dir/../../tools/lana-hf/lana_hf.py"}
 
 "$lana_bin" brain new "$brain_path" 3 2 2 7

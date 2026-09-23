@@ -265,8 +265,8 @@ fn write_chunk(chunk: &Chunk, path: &str) -> Result<(), LanaErrorInfo> {
         out.extend_from_slice(&instruction.imm.to_le_bytes());
         out.extend_from_slice(&instruction.line.to_le_bytes());
     }
-    std::fs::write(path, out)
-        .map_err(|_| LanaErrorInfo::new(LanaError::Io, 0, 0, 0, "cannot write output file"))
+    lana_runtime::atomic_file::write(Path::new(path), &out)
+        .map_err(|error| LanaErrorInfo::new(LanaError::Io, 0, 0, 0, &format!("cannot write output file: {error}")))
 }
 
 /// Compile a `.lana` source to a `.labc` chunk, mirroring
@@ -1120,35 +1120,38 @@ fn lsp_command() -> ExitCode {
     }
 }
 
+fn bridge_response(output: std::process::Output) -> Result<lana_vm::Value, String> {
+    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
+    let text = std::str::from_utf8(&output.stdout).map_err(|_| "bridge returned invalid UTF-8".to_owned())?;
+    let value = lana_runtime::json_parse(text).map_err(|_| "bridge returned malformed JSON".to_owned())?;
+    if lsp_string(&value, "status").as_deref() != Some("ok") { return Err("bridge did not return ok status".to_owned()); }
+    Ok(value)
+}
+
 fn bridge_tokens(bridge: &str, tokenizer: &str, text: &str) -> Result<Vec<usize>, String> {
     let output = std::process::Command::new(bridge).args(["tokenize", tokenizer, text]).output().map_err(|_| "cannot start LANA_HF bridge".to_owned())?;
-    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
-    let text = String::from_utf8(output.stdout).map_err(|_| "bridge returned invalid UTF-8".to_owned())?;
-    let Some(start) = text.find('[') else { return Err("bridge returned no token IDs".to_owned()); };
-    let Some(end) = text[start..].find(']') else { return Err("bridge returned malformed token IDs".to_owned()); };
-    text[start + 1..start + end].split(',').filter(|token| !token.trim().is_empty())
-        .map(|token| token.trim().parse().map_err(|_| "bridge returned invalid token ID".to_owned())).collect()
+    let value = bridge_response(output)?;
+    let Some(lana_vm::Value { kind: lana_vm::value::ValueKind::Array(ids), .. }) = lsp_member(&value, "token_ids") else { return Err("bridge returned no token IDs".to_owned()); };
+    let ids = ids.lock().unwrap();
+    ids.items().iter().map(|value| match value.kind {
+        lana_vm::value::ValueKind::Number(id) if id.is_finite() && id >= 0.0 && id.fract() == 0.0 && id < usize::MAX as f64 && id <= 9_007_199_254_740_991.0 => Ok(id as usize),
+        _ => Err("bridge returned invalid token ID".to_owned()),
+    }).collect()
 }
 
 fn bridge_text(bridge: &str, tokenizer: &str, token: usize) -> Result<String, String> {
     let output = std::process::Command::new(bridge).args(["detokenize", tokenizer, &format!("[{token}]")]).output().map_err(|_| "cannot start LANA_HF bridge".to_owned())?;
-    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).into_owned()); }
-    let text = String::from_utf8(output.stdout).map_err(|_| "bridge returned invalid UTF-8".to_owned())?;
-    let Some(start) = text.find("\"text\":") else { return Err("bridge returned no text".to_owned()); };
-    let rest = text[start + 7..].trim_start();
-    let Some(rest) = rest.strip_prefix('"') else { return Err("bridge returned malformed text".to_owned()); };
-    let Some(end) = rest.find('"') else { return Err("bridge returned malformed text".to_owned()); };
-    Ok(rest[..end].to_owned())
+    lsp_string(&bridge_response(output)?, "text").ok_or_else(|| "bridge returned no text".to_owned())
 }
 
 fn bridge_package(args: &[&str]) -> Result<(), String> {
     let bridge = std::env::var("LANA_HF").map_err(|_| "set LANA_HF to the installed local bridge".to_owned())?;
     let output = std::process::Command::new(bridge).args(args).output().map_err(|_| "cannot start LANA_HF bridge".to_owned())?;
-    if output.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&output.stderr).into_owned()) }
+    bridge_response(output).map(|_| ())
 }
 
 fn brain_command(args: &[String]) -> ExitCode {
-    let fail = |message: &str| { eprintln!("brain: {message}"); ExitCode::from(1) };
+    let fail = |message: &str| { eprintln!("brain: {message}\n{{\"status\":\"error\",\"error\":{}}}", json_quote(message)); ExitCode::from(1) };
     if args.is_empty() { return fail("usage: lana brain new|train|evaluate|save|load|inspect|chat"); }
     match args[0].as_str() {
         "new" if args.len() == 5 || args.len() == 6 => {
@@ -1214,11 +1217,11 @@ fn brain_command(args: &[String]) -> ExitCode {
                 let response = bridge_text(&bridge, &args[2], next).map_err(|_| LanaError::UnsupportedOperation)?;
                 brain.memory.push(format!("user:{}", args[3]));
                 brain.memory.push(format!("assistant:{response}"));
-                brain.version += 1;
+                brain.version = brain.version.checked_add(1).ok_or(LanaError::Limit)?;
                 brain.save(path)?;
                 Ok((response, brain.version, brain.memory.len() / 2))
             }) {
-                Ok((response, version, revision)) => { println!("brain chat: {response}\n{{\"status\":\"ok\",\"response\":\"{response}\",\"version\":{version},\"memory_revision\":{revision}}}"); ExitCode::SUCCESS }
+                Ok((response, version, revision)) => { println!("brain chat: {response}\n{{\"status\":\"ok\",\"response\":{},\"version\":{version},\"memory_revision\":{revision}}}", json_quote(&response)); ExitCode::SUCCESS }
                 Err(error) => fail(error.name()),
             }
         }

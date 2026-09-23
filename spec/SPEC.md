@@ -1,4 +1,4 @@
-# Lana 2.0 Source and Runtime Surface
+# Lana 3.0 Source and Runtime Surface
 
 ## Provenance expressions
 
@@ -211,6 +211,15 @@ observation inside an unresolved branch fail before producing an effect.
 bounded by the VM and exhaustion returns `LANA_ERR_PATH_LIMIT` without exposing a
 partial result.
 
+## Dataset selection
+
+Dataset filters accept definite Boolean results only. Unresolved results and
+sorting, grouping, or joining keys raise `LANA_ERR_UNRESOLVED_VALUE`; a definite
+non-Boolean predicate raises `LANA_ERR_TYPE`. Nested uncertainty is rejected.
+Keys are checked even for singleton inputs and empty joins. Use an explicit
+supported `resolve` operation before selection; selection never samples or
+implicitly resolves a value. Failure returns no partially materialized dataset.
+
 ## Native compiler and modules
 
 The production pipeline is `Lana source -> Lana lexer -> fixed-layout typed
@@ -229,57 +238,52 @@ policies; exhaustion is an error and never emits partial bytecode.
 
 ## Decision surface
 
-The **Decision** surface turns definite information into a policy recommendation
-or a durable claim. Decisions are pure computations that produce a
-`Decision<T>` value, where `T` is the type of the recommendation.
+`import "std/decision" as decision;` exposes ordinary module functions.
+`recommend_information(policy, input, evaluation)`, `recommend_definite(...)`,
+and `recommend_sampled(...)` wrap `policy_evaluate` and return an advisory map
+with `mode` and `advisory: true`. A recommendation does not authorize execution.
+The mode labels do not perform inference, conversion, or sampling.
 
-### Primitive constructors
+`value_of_information(prior, candidates, actions, utility, costs)` scores
+explicit finite relationships; missing relationships remain unscorable.
+`decision_context(...)` records alternatives, utility, evidence, provenance,
+assumptions, evaluation time, and recommendation. `review_outcome(context,
+outcome)` reports decision quality separately from observed outcome quality.
+`value_of_deliberation(value, direct_cost, delay_cost)` subtracts costs;
+`validate_alternative_set(alternatives)` reports missing alternative categories.
+Malformed probabilities, duplicate names, missing utility pairs, and non-finite
+costs fail validation. See the runnable [operation index](../docs/operations.md).
 
-```lana
-let d = decision(value: "approve", reason: "threshold met");
-```
-
-* `decision(value: <literal>, reason: <string>)` creates a deterministic decision.
-* `decision_if(info, then: <literal>, else: <literal>)` selects a decision based on a
-    boolean `Information`.
-
-### Accessors
-
-* `decision_value(d)` – returns the underlying literal.
-* `decision_reason(d)` – returns the explanatory string.
-
-### Failure modes
-
-* If the guard information is unresolved, the constructor raises
-    `LANA_ERR_UNRESOLVED_VALUE`.
-* Invalid reason strings raise `LANA_ERR_INVALID_ARGUMENT`.
+Durable policy evaluation, ledger entries, and claims use the existing
+`policy_evaluate`, `ledger_*`, and claim APIs. Advisory maps are not durable
+claims or Execution authorizations.
 
 ## Execution surface
 
-The **Execution** surface authorizes and performs narrow real‑world actions.
-Execution plans are built from `Capability` objects and run via `execute_effect`.
+`import "std/execution" as execution;` exposes four functions:
 
-### Primitive constructors
+- `plan_webhook(path, payload)` creates a pure `{kind: "webhook", path, payload}`
+  map. The path is origin-relative, without URL components or control characters;
+  the payload must be definite JSON-compatible data.
+- `capability()` obtains the host-configured opaque HTTPS capability.
+- `authorize(capability, decision, plan)` binds an Authorize decision to this
+  capability and the digest of this exact plan.
+- `execute(capability, authorization, plan)` commits a Pending receipt before
+  one POST attempt, then records Succeeded, Failed, or Unknown.
 
-```lana
-let exec = execution(plan: "http_get", args: {url: "https://example.com"});
-```
+Host configuration owns the HTTPS origin, credential reference, and receipt
+store. Source cannot choose arbitrary origins or headers. Invalid plans,
+revoked tokens, mismatched authorization, duplicate execution IDs, and a store
+with unrelated staged writes fail before sending. Redirects and retries are
+disabled. A transport failure or timeout can mean Unknown: the remote server
+may already have acted. This is at most one local send attempt per durable
+execution ID, not exactly-once remote delivery.
 
-* `execution(plan: <string>, args: <map>)` builds an execution request.
-* `execution_if(info, then: <plan>, else: <plan>)` conditionally selects a plan.
-
-### Accessors
-
-* `execute_effect(exec)` – runs the plan and returns an `ExecutionResult`.
-* `execution_status(res)` – yields `"success"`, `"failure"`, or `"unknown"`.
-* `execution_output(res)` – returns the raw UTF‑8 output on success.
-
-### Failure modes
-
-* Missing capability raises `LANA_ERR_CAPABILITY_NOT_FOUND`.
-* Network or I/O errors propagate as `LANA_ERR_EXECUTION_FAILURE` with a cause
-    string.
-* Unresolved guard information raises `LANA_ERR_UNRESOLVED_VALUE`.
+If receipt persistence fails, the store closes and must be reopened and
+reconciled by execution ID before any retry. An uncertain terminal write does
+not erase the previously committed Pending receipt. Temporary credential files
+are private from creation and removed on ordinary success and error paths.
+Process termination can interrupt cleanup; credentials are never receipt data.
 
 ## Transforms
 

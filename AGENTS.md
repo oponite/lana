@@ -93,6 +93,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 build/lana version
+cargo test --locked --workspace --no-fail-fast
 git diff --check
 ```
 
@@ -131,6 +132,15 @@ assertion, or sanitizer report. Preserve any crashing input as a regression.
 On macOS, use a Clang installation that includes the libFuzzer runtime; current
 Xcode command-line tools may omit it.
 
+The canonical Rust loader has its own required ten-minute fuzz gate:
+
+```bash
+RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_bytecode --fuzz-dir fuzz -- -max_total_time=600 -timeout=5
+```
+
+Install nightly and cargo-fuzz if absent. Both the C reference and Rust target
+must pass; C sanitizer coverage does not instrument the Rust runtime.
+
 ### 4. Universal clean install
 
 ```bash
@@ -155,8 +165,9 @@ made by the source release.
 
 ```bash
 python3 -m venv /tmp/lana-integrations-venv
-/tmp/lana-integrations-venv/bin/python -m pip install -e 'integrations/python[test]'
+/tmp/lana-integrations-venv/bin/python -m pip install -e 'integrations/python[test]' tokenizers safetensors numpy
 /tmp/lana-integrations-venv/bin/python -m pytest -q integrations/python/tests
+/tmp/lana-integrations-venv/bin/python -m unittest discover -s tools/lana-hf/tests -v
 
 cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release \
   -DLANA_BUILD_INTEGRATIONS=ON

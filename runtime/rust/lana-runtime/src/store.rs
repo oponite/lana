@@ -82,6 +82,11 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn ensure_clean(&self) -> Result<(), LanaError> {
+        self.ensure_open()?;
+        if self.staged.is_empty() { Ok(()) } else { Err(LanaError::InvalidState) }
+    }
+
     fn ensure_open(&self) -> Result<(), LanaError> {
         if self.journal.is_some() { Ok(()) } else { Err(LanaError::InvalidState) }
     }

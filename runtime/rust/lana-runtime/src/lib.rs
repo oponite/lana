@@ -6,6 +6,8 @@
 //! portable core.
 
 pub mod adapters;
+#[doc(hidden)]
+pub mod atomic_file;
 pub mod brain;
 pub mod claims;
 pub mod codec;

@@ -1,5 +1,12 @@
 enable_testing()
 
+if(UNIX)
+    add_test(NAME lana_rust_record_consumer COMMAND "${CMAKE_COMMAND}"
+        -DROOT=${CMAKE_CURRENT_SOURCE_DIR} -DBUILD=${CMAKE_CURRENT_BINARY_DIR}
+        -DCARGO=${LANA_CARGO_EXECUTABLE} -DCC=${CMAKE_C_COMPILER}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestRustRecords.cmake")
+endif()
+
 function(add_lana_c_test target source)
     add_executable(${target} ${source})
     target_link_libraries(${target} PRIVATE lanaruntime m)
@@ -121,6 +128,14 @@ add_test(NAME native_probability_identity
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestProbabilityConstructor.cmake")
 add_test(NAME native_run_source COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/examples/general.lana")
 add_test(NAME native_datasets_pass COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/datasets_pass.lana")
+add_test(NAME native_dataset_definite COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/dataset_definite_pass.lana")
+foreach(case uncertain_filter uncertain_key)
+    add_test(NAME native_dataset_${case}_rejected
+        COMMAND "${CMAKE_COMMAND}" -DLANA=${LANA_RUST_CLI}
+            -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/dataset_${case}_rejected.lana
+            -DEXPECT=LANA_ERR_UNRESOLVED_VALUE
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ExpectRuntimeFailure.cmake")
+endforeach()
 set_tests_properties(native_datasets_pass PROPERTIES PASS_REGULAR_EXPRESSION "DATASETS_PASS")
 add_test(NAME native_bootstrap_pass COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/bootstrap_pass.lana")
 set_tests_properties(native_bootstrap_pass PROPERTIES PASS_REGULAR_EXPRESSION "BOOTSTRAP_PASS")
@@ -135,7 +150,7 @@ set_tests_properties(native_inspect_dot PROPERTIES PASS_REGULAR_EXPRESSION "digr
 add_test(NAME native_external_prediction_data COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/examples/external_prediction_data.lana")
 add_test(NAME native_imports COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/import_main.lana")
 add_test(NAME native_core_import COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_import_only.lana")
-add_test(NAME native_core_distribution COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_distribution.lana")
+add_test(NAME native_core_distribution COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_distribution.lana")
 add_test(NAME native_core_refinement_map COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_refinement_map.lana")
 add_test(NAME native_execution_plan COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/execution_plan_pass.lana")
 add_test(NAME native_execution_plan_absolute_url_rejected COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/execution_plan_absolute_url_rejected.lana")
@@ -161,6 +176,13 @@ add_test(NAME lana_lsp_protocol
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLsp.cmake")
 find_program(LANA_PYTHON3 NAMES python3)
 if(LANA_PYTHON3)
+    add_test(NAME lana_compiler_output COMMAND ${LANA_PYTHON3}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compiler_output.py" ${LANA_RUST_CLI})
+    add_test(NAME lana_hf_bridge
+        COMMAND ${LANA_PYTHON3} -m unittest discover
+            -s "${CMAKE_CURRENT_SOURCE_DIR}/tools/lana-hf/tests" -q)
+    add_test(NAME lana_brain_workflow
+        COMMAND ${LANA_PYTHON3} "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_brain_workflow.py" ${LANA_RUST_CLI})
     add_test(NAME lana_lsp_roundtrip
         COMMAND ${LANA_PYTHON3}
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lsp.py"
@@ -197,3 +219,10 @@ add_test(NAME lana_local_install
         -DVERIFY_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify-install.sh
         ${LANA_INSTALL_EXPECTED_ARCH}
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLocalInstall.cmake")
+
+foreach(case recommendation review)
+    add_test(NAME native_decision_${case} COMMAND "${LANA_RUST_CLI}" run
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/decision_${case}_pass.lana")
+    set_tests_properties(native_decision_${case} PROPERTIES
+        ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
+endforeach()

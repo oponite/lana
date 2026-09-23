@@ -3,6 +3,7 @@ build-*/
 dist/
 Testing/Temporary/
 .ollama/
+.claude/
 .DS_Store
 .venv/
 .venv-*/
@@ -16,6 +17,7 @@ integrations/editors/vscode/*.vsix
 *.labc
 target/
 fuzz/artifacts/
+fuzz/corpus/lana_bytecode/
 benchmark/results/
 vijay-docs/
 archive

@@ -2,7 +2,7 @@
 //! general tensor framework: it owns only the three parameter groups required
 //! by the first Brain workflow.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
 
 use lana_bytecode::LanaError;
@@ -33,7 +33,26 @@ pub struct TrainingResult {
     pub changed_groups: Vec<&'static str>,
 }
 
+fn parameter_lengths(vocabulary: usize, embedding_width: usize, hidden_width: usize) -> Result<[usize; 5], LanaError> {
+    if vocabulary == 0 || embedding_width == 0 || hidden_width == 0 { return Err(LanaError::InvalidParameters); }
+    let lengths = [vocabulary.checked_mul(embedding_width).ok_or(LanaError::Limit)?,
+        hidden_width.checked_mul(embedding_width).ok_or(LanaError::Limit)?, hidden_width,
+        vocabulary.checked_mul(hidden_width).ok_or(LanaError::Limit)?, vocabulary];
+    let count = lengths.iter().try_fold(0usize, |sum, &n| sum.checked_add(n)).ok_or(LanaError::Limit)?;
+    if count.checked_mul(4).ok_or(LanaError::Limit)? > MAX_BRAIN_BYTES { return Err(LanaError::Limit); }
+    Ok(lengths)
+}
+
 impl Brain {
+    fn validate(&self) -> Result<(), LanaError> {
+        let lengths = parameter_lengths(self.vocabulary, self.embedding_width, self.hidden_width)?;
+        for (values, expected) in [&self.embedding, &self.hidden, &self.hidden_bias, &self.output, &self.output_bias].into_iter().zip(lengths) {
+            if values.len() != expected || values.iter().any(|value| !value.is_finite()) { return Err(LanaError::Schema); }
+        }
+        if self.training_history.iter().any(|loss| !loss.is_finite()) { return Err(LanaError::Schema); }
+        Ok(())
+    }
+
     pub fn relu(values: &[f32]) -> Result<Vec<f32>, LanaError> {
         if values.iter().any(|value| !value.is_finite()) { return Err(LanaError::InvalidParameters); }
         Ok(values.iter().map(|value| value.max(0.0)).collect())
@@ -45,7 +64,7 @@ impl Brain {
     }
 
     pub fn dense(input: &[f32], weights: &[f32], bias: &[f32]) -> Result<Vec<f32>, LanaError> {
-        if input.is_empty() || bias.is_empty() || weights.len() != input.len() * bias.len() || input.iter().chain(weights).chain(bias).any(|value| !value.is_finite()) { return Err(LanaError::InvalidParameters); }
+        if input.is_empty() || bias.is_empty() || Some(weights.len()) != input.len().checked_mul(bias.len()) || input.iter().chain(weights).chain(bias).any(|value| !value.is_finite()) { return Err(LanaError::InvalidParameters); }
         Ok((0..bias.len()).map(|row| bias[row] + input.iter().enumerate().map(|(column, value)| value * weights[row * input.len() + column]).sum::<f32>()).collect())
     }
 
@@ -57,7 +76,7 @@ impl Brain {
     }
 
     pub fn causal_mask(length: usize) -> Result<Vec<Vec<bool>>, LanaError> {
-        if length == 0 || length > 50_000_000 { return Err(LanaError::Limit); }
+        if length == 0 || length.checked_mul(length).and_then(|n| n.checked_add(length.checked_mul(std::mem::size_of::<Vec<bool>>())?)).is_none_or(|bytes| bytes > MAX_BRAIN_BYTES) { return Err(LanaError::Limit); }
         Ok((0..length).map(|row| (0..length).map(|column| column <= row).collect()).collect())
     }
 
@@ -121,18 +140,7 @@ impl Brain {
     }
 
     pub fn new(vocabulary: usize, embedding_width: usize, hidden_width: usize, seed: u64) -> Result<Self, LanaError> {
-        if vocabulary == 0 || embedding_width == 0 || hidden_width == 0 {
-            return Err(LanaError::InvalidParameters);
-        }
-        let count = vocabulary.checked_mul(embedding_width)
-            .and_then(|n| n.checked_add(hidden_width.checked_mul(embedding_width)?))
-            .and_then(|n| n.checked_add(hidden_width))
-            .and_then(|n| n.checked_add(vocabulary.checked_mul(hidden_width)?))
-            .and_then(|n| n.checked_add(vocabulary))
-            .ok_or(LanaError::Limit)?;
-        if count.checked_mul(std::mem::size_of::<f32>()).ok_or(LanaError::Limit)? > MAX_BRAIN_BYTES {
-            return Err(LanaError::Limit);
-        }
+        parameter_lengths(vocabulary, embedding_width, hidden_width)?;
         let mut state = seed;
         let mut next = || {
             state ^= state << 13;
@@ -153,15 +161,18 @@ impl Brain {
     }
 
     pub fn logits(&self, tokens: &[usize]) -> Result<Vec<f32>, LanaError> {
+        self.validate()?;
         if tokens.is_empty() || tokens.iter().any(|&token| token >= self.vocabulary) {
             return Err(LanaError::InvalidParameters);
         }
         let pooled = self.pool(tokens);
         let hidden = self.hidden_values(&pooled);
-        Ok((0..self.vocabulary).map(|row| {
+        let logits: Vec<f32> = (0..self.vocabulary).map(|row| {
             self.output_bias[row] + (0..self.hidden_width)
                 .map(|col| self.output[row * self.hidden_width + col] * hidden[col]).sum::<f32>()
-        }).collect())
+        }).collect();
+        if pooled.iter().chain(&hidden).chain(&logits).any(|value| !value.is_finite()) { return Err(LanaError::InvalidParameters); }
+        Ok(logits)
     }
 
     pub fn next_token_loss(&self, tokens: &[usize], target: usize) -> Result<f32, LanaError> {
@@ -169,10 +180,21 @@ impl Brain {
         let logits = self.logits(tokens)?;
         let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         let normalizer: f32 = logits.iter().map(|value| (value - max).exp()).sum();
-        Ok(-(logits[target] - max - normalizer.ln()))
+        let loss = -(logits[target] - max - normalizer.ln());
+        if !loss.is_finite() { return Err(LanaError::InvalidParameters); }
+        Ok(loss)
     }
 
     pub fn train_next_token(&mut self, tokens: &[usize], target: usize, learning_rate: f32) -> Result<f32, LanaError> {
+        self.validate()?;
+        let mut next = self.clone();
+        let loss = next.train_step(tokens, target, learning_rate)?;
+        next.validate()?;
+        *self = next;
+        Ok(loss)
+    }
+
+    fn train_step(&mut self, tokens: &[usize], target: usize, learning_rate: f32) -> Result<f32, LanaError> {
         if !learning_rate.is_finite() || learning_rate <= 0.0 || target >= self.vocabulary {
             return Err(LanaError::InvalidParameters);
         }
@@ -183,7 +205,9 @@ impl Brain {
         let logits: Vec<f32> = (0..self.vocabulary).map(|row| self.output_bias[row] +
             (0..self.hidden_width).map(|col| self.output[row * self.hidden_width + col] * hidden[col]).sum::<f32>()).collect();
         let mut probability = Self::softmax(&logits)?;
-        let loss = -probability[target].ln();
+        let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let loss = -(logits[target] - max - logits.iter().map(|value| (value - max).exp()).sum::<f32>().ln());
+        if !loss.is_finite() { return Err(LanaError::InvalidParameters); }
         probability[target] -= 1.0;
 
         let mut hidden_gradient = vec![0.0; self.hidden_width];
@@ -219,9 +243,9 @@ impl Brain {
                 self.embedding[token * self.embedding_width + col] -= scale * pooled_gradient[col];
             }
         }
-        self.version += 1;
+        self.version = self.version.checked_add(1).ok_or(LanaError::Limit)?;
         self.training_history.push(loss);
-        self.replay_steps += 1;
+        self.replay_steps = self.replay_steps.checked_add(1).ok_or(LanaError::Limit)?;
         Ok(loss)
     }
 
@@ -234,6 +258,7 @@ impl Brain {
         for group in [&mut next.embedding, &mut next.hidden, &mut next.hidden_bias, &mut next.output, &mut next.output_bias] {
             for value in group.iter_mut() { *value *= factor; }
         }
+        next.validate()?;
         *self = next;
         Ok(loss)
     }
@@ -243,16 +268,25 @@ impl Brain {
         let mut next = self.clone();
         let loss = next.train_next_token(tokens, target, learning_rate)?;
         let norm_squared: f32 = self.embedding.iter().zip(&next.embedding).chain(self.hidden.iter().zip(&next.hidden)).chain(self.hidden_bias.iter().zip(&next.hidden_bias)).chain(self.output.iter().zip(&next.output)).chain(self.output_bias.iter().zip(&next.output_bias)).map(|(before, after)| (after - before).powi(2)).sum();
+        if !norm_squared.is_finite() { return Err(LanaError::InvalidParameters); }
         let norm = norm_squared.sqrt();
         if norm > max_update_norm {
             let scale = max_update_norm / norm;
             for (before, after) in self.embedding.iter().zip(&mut next.embedding).chain(self.hidden.iter().zip(&mut next.hidden)).chain(self.hidden_bias.iter().zip(&mut next.hidden_bias)).chain(self.output.iter().zip(&mut next.output)).chain(self.output_bias.iter().zip(&mut next.output_bias)) { *after = *before + (*after - *before) * scale; }
         }
+        next.validate()?;
         *self = next;
         Ok(loss)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), LanaError> {
+        self.validate()?;
+        let mut length = 5usize + 5 * 8 + 5 * 8 + 3 * 8;
+        for group in [&self.embedding, &self.hidden, &self.hidden_bias, &self.output, &self.output_bias, &self.training_history] {
+            length = length.checked_add(group.len().checked_mul(4).ok_or(LanaError::Limit)?).ok_or(LanaError::Limit)?;
+        }
+        for item in &self.memory { length = length.checked_add(8).and_then(|n| n.checked_add(item.len())).ok_or(LanaError::Limit)?; }
+        if length > MAX_BRAIN_BYTES { return Err(LanaError::Limit); }
         let mut data = b"LBRN1".to_vec();
         for value in [self.vocabulary as u64, self.embedding_width as u64, self.hidden_width as u64, self.version, self.seed] {
             data.extend_from_slice(&value.to_le_bytes());
@@ -269,22 +303,15 @@ impl Brain {
         data.extend_from_slice(&(self.training_history.len() as u64).to_le_bytes());
         for loss in &self.training_history { data.extend_from_slice(&loss.to_le_bytes()); }
         data.extend_from_slice(&self.replay_steps.to_le_bytes());
-        let staging = path.with_extension(format!("tmp-{}", std::process::id()));
-        let result = (|| {
-            let mut file = std::fs::File::create(&staging).map_err(|_| LanaError::Io)?;
-            file.write_all(&data).map_err(|_| LanaError::Io)?;
-            file.sync_all().map_err(|_| LanaError::Io)?;
-            std::fs::rename(&staging, path).map_err(|_| LanaError::Io)?;
-            if let Some(parent) = path.parent() { std::fs::File::open(parent).map_err(|_| LanaError::Io)?.sync_all().map_err(|_| LanaError::Io)?; }
-            Ok(())
-        })();
-        if result.is_err() { let _ = std::fs::remove_file(staging); }
-        result
+        crate::atomic_file::write(path, &data).map_err(|_| LanaError::Io)
     }
 
     pub fn load(path: &Path) -> Result<Self, LanaError> {
         let mut data = Vec::new();
-        std::fs::File::open(path).map_err(|_| LanaError::Io)?.read_to_end(&mut data).map_err(|_| LanaError::Io)?;
+        let file = std::fs::File::open(path).map_err(|_| LanaError::Io)?;
+        if file.metadata().map_err(|_| LanaError::Io)?.len() > MAX_BRAIN_BYTES as u64 { return Err(LanaError::Limit); }
+        file.take(MAX_BRAIN_BYTES as u64 + 1).read_to_end(&mut data).map_err(|_| LanaError::Io)?;
+        if data.len() > MAX_BRAIN_BYTES { return Err(LanaError::Limit); }
         if data.get(..5) != Some(b"LBRN1") { return Err(LanaError::Format); }
         let mut offset = 5;
         let read_u64 = |data: &[u8], offset: &mut usize| -> Result<u64, LanaError> {
@@ -297,10 +324,12 @@ impl Brain {
         let hidden_width = usize::try_from(read_u64(&data, &mut offset)?).map_err(|_| LanaError::Limit)?;
         let version = read_u64(&data, &mut offset)?;
         let seed = read_u64(&data, &mut offset)?;
-        let template = Self::new(vocabulary, embedding_width, hidden_width, seed)?;
+        let lengths = parameter_lengths(vocabulary, embedding_width, hidden_width)?;
         let mut groups = Vec::new();
-        for expected in [template.embedding.len(), template.hidden.len(), template.hidden_bias.len(), template.output.len(), template.output_bias.len()] {
+        for expected in lengths {
             if usize::try_from(read_u64(&data, &mut offset)?).map_err(|_| LanaError::Limit)? != expected { return Err(LanaError::Schema); }
+            let end = offset.checked_add(expected.checked_mul(4).ok_or(LanaError::Limit)?).ok_or(LanaError::Limit)?;
+            if end > data.len() { return Err(LanaError::Format); }
             let mut values = Vec::with_capacity(expected);
             for _ in 0..expected {
                 let bytes = data.get(offset..offset + 4).ok_or(LanaError::Format)?;
@@ -316,7 +345,8 @@ impl Brain {
             let count = usize::try_from(read_u64(&data, &mut offset)?).map_err(|_| LanaError::Limit)?;
             for _ in 0..count {
                 let length = usize::try_from(read_u64(&data, &mut offset)?).map_err(|_| LanaError::Limit)?;
-                let bytes = data.get(offset..offset + length).ok_or(LanaError::Format)?;
+                let end = offset.checked_add(length).ok_or(LanaError::Limit)?;
+                let bytes = data.get(offset..end).ok_or(LanaError::Format)?;
                 offset += length;
                 memory.push(std::str::from_utf8(bytes).map_err(|_| LanaError::Schema)?.to_owned());
             }
@@ -372,6 +402,53 @@ mod tests {
         assert_ne!(brain.hidden, before.hidden);
         assert_ne!(brain.output, before.output);
         assert_eq!(brain.version, 2);
+    }
+
+    #[test]
+    fn failed_training_preserves_parameters_history_and_version() {
+        let mut brain = Brain::new(3, 2, 2, 7).unwrap();
+        brain.embedding.fill(f32::MAX);
+        brain.hidden.fill(f32::MAX);
+        let before = brain.clone();
+        assert!(brain.train_next_token(&[0, 1], 2, 1.0).is_err());
+        assert_eq!(brain, before);
+        let mut brain = Brain::new(3, 2, 2, 7).unwrap();
+        brain.version = u64::MAX;
+        let before = brain.clone();
+        assert_eq!(brain.train_next_token(&[0, 1], 2, 0.1), Err(LanaError::Limit));
+        assert_eq!(brain, before);
+        brain.hidden.pop();
+        assert_eq!(brain.logits(&[0]), Err(LanaError::Schema));
+        assert_eq!(Brain::causal_mask(usize::MAX), Err(LanaError::Limit));
+    }
+
+    #[test]
+    fn deterministic_training_reduces_loss() {
+        let mut brain = Brain::new(3, 2, 2, 7).unwrap();
+        let before = brain.next_token_loss(&[0, 1], 2).unwrap();
+        for _ in 0..30 { brain.train_next_token(&[0, 1], 2, 0.1).unwrap(); }
+        assert!(brain.next_token_loss(&[0, 1], 2).unwrap() < before);
+    }
+
+    #[test]
+    fn relative_save_invalid_state_and_malformed_lengths() {
+        let name = format!(".lana-brain-relative-{}", std::process::id());
+        let path = Path::new(&name);
+        let mut brain = Brain::new(3, 2, 2, 7).unwrap();
+        brain.save(path).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        brain.output[0] = f32::NAN;
+        assert_eq!(brain.save(path), Err(LanaError::Schema));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+        for end in [0, 4, 44, 50, bytes.len() - 1] {
+            std::fs::write(path, &bytes[..end]).unwrap();
+            assert!(Brain::load(path).is_err());
+        }
+        let mut malformed = bytes.clone();
+        malformed[45..53].copy_from_slice(&u64::MAX.to_le_bytes());
+        std::fs::write(path, malformed).unwrap();
+        assert!(Brain::load(path).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

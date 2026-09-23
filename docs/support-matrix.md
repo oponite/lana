@@ -1,4 +1,4 @@
-# Lana 3.0.1 support matrix
+# Lana 3.0.2 support matrix
 
 | Interface | Status | Bytecode contract |
 | --- | --- | --- |
