@@ -107,7 +107,13 @@ The operations below are semantically distinct:
 requested named variables. An unknown variable, duplicate requested name, or
 unsupported exact marginalization is an error. `condition` is pure refinement;
 impossible evidence returns `LANA_ERR_INVALID_CONDITIONING` and does not mutate
-the input. `observe` is an external information event: it records or consumes
+the input. For finite Possibility and Distribution, definite evidence retains
+one matching value; unweighted `Possibility` evidence retains the intersection.
+Distribution weights on retained values are divided by their retained total.
+The result keeps its information form and dependency identity, including for
+singleton support. Joint evidence maps names to definite values. Paths reject
+conditioning and observation until a path evidence model is specified.
+`observe` is an external information event: it records or consumes
 evidence in the execution context and returns the refined information or a
 definite observed result. It is effectful even when its returned value is
 immutable. `sample` is stochastic and read-only; it consumes the configured

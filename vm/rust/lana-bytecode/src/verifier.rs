@@ -1,9 +1,5 @@
-//! LABC verifier, mirroring `lana_chunk_verify` in `vm/c/bytecode.c`.
-//!
-//! Every rule — register bounds, constant indices, per-opcode operand shapes,
-//! jump targets, function metadata, and the OP_STATE_NEW state validation —
-//! matches the C11 verifier so that a chunk verifies identically under both
-//! implementations.
+//! LABC verifier for register bounds, constant indices, operand shapes,
+//! jump targets, function metadata, and state validation.
 
 use crate::chunk::{Chunk, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
@@ -17,7 +13,7 @@ use crate::opcode::{OpCode, LANA_MAX_REGISTERS};
 /// calls (run_async/future_all/future_race/sleep) occupy ids 126-129 and the
 /// LIP-015 dataset calls ids 130-140, LIP-018 FFI calls 157-159, LIP-019 net
 /// calls 160-165, LIP-027 cast at 166, matching the C11 VM.
-pub const LANA_HOST_COUNT: u32 = 188;
+pub const LANA_HOST_COUNT: u32 = 189;
 
 const LANA_TRANSFORM_NEUTRALIZE: u32 = 1;
 const LANA_MEASURE_SAMPLE: u32 = 2;

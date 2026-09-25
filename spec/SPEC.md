@@ -159,7 +159,9 @@ involving `STATE_DIST` raises `LANA_ERR_UNSUPPORTED_OPERATION`.
 ## Information and named joints
 
 The source-level Information forms use LABC v5 when they require the balanced
-Core surface; existing v1-v4 forms retain their established encodings:
+Core surface. In Lana 4.0, source `sample` expressions also emit v5 so
+unweighted Possibility cannot acquire legacy uniform-sampling behavior.
+Published v1-v4 chunks retain their established behavior:
 
 ```lana
 let product = joint independent { x: a, y: b };
@@ -179,7 +181,14 @@ let definite = resolve(refined); // succeeds only for singleton support
 refinement forms. The historical three-argument named-joint condition spelling
 is a compatibility alias. `std/core.distribution([[value, weight], ...])`
 constructs finite weighted support; `possibility([value, ...])` remains
-unweighted and cannot be sampled.
+unweighted and cannot be sampled. For definite, Possibility, and Distribution
+inputs, evidence is either one definite value or an unweighted
+`possibility([value, ...])` subset. Impossible evidence fails with
+`LANA_ERR_INVALID_CONDITIONING`. A Distribution keeps matching weights and
+renormalizes them. The result retains its form even with one value; call
+`resolve` to get that value. Joint evidence remains a map from names to exact
+values. Paths reject both refinements. `condition` leaves the input and VM
+revision unchanged; successful `observe` records one revision.
 
 Source uses typed joint forms; descriptor strings are rejected. Each correlated
 support row contains one value per declared variable followed by a positive
@@ -226,9 +235,8 @@ The production pipeline is `Lana source -> Lana lexer -> fixed-layout typed
 syntax -> semantic IR -> textual LABC -> Rust assembler/verifier -> Rust VM`. The
 compiler sources live in `compiler/`; `compiler/bootstrap/compiler.lasm` is the
 reproducible textual bootstrap artifact. A normal build assembles that artifact
-and executes it in the Rust VM without invoking Python. The C11
-assembler/verifier and VM are frozen v1-v2 conformance references, not the
-production pipeline.
+and executes it in the Rust VM without invoking Python. Published LABC v1-v2
+bytes remain covered by frozen compatibility fixtures.
 
 Imports are relative `.lana` paths and must precede executable syntax. The
 native loader canonicalizes paths, rejects cycles and imported-module top-level
@@ -258,18 +266,79 @@ Durable policy evaluation, ledger entries, and claims use the existing
 `policy_evaluate`, `ledger_*`, and claim APIs. Advisory maps are not durable
 claims or Execution authorizations.
 
+## Future messages
+
+`import "std/future_messages" as messages;` exposes `create(record)`,
+`inspect(id)`, `check(context)`, `receive(after_id, limit)`, `acknowledge(id)`,
+and `cancel(id)` on the Rust runtime. The application calls `store_open(path)`
+first and owns the checks: on startup, relevant events, or a timer. Nothing runs
+while the application is stopped. A missed event must be replayed explicitly.
+
+`create` takes `{id, payload, condition, provenance_refs}`. The ID is 1–128
+ASCII letters, digits, `.`, `_`, or `-`; provenance references are an array of
+at most 16 nonempty strings of at most 128 UTF-8 bytes each. Payloads must be
+plain, definite JSON-compatible snapshots, at most 64 KiB encoded. Process-local
+handles, cyclic values, non-finite numbers, and values carrying live metadata
+are rejected. The stored record has `schema_version: 1`, `created_at_utc` in
+Unix seconds, and one of `pending`, `ready`, `acknowledged`, or `cancelled`.
+
+`condition` contains `not_before_utc` (a finite nonnegative Unix-seconds
+number), `event` (a nonempty name), or both. An event may have `comparisons`,
+an array of up to 16 `{field, op, value}` maps. Operators are `eq`, `ne`,
+`lt`, `le`, `gt`, `ge`; equality compares like-typed definite scalars, and
+ordering compares numbers or strings of the same type. Comparisons are joined
+with AND. Comparison strings are at most 4 KiB; event names, field names, and
+context IDs are at most 128 UTF-8 bytes. A check receives `null` or
+`{id, event, values}` with at most 64 context fields. The runtime snapshots
+that context and captures one current time per check. Missing or unresolved
+fields leave a message pending; bad
+schemas or incompatible types return errors. No prose inference or implicit
+sampling occurs.
+
+`check` returns `{released_ids, pending}`, where each pending entry has `id`
+and a reason. It validates all pending messages before changing any. Each
+matching message then moves to `ready` in its own atomic store revision with a
+receipt containing match time, context ID (or null), condition, and exact
+revision as a decimal string. Ready persists through restarts and clock
+rollback. `receive(after_id, limit)` accepts a limit of 1–100 and reads up to
+that many ready records in ID order;
+use `""` for the first page and the last returned ID for the next. Receiving
+does not acknowledge. Acknowledgment and cancellation record their time and
+revision. Repeated identical creates, checks, acknowledgments, and cancellations
+do not create another transition. Cancellation cannot undo acknowledgment.
+Creation also records its time and exact revision in `creation_receipt`.
+
+At most 1,024 messages may be pending; a stored record is at most 128 KiB.
+Limits fail before the affected transition is staged. A transition refuses
+unrelated staged store writes. `LANA_ERR_IO` during a message commit means the
+commit outcome is unknown: reopen the store and inspect the stable ID before
+retrying. The inbox is local to the application's existing store access
+boundary and sends no notification or external effect.
+
 ## Execution surface
+
+Core inspection, policy decisions, and execution receipts are schema-1 Lana
+maps. Each exposes `record_schema`, `id` when an identity exists, `kind`,
+`transport_status`, `domain_status`, `payload`, `error`, `evidence`,
+`assumptions`, `exactness`, and `metadata`; form-specific fields remain on the
+same map. A plain value with no stable provenance has a null inspection ID.
+The bridge has its own protocol schema and serializes these maps as JSON
+without changing their record schema. Consumers check both versions.
 
 `import "std/execution" as execution;` exposes four functions:
 
-- `plan_webhook(path, payload)` creates a pure `{kind: "webhook", path, payload}`
-  map. The path is origin-relative, without URL components or control characters;
+- `plan_webhook(path, payload)` creates a pure schema-1 plan map with
+  `kind: "webhook"`, `path`, and `payload`. The path is origin-relative,
+  without URL components or control characters;
   the payload must be definite JSON-compatible data.
 - `capability()` obtains the host-configured opaque HTTPS capability.
 - `authorize(capability, decision, plan)` binds an Authorize decision to this
-  capability and the digest of this exact plan.
+  capability and the digest of this exact plan. The decision must be the
+  unchanged map issued by `policy_evaluate` in the same VM; a source-created
+  or modified Authorize map has no execution authority.
 - `execute(capability, authorization, plan)` commits a Pending receipt before
-  one POST attempt, then records Succeeded, Failed, or Unknown.
+  one POST attempt, then returns a schema-1 receipt record with `status` of
+  Succeeded, Failed, or Unknown, plus its plan digest and authorization ID.
 
 Host configuration owns the HTTPS origin, credential reference, and receipt
 store. Source cannot choose arbitrary origins or headers. Invalid plans,

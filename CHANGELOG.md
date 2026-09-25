@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.0.0 (candidate)
+
+- Distribute the Rust CLI and VM as the sole Lana engine; retire the C VM,
+  C-facing APIs, and standalone C evidence server.
+- Preserve LABC v1-v5 loading, with frozen v1-v2 golden bytecode checks.
+- Route repeated Python calls through a persistent Rust worker with a fresh VM
+  per request; port read-only SQLite and localhost HTTP_JSON adapters to Rust.
+
 ## 3.0.2
 
 - Reject unresolved dataset predicates and keys; fix self-join locking.

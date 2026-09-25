@@ -1,8 +1,8 @@
 {
   "name": "lana-language-support",
   "displayName": "Lana Language Support",
-  "description": "Language Server Protocol support for Lana 3.0",
-  "version": "3.0.2",
+  "description": "Language Server Protocol support for Lana 4.0",
+  "version": "4.0.0",
   "publisher": "lana-language",
   "license": "Apache-2.0",
   "engines": {

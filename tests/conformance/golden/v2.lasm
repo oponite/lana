@@ -1,0 +1,8 @@
+.version 2
+.function main 0 4
+STATE_NEW R0 0.4 0.2 0.0
+STATE_NEW R1 0.8 -0.1 0.0
+LOAD_CONST R2 0.5
+MIX R3 R0 R1 R2
+PRINT R3
+HALT

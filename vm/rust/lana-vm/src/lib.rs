@@ -1,13 +1,4 @@
-//! Lana VM core (phase 2 of the Rust runtime boundary).
-//!
-//! A register VM semantically identical to the C11 reference (`vm/c/vm.c`):
-//! same state math, same PCG32 stream, same error codes, same value printing.
-//! The memory model differs — native Rust ownership instead of a mark-sweep GC
-//! — but the 256 MiB limit is preserved by byte accounting.
-//!
-//! Increment 1 covers the scalar/array/control-flow/state/history opcodes.
-//! Increments 2-5 add state dists and the 2.0 ISA ops, information types,
-//! tasks, and host calls; increment 6 is the differential conformance harness.
+//! Lana VM core. Rust ownership and byte accounting enforce the 256 MiB limit.
 
 pub mod backend;
 pub mod derivation;
@@ -54,4 +45,5 @@ pub use vm::{
     LANA_HOST_TRACE_DISTANCE, LANA_HOST_IS_SEPARABLE, LANA_HOST_TO_STATE,
     LANA_HOST_STATE_TENSOR, LANA_HOST_APPEND, LANA_HOST_MEASURE, LANA_HOST_TRANSFORM,
     LANA_HOST_EXECUTION_CAPABILITY, LANA_HOST_EXECUTION_AUTHORIZE, LANA_HOST_EXECUTION_EXECUTE,
+    LANA_HOST_FUTURE_MESSAGE,
 };

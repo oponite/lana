@@ -23,3 +23,6 @@ lana-bytecode = { workspace = true }
 lana-vm = { workspace = true, default-features = false }
 ed25519-compact = { version = "2.4.2", default-features = false, features = ["std"] }
 ring = "0.17"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rusqlite = "0.37.0"

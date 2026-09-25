@@ -1,9 +1,6 @@
-//! LABC opcodes, mirroring `OpCode` in `vm/include/bytecode.h`.
-//!
-//! The discriminants are stable and MUST match the C11 enum so that chunks
-//! verify identically under both implementations.
+//! LABC opcodes. Discriminants follow the published table in `spec/BYTECODE.md`.
 
-/// LABC opcodes. The discriminants match `OpCode` in `vm/include/bytecode.h`.
+/// LABC opcodes with stable numeric discriminants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum OpCode {
@@ -116,8 +113,7 @@ pub enum OpCode {
 }
 
 impl OpCode {
-    /// The stable C11 mnemonic for this opcode, matching `lana_opcode_name`
-    /// in `vm/c/bytecode.c`, e.g. `MIX`.
+    /// The stable textual mnemonic for this opcode, e.g. `MIX`.
     pub fn name(self) -> &'static str {
         use OpCode::*;
         match self {

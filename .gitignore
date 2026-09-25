@@ -29,3 +29,4 @@ ghost_*/
 .claude/settings.local.json
 .claude/worktrees/
 .experiments/
+RELEASE_CHECKLIST.md

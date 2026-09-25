@@ -1,6 +1,7 @@
 let source = information(possibility([1, 2]));
 let snapshot = inspect_information(source);
 assert(snapshot.kind == "information_snapshot", "snapshot kind missing");
+assert(snapshot.record_schema == 1, "inspection record schema missing");
 assert(snapshot.remaining_alternatives == 2, "alternatives missing");
 assert(snapshot.reactive, "dependency graph status missing");
 

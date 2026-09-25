@@ -83,7 +83,7 @@ def run(name, source, error=None, overrides=None):
 
 run("redirect", base.replace('"/ok"', '"/redirect"').replace('== "Succeeded"', '== "Failed"'))
 run("glob", base.replace('"/ok"', '"/{ok,fail}"').replace('== "Succeeded"', '== "Failed"'))
-run("mismatch", base.replace('assert(execution.execute', 'plan = execution.plan_webhook("/different", {event: "approved"});\nassert(execution.execute'), "LANA_ERR_CAPABILITY")
+run("mismatch", base.replace('let receipt = execution.execute', 'plan = execution.plan_webhook("/different", {event: "approved"});\nlet receipt = execution.execute'), "LANA_ERR_CAPABILITY")
 run("timeout", base.replace('"/ok"', '"/timeout"').replace('== "Succeeded"', '== "Unknown"'))
 run("timeout", base.replace('"/ok"', '"/timeout"').replace('== "Succeeded"', '== "Unknown"'), "LANA_ERR_CONFLICT")
 run("spawn-failure", base.replace('== "Succeeded"', '== "Unknown"'), overrides={"PATH": str(work / "no-tools")})

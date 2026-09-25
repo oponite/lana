@@ -12,14 +12,11 @@ cmake --install build --prefix "$HOME/.local"
 "$HOME/.local/bin/lana" check examples/belief.lana
 ```
 
-The installed `lana` command uses the Rust VM and the self-hosted Lana compiler
-bytecode. Python is not required. The C11 `lanavm` binary remains a frozen
-reference for LABC v1 and v2 conformance.
-
-Rust is the canonical runtime (`lana-bytecode`, `lana-vm`,
-`lana-runtime`, `lana-ffi`, and `lana-cli` under `vm/rust/`, `runtime/rust/`,
-and `tools/rust/`). The compiler emits LABC v2 through v5 as required by the
-source program. The C11 VM remains the conformance reference.
+The installed `lana` command uses the Rust VM and self-hosted Lana compiler
+bytecode. Python is optional. Published LABC v1-v2 behavior is checked against
+frozen fixtures. The Rust loader accepts LABC v1-v5. The build no longer has
+Lana-owned C sources; it can still use system libraries such as SQLite and
+macOS Metal.
 
 For VM development:
 
@@ -32,17 +29,16 @@ ctest --test-dir build --output-on-failure
 Low-level tooling assembles, verifies, disassembles, traces, and executes LABC:
 
 ```bash
-build/lanavm asm examples/belief.lasm -o build/belief.labc
-build/lanavm dis build/belief.labc
-build/lanavm run build/belief.labc --trace
+build/lana asm examples/belief.lasm -o build/belief.labc
+build/lana dis build/belief.labc
+build/lana run build/belief.labc --trace
 ```
 
 ## Integrations
 
-The source-install integrations connect Lana 3.0.2 to JSON subprocess callers,
-MCP hosts, Jupyter, VS Code, Neovim, and a narrow native C ABI without adding
-dependencies to the normal Lana build. Start with
-[`integrations/README.md`](integrations/README.md).
+The optional integrations connect Lana 4.0 to JSON callers, MCP hosts,
+Jupyter, VS Code, and Neovim through the Rust CLI and persistent worker.
+See [`integrations/README.md`](integrations/README.md).
 
 ## Development Policy
 

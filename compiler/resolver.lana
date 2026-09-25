@@ -380,7 +380,7 @@ fn host_effect(name) {
     if (name == "store_delete") { return effects("mutation"); }
     if (name == "store_commit") { return effects("mutation"); }
     if (name == "store_scan") { return effects("io"); }
-    if (name == "store_current_revision") { return effects("io"); }
+    if (name == "store_current_revision") { return effects("io"); } if (name == "future_message") { return effects("mutation"); }
     if (name == "policy_evaluate") { return effects("pure"); }
     if (name == "policy_store_decision") { return effects("mutation"); }
     if (name == "ledger_append") { return effects("mutation"); }

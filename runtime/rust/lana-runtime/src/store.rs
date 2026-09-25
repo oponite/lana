@@ -652,6 +652,20 @@ pub fn store_scan(store: &Store, prefix: &str) -> Result<Vec<ScanRecord>, LanaEr
     Ok(records)
 }
 
+/// Bounded scan for durable inbox pages. `after` is a key, not a record offset.
+pub(crate) fn store_scan_page(store: &Store, prefix: &str, after: &str, limit: usize) -> Result<Vec<ScanRecord>, LanaError> {
+    store.ensure_open()?;
+    let start = if after.is_empty() { prefix } else { after };
+    let mut records = Vec::new();
+    for (key, data) in store.index.range(start.to_string()..) {
+        if !key.starts_with(prefix) { break; }
+        if key.as_str() <= after { continue; }
+        if records.len() == limit { break; }
+        records.push(ScanRecord { key: key.clone(), value: decode_bytes(data)? });
+    }
+    Ok(records)
+}
+
 pub fn store_snapshot(store: &mut Store) -> Result<(Value, StoreRevisionInfo), LanaError> {
     store.ensure_open()?;
     let heap = lana_vm::heap::Heap::new(256 * 1024 * 1024);

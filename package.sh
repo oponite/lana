@@ -18,12 +18,11 @@ if [[ ! -d "${BUILD_DIR}" ]]; then
 fi
 
 mkdir -p "${DIST_DIR}/bin"
-mkdir -p "${DIST_DIR}/lib"
 
 echo "Packaging Lana ${VERSION} from ${BUILD_DIR}..."
 
 # 1. Copy Binaries
-for artifact in lana lanavm; do
+for artifact in lana; do
     if [[ ! -f "${BUILD_DIR}/${artifact}" ]]; then
         echo "FAILED: '${BUILD_DIR}/${artifact}' not found" >&2
         exit 1
@@ -31,21 +30,14 @@ for artifact in lana lanavm; do
     cp "${BUILD_DIR}/${artifact}" "${DIST_DIR}/bin/"
 done
 
-# 2. Copy Runtime Library
-if [[ ! -f "${BUILD_DIR}/liblanaruntime.a" ]]; then
-    echo "FAILED: '${BUILD_DIR}/liblanaruntime.a' not found" >&2
-    exit 1
-fi
-cp "${BUILD_DIR}/liblanaruntime.a" "${DIST_DIR}/lib/"
-
-# 3. Copy Compiler Artifact (compiled bytecode, not the bootstrap source)
+# 2. Copy Compiler Artifact (compiled bytecode, not the bootstrap source)
 if [[ ! -f "${BUILD_DIR}/lana-compiler.labc" ]]; then
     echo "FAILED: '${BUILD_DIR}/lana-compiler.labc' not found" >&2
     exit 1
 fi
 cp "${BUILD_DIR}/lana-compiler.labc" "${DIST_DIR}/bin/"
 
-# 4. Copy Distribution Metadata
+# 3. Copy Distribution Metadata
 echo "${VERSION}" > "${DIST_DIR}/version.txt"
 
 # Create tarball

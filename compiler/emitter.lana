@@ -105,7 +105,7 @@ fn is_host_call(name) {
     if (name == "store_open") { return true; } if (name == "store_put") { return true; }
     if (name == "store_get") { return true; } if (name == "store_delete") { return true; }
     if (name == "store_commit") { return true; } if (name == "store_scan") { return true; }
-    if (name == "store_current_revision") { return true; }
+    if (name == "store_current_revision") { return true; } if (name == "future_message") { return true; }
     if (name == "policy_evaluate") { return true; } if (name == "policy_store_decision") { return true; }
     if (name == "ledger_append") { return true; } if (name == "ledger_query") { return true; }
     if (name == "json_parse") { return true; } if (name == "json_stringify") { return true; }

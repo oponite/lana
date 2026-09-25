@@ -1,6 +1,6 @@
 # Lana integrations
 
-This optional Python package connects Lana 3.0 programs to subprocess callers,
+This optional Python package connects Lana 4.0 programs to subprocess callers,
 MCP hosts, and IPython. It does not add dependencies to Lana itself.
 
 ```bash
@@ -12,10 +12,10 @@ printf '{"message":"hello"}' |
 ```
 
 The `lana` executable is resolved from `--lana`, `LANA_EXECUTABLE`, then
-`PATH`. Lana 3.0 reporting LABC v2 through v5 is accepted.
+`PATH`. Lana 4.0 reporting LABC v2 through v5 is accepted.
 
-The ergonomic `Lana` class prefers the native ctypes bridge when a compatible
-`liblana_bridge` is available and falls back to the subprocess bridge otherwise:
+The ergonomic `Lana` class uses a persistent Rust worker for repeated calls,
+with a fresh VM for each request:
 
 ```python
 from lana_integrations import Lana

@@ -13,14 +13,7 @@ fi
 LANA_BIN=$(command -v lana)
 echo "PASSED: 'lana' binary found ($LANA_BIN)"
 
-# 2. Check lanavm binary
-if ! command -v lanavm &> /dev/null; then
-    echo "FAILED: 'lanavm' binary not found in PATH"
-    exit 1
-fi
-echo "PASSED: 'lanavm' binary found"
-
-# 3. Version reporting
+# 2. Version reporting
 VERSION=$(lana version 2>&1)
 if [[ -z "$VERSION" ]]; then
     echo "FAILED: 'lana version' returned no output"
@@ -28,15 +21,7 @@ if [[ -z "$VERSION" ]]; then
 fi
 echo "PASSED: 'lana version' works ($VERSION)"
 
-# 4. lanavm version reporting
-VM_VERSION=$(lanavm version 2>&1)
-if [[ -z "$VM_VERSION" ]]; then
-    echo "FAILED: 'lanavm version' returned no output"
-    exit 1
-fi
-echo "PASSED: 'lanavm version' works ($VM_VERSION)"
-
-# 5. Source execution check
+# 3. Source execution check
 # Create a trivial program in a temp dir and run it
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -51,7 +36,7 @@ if ! lana run "${TMP_DIR}/verify.lana" | grep -q "1"; then
 fi
 echo "PASSED: 'lana run' verified"
 
-# 6. Compiler artifact check
+# 4. Compiler artifact check
 # The compiler bytecode must sit next to the lana binary.
 COMPILER_PATH="$(dirname "$LANA_BIN")/lana-compiler.labc"
 if [[ ! -f "$COMPILER_PATH" ]]; then
@@ -59,15 +44,6 @@ if [[ ! -f "$COMPILER_PATH" ]]; then
     exit 1
 fi
 echo "PASSED: Compiler artifact found"
-
-# 7. Runtime library check
-# liblanaruntime.a must sit in the lib directory one level up from bin.
-LIB_PATH="$(dirname "$(dirname "$LANA_BIN")")/lib/liblanaruntime.a"
-if [[ ! -f "$LIB_PATH" ]]; then
-    echo "FAILED: 'liblanaruntime.a' not found in lib directory"
-    exit 1
-fi
-echo "PASSED: Runtime library found"
 
 echo "--- ALL CHECKS PASSED ---"
 exit 0

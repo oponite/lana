@@ -1,8 +1,6 @@
 // LIP-004 §5: explicit GPU matmul. A single deterministic float32 sgemm
-// compute kernel, one thread per output element, fixed reduction order. Both
-// the C11 VM (vm/c/metal.m) and the Rust VM (vm/rust/lana-vm/src/metal.rs)
-// compile this same source, so a given device produces byte-identical results
-// from both VMs. Binary64 inputs are downcast to float32 by the caller before
+// compute kernel, one thread per output element, fixed reduction order. The
+// Rust VM embeds this source. Binary64 inputs are downcast to float32 before
 // dispatch and upcast after — never silently.
 #include <metal_stdlib>
 using namespace metal;

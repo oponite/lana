@@ -1,6 +1,6 @@
 # Lana integrations
 
-These optional adapters support Lana 3.0.2 without dependencies in the normal
+These optional adapters support Lana 4.0.0 without dependencies in the normal
 Lana build.
 
 ## JSON, MCP, and Jupyter
@@ -32,22 +32,11 @@ the supplied walk-forward evidence passes every gate; all other cases emit
 
 Both integrations currently diagnose files saved on disk.
 
-## Native ABI
+## Repeated Python calls
 
-```bash
-cmake -S . -B build-integrations \
-  -DCMAKE_BUILD_TYPE=Release -DLANA_BUILD_INTEGRATIONS=ON
-cmake --build build-integrations --parallel
-ctest --test-dir build-integrations -R lana_native_bridge --output-on-failure
-```
-
-This produces `liblana_bridge` and its ABI-v1 header. The facade runs
-precompiled LABC only. Python can load it through
-`lana_integrations.native.NativeBridge`.
-
-The JSON, MCP, Jupyter, and editor adapters use the Rust CLI and accept Lana
-3.0.2 source with LABC v2 through v5. The native ABI remains v1 and uses the
-frozen C11 LABC v2 path.
+`lana_integrations.Lana` uses the persistent Rust worker for repeated source
+and bytecode calls. Each call runs in a fresh VM. Close the object after use.
+The one-shot `lana-bridge` command remains available for shell callers.
 
 ## Evidence lifecycle contract
 

@@ -1,14 +1,14 @@
-name: Release Lana 3.0.2
+name: Release Lana 4.0.0
 
 on:
   push:
-    tags: ["v3.0.2"]
+    tags: ["v4.0.0"]
 
 permissions:
   contents: read
 
 env:
-  EXPECTED_VERSION: "3.0.2"
+  EXPECTED_VERSION: "4.0.0"
 
 jobs:
   linux:
@@ -31,22 +31,7 @@ jobs:
           build/lana version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           git diff --check
       - name: Rust workspace tests
-        run: cargo test --workspace --no-fail-fast
-      - name: Address and undefined behavior sanitizers
-        run: |
-          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_SANITIZERS=ON
-          cmake --build build-asan --parallel
-          ctest --test-dir build-asan --output-on-failure
-      - name: Thread sanitizer
-        run: |
-          cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DLANA_ENABLE_TSAN=ON
-          cmake --build build-tsan --parallel
-          ctest --test-dir build-tsan --output-on-failure
-      - name: Ten-minute malformed-bytecode fuzz test
-        run: |
-          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
-          cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
-          build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5
+        run: cargo test --locked --workspace --no-fail-fast
       - name: Ten-minute Rust bytecode fuzz test
         run: |
           rustup toolchain install nightly --profile minimal
@@ -61,7 +46,7 @@ jobs:
           if-no-files-found: ignore
       - name: Optional integrations
         run: |
-          cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release -DLANA_BUILD_INTEGRATIONS=ON
+          cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release
           cmake --build build-integrations --parallel
           ctest --test-dir build-integrations --output-on-failure
           python3 -m venv "$RUNNER_TEMP/lana-integrations-venv"
@@ -89,7 +74,6 @@ jobs:
           prefix="$RUNNER_TEMP/lana-install"
           cmake --install build-universal --prefix "$prefix"
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
-          lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
           arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           "$prefix/bin/lana" run examples/belief.lana
@@ -103,8 +87,8 @@ jobs:
         with:
           name: lana-macos-universal
           path: |
-            ${{ runner.temp }}/lana-3.0.2-macos-universal.tar.gz
-            ${{ runner.temp }}/lana-3.0.2-macos-universal.tar.gz.sha256
+            ${{ runner.temp }}/lana-4.0.0-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-4.0.0-macos-universal.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -130,7 +114,6 @@ jobs:
           mkdir "$prefix"
           tar -C "$prefix" -xzf "$artifact_dir/$archive"
           lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
-          lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
           arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
           cp examples/belief.lana "$prefix/belief.lana"

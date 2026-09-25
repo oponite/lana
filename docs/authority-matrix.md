@@ -13,5 +13,8 @@ This file maps each key term to the authority file where it is defined.
 | Execution | spec/SPEC.md | Module that authorizes and performs real‑world actions |
 | LABC v5 | spec/BYTECODE.md | New bytecode version with extended opcodes |
 | LIP‑029 | lip/LIP-029.md | Versioned JSON record protocol |
+| LIP‑030 | lip/LIP-030.md | Balanced Core information surface |
+| LIP‑031 | lip/LIP-031.md | Rust-only Lana 4.0 distribution |
+| LIP‑032 | lip/LIP-032.md | Durable application-checked future messages |
 
 The matrix is kept up‑to‑date when new terms are introduced.

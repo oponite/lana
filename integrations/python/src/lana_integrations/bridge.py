@@ -17,7 +17,7 @@ from .evidence import validate_evidence
 
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 30.0
-_VERSION_PATTERN = re.compile(r"^Lana (3\.\d+\.\d+) \(LABC v[2-5],")
+_VERSION_PATTERN = re.compile(r"^Lana ([34]\.\d+\.\d+) \(LABC v[2-5],")
 
 
 class LanaCompatibilityError(RuntimeError):
@@ -91,7 +91,7 @@ class BridgeRunner:
         if completed.returncode != 0 or match is None:
             detail = output or completed.stderr.strip() or "no version output"
             raise LanaCompatibilityError(
-                f"expected Lana 3.0 with supported LABC; got: {detail}"
+                f"expected Lana 3.x or 4.x with supported LABC; got: {detail}"
             )
         return match.group(1)
 

@@ -1,4 +1,8 @@
 let joint_value = joint correlated (x, y) with support: [[0, 0, 0.5], [1, 1, 0.5]];
+let snapshot = inspect_information(joint_value);
+assert(snapshot.form == "joint", "joint form");
+assert(snapshot.finite_support, "finite joint support");
+assert(array_length(snapshot.support) == 2, "joint rows visible");
 let conditioned = condition(joint_value, {x: 1, y: 1});
 let observed = observe(joint_value, {x: 1});
 assert(resolve(conditioned)[0] == 1, "map condition selects x");

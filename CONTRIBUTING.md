@@ -20,15 +20,8 @@ cargo build -p lana-cli
 ctest --test-dir build --output-on-failure
 ```
 
-The differential conformance suite asserts byte-identical stdout/stderr/exit
-codes between the C11 VM and the Rust VM:
-
-```bash
-tests/conformance/differential/run_core.sh
-tests/conformance/differential/run_hostcalls.sh
-tests/conformance/differential/run_tasks.sh
-tests/conformance/differential/run_fuzz_diff.sh
-```
+Published LABC v1-v2 bytecode and assembly fixtures are checked by
+`lana_legacy_bytecode` in CTest. Rust loader fuzzing lives in `fuzz/`.
 
 ## Change process
 
@@ -39,8 +32,6 @@ tests/conformance/differential/run_fuzz_diff.sh
 
 ## Code style
 
-- C: C11, matching the existing `vm/c/`, `runtime/c/`, and `tools/c/`
-  conventions.
 - Lana: the self-hosted compiler source under `compiler/`.
 - Rust: the workspace crates under `vm/rust/`, `runtime/rust/`, and
   `tools/rust/`.

@@ -27,7 +27,7 @@ endif()
 # When building for a specific architecture, confirm the installed binaries
 # actually carry it (a universal build must not silently ship a single slice).
 if(DEFINED EXPECTED_ARCH)
-    foreach(binary lana lanavm)
+    foreach(binary lana)
         execute_process(
             COMMAND lipo -archs "${prefix}/bin/${binary}"
             RESULT_VARIABLE lipo_result

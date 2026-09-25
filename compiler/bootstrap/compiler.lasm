@@ -9922,35 +9922,35 @@ RETURN R3
 JUMP __host_effect_endif_30
 __host_effect_else_29:
 __host_effect_endif_30:
-.line 1104
-LOAD_STRING R1 706f6c6963795f6576616c75617465
+.line 1103
+LOAD_STRING R1 6675747572655f6d657373616765
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_31
-.line 1104
-LOAD_STRING R1 70757265
+.line 1103
+LOAD_STRING R1 6d75746174696f6e
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_32
 __host_effect_else_31:
 __host_effect_endif_32:
-.line 1105
-LOAD_STRING R1 706f6c6963795f73746f72655f6465636973696f6e
+.line 1104
+LOAD_STRING R1 706f6c6963795f6576616c75617465
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_33
-.line 1105
-LOAD_STRING R1 6d75746174696f6e
+.line 1104
+LOAD_STRING R1 70757265
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_34
 __host_effect_else_33:
 __host_effect_endif_34:
-.line 1106
-LOAD_STRING R1 6c65646765725f617070656e64
+.line 1105
+LOAD_STRING R1 706f6c6963795f73746f72655f6465636973696f6e
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_35
-.line 1106
+.line 1105
 LOAD_STRING R1 6d75746174696f6e
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -9958,23 +9958,23 @@ RETURN R3
 JUMP __host_effect_endif_36
 __host_effect_else_35:
 __host_effect_endif_36:
-.line 1107
-LOAD_STRING R1 6c65646765725f7175657279
+.line 1106
+LOAD_STRING R1 6c65646765725f617070656e64
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_37
-.line 1107
-LOAD_STRING R1 696f
+.line 1106
+LOAD_STRING R1 6d75746174696f6e
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_38
 __host_effect_else_37:
 __host_effect_endif_38:
-.line 1108
-LOAD_STRING R1 6373765f72656164
+.line 1107
+LOAD_STRING R1 6c65646765725f7175657279
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_39
-.line 1108
+.line 1107
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -9982,11 +9982,11 @@ RETURN R3
 JUMP __host_effect_endif_40
 __host_effect_else_39:
 __host_effect_endif_40:
-.line 1109
-LOAD_STRING R1 6373765f7772697465
+.line 1108
+LOAD_STRING R1 6373765f72656164
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_41
-.line 1109
+.line 1108
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -9994,23 +9994,23 @@ RETURN R3
 JUMP __host_effect_endif_42
 __host_effect_else_41:
 __host_effect_endif_42:
-.line 1110
-LOAD_STRING R1 61726773
+.line 1109
+LOAD_STRING R1 6373765f7772697465
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_43
-.line 1110
-LOAD_STRING R1 65787465726e616c5f63616c6c
+.line 1109
+LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_44
 __host_effect_else_43:
 __host_effect_endif_44:
-.line 1111
-LOAD_STRING R1 676574656e76
+.line 1110
+LOAD_STRING R1 61726773
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_45
-.line 1111
+.line 1110
 LOAD_STRING R1 65787465726e616c5f63616c6c
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10018,11 +10018,11 @@ RETURN R3
 JUMP __host_effect_endif_46
 __host_effect_else_45:
 __host_effect_endif_46:
-.line 1112
-LOAD_STRING R1 6e6f77
+.line 1111
+LOAD_STRING R1 676574656e76
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_47
-.line 1112
+.line 1111
 LOAD_STRING R1 65787465726e616c5f63616c6c
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10030,23 +10030,23 @@ RETURN R3
 JUMP __host_effect_endif_48
 __host_effect_else_47:
 __host_effect_endif_48:
-.line 1113
-LOAD_STRING R1 72616e646f6d
+.line 1112
+LOAD_STRING R1 6e6f77
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_49
-.line 1113
-LOAD_STRING R1 73746f63686173746963
+.line 1112
+LOAD_STRING R1 65787465726e616c5f63616c6c
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_50
 __host_effect_else_49:
 __host_effect_endif_50:
-.line 1114
-LOAD_STRING R1 72616e646f6d5f73656564
+.line 1113
+LOAD_STRING R1 72616e646f6d
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_51
-.line 1114
+.line 1113
 LOAD_STRING R1 73746f63686173746963
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10054,11 +10054,11 @@ RETURN R3
 JUMP __host_effect_endif_52
 __host_effect_else_51:
 __host_effect_endif_52:
-.line 1115
-LOAD_STRING R1 696e666572
+.line 1114
+LOAD_STRING R1 72616e646f6d5f73656564
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_53
-.line 1115
+.line 1114
 LOAD_STRING R1 73746f63686173746963
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10066,23 +10066,23 @@ RETURN R3
 JUMP __host_effect_endif_54
 __host_effect_else_53:
 __host_effect_endif_54:
-.line 1116
-LOAD_STRING R1 666c6f6f72
+.line 1115
+LOAD_STRING R1 696e666572
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_55
-.line 1116
-LOAD_STRING R1 70757265
+.line 1115
+LOAD_STRING R1 73746f63686173746963
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_56
 __host_effect_else_55:
 __host_effect_endif_56:
-.line 1117
-LOAD_STRING R1 737472696e675f746f5f6e756d626572
+.line 1116
+LOAD_STRING R1 666c6f6f72
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_57
-.line 1117
+.line 1116
 LOAD_STRING R1 70757265
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10090,11 +10090,11 @@ RETURN R3
 JUMP __host_effect_endif_58
 __host_effect_else_57:
 __host_effect_endif_58:
-.line 1118
-LOAD_STRING R1 747970655f6f66
+.line 1117
+LOAD_STRING R1 737472696e675f746f5f6e756d626572
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_59
-.line 1118
+.line 1117
 LOAD_STRING R1 70757265
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10102,35 +10102,35 @@ RETURN R3
 JUMP __host_effect_endif_60
 __host_effect_else_59:
 __host_effect_endif_60:
-.line 1119
-LOAD_STRING R1 617373657274
+.line 1118
+LOAD_STRING R1 747970655f6f66
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_61
-.line 1119
-LOAD_STRING R1 65787465726e616c5f63616c6c
+.line 1118
+LOAD_STRING R1 70757265
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_62
 __host_effect_else_61:
 __host_effect_endif_62:
-.line 1120
-LOAD_STRING R1 696e6465785f736574
+.line 1119
+LOAD_STRING R1 617373657274
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_63
-.line 1120
-LOAD_STRING R1 6d75746174696f6e
+.line 1119
+LOAD_STRING R1 65787465726e616c5f63616c6c
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_64
 __host_effect_else_63:
 __host_effect_endif_64:
-.line 1121
-LOAD_STRING R1 61727261795f70757368
+.line 1120
+LOAD_STRING R1 696e6465785f736574
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_65
-.line 1121
+.line 1120
 LOAD_STRING R1 6d75746174696f6e
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10138,23 +10138,23 @@ RETURN R3
 JUMP __host_effect_endif_66
 __host_effect_else_65:
 __host_effect_endif_66:
-.line 1122
-LOAD_STRING R1 72756e5f6173796e63
+.line 1121
+LOAD_STRING R1 61727261795f70757368
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_67
-.line 1122
-LOAD_STRING R1 696f
+.line 1121
+LOAD_STRING R1 6d75746174696f6e
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_68
 __host_effect_else_67:
 __host_effect_endif_68:
-.line 1123
-LOAD_STRING R1 6675747572655f616c6c
+.line 1122
+LOAD_STRING R1 72756e5f6173796e63
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_69
-.line 1123
+.line 1122
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10162,11 +10162,11 @@ RETURN R3
 JUMP __host_effect_endif_70
 __host_effect_else_69:
 __host_effect_endif_70:
-.line 1124
-LOAD_STRING R1 6675747572655f72616365
+.line 1123
+LOAD_STRING R1 6675747572655f616c6c
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_71
-.line 1124
+.line 1123
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10174,11 +10174,11 @@ RETURN R3
 JUMP __host_effect_endif_72
 __host_effect_else_71:
 __host_effect_endif_72:
-.line 1125
-LOAD_STRING R1 736c656570
+.line 1124
+LOAD_STRING R1 6675747572655f72616365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_73
-.line 1125
+.line 1124
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10186,11 +10186,11 @@ RETURN R3
 JUMP __host_effect_endif_74
 __host_effect_else_73:
 __host_effect_endif_74:
-.line 1126
-LOAD_STRING R1 687474705f676574
+.line 1125
+LOAD_STRING R1 736c656570
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_75
-.line 1126
+.line 1125
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10198,11 +10198,11 @@ RETURN R3
 JUMP __host_effect_endif_76
 __host_effect_else_75:
 __host_effect_endif_76:
-.line 1127
-LOAD_STRING R1 687474705f706f7374
+.line 1126
+LOAD_STRING R1 687474705f676574
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_77
-.line 1127
+.line 1126
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10210,47 +10210,47 @@ RETURN R3
 JUMP __host_effect_endif_78
 __host_effect_else_77:
 __host_effect_endif_78:
-.line 1128
-LOAD_STRING R1 657865637574696f6e5f6361706162696c697479
+.line 1127
+LOAD_STRING R1 687474705f706f7374
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_79
-.line 1128
-LOAD_STRING R1 65787465726e616c5f63616c6c
+.line 1127
+LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_80
 __host_effect_else_79:
 __host_effect_endif_80:
-.line 1129
-LOAD_STRING R1 657865637574696f6e5f617574686f72697a65
+.line 1128
+LOAD_STRING R1 657865637574696f6e5f6361706162696c697479
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_81
-.line 1129
-LOAD_STRING R1 70757265
+.line 1128
+LOAD_STRING R1 65787465726e616c5f63616c6c
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_82
 __host_effect_else_81:
 __host_effect_endif_82:
-.line 1130
-LOAD_STRING R1 657865637574696f6e5f65786563757465
+.line 1129
+LOAD_STRING R1 657865637574696f6e5f617574686f72697a65
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_83
-.line 1130
-LOAD_STRING R1 696f
+.line 1129
+LOAD_STRING R1 70757265
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_84
 __host_effect_else_83:
 __host_effect_endif_84:
-.line 1131
-LOAD_STRING R1 736f636b65745f636f6e6e656374
+.line 1130
+LOAD_STRING R1 657865637574696f6e5f65786563757465
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_85
-.line 1131
+.line 1130
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10258,11 +10258,11 @@ RETURN R3
 JUMP __host_effect_endif_86
 __host_effect_else_85:
 __host_effect_endif_86:
-.line 1132
-LOAD_STRING R1 736f636b65745f73656e64
+.line 1131
+LOAD_STRING R1 736f636b65745f636f6e6e656374
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_87
-.line 1132
+.line 1131
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10270,11 +10270,11 @@ RETURN R3
 JUMP __host_effect_endif_88
 __host_effect_else_87:
 __host_effect_endif_88:
-.line 1133
-LOAD_STRING R1 736f636b65745f72656376
+.line 1132
+LOAD_STRING R1 736f636b65745f73656e64
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_89
-.line 1133
+.line 1132
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10282,11 +10282,11 @@ RETURN R3
 JUMP __host_effect_endif_90
 __host_effect_else_89:
 __host_effect_endif_90:
-.line 1134
-LOAD_STRING R1 736f636b65745f636c6f7365
+.line 1133
+LOAD_STRING R1 736f636b65745f72656376
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_91
-.line 1134
+.line 1133
 LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
@@ -10294,18 +10294,30 @@ RETURN R3
 JUMP __host_effect_endif_92
 __host_effect_else_91:
 __host_effect_endif_92:
-.line 1135
-MOVE R1 R0
-CALL host_is_pure R1 1 R2
+.line 1134
+LOAD_STRING R1 736f636b65745f636c6f7365
+COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __host_effect_else_93
-.line 1135
-LOAD_STRING R1 70757265
+.line 1134
+LOAD_STRING R1 696f
 MOVE R2 R1
 CALL effects R2 1 R3
 RETURN R3
 JUMP __host_effect_endif_94
 __host_effect_else_93:
 __host_effect_endif_94:
+.line 1135
+MOVE R1 R0
+CALL host_is_pure R1 1 R2
+JUMP_IF_FALSE R2 __host_effect_else_95
+.line 1135
+LOAD_STRING R1 70757265
+MOVE R2 R1
+CALL effects R2 1 R3
+RETURN R3
+JUMP __host_effect_endif_96
+__host_effect_else_95:
+__host_effect_endif_96:
 .line 1136
 LOAD_STRING R1 65787465726e616c5f63616c6c
 MOVE R2 R1
@@ -28294,18 +28306,18 @@ RETURN R1
 JUMP __is_host_call_endif_88
 __is_host_call_else_87:
 __is_host_call_endif_88:
-.line 3218
-LOAD_STRING R1 706f6c6963795f6576616c75617465
+.line 3217
+LOAD_STRING R1 6675747572655f6d657373616765
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_89
-.line 3218
+.line 3217
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_90
 __is_host_call_else_89:
 __is_host_call_endif_90:
 .line 3218
-LOAD_STRING R1 706f6c6963795f73746f72655f6465636973696f6e
+LOAD_STRING R1 706f6c6963795f6576616c75617465
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_91
 .line 3218
@@ -28314,18 +28326,18 @@ RETURN R1
 JUMP __is_host_call_endif_92
 __is_host_call_else_91:
 __is_host_call_endif_92:
-.line 3219
-LOAD_STRING R1 6c65646765725f617070656e64
+.line 3218
+LOAD_STRING R1 706f6c6963795f73746f72655f6465636973696f6e
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_93
-.line 3219
+.line 3218
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_94
 __is_host_call_else_93:
 __is_host_call_endif_94:
 .line 3219
-LOAD_STRING R1 6c65646765725f7175657279
+LOAD_STRING R1 6c65646765725f617070656e64
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_95
 .line 3219
@@ -28334,18 +28346,18 @@ RETURN R1
 JUMP __is_host_call_endif_96
 __is_host_call_else_95:
 __is_host_call_endif_96:
-.line 3220
-LOAD_STRING R1 6a736f6e5f7061727365
+.line 3219
+LOAD_STRING R1 6c65646765725f7175657279
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_97
-.line 3220
+.line 3219
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_98
 __is_host_call_else_97:
 __is_host_call_endif_98:
 .line 3220
-LOAD_STRING R1 6a736f6e5f737472696e67696679
+LOAD_STRING R1 6a736f6e5f7061727365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_99
 .line 3220
@@ -28354,18 +28366,18 @@ RETURN R1
 JUMP __is_host_call_endif_100
 __is_host_call_else_99:
 __is_host_call_endif_100:
-.line 3221
-LOAD_STRING R1 6373765f72656164
+.line 3220
+LOAD_STRING R1 6a736f6e5f737472696e67696679
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_101
-.line 3221
+.line 3220
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_102
 __is_host_call_else_101:
 __is_host_call_endif_102:
 .line 3221
-LOAD_STRING R1 6373765f7772697465
+LOAD_STRING R1 6373765f72656164
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_103
 .line 3221
@@ -28374,38 +28386,38 @@ RETURN R1
 JUMP __is_host_call_endif_104
 __is_host_call_else_103:
 __is_host_call_endif_104:
-.line 3222
-LOAD_STRING R1 6c617a795f626f756e64
+.line 3221
+LOAD_STRING R1 6373765f7772697465
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_105
-.line 3222
+.line 3221
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_106
 __is_host_call_else_105:
 __is_host_call_endif_106:
-.line 3223
-LOAD_STRING R1 73757270726973616c
+.line 3222
+LOAD_STRING R1 6c617a795f626f756e64
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_107
-.line 3223
+.line 3222
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_108
 __is_host_call_else_107:
 __is_host_call_endif_108:
-.line 3224
-LOAD_STRING R1 74656e736f72
+.line 3223
+LOAD_STRING R1 73757270726973616c
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_109
-.line 3224
+.line 3223
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_110
 __is_host_call_else_109:
 __is_host_call_endif_110:
 .line 3224
-LOAD_STRING R1 74656e736f725f636f6d706c6578
+LOAD_STRING R1 74656e736f72
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_111
 .line 3224
@@ -28414,18 +28426,18 @@ RETURN R1
 JUMP __is_host_call_endif_112
 __is_host_call_else_111:
 __is_host_call_endif_112:
-.line 3225
-LOAD_STRING R1 7a65726f73
+.line 3224
+LOAD_STRING R1 74656e736f725f636f6d706c6578
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_113
-.line 3225
+.line 3224
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_114
 __is_host_call_else_113:
 __is_host_call_endif_114:
 .line 3225
-LOAD_STRING R1 6f6e6573
+LOAD_STRING R1 7a65726f73
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_115
 .line 3225
@@ -28434,18 +28446,18 @@ RETURN R1
 JUMP __is_host_call_endif_116
 __is_host_call_else_115:
 __is_host_call_endif_116:
-.line 3226
-LOAD_STRING R1 657965
+.line 3225
+LOAD_STRING R1 6f6e6573
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_117
-.line 3226
+.line 3225
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_118
 __is_host_call_else_117:
 __is_host_call_endif_118:
 .line 3226
-LOAD_STRING R1 7368617065
+LOAD_STRING R1 657965
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_119
 .line 3226
@@ -28454,18 +28466,18 @@ RETURN R1
 JUMP __is_host_call_endif_120
 __is_host_call_else_119:
 __is_host_call_endif_120:
-.line 3227
-LOAD_STRING R1 6e64696d
+.line 3226
+LOAD_STRING R1 7368617065
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_121
-.line 3227
+.line 3226
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_122
 __is_host_call_else_121:
 __is_host_call_endif_122:
 .line 3227
-LOAD_STRING R1 6474797065
+LOAD_STRING R1 6e64696d
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_123
 .line 3227
@@ -28474,28 +28486,28 @@ RETURN R1
 JUMP __is_host_call_endif_124
 __is_host_call_else_123:
 __is_host_call_endif_124:
-.line 3228
-LOAD_STRING R1 63617374
+.line 3227
+LOAD_STRING R1 6474797065
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_125
-.line 3228
+.line 3227
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_126
 __is_host_call_else_125:
 __is_host_call_endif_126:
-.line 3229
-LOAD_STRING R1 72657368617065
+.line 3228
+LOAD_STRING R1 63617374
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_127
-.line 3229
+.line 3228
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_128
 __is_host_call_else_127:
 __is_host_call_endif_128:
 .line 3229
-LOAD_STRING R1 7472616e73706f7365
+LOAD_STRING R1 72657368617065
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_129
 .line 3229
@@ -28504,18 +28516,18 @@ RETURN R1
 JUMP __is_host_call_endif_130
 __is_host_call_else_129:
 __is_host_call_endif_130:
-.line 3230
-LOAD_STRING R1 657870
+.line 3229
+LOAD_STRING R1 7472616e73706f7365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_131
-.line 3230
+.line 3229
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_132
 __is_host_call_else_131:
 __is_host_call_endif_132:
 .line 3230
-LOAD_STRING R1 6c6f67
+LOAD_STRING R1 657870
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_133
 .line 3230
@@ -28524,18 +28536,18 @@ RETURN R1
 JUMP __is_host_call_endif_134
 __is_host_call_else_133:
 __is_host_call_endif_134:
-.line 3231
-LOAD_STRING R1 73717274
+.line 3230
+LOAD_STRING R1 6c6f67
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_135
-.line 3231
+.line 3230
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_136
 __is_host_call_else_135:
 __is_host_call_endif_136:
 .line 3231
-LOAD_STRING R1 72656c75
+LOAD_STRING R1 73717274
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_137
 .line 3231
@@ -28544,18 +28556,18 @@ RETURN R1
 JUMP __is_host_call_endif_138
 __is_host_call_else_137:
 __is_host_call_endif_138:
-.line 3232
-LOAD_STRING R1 736f66746d6178
+.line 3231
+LOAD_STRING R1 72656c75
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_139
-.line 3232
+.line 3231
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_140
 __is_host_call_else_139:
 __is_host_call_endif_140:
 .line 3232
-LOAD_STRING R1 6c6f6773756d657870
+LOAD_STRING R1 736f66746d6178
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_141
 .line 3232
@@ -28564,118 +28576,118 @@ RETURN R1
 JUMP __is_host_call_endif_142
 __is_host_call_else_141:
 __is_host_call_endif_142:
-.line 3233
-LOAD_STRING R1 6172676d6178
+.line 3232
+LOAD_STRING R1 6c6f6773756d657870
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_143
-.line 3233
+.line 3232
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_144
 __is_host_call_else_143:
 __is_host_call_endif_144:
-.line 3234
-LOAD_STRING R1 74656e736f725f636f6d70617265
+.line 3233
+LOAD_STRING R1 6172676d6178
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_145
-.line 3234
+.line 3233
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_146
 __is_host_call_else_145:
 __is_host_call_endif_146:
-.line 3235
-LOAD_STRING R1 74656e736f725f73656c656374
+.line 3234
+LOAD_STRING R1 74656e736f725f636f6d70617265
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_147
-.line 3235
+.line 3234
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_148
 __is_host_call_else_147:
 __is_host_call_endif_148:
-.line 3236
-LOAD_STRING R1 676174686572
+.line 3235
+LOAD_STRING R1 74656e736f725f73656c656374
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_149
-.line 3236
+.line 3235
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_150
 __is_host_call_else_149:
 __is_host_call_endif_150:
-.line 3237
-LOAD_STRING R1 63686f6c65736b795f736f6c7665
+.line 3236
+LOAD_STRING R1 676174686572
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_151
-.line 3237
+.line 3236
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_152
 __is_host_call_else_151:
 __is_host_call_endif_152:
-.line 3238
-LOAD_STRING R1 72616e646f6d5f756e69666f726d
+.line 3237
+LOAD_STRING R1 63686f6c65736b795f736f6c7665
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_153
-.line 3238
+.line 3237
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_154
 __is_host_call_else_153:
 __is_host_call_endif_154:
-.line 3239
-LOAD_STRING R1 72616e646f6d5f6e6f726d616c
+.line 3238
+LOAD_STRING R1 72616e646f6d5f756e69666f726d
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_155
-.line 3239
+.line 3238
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_156
 __is_host_call_else_155:
 __is_host_call_endif_156:
-.line 3240
-LOAD_STRING R1 646576696365
+.line 3239
+LOAD_STRING R1 72616e646f6d5f6e6f726d616c
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_157
-.line 3240
+.line 3239
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_158
 __is_host_call_else_157:
 __is_host_call_endif_158:
-.line 3241
-LOAD_STRING R1 746f5f646576696365
+.line 3240
+LOAD_STRING R1 646576696365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_159
-.line 3241
+.line 3240
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_160
 __is_host_call_else_159:
 __is_host_call_endif_160:
-.line 3242
-LOAD_STRING R1 746f5f637075
+.line 3241
+LOAD_STRING R1 746f5f646576696365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_161
-.line 3242
+.line 3241
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_162
 __is_host_call_else_161:
 __is_host_call_endif_162:
-.line 3243
-LOAD_STRING R1 6d61746d756c
+.line 3242
+LOAD_STRING R1 746f5f637075
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_163
-.line 3243
+.line 3242
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_164
 __is_host_call_else_163:
 __is_host_call_endif_164:
 .line 3243
-LOAD_STRING R1 73756d
+LOAD_STRING R1 6d61746d756c
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_165
 .line 3243
@@ -28684,18 +28696,18 @@ RETURN R1
 JUMP __is_host_call_endif_166
 __is_host_call_else_165:
 __is_host_call_endif_166:
-.line 3244
-LOAD_STRING R1 6d65616e
+.line 3243
+LOAD_STRING R1 73756d
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_167
-.line 3244
+.line 3243
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_168
 __is_host_call_else_167:
 __is_host_call_endif_168:
 .line 3244
-LOAD_STRING R1 6d6178
+LOAD_STRING R1 6d65616e
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_169
 .line 3244
@@ -28704,28 +28716,28 @@ RETURN R1
 JUMP __is_host_call_endif_170
 __is_host_call_else_169:
 __is_host_call_endif_170:
-.line 3245
-LOAD_STRING R1 6d696e
+.line 3244
+LOAD_STRING R1 6d6178
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_171
-.line 3245
+.line 3244
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_172
 __is_host_call_else_171:
 __is_host_call_endif_172:
-.line 3246
-LOAD_STRING R1 7365745f6e6577
+.line 3245
+LOAD_STRING R1 6d696e
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_173
-.line 3246
+.line 3245
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_174
 __is_host_call_else_173:
 __is_host_call_endif_174:
 .line 3246
-LOAD_STRING R1 7365745f616464
+LOAD_STRING R1 7365745f6e6577
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_175
 .line 3246
@@ -28734,18 +28746,18 @@ RETURN R1
 JUMP __is_host_call_endif_176
 __is_host_call_else_175:
 __is_host_call_endif_176:
-.line 3247
-LOAD_STRING R1 7365745f636f6e7461696e73
+.line 3246
+LOAD_STRING R1 7365745f616464
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_177
-.line 3247
+.line 3246
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_178
 __is_host_call_else_177:
 __is_host_call_endif_178:
 .line 3247
-LOAD_STRING R1 7365745f756e696f6e
+LOAD_STRING R1 7365745f636f6e7461696e73
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_179
 .line 3247
@@ -28754,18 +28766,18 @@ RETURN R1
 JUMP __is_host_call_endif_180
 __is_host_call_else_179:
 __is_host_call_endif_180:
-.line 3248
-LOAD_STRING R1 7365745f696e74657273656374
+.line 3247
+LOAD_STRING R1 7365745f756e696f6e
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_181
-.line 3248
+.line 3247
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_182
 __is_host_call_else_181:
 __is_host_call_endif_182:
 .line 3248
-LOAD_STRING R1 7365745f646966666572656e6365
+LOAD_STRING R1 7365745f696e74657273656374
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_183
 .line 3248
@@ -28774,28 +28786,28 @@ RETURN R1
 JUMP __is_host_call_endif_184
 __is_host_call_else_183:
 __is_host_call_endif_184:
-.line 3249
-LOAD_STRING R1 676574656e76
+.line 3248
+LOAD_STRING R1 7365745f646966666572656e6365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_185
-.line 3249
+.line 3248
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_186
 __is_host_call_else_185:
 __is_host_call_endif_186:
-.line 3250
-LOAD_STRING R1 666f726d6174
+.line 3249
+LOAD_STRING R1 676574656e76
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_187
-.line 3250
+.line 3249
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_188
 __is_host_call_else_187:
 __is_host_call_endif_188:
 .line 3250
-LOAD_STRING R1 666f726d61745f6e756d626572
+LOAD_STRING R1 666f726d6174
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_189
 .line 3250
@@ -28804,18 +28816,18 @@ RETURN R1
 JUMP __is_host_call_endif_190
 __is_host_call_else_189:
 __is_host_call_endif_190:
-.line 3251
-LOAD_STRING R1 636861725f6c656e677468
+.line 3250
+LOAD_STRING R1 666f726d61745f6e756d626572
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_191
-.line 3251
+.line 3250
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_192
 __is_host_call_else_191:
 __is_host_call_endif_192:
 .line 3251
-LOAD_STRING R1 737472696e675f636f6465706f696e745f736c696365
+LOAD_STRING R1 636861725f6c656e677468
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_193
 .line 3251
@@ -28824,18 +28836,18 @@ RETURN R1
 JUMP __is_host_call_endif_194
 __is_host_call_else_193:
 __is_host_call_endif_194:
-.line 3252
-LOAD_STRING R1 746f5f7570706572
+.line 3251
+LOAD_STRING R1 737472696e675f636f6465706f696e745f736c696365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_195
-.line 3252
+.line 3251
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_196
 __is_host_call_else_195:
 __is_host_call_endif_196:
 .line 3252
-LOAD_STRING R1 746f5f6c6f776572
+LOAD_STRING R1 746f5f7570706572
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_197
 .line 3252
@@ -28844,18 +28856,18 @@ RETURN R1
 JUMP __is_host_call_endif_198
 __is_host_call_else_197:
 __is_host_call_endif_198:
-.line 3253
-LOAD_STRING R1 72656765785f636f6d70696c65
+.line 3252
+LOAD_STRING R1 746f5f6c6f776572
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_199
-.line 3253
+.line 3252
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_200
 __is_host_call_else_199:
 __is_host_call_endif_200:
 .line 3253
-LOAD_STRING R1 72656765785f6d61746368
+LOAD_STRING R1 72656765785f636f6d70696c65
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_201
 .line 3253
@@ -28864,18 +28876,18 @@ RETURN R1
 JUMP __is_host_call_endif_202
 __is_host_call_else_201:
 __is_host_call_endif_202:
-.line 3254
-LOAD_STRING R1 72656765785f736561726368
+.line 3253
+LOAD_STRING R1 72656765785f6d61746368
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_203
-.line 3254
+.line 3253
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_204
 __is_host_call_else_203:
 __is_host_call_endif_204:
 .line 3254
-LOAD_STRING R1 72656765785f7265706c616365
+LOAD_STRING R1 72656765785f736561726368
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_205
 .line 3254
@@ -28884,28 +28896,28 @@ RETURN R1
 JUMP __is_host_call_endif_206
 __is_host_call_else_205:
 __is_host_call_endif_206:
-.line 3255
-LOAD_STRING R1 6770755f6d61746d756c
+.line 3254
+LOAD_STRING R1 72656765785f7265706c616365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_207
-.line 3255
+.line 3254
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_208
 __is_host_call_else_207:
 __is_host_call_endif_208:
-.line 3256
-LOAD_STRING R1 64656e736974795f6f70657261746f72
+.line 3255
+LOAD_STRING R1 6770755f6d61746d756c
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_209
-.line 3256
+.line 3255
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_210
 __is_host_call_else_209:
 __is_host_call_endif_210:
 .line 3256
-LOAD_STRING R1 706f766d
+LOAD_STRING R1 64656e736974795f6f70657261746f72
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_211
 .line 3256
@@ -28914,18 +28926,18 @@ RETURN R1
 JUMP __is_host_call_endif_212
 __is_host_call_else_211:
 __is_host_call_endif_212:
-.line 3257
-LOAD_STRING R1 6368616e6e656c
+.line 3256
+LOAD_STRING R1 706f766d
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_213
-.line 3257
+.line 3256
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_214
 __is_host_call_else_213:
 __is_host_call_endif_214:
 .line 3257
-LOAD_STRING R1 6f627365727661626c65
+LOAD_STRING R1 6368616e6e656c
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_215
 .line 3257
@@ -28934,18 +28946,18 @@ RETURN R1
 JUMP __is_host_call_endif_216
 __is_host_call_else_215:
 __is_host_call_endif_216:
-.line 3258
-LOAD_STRING R1 74656e736f725f70726f64756374
+.line 3257
+LOAD_STRING R1 6f627365727661626c65
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_217
-.line 3258
+.line 3257
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_218
 __is_host_call_else_217:
 __is_host_call_endif_218:
 .line 3258
-LOAD_STRING R1 7061727469616c5f7472616365
+LOAD_STRING R1 74656e736f725f70726f64756374
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_219
 .line 3258
@@ -28954,18 +28966,18 @@ RETURN R1
 JUMP __is_host_call_endif_220
 __is_host_call_else_219:
 __is_host_call_endif_220:
-.line 3259
-LOAD_STRING R1 6d6561737572655f77697468
+.line 3258
+LOAD_STRING R1 7061727469616c5f7472616365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_221
-.line 3259
+.line 3258
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_222
 __is_host_call_else_221:
 __is_host_call_endif_222:
 .line 3259
-LOAD_STRING R1 6170706c795f746f
+LOAD_STRING R1 6d6561737572655f77697468
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_223
 .line 3259
@@ -28974,18 +28986,18 @@ RETURN R1
 JUMP __is_host_call_endif_224
 __is_host_call_else_223:
 __is_host_call_endif_224:
-.line 3260
-LOAD_STRING R1 69735f736570617261626c65
+.line 3259
+LOAD_STRING R1 6170706c795f746f
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_225
-.line 3260
+.line 3259
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_226
 __is_host_call_else_225:
 __is_host_call_endif_226:
 .line 3260
-LOAD_STRING R1 746f5f7374617465
+LOAD_STRING R1 69735f736570617261626c65
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_227
 .line 3260
@@ -28994,18 +29006,18 @@ RETURN R1
 JUMP __is_host_call_endif_228
 __is_host_call_else_227:
 __is_host_call_endif_228:
-.line 3261
-LOAD_STRING R1 67726164
+.line 3260
+LOAD_STRING R1 746f5f7374617465
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_229
-.line 3261
+.line 3260
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_230
 __is_host_call_else_229:
 __is_host_call_endif_230:
 .line 3261
-LOAD_STRING R1 766a70
+LOAD_STRING R1 67726164
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_231
 .line 3261
@@ -29014,18 +29026,18 @@ RETURN R1
 JUMP __is_host_call_endif_232
 __is_host_call_else_231:
 __is_host_call_endif_232:
-.line 3262
-LOAD_STRING R1 736764
+.line 3261
+LOAD_STRING R1 766a70
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_233
-.line 3262
+.line 3261
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_234
 __is_host_call_else_233:
 __is_host_call_endif_234:
 .line 3262
-LOAD_STRING R1 6164616d
+LOAD_STRING R1 736764
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_235
 .line 3262
@@ -29034,48 +29046,48 @@ RETURN R1
 JUMP __is_host_call_endif_236
 __is_host_call_else_235:
 __is_host_call_endif_236:
-.line 3263
-LOAD_STRING R1 747261696e
+.line 3262
+LOAD_STRING R1 6164616d
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_237
-.line 3263
+.line 3262
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_238
 __is_host_call_else_237:
 __is_host_call_endif_238:
-.line 3264
-LOAD_STRING R1 757064617465
+.line 3263
+LOAD_STRING R1 747261696e
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_239
-.line 3264
+.line 3263
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_240
 __is_host_call_else_239:
 __is_host_call_endif_240:
-.line 3265
-LOAD_STRING R1 726573756d65
+.line 3264
+LOAD_STRING R1 757064617465
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_241
-.line 3265
+.line 3264
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_242
 __is_host_call_else_241:
 __is_host_call_endif_242:
-.line 3266
-LOAD_STRING R1 6d636d63
+.line 3265
+LOAD_STRING R1 726573756d65
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_243
-.line 3266
+.line 3265
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_244
 __is_host_call_else_243:
 __is_host_call_endif_244:
 .line 3266
-LOAD_STRING R1 7669
+LOAD_STRING R1 6d636d63
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_245
 .line 3266
@@ -29084,18 +29096,18 @@ RETURN R1
 JUMP __is_host_call_endif_246
 __is_host_call_else_245:
 __is_host_call_endif_246:
-.line 3267
-LOAD_STRING R1 736d63
+.line 3266
+LOAD_STRING R1 7669
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_247
-.line 3267
+.line 3266
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_248
 __is_host_call_else_247:
 __is_host_call_endif_248:
 .line 3267
-LOAD_STRING R1 696e666572
+LOAD_STRING R1 736d63
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_249
 .line 3267
@@ -29104,18 +29116,18 @@ RETURN R1
 JUMP __is_host_call_endif_250
 __is_host_call_else_249:
 __is_host_call_endif_250:
-.line 3268
-LOAD_STRING R1 73746174655f74656e736f72
+.line 3267
+LOAD_STRING R1 696e666572
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_251
-.line 3268
+.line 3267
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_252
 __is_host_call_else_251:
 __is_host_call_endif_252:
 .line 3268
-LOAD_STRING R1 617070656e64
+LOAD_STRING R1 73746174655f74656e736f72
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_253
 .line 3268
@@ -29124,18 +29136,18 @@ RETURN R1
 JUMP __is_host_call_endif_254
 __is_host_call_else_253:
 __is_host_call_endif_254:
-.line 3269
-LOAD_STRING R1 6d656173757265
+.line 3268
+LOAD_STRING R1 617070656e64
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_255
-.line 3269
+.line 3268
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_256
 __is_host_call_else_255:
 __is_host_call_endif_256:
 .line 3269
-LOAD_STRING R1 7472616e73666f726d
+LOAD_STRING R1 6d656173757265
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_257
 .line 3269
@@ -29144,68 +29156,68 @@ RETURN R1
 JUMP __is_host_call_endif_258
 __is_host_call_else_257:
 __is_host_call_endif_258:
-.line 3270
-LOAD_STRING R1 72756e5f6173796e63
+.line 3269
+LOAD_STRING R1 7472616e73666f726d
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_259
-.line 3270
+.line 3269
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_260
 __is_host_call_else_259:
 __is_host_call_endif_260:
-.line 3271
-LOAD_STRING R1 6675747572655f616c6c
+.line 3270
+LOAD_STRING R1 72756e5f6173796e63
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_261
-.line 3271
+.line 3270
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_262
 __is_host_call_else_261:
 __is_host_call_endif_262:
-.line 3272
-LOAD_STRING R1 6675747572655f72616365
+.line 3271
+LOAD_STRING R1 6675747572655f616c6c
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_263
-.line 3272
+.line 3271
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_264
 __is_host_call_else_263:
 __is_host_call_endif_264:
-.line 3273
-LOAD_STRING R1 736c656570
+.line 3272
+LOAD_STRING R1 6675747572655f72616365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_265
-.line 3273
+.line 3272
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_266
 __is_host_call_else_265:
 __is_host_call_endif_266:
-.line 3274
-LOAD_STRING R1 64617461736574
+.line 3273
+LOAD_STRING R1 736c656570
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_267
-.line 3274
+.line 3273
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_268
 __is_host_call_else_267:
 __is_host_call_endif_268:
-.line 3275
-LOAD_STRING R1 73656c656374
+.line 3274
+LOAD_STRING R1 64617461736574
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_269
-.line 3275
+.line 3274
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_270
 __is_host_call_else_269:
 __is_host_call_endif_270:
 .line 3275
-LOAD_STRING R1 6c696d6974
+LOAD_STRING R1 73656c656374
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_271
 .line 3275
@@ -29214,18 +29226,18 @@ RETURN R1
 JUMP __is_host_call_endif_272
 __is_host_call_else_271:
 __is_host_call_endif_272:
-.line 3276
-LOAD_STRING R1 736f7274
+.line 3275
+LOAD_STRING R1 6c696d6974
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_273
-.line 3276
+.line 3275
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_274
 __is_host_call_else_273:
 __is_host_call_endif_274:
 .line 3276
-LOAD_STRING R1 67726f75705f6279
+LOAD_STRING R1 736f7274
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_275
 .line 3276
@@ -29234,18 +29246,18 @@ RETURN R1
 JUMP __is_host_call_endif_276
 __is_host_call_else_275:
 __is_host_call_endif_276:
-.line 3277
-LOAD_STRING R1 616767726567617465
+.line 3276
+LOAD_STRING R1 67726f75705f6279
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_277
-.line 3277
+.line 3276
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_278
 __is_host_call_else_277:
 __is_host_call_endif_278:
 .line 3277
-LOAD_STRING R1 6a6f696e
+LOAD_STRING R1 616767726567617465
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_279
 .line 3277
@@ -29254,18 +29266,18 @@ RETURN R1
 JUMP __is_host_call_endif_280
 __is_host_call_else_279:
 __is_host_call_endif_280:
-.line 3278
-LOAD_STRING R1 6d6174657269616c697a65
+.line 3277
+LOAD_STRING R1 6a6f696e
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_281
-.line 3278
+.line 3277
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_282
 __is_host_call_else_281:
 __is_host_call_endif_282:
 .line 3278
-LOAD_STRING R1 6578706c61696e
+LOAD_STRING R1 6d6174657269616c697a65
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_283
 .line 3278
@@ -29274,18 +29286,18 @@ RETURN R1
 JUMP __is_host_call_endif_284
 __is_host_call_else_283:
 __is_host_call_endif_284:
-.line 3279
-LOAD_STRING R1 646174617365745f6d6170
+.line 3278
+LOAD_STRING R1 6578706c61696e
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_285
-.line 3279
+.line 3278
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_286
 __is_host_call_else_285:
 __is_host_call_endif_286:
 .line 3279
-LOAD_STRING R1 646174617365745f66696c746572
+LOAD_STRING R1 646174617365745f6d6170
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_287
 .line 3279
@@ -29294,28 +29306,28 @@ RETURN R1
 JUMP __is_host_call_endif_288
 __is_host_call_else_287:
 __is_host_call_endif_288:
-.line 3280
-LOAD_STRING R1 646174617365745f6578706c61696e
+.line 3279
+LOAD_STRING R1 646174617365745f66696c746572
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_289
-.line 3280
+.line 3279
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_290
 __is_host_call_else_289:
 __is_host_call_endif_290:
-.line 3281
-LOAD_STRING R1 687474705f676574
+.line 3280
+LOAD_STRING R1 646174617365745f6578706c61696e
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_291
-.line 3281
+.line 3280
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_292
 __is_host_call_else_291:
 __is_host_call_endif_292:
 .line 3281
-LOAD_STRING R1 687474705f706f7374
+LOAD_STRING R1 687474705f676574
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_293
 .line 3281
@@ -29324,18 +29336,18 @@ RETURN R1
 JUMP __is_host_call_endif_294
 __is_host_call_else_293:
 __is_host_call_endif_294:
-.line 3282
-LOAD_STRING R1 657865637574696f6e5f6361706162696c697479
+.line 3281
+LOAD_STRING R1 687474705f706f7374
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_295
-.line 3282
+.line 3281
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_296
 __is_host_call_else_295:
 __is_host_call_endif_296:
 .line 3282
-LOAD_STRING R1 657865637574696f6e5f617574686f72697a65
+LOAD_STRING R1 657865637574696f6e5f6361706162696c697479
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_297
 .line 3282
@@ -29344,28 +29356,28 @@ RETURN R1
 JUMP __is_host_call_endif_298
 __is_host_call_else_297:
 __is_host_call_endif_298:
-.line 3283
-LOAD_STRING R1 657865637574696f6e5f65786563757465
+.line 3282
+LOAD_STRING R1 657865637574696f6e5f617574686f72697a65
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_299
-.line 3283
+.line 3282
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_300
 __is_host_call_else_299:
 __is_host_call_endif_300:
-.line 3284
-LOAD_STRING R1 736f636b65745f636f6e6e656374
+.line 3283
+LOAD_STRING R1 657865637574696f6e5f65786563757465
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_301
-.line 3284
+.line 3283
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_302
 __is_host_call_else_301:
 __is_host_call_endif_302:
 .line 3284
-LOAD_STRING R1 736f636b65745f73656e64
+LOAD_STRING R1 736f636b65745f636f6e6e656374
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_303
 .line 3284
@@ -29374,18 +29386,18 @@ RETURN R1
 JUMP __is_host_call_endif_304
 __is_host_call_else_303:
 __is_host_call_endif_304:
-.line 3285
-LOAD_STRING R1 736f636b65745f72656376
+.line 3284
+LOAD_STRING R1 736f636b65745f73656e64
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_305
-.line 3285
+.line 3284
 LOAD_CONST R1 true
 RETURN R1
 JUMP __is_host_call_endif_306
 __is_host_call_else_305:
 __is_host_call_endif_306:
 .line 3285
-LOAD_STRING R1 736f636b65745f636c6f7365
+LOAD_STRING R1 736f636b65745f72656376
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_307
 .line 3285
@@ -29395,7 +29407,7 @@ JUMP __is_host_call_endif_308
 __is_host_call_else_307:
 __is_host_call_endif_308:
 .line 3285
-LOAD_STRING R1 646174617365745f6d6174657269616c697a65
+LOAD_STRING R1 736f636b65745f636c6f7365
 COMPARE R0 == R1 R2
 JUMP_IF_FALSE R2 __is_host_call_else_309
 .line 3285
@@ -29404,6 +29416,16 @@ RETURN R1
 JUMP __is_host_call_endif_310
 __is_host_call_else_309:
 __is_host_call_endif_310:
+.line 3285
+LOAD_STRING R1 646174617365745f6d6174657269616c697a65
+COMPARE R0 == R1 R2
+JUMP_IF_FALSE R2 __is_host_call_else_311
+.line 3285
+LOAD_CONST R1 true
+RETURN R1
+JUMP __is_host_call_endif_312
+__is_host_call_else_311:
+__is_host_call_endif_312:
 .line 3286
 LOAD_CONST R1 false
 RETURN R1

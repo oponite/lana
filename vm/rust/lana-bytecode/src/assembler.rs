@@ -1,8 +1,4 @@
-//! LABC assembler, mirroring `lana_assemble_file` in `vm/c/assembler.c`.
-//!
-//! Accepts the same textual assembly format as the C11 assembler and produces
-//! the same chunk, so that `.lasm` sources assemble identically under both
-//! implementations.
+//! LABC assembler for the textual format in `spec/BYTECODE.md`.
 
 use crate::chunk::{Chunk, Function, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
@@ -86,6 +82,7 @@ const HOST_CALL_NAMES: &[&str] = &[
     "cholesky_solve", "random_uniform", "random_normal",
     "tensor_device", "tensor_to_device", "tensor_to_cpu",
     "execution_capability", "execution_authorize", "execution_execute",
+    "future_message",
 ];
 
 struct Label {

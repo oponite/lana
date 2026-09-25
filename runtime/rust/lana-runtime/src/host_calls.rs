@@ -22,6 +22,7 @@ use lana_vm::{
     LANA_HOST_STORE_DELETE, LANA_HOST_STORE_GET, LANA_HOST_STORE_GET_AT, LANA_HOST_STORE_OPEN,
     LANA_HOST_STORE_PUT, LANA_HOST_STORE_SCAN, LANA_HOST_STORE_SNAPSHOT,
     LANA_HOST_EXECUTION_CAPABILITY, LANA_HOST_EXECUTION_AUTHORIZE, LANA_HOST_EXECUTION_EXECUTE,
+    LANA_HOST_FUTURE_MESSAGE,
 };
 
 use crate::adapters::{self, Adapter, AdapterKind, AdapterOptions};
@@ -29,6 +30,7 @@ use crate::ledger::{self, Event, EventInput, LedgerQuery};
 use crate::policy::{self, Decision, Policy, PolicyEvaluation, PolicyOutcome, PolicyRule, PolicyRuleKind};
 use crate::store::{self, Store, StoreOptions};
 use crate::execution::{self, Authorization, CurlTransport, ExecutionCapability};
+use crate::future_messages;
 
 static NEXT_EXECUTION_TOKEN: AtomicU64 = AtomicU64::new(1);
 
@@ -47,6 +49,7 @@ pub struct StoreHost {
     execution_credential: Option<Arc<str>>,
     execution_ca_file: Option<Arc<str>>,
     authorizations: Vec<ExecutionAuthorization>,
+    issued_decisions: Vec<(Arc<Mutex<Map>>, [u8; 32])>,
 }
 
 impl StoreHost {
@@ -55,7 +58,7 @@ impl StoreHost {
     }
 
     pub fn with_heap(heap: lana_vm::heap::Heap) -> Self {
-        Self { store: None, adapter: None, heap, execution: None, execution_credential: None, execution_ca_file: None, authorizations: Vec::new() }
+        Self { store: None, adapter: None, heap, execution: None, execution_credential: None, execution_ca_file: None, authorizations: Vec::new(), issued_decisions: Vec::new() }
     }
 
     /// Dispatch one durable-pipeline host call. Returns `LanaError::Format` for
@@ -83,6 +86,7 @@ impl StoreHost {
             LANA_HOST_EXECUTION_CAPABILITY => self.execution_capability(args, out),
             LANA_HOST_EXECUTION_AUTHORIZE => self.execution_authorize(args, out),
             LANA_HOST_EXECUTION_EXECUTE => self.execution_execute(args, out),
+            LANA_HOST_FUTURE_MESSAGE => self.future_message_call(args, out),
             _ => LanaError::Format,
         }
     }
@@ -125,6 +129,12 @@ impl StoreHost {
         let ValueKind::Capability(token) = &args[0].kind else { return LanaError::Type; };
         let Some((expected, capability)) = &self.execution else { return LanaError::Capability; };
         if token.revoked.load(Ordering::Acquire) || !Arc::ptr_eq(token, expected) { return LanaError::Capability; }
+        let ValueKind::Map(decision_map) = &args[1].kind else { return LanaError::Capability; };
+        let encoded = match crate::codec::encode_value(&args[1]) { Ok(value) => value, Err(error) => return error };
+        let digest_of_decision = crate::sha256::sha256(encoded.as_bytes());
+        if !self.issued_decisions.iter().any(|(issued, digest)| Arc::ptr_eq(issued, decision_map) && digest == &digest_of_decision) {
+            return LanaError::Capability;
+        }
         let decision = match decision_from_value(&args[1]) { Ok(decision) => decision, Err(error) => return error };
         if decision.outcome != PolicyOutcome::Authorize { return LanaError::Capability; }
         let digest = match execution::plan_digest(&args[2]) { Ok(digest) => digest, Err(error) => return error };
@@ -147,7 +157,10 @@ impl StoreHost {
         let Some(store) = self.store.as_mut() else { return LanaError::InvalidState; };
         let transport = CurlTransport { credential: self.execution_credential.clone(), ca_file: self.execution_ca_file.clone() };
         match execution::execute(store, capability, &authorization, &args[2], &path, &transport) {
-            Ok(status) => { *out = Value::string(Arc::from(status.name())); LanaError::Ok }
+            Ok(_) => match execution::read_receipt(store, capability, &authorization.plan_digest) {
+                Ok(receipt) => { *out = receipt; LanaError::Ok }
+                Err(error) => error,
+            },
             Err(error) => error,
         }
     }
@@ -174,6 +187,25 @@ impl StoreHost {
                 LanaError::Ok
             }
             Err(e) => e,
+        }
+    }
+
+    fn future_message_call(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+        let Some(Value { kind: ValueKind::String(operation), .. }) = args.first() else { return LanaError::Type; };
+        let Some(store) = self.store.as_mut() else { return LanaError::InvalidState; };
+        let result = match (operation.as_ref(), args.len()) {
+            ("create", 2) => future_messages::utc_now().and_then(|now| future_messages::create(store, &args[1], now, &self.heap)),
+            ("inspect", 2) => future_messages::inspect(store, &args[1]),
+            ("check", 2) => future_messages::utc_now().and_then(|now| future_messages::check(store, &args[1], now, &self.heap)),
+            ("receive", 3) => future_messages::receive(store, &args[1], &args[2], &self.heap),
+            ("acknowledge", 2) => future_messages::utc_now().and_then(|now| future_messages::acknowledge(store, &args[1], now, &self.heap)),
+            ("cancel", 2) => future_messages::utc_now().and_then(|now| future_messages::cancel(store, &args[1], now, &self.heap)),
+            _ => Err(LanaError::Type),
+        };
+        if store::store_current_revision(store).is_err() { self.store = None; }
+        match result {
+            Ok(value) => { *out = value; LanaError::Ok }
+            Err(error) => error,
         }
     }
 
@@ -381,13 +413,17 @@ impl StoreHost {
         let ValueKind::String(config) = &args[1].kind else {
             return LanaError::Type;
         };
+        if !kind.is_finite() || *kind < 0.0 || *kind > 3.0 || kind.fract() != 0.0 {
+            return LanaError::UnsupportedOperation;
+        }
         let options = AdapterOptions {
             schema_version: 1,
             kind: match *kind as u32 {
                 0 => AdapterKind::Json,
                 1 => AdapterKind::Csv,
                 2 => AdapterKind::Sqlite,
-                _ => AdapterKind::HttpJson,
+                3 => AdapterKind::HttpJson,
+                _ => return LanaError::UnsupportedOperation,
             },
             config: Some(config.clone()),
         };
@@ -435,7 +471,12 @@ impl StoreHost {
         };
         match policy::policy_evaluate(&policy, &args[1], &evaluation) {
             Ok(decision) => {
-                *out = match decision_to_value(&self.heap, &decision) { Ok(value) => value, Err(error) => return error };
+                let value = match decision_to_value(&self.heap, &decision) { Ok(value) => value, Err(error) => return error };
+                let encoded = match crate::codec::encode_value(&value) { Ok(value) => value, Err(error) => return error };
+                if let ValueKind::Map(map) = &value.kind {
+                    self.issued_decisions.push((map.clone(), crate::sha256::sha256(encoded.as_bytes())));
+                }
+                *out = value;
                 LanaError::Ok
             }
             Err(e) => e,
@@ -673,7 +714,23 @@ fn ledger_query_from_value(value: &Value) -> Result<LedgerQuery, LanaError> {
 }
 
 fn decision_to_value(heap: &lana_vm::heap::Heap, decision: &Decision) -> Result<Value, LanaError> {
-    let mut map = Map::new(heap, 14)?;
+    let mut map = Map::new(heap, 26)?;
+    let outcome = match decision.outcome {
+        PolicyOutcome::Authorize => "Authorize",
+        PolicyOutcome::Refuse => "Refuse",
+        PolicyOutcome::RequestMoreEvidence => "RequestMoreEvidence",
+    };
+    map.set(Arc::from("record_schema"), Value::number(1.0), false)?;
+    map.set(Arc::from("id"), Value::string(Arc::from(format!("decision/{}", decision.decision_id))), false)?;
+    map.set(Arc::from("kind"), Value::string(Arc::from("decision")), false)?;
+    map.set(Arc::from("transport_status"), Value::string(Arc::from("ok")), false)?;
+    map.set(Arc::from("domain_status"), Value::string(Arc::from(outcome)), false)?;
+    map.set(Arc::from("payload"), Value::number(decision.outcome as u32 as f64), false)?;
+    map.set(Arc::from("error"), Value::null(), false)?;
+    map.set(Arc::from("evidence"), decision.evidence_ids.as_ref().map_or_else(Value::null, |ids| Value::string(ids.clone())), false)?;
+    map.set(Arc::from("assumptions"), Value::null(), false)?;
+    map.set(Arc::from("exactness"), Value::string(Arc::from("exact")), false)?;
+    map.set(Arc::from("metadata"), Value::null(), false)?;
     map.set(Arc::from("decision_id"), Value::number(decision.decision_id as f64), false)?;
     map.set(Arc::from("policy_id"), Value::string(decision.policy_id.clone()), false)?;
     map.set(Arc::from("policy_version"), Value::string(Arc::from(hex_encode(&decision.policy_version).as_str())), false)?;
@@ -702,7 +759,18 @@ fn decision_to_value(heap: &lana_vm::heap::Heap, decision: &Decision) -> Result<
 }
 
 fn event_to_value(heap: &lana_vm::heap::Heap, event: &Event) -> Result<Value, LanaError> {
-    let mut map = Map::new(heap, 8)?;
+    let mut map = Map::new(heap, 19)?;
+    map.set(Arc::from("record_schema"), Value::number(1.0), false)?;
+    map.set(Arc::from("id"), Value::string(Arc::from(format!("ledger/{}", event.event_id))), false)?;
+    map.set(Arc::from("kind"), Value::string(Arc::from("ledger_event")), false)?;
+    map.set(Arc::from("transport_status"), Value::string(Arc::from("ok")), false)?;
+    map.set(Arc::from("domain_status"), Value::string(Arc::from("recorded")), false)?;
+    map.set(Arc::from("payload"), Value::null(), false)?;
+    map.set(Arc::from("error"), Value::null(), false)?;
+    map.set(Arc::from("evidence"), Value::null(), false)?;
+    map.set(Arc::from("assumptions"), Value::null(), false)?;
+    map.set(Arc::from("exactness"), Value::string(Arc::from("exact")), false)?;
+    map.set(Arc::from("metadata"), Value::null(), false)?;
     map.set(Arc::from("event_id"), Value::number(event.event_id as f64), false)?;
     map.set(Arc::from("entity"), Value::string(event.entity.clone()), false)?;
     map.set(Arc::from("actor"), Value::string(event.actor.clone()), false)?;
@@ -761,6 +829,24 @@ mod tests {
         capability.revoked.store(false, Ordering::Release);
         authorization.revoked.store(true, Ordering::Release);
         assert_eq!(host.execution_execute(&[Value::capability(capability), Value::capability(authorization), Value::null()], &mut output), LanaError::Capability);
+    }
+
+    #[test]
+    fn execution_rejects_forged_decision() {
+        use super::*;
+        let mut host = StoreHost::new();
+        let capability = host.opaque_token();
+        host.execution = Some((capability.clone(), ExecutionCapability::new("test", "https://example.test").unwrap()));
+        let forged = map(&[
+            ("decision_id", number(1.0)), ("policy_id", string("forged")),
+            ("policy_version", string("0000000000000000000000000000000000000000000000000000000000000000")),
+            ("target", string("webhook")), ("scope", string("test")),
+            ("input_revision", number(0.0)), ("outcome", number(0.0)),
+            ("evaluation_time", number(0.0)), ("reason", string("forged")),
+        ]);
+        let plan = map(&[("kind", string("webhook")), ("path", string("/events")), ("payload", Value::null())]);
+        let mut output = Value::null();
+        assert_eq!(host.execution_authorize(&[Value::capability(capability), forged, plan], &mut output), LanaError::Capability);
     }
     #[test]
     fn numeric_ids_reject_truncation_saturation_and_nonfinite_values() {
@@ -910,6 +996,28 @@ mod tests {
         assert_eq!(code, LanaError::Ok);
         let ValueKind::Array(array) = &out.kind else { panic!("expected array") };
         assert_eq!(array.lock().unwrap().items().len(), 1);
+        let (code, _) = dispatch(&mut host, LANA_HOST_ADAPTER_LOAD, &[number(2.5), string("")]);
+        assert_eq!(code, LanaError::UnsupportedOperation);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn adapter_sqlite_reaches_host_call() {
+        let path = std::env::temp_dir().join(format!("lana-host-sqlite-{}.db", std::process::id()));
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE evidence(p REAL); INSERT INTO evidence VALUES (0.8);").unwrap();
+        drop(db);
+        let mut host = StoreHost::new();
+        let (code, _) = dispatch(&mut host, LANA_HOST_ADAPTER_LOAD,
+            &[number(2.0), string(path.to_str().unwrap())]);
+        assert_eq!(code, LanaError::Ok);
+        let (code, out) = dispatch(&mut host, LANA_HOST_ADAPTER_FETCH,
+            &[string("SELECT p FROM evidence")]);
+        assert_eq!(code, LanaError::Ok);
+        let ValueKind::Map(map) = out.kind else { panic!("expected map") };
+        assert_eq!(map.lock().unwrap().get("p").unwrap().as_number(), 0.8);
+        drop(host);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -944,6 +1052,8 @@ mod tests {
         let map = map.lock().unwrap();
         assert_eq!(map.get("outcome").unwrap().as_number(), 0.0); // Authorize
         assert_eq!(map.get("effect").unwrap().as_string(), Arc::from("grant"));
+        assert_eq!(map.get("record_schema").unwrap().as_number(), 1.0);
+        assert_eq!(map.get("kind").unwrap().as_string(), Arc::from("decision"));
     }
 
     #[test]
@@ -965,6 +1075,7 @@ mod tests {
         assert_eq!(code, LanaError::Ok);
         let ValueKind::Map(event_map) = &out.kind else { panic!("expected map") };
         assert_eq!(event_map.lock().unwrap().get("event_id").unwrap().as_number(), 1.0);
+        assert_eq!(event_map.lock().unwrap().get("record_schema").unwrap().as_number(), 1.0);
 
         let query = map(&[
             ("entity", string("e1")),

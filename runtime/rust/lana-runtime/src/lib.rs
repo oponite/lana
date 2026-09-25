@@ -14,6 +14,7 @@ pub mod codec;
 pub mod data;
 pub mod effects;
 pub mod execution;
+pub mod future_messages;
 pub mod host_calls;
 pub mod ledger;
 pub mod policy;

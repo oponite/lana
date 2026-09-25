@@ -3,14 +3,13 @@
 #
 # Compiles `durable_pipeline.lana` with the self-hosted compiler, assembles the
 # result with the Rust assembler, and runs it on the Rust VM. The store, policy,
-# and ledger host calls are Rust-only (the C11 VM is frozen at 52 host calls),
-# so this is not a differential check — it asserts the Rust pipeline succeeds.
+# and ledger host calls are checked through the Rust pipeline.
 #
 #   cargo build -p lana-cli
 #   ./tests/durable/run_durable.sh
 #
 # The compiler is expected at build/lana-compiler.labc relative to the repo
-# root (re-assembled from compiler/bootstrap/compiler.lasm by the C11 build).
+# root (assembled from compiler/bootstrap/compiler.lasm by the Rust build).
 
 set -u
 
@@ -38,8 +37,7 @@ if ! "$RUST" run "$COMPILER" --memory-limit-mib 256 --instruction-limit 50000000
     exit 1
 fi
 
-# Assemble with the Rust assembler (the C11 assembler does not know the
-# store/policy/ledger host-call names).
+# Assemble with the Rust assembler.
 if ! "$RUST" asm "$WORK/durable.lasm" -o "$WORK/durable.labc" >"$WORK/asm.out" 2>&1; then
     echo "FAIL: assembly failed"
     cat "$WORK/asm.out"

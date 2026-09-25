@@ -1,4 +1,4 @@
-//! LABC binary loader, mirroring `lana_chunk_read_file` in `vm/c/bytecode.c`.
+//! LABC binary loader.
 //!
 //! The on-disk layout is little-endian:
 //!

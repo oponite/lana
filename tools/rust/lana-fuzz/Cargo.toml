@@ -3,13 +3,12 @@ name = "lana-fuzz"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Differential fuzz targets for the Lana Rust runtime boundary"
+description = "Fuzz targets for the Lana Rust runtime boundary"
 
 [dependencies]
 lana-bytecode = { path = "../../../vm/rust/lana-bytecode" }
 
-# `rlib` lets the `fuzz-driver`, `fuzz-diff`, and cargo-fuzz target reuse the
-# shared loader/verifier check.
+# `rlib` lets the driver and cargo-fuzz target reuse the loader/verifier check.
 [lib]
 name = "lana_fuzz"
 crate-type = ["rlib"]
@@ -17,7 +16,3 @@ crate-type = ["rlib"]
 [[bin]]
 name = "fuzz-driver"
 path = "src/bin/fuzz_driver.rs"
-
-[[bin]]
-name = "fuzz-diff"
-path = "src/bin/fuzz_diff.rs"

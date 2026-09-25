@@ -580,6 +580,7 @@ pub const LANA_HOST_TENSOR_TO_CPU: u32 = 184;
 pub const LANA_HOST_EXECUTION_CAPABILITY: u32 = 185;
 pub const LANA_HOST_EXECUTION_AUTHORIZE: u32 = 186;
 pub const LANA_HOST_EXECUTION_EXECUTE: u32 = 187;
+pub const LANA_HOST_FUTURE_MESSAGE: u32 = 188;
 
 // LIP-024 async/await. Present in both the C11 VM and the Rust VM at ids
 // 126-129 (matching the C11 assembler's host-call table and the
@@ -814,6 +815,7 @@ pub struct Vm<'a> {
     event_loop_active: bool,
     event_loop_base_depth: usize,
     host_call_extension: Option<Box<dyn FnMut(u32, &[Value], &mut Value) -> LanaError + Send>>,
+    captured_output: Option<Arc<Mutex<String>>>,
     /// Optional in-memory filesystem. When set, the file-backed host calls
     /// (`read_text`, `write_text`, `write_text_atomic`, `path_exists`) resolve
     /// against this map instead of `std::fs`, so the self-hosted compiler can
@@ -1394,6 +1396,7 @@ impl<'a> Vm<'a> {
             event_loop_active: false,
             event_loop_base_depth: 0,
             host_call_extension: None,
+            captured_output: None,
             virtual_fs: None,
             breakpoint_line: None,
             breakpoint_hit: false,
@@ -1672,6 +1675,15 @@ impl<'a> Vm<'a> {
         self.host_call_extension = Some(handler);
     }
 
+    /// Capture PRINT output for the JSON worker without mixing it with the protocol.
+    pub fn capture_output(&mut self) {
+        self.captured_output = Some(Arc::new(Mutex::new(String::new())));
+    }
+
+    pub fn output(&self) -> Option<String> {
+        self.captured_output.as_ref().map(|output| output.lock().unwrap().clone())
+    }
+
     /// Store a file in the in-memory filesystem, enabling the file-backed host
     /// calls on targets without a real filesystem. Once a virtual file is set,
     /// the virtual filesystem is authoritative for all file-backed host calls.
@@ -1722,6 +1734,7 @@ impl<'a> Vm<'a> {
         child.set_memory_limit(self.memory_limit);
         child.program_argc = self.program_argc;
         child.program_argv = self.program_argv.clone();
+        child.captured_output = self.captured_output.clone();
         child.lineage = mix64(self.lineage ^ { self.spawn_counter += 1; self.spawn_counter });
         child.seed(mix64(self.root_seed ^ child.lineage));
         child.root_seed = self.root_seed;
@@ -6023,7 +6036,16 @@ impl<'a> Vm<'a> {
                     Ok(text) => text,
                     Err(error) => return error,
                 };
-                println!("{}", rendered);
+                if let Some(output) = &self.captured_output {
+                    let mut output = output.lock().unwrap();
+                    if output.len().saturating_add(rendered.len()).saturating_add(1) > 64 * 1024 * 1024 {
+                        return LanaError::Limit;
+                    }
+                    output.push_str(&rendered);
+                    output.push('\n');
+                } else {
+                    println!("{}", rendered);
+                }
                 LanaError::Ok
             }
             Halt => {
@@ -6366,14 +6388,11 @@ impl<'a> Vm<'a> {
             JointConditionMap => {
                 let source = self.current_frame().registers[ins.a as usize].clone();
                 let evidence = self.current_frame().registers[ins.c as usize].clone();
-                let ValueKind::Joint(joint) = &source.kind else {
-                    return LanaError::Type;
-                };
-                let joint = match self.joint_condition_map(joint, &evidence) {
-                    Ok(joint) => joint,
+                let result = match self.core_condition(&source, &evidence) {
+                    Ok(result) => result,
                     Err(error) => return error,
                 };
-                self.current_frame_mut().registers[ins.b as usize] = Value::joint(joint);
+                self.current_frame_mut().registers[ins.b as usize] = result;
                 let inputs = [&source, &evidence];
                 self.attach_derivation(ins.b, DerivationKind::Operation, "condition", &inputs, "",
                                        ins.line, DerivationExactness::Exact, "evidence_map")
@@ -6520,14 +6539,13 @@ impl<'a> Vm<'a> {
                         Err(error) => return error,
                     }
                 } else {
-                    let ValueKind::Joint(joint) = &source.kind else {
-                        return LanaError::Type;
-                    };
-                    let joint = match self.joint_observe_map(joint, &evidence) {
-                        Ok(joint) => joint,
+                    let result = match self.core_condition(&source, &evidence) {
+                        Ok(result) => result,
                         Err(error) => return error,
                     };
-                    Value::joint(joint)
+                    self.observation_count += 1;
+                    self.revision += 1;
+                    result
                 };
                 self.current_frame_mut().registers[ins.b as usize] = result;
                 let inputs = [&source, &evidence];
@@ -8267,11 +8285,61 @@ impl<'a> Vm<'a> {
         Ok(joint)
     }
 
-    fn joint_observe_map(&mut self, source: &JointState, evidence: &Value) -> Result<Arc<JointState>, LanaError> {
-        let joint = self.joint_condition_map(source, evidence)?;
-        self.observation_count += 1;
-        self.revision += 1;
-        Ok(joint)
+    fn core_condition(&mut self, source: &Value, evidence: &Value) -> Result<Value, LanaError> {
+        let current = self.reactive_value(source);
+        if let ValueKind::Joint(joint) = &current.kind {
+            return self.joint_condition_map(joint, evidence).map(Value::joint);
+        }
+        if matches!(current.kind, ValueKind::PathSet(_) | ValueKind::StateDist(_)) {
+            return Err(LanaError::UnsupportedOperation);
+        }
+        let candidates: Vec<&Value> = match &evidence.kind {
+            ValueKind::Possibility(subset) if subset.weights.is_none() => subset.values.iter().collect(),
+            ValueKind::Possibility(_) => return Err(LanaError::Type),
+            _ if joint_value_is_definite(evidence) => vec![evidence],
+            _ => return Err(LanaError::Type),
+        };
+        if candidates.is_empty() || candidates.iter().any(|value| {
+            matches!(value.kind, ValueKind::Possibility(_) | ValueKind::PathSet(_))
+                || !joint_value_is_definite(value)
+        }) {
+            return Err(LanaError::Type);
+        }
+        for candidate in &candidates {
+            self.check_resolved(candidate)?;
+        }
+        let matches = |value: &Value| candidates.iter().any(|candidate| joint_value_equal(value, candidate));
+        if let ValueKind::Possibility(possibility) = &current.kind {
+            let indices: Vec<usize> = possibility.values.iter().enumerate()
+                .filter_map(|(index, value)| matches(value).then_some(index)).collect();
+            if indices.is_empty() {
+                return Err(LanaError::InvalidConditioning);
+            }
+            if self.alloc_bytes(std::mem::size_of::<Possibility>()) != LanaError::Ok {
+                return Err(LanaError::Oom);
+            }
+            let mut memo = DeepCloneMemo::default();
+            let mut values = Vec::with_capacity(indices.len());
+            for &index in &indices {
+                values.push(self.deep_clone_value(&possibility.values[index], &mut memo)?);
+            }
+            let weights = possibility.weights.as_ref().map(|weights| {
+                let total: f64 = indices.iter().map(|&index| weights[index]).sum();
+                indices.iter().map(|&index| weights[index] / total).collect()
+            });
+            return Ok(Value::possibility(Arc::new(Possibility {
+                values, weights, dependency_id: possibility.dependency_id,
+            })));
+        }
+        if !joint_value_is_definite(&current) {
+            return Err(LanaError::Type);
+        }
+        self.check_resolved(&current)?;
+        if !matches(&current) {
+            return Err(LanaError::InvalidConditioning);
+        }
+        let mut memo = DeepCloneMemo::default();
+        self.deep_clone_value(&current, &mut memo)
     }
 
     /// Sample a joint, mirroring `lana_vm_joint_sample`.
@@ -9379,17 +9447,23 @@ impl<'a> Vm<'a> {
             }
             node.is_training_data
         };
-        let replacement = self.reactive_value(evidence);
         if self.active_path_count > 1 {
             return Err(LanaError::UnresolvedValue);
         }
-        self.check_resolved(&replacement)?;
         let current = reactive
             .lock()
             .unwrap()
             .current
             .clone()
             .unwrap_or_else(Value::null);
+        if self.chunk.version == lana_bytecode::opcode::LABC_VERSION_5 && !is_training_data {
+            let refined = self.core_condition(&current, evidence)?;
+            self.reactive_recompute_transaction(reactive, &refined, scratch_register)?;
+            self.observation_count += 1;
+            return Ok(source.clone());
+        }
+        let replacement = self.reactive_value(evidence);
+        self.check_resolved(&replacement)?;
         match &current.kind {
             ValueKind::Possibility(possibility) => {
                 if !possibility
@@ -14140,7 +14214,7 @@ impl<'a> Vm<'a> {
     }
 
     fn information_inspect(&mut self, argument: &Value, out: &mut Value) -> LanaError {
-        let mut inspection = match Map::new(&self.heap, 10) { Ok(map) => map, Err(error) => return error };
+        let mut inspection = match Map::new(&self.heap, 28) { Ok(map) => map, Err(error) => return error };
         if let ValueKind::Capability(capability) = &argument.kind {
             let shared = capability.shared.clone();
             let state = shared.state.lock().unwrap();
@@ -14154,6 +14228,16 @@ impl<'a> Vm<'a> {
                 Value::string(Arc::from("shared_information")),
                 true,
             );
+            let _ = inspection.set(Arc::from("record_schema"), Value::number(1.0), true);
+            let _ = inspection.set(Arc::from("id"), Value::string(Arc::from(format!("shared/{}", shared.identity))), true);
+            let _ = inspection.set(Arc::from("transport_status"), Value::string(Arc::from("ok")), true);
+            let _ = inspection.set(Arc::from("domain_status"), Value::string(Arc::from("available")), true);
+            let _ = inspection.set(Arc::from("payload"), Value::null(), true);
+            let _ = inspection.set(Arc::from("error"), Value::null(), true);
+            let _ = inspection.set(Arc::from("evidence"), Value::null(), true);
+            let _ = inspection.set(Arc::from("assumptions"), Value::null(), true);
+            let _ = inspection.set(Arc::from("exactness"), Value::string(Arc::from("exact")), true);
+            let _ = inspection.set(Arc::from("metadata"), Value::null(), true);
             let _ = inspection.set(Arc::from("identity"), Value::number(shared.identity as f64), true);
             let _ = inspection.set(Arc::from("revision"), Value::number(revision as f64), true);
             let _ = inspection.set(
@@ -14175,11 +14259,47 @@ impl<'a> Vm<'a> {
             return LanaError::Ok;
         }
         let value = self.reactive_value(argument);
+        let record_id = if let Some(reactive) = &argument.reactive {
+            Value::string(Arc::from(format!("information/{}", reactive.lock().unwrap().id)))
+        } else if let Some(derivation) = &argument.derivation {
+            Value::string(Arc::from(format!("derivation/{}/{}", derivation.task_lineage, derivation.local_sequence)))
+        } else {
+            Value::null()
+        };
+        let _ = inspection.set(Arc::from("record_schema"), Value::number(1.0), true);
+        let _ = inspection.set(Arc::from("id"), record_id, true);
+        let _ = inspection.set(Arc::from("transport_status"), Value::string(Arc::from("ok")), true);
+        let _ = inspection.set(Arc::from("domain_status"), Value::string(Arc::from("available")), true);
+        let _ = inspection.set(Arc::from("payload"), Value::null(), true);
+        let _ = inspection.set(Arc::from("error"), Value::null(), true);
+        let _ = inspection.set(Arc::from("evidence"), Value::null(), true);
+        let _ = inspection.set(Arc::from("assumptions"), Value::null(), true);
+        let _ = inspection.set(Arc::from("metadata"), Value::null(), true);
         let alternatives = match &value.kind {
             ValueKind::Possibility(possibility) => possibility.values.len(),
             ValueKind::PathSet(paths) => paths.alternatives.len(),
-            _ => 0,
+            ValueKind::Joint(joint) => joint.rows.len(),
+            ValueKind::StateDist(_) => 0,
+            _ => 1,
         };
+        let form = match &value.kind {
+            ValueKind::Possibility(possibility) if possibility.weights.is_some() => "distribution",
+            ValueKind::Possibility(_) => "possibility",
+            ValueKind::Joint(_) => "joint",
+            ValueKind::PathSet(_) => "paths",
+            ValueKind::StateDist(_) => "state_dist",
+            _ => "definite",
+        };
+        let _ = inspection.set(Arc::from("form"), Value::string(Arc::from(form)), true);
+        let _ = inspection.set(
+            Arc::from("finite_support"),
+            Value::boolean(match &value.kind {
+                ValueKind::Joint(joint) => !joint.rows.is_empty(),
+                ValueKind::StateDist(_) => false,
+                _ => true,
+            }),
+            true,
+        );
         let _ = inspection.set(
             Arc::from("kind"),
             Value::string(Arc::from("information_snapshot")),
@@ -14227,6 +14347,46 @@ impl<'a> Vm<'a> {
             ),
             true,
         );
+        let _ = inspection.set(Arc::from("exactness"),
+            Value::string(Arc::from(if argument.derivation.as_ref().is_some_and(|d| d.exactness == DerivationExactness::Approximate) { "approximate" } else { "exact" })),
+            true);
+        if let ValueKind::Possibility(possibility) = &value.kind {
+            let mut support = Vec::with_capacity(possibility.values.len());
+            for (index, candidate) in possibility.values.iter().enumerate() {
+                let mut row = match Map::new(&self.heap, 2) { Ok(map) => map, Err(error) => return error };
+                let mut memo = DeepCloneMemo::default();
+                let candidate = match self.deep_clone_value(candidate, &mut memo) {
+                    Ok(value) => value,
+                    Err(error) => return error,
+                };
+                let _ = row.set(Arc::from("value"), candidate, true);
+                if let Some(weights) = &possibility.weights {
+                    let _ = row.set(Arc::from("weight"), Value::number(weights[index]), true);
+                }
+                support.push(Value::map(Arc::new(Mutex::new(row))));
+            }
+            let support = match self.array_value(support) { Ok(value) => value, Err(error) => return error };
+            let _ = inspection.set(Arc::from("support"), support, true);
+        }
+        if let ValueKind::Joint(joint) = &value.kind {
+            if !joint.rows.is_empty() {
+                let mut support = Vec::with_capacity(joint.rows.len());
+                for joint_row in &joint.rows {
+                    let mut assignment = match Map::new(&self.heap, joint.names.len()) { Ok(map) => map, Err(error) => return error };
+                    let mut memo = DeepCloneMemo::default();
+                    for (name, candidate) in joint.names.iter().zip(&joint_row.values) {
+                        let candidate = match self.deep_clone_value(candidate, &mut memo) { Ok(value) => value, Err(error) => return error };
+                        if let Err(error) = assignment.set(name.clone(), candidate, true) { return error; }
+                    }
+                    let mut row = match Map::new(&self.heap, 2) { Ok(map) => map, Err(error) => return error };
+                    let _ = row.set(Arc::from("assignment"), Value::map(Arc::new(Mutex::new(assignment))), true);
+                    let _ = row.set(Arc::from("weight"), Value::number(joint_row.weight), true);
+                    support.push(Value::map(Arc::new(Mutex::new(row))));
+                }
+                let support = match self.array_value(support) { Ok(value) => value, Err(error) => return error };
+                let _ = inspection.set(Arc::from("support"), support, true);
+            }
+        }
         if let Some(reactive) = &argument.reactive {
             let reactive = reactive.lock().unwrap();
             let relationship = match reactive.relationship {
@@ -14252,7 +14412,7 @@ impl<'a> Vm<'a> {
             let _ = inspection.set(
                 Arc::from("exactness"),
                 Value::string(Arc::from(derivation::exactness_name(reactive.exactness))),
-                true,
+                false,
             );
         }
         let _ = inspection.set(
@@ -14260,6 +14420,15 @@ impl<'a> Vm<'a> {
             Value::boolean(argument.planned_effect.is_some()),
             true,
         );
+        if let Some(claim) = &argument.claim {
+            let mut summary = match Map::new(&self.heap, 4) { Ok(map) => map, Err(error) => return error };
+            let _ = summary.set(Arc::from("proposition"), Value::string(claim.proposition.clone()), true);
+            let _ = summary.set(Arc::from("exactness"), Value::string(Arc::from(derivation::exactness_name(claim.exactness))), true);
+            let _ = summary.set(Arc::from("tolerance"), Value::number(claim.tolerance), true);
+            let _ = summary.set(Arc::from("source_valid"), Value::boolean(claim.source_valid), true);
+            let _ = inspection.set(Arc::from("claim"), Value::map(Arc::new(Mutex::new(summary))), true);
+            let _ = inspection.set(Arc::from("exactness"), Value::string(Arc::from(derivation::exactness_name(claim.exactness))), false);
+        }
         if argument.derivation.is_some() {
             let derivation = match self.vm_derivation(argument) {
                 Ok(derivation) => derivation,
@@ -17470,6 +17639,18 @@ mod tests {
                 assert_eq!(actual, expected, "{name}/{operation}");
             }
         }
+    }
+
+    #[test]
+    fn finite_refinement_rejects_impossible_evidence() {
+        let (error, _) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 2\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nLOAD_CONST R4 3\nJOINT_CONDITION_MAP R3 R5 R4\nRETURN R5\n",
+        );
+        assert_eq!(error, LanaError::InvalidConditioning);
+        let (error, _) = run_chunk(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 2\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nLOAD_CONST R4 3\nOBSERVE_MAP R3 R5 R4\nRETURN R5\n",
+        );
+        assert_eq!(error, LanaError::InvalidConditioning);
     }
 
     #[test]

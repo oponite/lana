@@ -1,11 +1,9 @@
-//! Command-line driver for the Rust Lana runtime (phase 2 of the Rust runtime
-//! boundary).
+//! Command-line driver for the Rust Lana runtime.
 //!
 //! `lana run <file.labc> [--seed N] [--stats]` loads and verifies a chunk,
-//! runs it on the Rust VM, and reports the result. Output matches `tools/c/cli.c`
-//! `load_command` so differential spot-checks can compare the two byte-for-byte.
+//! runs it on the Rust VM, and reports the result.
 //!
-//! The full command surface mirrors `tools/c/cli.c` `main()`: `version`, `new`,
+//! The full command surface includes `version`, `new`,
 //! `lsp`, `fmt`, `doc`, `build`, `test`, `compile`, `check`, `asm`, `debug`,
 //! `run`, `run-bytecode`, `dis`, and `verify`. Commands that need the
 //! self-hosted compiler locate `lana-compiler.labc` and run it on the Rust VM.
@@ -20,10 +18,11 @@ use lana_runtime::brain::Brain;
 use lana_runtime::execution::ExecutionConfig;
 use lana_vm::{Vm, ValueKind as RuntimeValueKind};
 
+mod bridge_worker;
+
 const LANA_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Full usage text, mirroring `usage()` in `tools/c/cli.c` (with `lanavm` folded
-/// into the single `lana` binary).
+/// Full usage text for the single `lana` binary.
 fn usage(program: &str) {
     eprintln!(
         "usage:\n  {program} compile program.lana -o program.labc\n  {program} new directory\n  {program} brain new|train|evaluate|save|load|inspect|chat\n  {program} lsp\n  {program} debug program.lana\n  {program} build|run|test|check|fmt|doc\n  {program} check program.lana\n  {program} asm program.lasm -o program.labc\n  {program} run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} dis program.labc\n  {program} verify program.labc\n  {program} inspect program.lana [--format json|dot]\n  {program} execution-config init --metadata PATH --key PATH --capability-id ID --origin HTTPS_ORIGIN --credential-key-id ID [--ca-file PATH]"
@@ -148,8 +147,8 @@ fn report_cli_error(error: &CliError) {
         }
         CliError::Assemble { path, info } => {
             eprintln!(
-                "{path}:{}: error[{}]: {} (instruction {}, opcode {})",
-                info.line,
+                "{path}:{}:1-{}:1: error[{}]: {} (instruction {}, opcode {})",
+                info.line, info.line,
                 info.code.name(),
                 info.message,
                 info.ip,
@@ -291,8 +290,23 @@ fn compile_source_file(compiler: &Path, source_path: &str, output_path: &str) ->
         }
     };
     let _ = std::fs::remove_file(&asm_path);
-    let chunk = lana_bytecode::assemble(&asm_text)
+    let mut chunk = lana_bytecode::assemble(&asm_text)
         .map_err(|info| CliError::Assemble { path: source_path.to_string(), info })?;
+    for (ip, pair) in chunk.code.windows(2).enumerate() {
+        if pair[0].opcode == OpCode::PossibilityBuild
+            && pair[1].opcode == OpCode::InfoSample
+            && pair[0].b == pair[1].a
+        {
+            return Err(CliError::Assemble {
+                path: source_path.to_string(),
+                info: LanaErrorInfo::new(LanaError::UnsupportedOperation, ip + 1, pair[1].opcode as u8, pair[1].line,
+                    "possibility has no weights; use distribution(...) before sample"),
+            });
+        }
+    }
+    if chunk.code.iter().any(|ins| ins.opcode == OpCode::InfoSample) {
+        chunk.version = lana_bytecode::opcode::LABC_VERSION_5;
+    }
     write_chunk(&chunk, output_path)
         .map_err(|info| CliError::Write { path: output_path.to_string(), info })
 }
@@ -1256,6 +1270,16 @@ fn new_project(directory: &str) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    if std::env::var_os("LANA_STDLIB_DIR").is_none() {
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(bin) = executable.parent() {
+                let installed = bin.join("../share/lana/stdlib");
+                if installed.is_dir() {
+                    std::env::set_var("LANA_STDLIB_DIR", installed);
+                }
+            }
+        }
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         usage("lana");
@@ -1263,6 +1287,7 @@ fn main() -> ExitCode {
     }
     match args[1].as_str() {
         "brain" => brain_command(&args[2..]),
+        "bridge-worker" if args.len() == 2 => bridge_worker::serve(),
         "execution-config" => execution_config_command(&args[2..]),
         "version" => {
             println!("Lana {LANA_VERSION} (LABC v2, Rust VM, native compiler)");

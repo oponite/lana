@@ -1,42 +1,5 @@
 enable_testing()
 
-if(UNIX)
-    add_test(NAME lana_rust_record_consumer COMMAND "${CMAKE_COMMAND}"
-        -DROOT=${CMAKE_CURRENT_SOURCE_DIR} -DBUILD=${CMAKE_CURRENT_BINARY_DIR}
-        -DCARGO=${LANA_CARGO_EXECUTABLE} -DCC=${CMAKE_C_COMPILER}
-        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestRustRecords.cmake")
-endif()
-
-function(add_lana_c_test target source)
-    add_executable(${target} ${source})
-    target_link_libraries(${target} PRIVATE lanaruntime m)
-    # Tests rely on assert() for their checks; keep it active in Release builds.
-    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror -UNDEBUG)
-    add_test(NAME ${target} COMMAND ${target})
-endfunction()
-
-add_lana_c_test(lana_runtime_tests tests/unit/test_runtime.c)
-target_compile_definitions(lana_runtime_tests PRIVATE LANA_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
-add_lana_c_test(lana_mix_tests tests/unit/test_mix.c)
-add_lana_c_test(lana_operations2_tests tests/unit/test_operations2.c)
-add_lana_c_test(lana_map_tests tests/unit/test_map.c)
-add_lana_c_test(lana_support_tests tests/unit/test_support.c)
-add_lana_c_test(lana_expect_tests tests/unit/test_expect.c)
-add_lana_c_test(lana_inspect_tests tests/unit/test_inspect.c)
-add_lana_c_test(lana_validate_tests tests/unit/test_validate.c)
-add_lana_c_test(lana_revision_tests tests/unit/test_revision.c)
-add_lana_c_test(lana_gc_tests tests/unit/test_gc.c)
-add_lana_c_test(lana_error_tests tests/unit/test_errors.c)
-add_lana_c_test(lana_public_api_smoke tests/unit/test_public_api.c)
-add_lana_c_test(lana_store_tests tests/unit/test_store.c)
-add_lana_c_test(lana_codec_tests tests/unit/test_codec.c)
-add_lana_c_test(lana_state_codec_tests tests/unit/test_state_codec.c)
-add_lana_c_test(lana_claims_tests tests/unit/test_claims.c)
-add_lana_c_test(lana_policy_ledger_tests tests/unit/test_policy_ledger.c)
-add_lana_c_test(lana_effects_tests tests/unit/test_effects.c)
-add_lana_c_test(lana_ledger_coverage_tests tests/unit/test_ledger_coverage.c)
-add_lana_c_test(lana_shared_tests tests/unit/test_shared.c)
-
 function(add_native_compile_failure name source expected)
     add_test(
         NAME ${name}
@@ -47,30 +10,6 @@ function(add_native_compile_failure name source expected)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ExpectCompileFailure.cmake"
     )
 endfunction()
-
-if(LANA_BUILD_FUZZERS)
-    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
-        message(FATAL_ERROR "LANA_BUILD_FUZZERS requires Clang")
-    endif()
-    if(NOT LANA_ENABLE_SANITIZERS)
-        message(FATAL_ERROR "LANA_BUILD_FUZZERS requires LANA_ENABLE_SANITIZERS")
-    endif()
-    add_library(lanaruntime_fuzz STATIC ${LANA_RUNTIME_SOURCES})
-    target_include_directories(lanaruntime_fuzz PUBLIC ${LANA_INCLUDE_DIRS})
-    target_link_libraries(lanaruntime_fuzz PUBLIC Threads::Threads)
-    target_compile_definitions(lanaruntime_fuzz PRIVATE
-        LANA_ADAPTER_DIR="${CMAKE_CURRENT_BINARY_DIR}"
-        LANA_ADAPTER_SUFFIX="${CMAKE_SHARED_LIBRARY_SUFFIX}")
-    target_compile_options(lanaruntime_fuzz PRIVATE
-        -Wall -Wextra -Wpedantic -Werror
-        -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer)
-    add_executable(lana_bytecode_fuzz tests/unit/fuzz_bytecode.c)
-    target_link_libraries(lana_bytecode_fuzz PRIVATE lanaruntime_fuzz m)
-    target_compile_options(lana_bytecode_fuzz PRIVATE
-        -Wall -Wextra -Wpedantic -Werror -fsanitize=fuzzer,address,undefined
-        -fno-omit-frame-pointer)
-    target_link_options(lana_bytecode_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
-endif()
 
 add_native_compile_failure(native_import_cycle_rejected_a tests/regression/import_cycle_a.lana "LANA_ERR_ASSERTION")
 add_native_compile_failure(native_import_cycle_rejected_b tests/regression/import_cycle_b.lana "LANA_ERR_ASSERTION")
@@ -83,6 +22,7 @@ add_test(NAME native_m4_sample_pass COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CU
 add_test(NAME native_m4_sample_metadata_run COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m4_sample_pass.lana")
 set_tests_properties(native_m4_sample_metadata_run PROPERTIES PASS_REGULAR_EXPRESSION "host:random;random")
 add_test(NAME native_m4_claim_pass COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m4_claim_pass.lana")
+add_test(NAME native_m4_claim_record COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m4_claim_pass.lana")
 add_test(NAME native_m4_information_pass COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m4_information_pass.lana")
 add_test(NAME native_m4_effect_pass COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m4_effect_pass.lana")
 add_test(NAME native_m4_result_pass COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/m4_result_pass.lana")
@@ -152,12 +92,20 @@ add_test(NAME native_imports COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOU
 add_test(NAME native_core_import COMMAND "${LANA_RUST_CLI}" check "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_import_only.lana")
 add_test(NAME native_core_distribution COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_distribution.lana")
 add_test(NAME native_core_refinement_map COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_refinement_map.lana")
+add_test(NAME native_core_refinement_finite COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_refinement_finite.lana")
+add_native_compile_failure(native_core_possibility_sample_rejected tests/regression/core_possibility_sample_rejected.lana "possibility has no weights")
+add_test(NAME native_core_possibility_sample_indirect_rejected
+    COMMAND "${CMAKE_COMMAND}" -DLANA=${LANA_RUST_CLI}
+        -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/core_possibility_sample_indirect_rejected.lana
+        -DEXPECT=LANA_ERR_UNSUPPORTED_OPERATION
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ExpectRuntimeFailure.cmake")
 add_test(NAME native_execution_plan COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/execution_plan_pass.lana")
 add_test(NAME native_execution_plan_absolute_url_rejected COMMAND "${LANA_RUST_CLI}" run "${CMAKE_CURRENT_SOURCE_DIR}/tests/regression/execution_plan_absolute_url_rejected.lana")
 set_tests_properties(native_execution_plan_absolute_url_rejected PROPERTIES WILL_FAIL TRUE)
 set_tests_properties(
     native_core_import
     native_core_distribution
+    native_core_refinement_finite
     native_execution_plan
     native_execution_plan_absolute_url_rejected
     PROPERTIES ENVIRONMENT "LANA_STDLIB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/stdlib")
@@ -170,12 +118,20 @@ add_test(NAME native_compiler_bootstrap
         -DLANA_REFERENCE=${CMAKE_CURRENT_SOURCE_DIR}/compiler/bootstrap/compiler.lasm
         -DLANA_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/compiler-selfcheck.lasm
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/VerifyNativeBootstrap.cmake")
+add_test(NAME native_future_messages
+    COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance/durable/run_future_messages.sh"
+        "${LANA_RUST_CLI}" "${CMAKE_CURRENT_SOURCE_DIR}")
+set_tests_properties(native_future_messages PROPERTIES PASS_REGULAR_EXPRESSION "FUTURE_MESSAGES_PASS")
 add_test(NAME lana_lsp_protocol
     COMMAND "${CMAKE_COMMAND}" -DLANA=${LANA_RUST_CLI}
         -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/lsp-test-output.txt
         -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLsp.cmake")
 find_program(LANA_PYTHON3 NAMES python3)
 if(LANA_PYTHON3)
+    add_test(NAME lana_legacy_bytecode
+        COMMAND ${LANA_PYTHON3}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance/golden/run_legacy.py"
+            ${LANA_RUST_CLI})
     add_test(NAME lana_compiler_output COMMAND ${LANA_PYTHON3}
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_compiler_output.py" ${LANA_RUST_CLI})
     add_test(NAME lana_hf_bridge

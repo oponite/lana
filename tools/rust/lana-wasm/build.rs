@@ -1,7 +1,7 @@
 //! Embed the self-hosted compiler bytecode (`lana-compiler.labc`) so the wasm
 //! bundle can compile Lana source without a filesystem.
 //!
-//! The compiler is produced by the C build (`cmake --build build`). Its path is
+//! The compiler is produced by the Rust build (`cmake --build build`). Its path is
 //! resolved from `LANA_COMPILER_LABC`, falling back to the repo build directory
 //! relative to this crate.
 
@@ -14,7 +14,7 @@ fn main() {
         .unwrap_or_else(|_| manifest.join("../../../build/lana-compiler.labc"));
     if !compiler.exists() {
         panic!(
-            "lana-compiler.labc not found at {}; build the C side first \
+            "lana-compiler.labc not found at {}; build Lana first \
              (cmake --build build) or set LANA_COMPILER_LABC",
             compiler.display()
         );

@@ -251,10 +251,19 @@ fn receipt_key(capability: &ExecutionCapability, digest: &str) -> String {
 
 fn receipt_value(status: ReceiptStatus, authorization: &Authorization, capability: &ExecutionCapability, digest: &str, http_status: u16) -> Result<Value, LanaError> {
     let id = codec::encode_value(&Value::string(Arc::from(capability.id())))?;
+    let receipt_id = codec::encode_value(&Value::string(Arc::from(receipt_key(capability, digest))))?;
+    let transport_status = if status == ReceiptStatus::Unknown { "unknown" } else if status == ReceiptStatus::Pending { "pending" } else { "received" };
     Ok(Value::string(Arc::from(format!(
-        "{{\"authorization_id\":{},\"capability_id\":{},\"http_status\":{},\"plan_digest\":\"{}\",\"record_schema\":1,\"status\":\"{}\"}}",
+        "{{\"record_schema\":1,\"id\":{},\"kind\":\"execution_receipt\",\"transport_status\":\"{}\",\"domain_status\":\"{}\",\"payload\":{{\"http_status\":{}}},\"error\":null,\"evidence\":[],\"assumptions\":[],\"exactness\":\"{}\",\"metadata\":{{}},\"authorization_id\":{},\"capability_id\":{},\"http_status\":{},\"plan_digest\":\"{}\",\"status\":\"{}\"}}",
+        receipt_id, transport_status, status.name(), http_status,
+        if status == ReceiptStatus::Unknown { "unknown" } else { "exact" },
         authorization.decision_id, id, http_status, digest, status.name()
     ))))
+}
+
+pub fn read_receipt(store: &Store, capability: &ExecutionCapability, digest: &str) -> Result<Value, LanaError> {
+    let saved = store_get(store, &receipt_key(capability, digest))?;
+    crate::data::json_parse(&saved.as_string())
 }
 
 /// Performs at most one transport attempt for a committed plan. Duplicate execution is rejected before transport;
