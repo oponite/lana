@@ -9,7 +9,7 @@ Lana build.
 python3 -m venv /tmp/lana-integrations-venv
 /tmp/lana-integrations-venv/bin/python -m pip install -e integrations/python
 printf '{"hello":"lana"}' |
-  LANA_EXECUTABLE="$PWD/build/lana-rust" \
+  LANA_EXECUTABLE="$PWD/target/lana/bin/lana" \
   /tmp/lana-integrations-venv/bin/lana-bridge run \
   integrations/lana/echo_bridge.lana
 ```

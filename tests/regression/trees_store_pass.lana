@@ -1,0 +1,59 @@
+import "std/trees" as trees;
+
+fn task() {
+    return {id: "saved-tree", feature_schema: [{name: "x", kind: "number", nullable: false, categories: []}],
+        problem: "classification", labels: [false, true]};
+}
+
+fn training_rows() {
+    return [{id: "a", features: {x: 1}, target: false},
+        {id: "b", features: {x: 3}, target: true}];
+}
+
+fn holdout() {
+    let rows = array_new(0);
+    let index = 0;
+    while (index < 20) {
+        let yes = index - floor(index / 2) * 2 == 1;
+        let x = 1;
+        if (yes) { x = 3; }
+        array_push(rows, {id: string_concat("h", number_to_string(index)), features: {x: x}, target: yes});
+        index = index + 1;
+    }
+    return rows;
+}
+
+let store = store_open(args()[0]);
+let mode = args()[1];
+if (mode == "save") {
+    let report = trees.fit(task(), training_rows(), holdout(), {max_depth: 2, min_leaf: 1});
+    let before = store_current_revision();
+    assert(trees.save(store, "saved-tree", before, report) == "1", "first tree saved");
+    assert(store_current_revision() == before + 1, "one revision committed");
+    print("TREE_SAVED");
+} else {
+    if (mode == "read") {
+        let saved = trees.load(store, "saved-tree", null);
+        assert(saved.active_version == "1", "active tree reloaded");
+        assert(saved.versions[0].model.trees[0].nodes[0].constant.tag == "number", "tagged split constant");
+        assert(saved.versions[0].report.metrics.accuracy == "3ff0000000000000", "metric bits");
+        assert(trees.predict(saved, {x: 3}).label == true, "active stored tree predicts");
+        print("TREE_READ");
+    } else {
+        if (mode == "second") {
+            let report = trees.fit(task(), training_rows(), [], {max_depth: 2, min_leaf: 1});
+            assert(trees.save(store, "saved-tree", store_current_revision(), report) == "2", "second version saved");
+            let saved = trees.load(store, "saved-tree", null);
+            assert(saved.active_version == "1", "insufficient version stays inactive");
+            assert(array_length(saved.versions) == 2, "history retained");
+            assert(trees.predict(saved, {x: 1}).label == false, "older active tree still predicts");
+            print("TREE_SECOND");
+        } else {
+            if (mode == "tamper") {
+                let report = trees.fit(task(), training_rows(), holdout(), {max_depth: 2, min_leaf: 1});
+                map_set(report.validation_report.metrics, "correct", 0);
+                trees.save(store, "saved-tree", store_current_revision(), report);
+            }
+        }
+    }
+}

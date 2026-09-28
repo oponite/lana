@@ -1,6 +1,6 @@
 # lana-hf
 
-Local-only bridge for the fixed Lana reference Brain format. No runtime Python
+Local-only bridge for Lana LBRN1 and dense-layer LBRN2 Brain files. No runtime Python
 packages are required. It is not a Transformers model loader.
 
 ```bash
@@ -25,6 +25,15 @@ Packages contain config.json, generation_config.json, tokenizer.json, README.md,
 model.safetensors, and the Lana brain snapshot. Tensor names, shapes, F32 dtype,
 contiguous non-overlapping offsets, finite values, and model dimensions are
 validated before replacing a brain. Files are bounded to 256 MiB.
+
+LBRN2 packages use `lana-brain-hf-v2`, with explicit layer descriptions and
+SHA-256 digests for the Brain, weights, and tokenizer. Import requires the
+complete snapshot and checks that its weights match the SafeTensors bytes.
+Standalone SafeTensors import requires an existing Brain template and preserves
+its memory and training history. Typed Information memory is validated by the
+Rust loader, including Core observation replay. For standalone bridge commands,
+put `lana` on PATH or set `LANA_CLI` to its path. `lana brain save` and `load`
+set that path automatically.
 
 Package destinations must be absent. Use one writer per package destination.
 Files use exclusive temporary siblings and atomic replacement. A failure before

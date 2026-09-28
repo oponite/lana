@@ -1,0 +1,65 @@
+# Copy to .github/workflows/lana-package.yml in the package repository.
+# Also copy tools/package_release.py; set the two LANA_TOOLCHAIN_* variables.
+name: Publish Lana source package
+on:
+  push:
+    tags: ['lana-v*']
+permissions:
+  contents: read
+concurrency:
+  group: lana-package-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LANA_REF_PROTECTED: ${{ github.ref_protected }}
+      TOOLCHAIN_REVISION: ${{ vars.LANA_TOOLCHAIN_REVISION }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Require protected tag and pinned toolchain
+        run: |
+          test "$LANA_REF_PROTECTED" = true
+          [[ "$TOOLCHAIN_REVISION" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ vars.LANA_TOOLCHAIN_REPOSITORY }}
+          ref: ${{ vars.LANA_TOOLCHAIN_REVISION }}
+          path: .lana-toolchain
+          persist-credentials: false
+      - name: Build pinned Lana
+        run: |
+          python3 .lana-toolchain/tools/build.py build
+      - name: Pack, verify identity, clean extract, build, and test
+        env:
+          LANA_COMPILER_LABC: ${{ github.workspace }}/.lana-toolchain/target/lana/bin/lana-compiler.labc
+          LANA_STDLIB_DIR: ${{ github.workspace }}/.lana-toolchain/stdlib
+        run: python3 tools/package_release.py prepare .lana-toolchain/target/lana/bin/lana . "$RUNNER_TEMP/source-package"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qualified-source-package
+          path: ${{ runner.temp }}/source-package/*
+          if-no-files-found: error
+  publish:
+    needs: qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      LANA_REF_PROTECTED: ${{ github.ref_protected }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: qualified-source-package
+          path: ${{ runner.temp }}/source-package
+      - name: Publish once, or verify identical existing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/package_release.py publish "$RUNNER_TEMP/source-package"

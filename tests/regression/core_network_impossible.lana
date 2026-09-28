@@ -1,0 +1,6 @@
+import "std/core" as info;
+
+let root = joint correlated (r) with support: [[0, 0.5], [1, 0.5]];
+let same = info.identity_kernel([0, 1]);
+let graph = info.network(root, [{name: "y", parents: ["r"], kernel: same}]);
+info.infer(graph, ["y"], {r: 0, y: 1});

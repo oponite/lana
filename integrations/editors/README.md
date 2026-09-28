@@ -1,6 +1,6 @@
 # Editor integrations
 
-VS Code and Neovim are the tested Lana 3.0 editor integrations. Other
+VS Code and Neovim support Lana 3.x and 4.x. Other
 LSP-capable editors can launch this command for `.lana` files:
 
 ```bash

@@ -1,0 +1,5 @@
+store_open("dataset-source-pass-store");
+dataset_source("source-1");
+dataset_source("source-1");
+assert(store_current_revision() >= 1, "source registration committed");
+print("DATASET_SOURCE_PASS");

@@ -3,8 +3,9 @@
 //!
 //! Derivations are immutable records: each operation that produces a value
 //! attaches a derivation describing how the value was obtained. The derivation
-//! graph is a DAG (inputs reference pre-existing derivations), so `Arc`
-//! without cycle collection is sound.
+//! graph is a DAG (inputs reference pre-existing derivations). VM constructors
+//! register its nodes with the managed heap for checked reservations and
+//! incremental disposal of deep graphs.
 
 use std::sync::{Arc, Mutex};
 

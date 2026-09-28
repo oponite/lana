@@ -9,7 +9,9 @@
 //! Opcodes that construct increment-2+ types (state dists, joints, tasks,
 //! host calls) return `UnsupportedOperation` until their increment lands.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 #[cfg(not(target_arch = "wasm32"))]
@@ -29,7 +31,7 @@ use crate::state_dist::{self, DistEvalFrame, EvalAction, LANA_STATE_DIST_DEPTH_L
 use crate::tensor;
 use crate::tensor::{tensor_get_imag, tensor_get_real, tensor_set_imag, tensor_set_real};
 use crate::value::{
-    Adt, Array, CapabilityToken, Claim, Dataset, DatasetOp, DistOperand, EffectReceipt, InferenceAlgorithm, JointKind, JointRow,
+    Adt, Array, CapabilityToken, Claim, Dataset, DatasetOp, DistOperand, EffectReceipt, FiniteKernel, FiniteNetwork, Generator, NetworkNode, InferenceAlgorithm, JointKind, JointRow, ObjectValue,
     JointState, Map, Optimizer, PathAlternative, PathSet, PlannedEffect, PlannedEffectState, Possibility, Posterior, Reactive,
     ReactiveKind, ReactiveVersion, RelationshipKind, SharedCommit, SharedInformation,
     SharedObservation, SharedState, SharedVersion, Set, StateDist, StateDistKind, Task, Tensor, TensorDtype, TrainingResult, Value,
@@ -37,6 +39,14 @@ use crate::value::{
     LANA_JOINT_CAN_CONDITION, LANA_JOINT_CAN_PROJECT, LANA_JOINT_CAN_RESOLVE,
     LANA_JOINT_CAN_SAMPLE,
 };
+
+mod evaluation;
+mod http;
+mod objects;
+mod classes;
+pub(crate) mod class_gc;
+pub use class_gc::RootedValue;
+mod object_effects;
 
 fn shared_derivation_text(text: &'static str) -> Arc<str> {
     static EMPTY: OnceLock<Arc<str>> = OnceLock::new();
@@ -101,6 +111,16 @@ pub struct History {
     pub versions: Vec<StateValue>,
 }
 
+/// Ephemeral source-row decision from one named dataset-plan run.
+#[derive(Debug, Clone)]
+pub struct DatasetDecision {
+    pub operation: &'static str,
+    pub reason: &'static str,
+    pub input: Arc<Derivation>,
+    pub predicate: Option<Arc<Derivation>>,
+    pub predicate_value: Option<bool>,
+}
+
 /// A call frame, mirroring `LanaFrame` in `vm/include/vm.h`.
 ///
 /// Registers and histories are sized to the function's `register_count` (not
@@ -117,6 +137,8 @@ pub struct Frame {
     pub function: u32,
     pub is_generator: bool,
     pub is_async: bool,
+    object_method: Option<(u32, u32)>,
+    _allocation: Option<Arc<crate::heap::Reservation>>,
 }
 
 impl Frame {
@@ -133,7 +155,18 @@ impl Frame {
             function: u32::MAX,
             is_generator: false,
             is_async: false,
+            object_method: None,
+            _allocation: None,
         }
+    }
+
+    fn charged(register_count: usize, heap: &Heap) -> Result<Self, LanaError> {
+        let bytes = register_count.checked_mul(std::mem::size_of::<Value>() + std::mem::size_of::<History>())
+            .ok_or(LanaError::Oom)?;
+        let allocation = Arc::new(heap.reserve(bytes)?);
+        let mut frame = Self::new(register_count);
+        frame._allocation = Some(allocation);
+        Ok(frame)
     }
 }
 
@@ -162,6 +195,12 @@ fn instruction_max_register(ins: &Instruction) -> usize {
             if ins.imm != u32::MAX && ins.imm > 0 {
                 max = max.max(ins.c as usize + ins.imm as usize - 1);
             }
+        }
+        ValueNew | ObjectNew => {
+            if ins.imm > 0 { max = max.max(ins.b as usize + ins.imm as usize - 1); }
+        }
+        OoGet | OoSet | OoCall | OoStaticCall | OoAsInterface => {
+            max = max.max(ins.b as usize);
         }
         // Elements occupy `ins.b .. ins.b + ins.c - 1`.
         ArrayNew | JointBuild | AdtBuild => {
@@ -221,7 +260,9 @@ fn compute_max_registers(chunk: &Chunk) -> Vec<usize> {
         for ins in &chunk.code[entry..end] {
             max = max.max(instruction_max_register(ins));
         }
-        result[index] = max + 1;
+        result[index] = if chunk.version == 6 {
+            (max + 1).max(chunk.functions[index].register_count as usize)
+        } else { max + 1 };
     }
     result
 }
@@ -244,16 +285,25 @@ struct PathExecution {
 }
 
 /// A memo mapping source container pointers to their clones, mirroring
-/// `LanaContainerCloneMemo` in `vm/c/vm.c`. Only the mutable containers
-/// (arrays, maps) need the memo; the immutable wrappers (joints, possibilities,
-/// path sets, state dists) are duplicated freely because aliasing them is
-/// unobservable. Keyed by `Arc::as_ptr` so shared substructure is preserved
-/// across one clone operation.
+/// `LanaContainerCloneMemo` in `vm/c/vm.c`. Mutable containers preserve
+/// shared substructure. Joints also preserve aliasing because that identity
+/// represents a declared relationship in captured dataset cells.
 #[derive(Default)]
 struct DeepCloneMemo {
+    freeze: bool,
+    transfer: bool,
+    classes: HashMap<usize, Arc<crate::value::ClassReference>>,
+    depth: usize,
     arrays: HashMap<usize, Arc<Mutex<Array>>>,
     maps: HashMap<usize, Arc<Mutex<Map>>>,
+    joints: HashMap<usize, Arc<JointState>>,
+    distributions: HashMap<usize, Arc<StateDist>>,
+    derivations: HashMap<usize, Arc<Derivation>>,
     sets: HashMap<usize, Arc<Mutex<Set>>>,
+    generators: HashMap<usize, Arc<Mutex<Generator>>>,
+    futures: HashMap<usize, Arc<Mutex<Future>>>,
+    claims: HashMap<usize, Arc<Claim>>,
+    effects: HashMap<usize, Arc<PlannedEffect>>,
     strings: HashMap<usize, Arc<str>>,
 }
 
@@ -581,6 +631,38 @@ pub const LANA_HOST_EXECUTION_CAPABILITY: u32 = 185;
 pub const LANA_HOST_EXECUTION_AUTHORIZE: u32 = 186;
 pub const LANA_HOST_EXECUTION_EXECUTE: u32 = 187;
 pub const LANA_HOST_FUTURE_MESSAGE: u32 = 188;
+pub const LANA_HOST_CORE_ENTROPY: u32 = 189;
+pub const LANA_HOST_CORE_CONDITIONAL_ENTROPY: u32 = 190;
+pub const LANA_HOST_CORE_MUTUAL_INFORMATION: u32 = 191;
+pub const LANA_HOST_CORE_BROJA: u32 = 192;
+pub const LANA_HOST_CORE_KERNEL: u32 = 193;
+pub const LANA_HOST_CORE_IDENTITY_KERNEL: u32 = 194;
+pub const LANA_HOST_CORE_COMPOSE_KERNELS: u32 = 195;
+pub const LANA_HOST_CORE_NETWORK: u32 = 196;
+pub const LANA_HOST_CORE_INFER: u32 = 197;
+pub const LANA_HOST_CORE_FORGET_WEIGHTS: u32 = 198;
+pub const LANA_HOST_CORE_ASSIGN_WEIGHTS: u32 = 199;
+pub const LANA_HOST_DATASET_SOURCE: u32 = 200;
+pub const LANA_HOST_DATASET_QUERY: u32 = 201;
+pub const LANA_HOST_DATASET_APPLY: u32 = 202;
+pub const LANA_HOST_DATASET_SNAPSHOT: u32 = 203;
+pub const LANA_HOST_DATASET_EVIDENCE: u32 = 204;
+pub const LANA_HOST_DATASET_EXCLUSIONS: u32 = 205;
+pub const LANA_HOST_RULES_LEARN: u32 = 206;
+pub const LANA_HOST_RULES_PREDICT: u32 = 207;
+pub const LANA_HOST_RULES_SAVE: u32 = 208;
+pub const LANA_HOST_RULES_ADD_COUNTEREXAMPLE: u32 = 209;
+pub const LANA_HOST_RULES_INSPECT: u32 = 210;
+pub const LANA_HOST_RULES_ROLLBACK: u32 = 211;
+pub const LANA_HOST_TREES_FIT: u32 = 212;
+pub const LANA_HOST_TREES_PREDICT: u32 = 213;
+pub const LANA_HOST_TREES_EXPLAIN: u32 = 214;
+pub const LANA_HOST_TREES_SAVE: u32 = 215;
+pub const LANA_HOST_TREES_LOAD: u32 = 216;
+pub const LANA_HOST_EVALUATION_WALK_FORWARD: u32 = 217;
+pub const LANA_HOST_DATASET_SQLITE: u32 = 218;
+pub const LANA_HOST_DOCUMENT_EXTRACT: u32 = 219;
+pub const LANA_HOST_INFORMATION_SNAPSHOT: u32 = 220;
 
 // LIP-024 async/await. Present in both the C11 VM and the Rust VM at ids
 // 126-129 (matching the C11 assembler's host-call table and the
@@ -606,6 +688,37 @@ pub const LANA_HOST_DATASET_EXPLAIN: u32 = 140;
 /// `next_shared_identity` / `next_commit_revision` atomics in `runtime/c/shared.c`.
 static NEXT_SHARED_IDENTITY: AtomicU64 = AtomicU64::new(1);
 static NEXT_COMMIT_REVISION: AtomicU64 = AtomicU64::new(1);
+static NEXT_ATOMIC_WRITE: AtomicU64 = AtomicU64::new(0);
+
+fn write_text_atomic_with_sync(
+    path: &Path,
+    contents: &[u8],
+    sync_file: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+    sync_parent: impl FnOnce(&std::fs::File) -> std::io::Result<()>,
+) -> Result<(), (std::io::Error, bool)> {
+    let name = path.file_name().ok_or_else(|| (std::io::Error::other("missing file name"), false))?;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let directory = std::fs::File::open(parent).map_err(|error| (error, false))?;
+    let mut temporary_name = name.to_os_string();
+    temporary_name.push(format!(".lana-{}-{}.tmp", std::process::id(), NEXT_ATOMIC_WRITE.fetch_add(1, Ordering::Relaxed)));
+    let temporary = parent.join(temporary_name);
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)] {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(|error| (error, false))?;
+        file.write_all(contents).map_err(|error| (error, false))?;
+        sync_file(&file).map_err(|error| (error, false))?;
+        drop(file);
+        std::fs::rename(&temporary, path).map_err(|error| (error, false))?;
+        sync_parent(&directory).map_err(|error| (error, true))
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
+    result
+}
 
 /// The default worker count, matching `lana_vm_init` in `vm/c/vm.c`:
 /// `min(processors, 8)`, falling back to 1 when the count is unknown. wasm has
@@ -667,7 +780,7 @@ struct QueuedTask<'a> {
 /// every live task before joining the workers.
 struct SchedulerState<'a> {
     queue: VecDeque<QueuedTask<'a>>,
-    all_tasks: Vec<Arc<Task>>,
+    all_tasks: Vec<(Arc<Task>, RootedValue)>,
     live_tasks: usize,
     next_task_id: u64,
     stopping: bool,
@@ -701,27 +814,44 @@ impl<'a> Scheduler<'a> {
     fn shutdown(&self) {
         let mut state = self.state.lock().unwrap();
         state.stopping = true;
-        for task in &state.all_tasks {
+        for (task, _) in &state.all_tasks {
             task.cancelled.store(true, Ordering::Relaxed);
         }
         self.available.notify_all();
     }
 }
 
+struct SchedulerShutdown<'run, 'chunk>(&'run Scheduler<'chunk>);
+
+impl Drop for SchedulerShutdown<'_, '_> {
+    fn drop(&mut self) { self.0.shutdown(); }
+}
+
 /// Run a queued task's child VM to completion and publish the result to the
 /// task handle, mirroring `run_task` in `vm/c/vm.c`.
 fn run_task(queued: QueuedTask<'_>) {
     let mut child = queued.child;
-    let status = child.run();
-    let (status, error, result) = if status == LanaError::Ok {
-        (status, VmError::default(), child.result().clone())
+    let mut status = child.run();
+    let (mut error, mut result) = if status == LanaError::Ok {
+        (VmError::default(), child.result.clone())
     } else {
-        (status, child.error().clone(), Value::null())
+        (child.error().clone(), Value::null())
     };
+    let result_root = if status == LanaError::Ok {
+        match child.result() {
+            Ok(root) => Some(root),
+            Err(root_error) => { status = root_error; error = VmError::default(); result = Value::null(); None }
+        }
+    } else { None };
+    // Publish completion only after the result lease owns the retired child heap.
+    drop(child);
     let mut state = queued.handle.state.lock().unwrap();
     state.status = status;
     state.error = error;
     state.result = result;
+    // The result lease owns the child's storage after Vm::drop retires it.
+    // Moving storage into TaskState would invalidate independent result leases.
+    state.result_root = result_root;
     state.completed = true;
     queued.handle.completed_cond.notify_all();
 }
@@ -763,7 +893,20 @@ pub struct Vm<'a> {
     running: bool,
     instruction_limit: u64,
     instruction_count: u64,
+    dataset_work_remaining: Option<u64>,
+    dataset_decisions: Vec<DatasetDecision>,
     opcode_counts: Vec<u64>,
+    class_owner: Arc<()>,
+    class_objects: Vec<Arc<crate::value::ClassObject>>,
+    class_objects_reservation: Arc<Mutex<crate::heap::Reservation>>,
+    class_allocations_since_gc: usize,
+    owned_cycles: Buffer<Arc<crate::heap::CycleSlot>>,
+    host_roots: Arc<class_gc::RootOwner>,
+    constructing: Vec<Arc<crate::value::ClassReference>>,
+    constructions: Vec<classes::Construction>,
+    object_methods: HashMap<u32, (u32, u32)>,
+    object_function_entries: Vec<(usize, Option<(u32, u32)>)>,
+    object_descriptors: Option<std::collections::BTreeMap<u32, Arc<lana_bytecode::objects::Descriptor>>>,
     state_transition_count: u64,
     allocation_count: u64,
     memory_limit: usize,
@@ -790,6 +933,7 @@ pub struct Vm<'a> {
     result: Value,
     error: VmError,
     pending_error_message: Option<String>,
+    pending_io_outcome: Option<(bool, String)>,
     scheduler: Option<Scheduler<'a>>,
     scheduler_owner: bool,
     spawn_counter: u64,
@@ -814,13 +958,14 @@ pub struct Vm<'a> {
     /// `event_loop_base_depth` (an async frame returned or suspended).
     event_loop_active: bool,
     event_loop_base_depth: usize,
-    host_call_extension: Option<Box<dyn FnMut(u32, &[Value], &mut Value) -> LanaError + Send>>,
+    host_call_extension: Option<Box<dyn FnMut(&mut Vm<'a>, u32, &[Value], &mut Value) -> LanaError + Send>>,
     captured_output: Option<Arc<Mutex<String>>>,
     /// Optional in-memory filesystem. When set, the file-backed host calls
     /// (`read_text`, `write_text`, `write_text_atomic`, `path_exists`) resolve
     /// against this map instead of `std::fs`, so the self-hosted compiler can
     /// run on targets without a filesystem (e.g. `wasm32-unknown-unknown`).
     virtual_fs: Option<HashMap<String, String>>,
+    package_paths: HashMap<String, String>,
     breakpoint_line: Option<u32>,
     breakpoint_hit: bool,
     /// LIP-018 two-way FFI: declared signatures and the single loaded library.
@@ -831,6 +976,8 @@ pub struct Vm<'a> {
     ffi_lib: Option<libloading::Library>,
     /// LIP-019 networking: open sockets, indexed by handle.
     sockets: Vec<NetSocket>,
+    pure_callback_depth: usize,
+    evaluation_callback_depth: usize,
 }
 
 /// LIP-018 two-way FFI: a parsed C-style signature and the bounded set of
@@ -849,56 +996,53 @@ enum FfiType {
 /// and only ever holds plain sockets.
 enum NetSocket {
     Plain(std::net::TcpStream),
-    #[cfg(feature = "net-tls")]
+    #[cfg(all(feature = "net-tls", not(target_arch = "wasm32")))]
     Tls(Box<rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>>),
 }
 
 /// LIP-019 networking: a network failure, mapped to a `Result` error reason.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum NetError {
     Timeout,
     Io,
 }
 
-// RFC 9112 section 6.3: completion is determined by framing, not TLS EOF.
-fn net_response_length(response: &[u8]) -> Result<Option<usize>, NetError> {
-    let Some(end) = response.windows(4).position(|part| part == b"\r\n\r\n") else { return Ok(None); };
-    let header = std::str::from_utf8(&response[..end]).map_err(|_| NetError::Io)?;
-    let mut length = None;
-    for line in header.split("\r\n").skip(1) {
-        let (name, value) = line.split_once(':').ok_or(NetError::Io)?;
-        // ponytail: transfer-coded bodies are unsupported; add a decoder before accepting them.
-        if name.eq_ignore_ascii_case("transfer-encoding") { return Err(NetError::Io); }
-        if !name.eq_ignore_ascii_case("content-length") { continue; }
-        let value = value.trim_matches([' ', '\t']);
-        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) { return Err(NetError::Io); }
-        let parsed = value.parse::<usize>().map_err(|_| NetError::Io)?;
-        if length.is_some_and(|previous| previous != parsed) { return Err(NetError::Io); }
-        length = Some(parsed);
-    }
-    length.map(|length| end.checked_add(4).and_then(|end| end.checked_add(length)).ok_or(NetError::Io)).transpose()
-}
-
-/// Parse a URL into `(scheme, host, port, path)`. Returns `None` on malformed.
+/// Parse an HTTP URI without allowing authority or request-line injection.
 fn net_parse_url(url: &str) -> Option<(String, String, u16, String)> {
+    if url.len() > http::HEADER_LIMIT || !url.is_ascii()
+        || url.bytes().any(|byte| byte <= b' ' || byte == 127 || byte == b'\\') { return None; }
     let (scheme, rest) = url.split_once("://")?;
-    if scheme.is_empty() {
-        return None;
-    }
-    let (host_port, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "http" | "https") { return None; }
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..end];
+    if authority.is_empty() || authority.contains('@') { return None; }
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let (host, suffix) = rest.split_once(']')?;
+        host.parse::<std::net::Ipv6Addr>().ok()?;
+        let port = if suffix.is_empty() { default_port } else {
+            let port = suffix.strip_prefix(':')?;
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
+            port.parse::<u16>().ok()?
+        };
+        (host, port)
+    } else {
+        let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
+            (host, port.parse::<u16>().ok()?)
+        } else { (authority, default_port) };
+        if host.is_empty() || !host.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-._".contains(&byte)) { return None; }
+        (host, port)
     };
-    let (host, port) = match host_port.rsplit_once(':') {
-        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
-            (h.to_string(), p.parse::<u16>().ok()?)
-        }
-        _ => (host_port.to_string(), if scheme == "https" { 443 } else { 80 }),
-    };
-    if host.is_empty() {
-        return None;
+    if port == 0 { return None; }
+    let path = rest[end..].split('#').next().unwrap();
+    let path = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
+    let bytes = path.as_bytes();
+    for (index, &byte) in bytes.iter().enumerate() {
+        if byte == b'%' && (index + 2 >= bytes.len() || !bytes[index + 1..index + 3].iter().all(u8::is_ascii_hexdigit)) { return None; }
     }
-    Some((scheme.to_string(), host, port, path.to_string()))
+    Some((scheme, host.to_string(), port, path))
 }
 
 /// Connect a TCP socket to `host:port` with a timeout.
@@ -921,46 +1065,45 @@ fn net_connect(host: &str, port: u16, timeout_ms: u64) -> Result<std::net::TcpSt
     Err(last_err)
 }
 
+impl From<std::io::Error> for NetError {
+    fn from(error: std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => Self::Timeout,
+            _ => Self::Io,
+        }
+    }
+}
+
 impl NetSocket {
     fn read(&mut self, buf: &mut [u8], timeout_ms: u64) -> Result<usize, NetError> {
         use std::io::Read;
+        let timeout = Some(std::time::Duration::from_millis(timeout_ms));
         match self {
-            NetSocket::Plain(s) => {
-                let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(timeout_ms)));
-                match s.read(buf) {
-                    Ok(n) => Ok(n),
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.kind() == std::io::ErrorKind::TimedOut =>
-                    {
-                        Err(NetError::Timeout)
-                    }
-                    Err(_) => Err(NetError::Io),
-                }
+            NetSocket::Plain(socket) => {
+                socket.set_read_timeout(timeout).map_err(NetError::from)?;
+                socket.read(buf).map_err(NetError::from)
             }
-            #[cfg(feature = "net-tls")]
-            NetSocket::Tls(s) => match s.read(buf) {
-                Ok(n) => Ok(n),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(NetError::Timeout),
-                Err(_) => Err(NetError::Io),
-            },
+            #[cfg(all(feature = "net-tls", not(target_arch = "wasm32")))]
+            NetSocket::Tls(socket) => {
+                socket.sock.set_read_timeout(timeout).map_err(NetError::from)?;
+                socket.read(buf).map_err(NetError::from)
+            }
         }
     }
 
     fn write_all(&mut self, data: &[u8]) -> Result<(), NetError> {
         use std::io::Write;
         match self {
-            NetSocket::Plain(s) => s.write_all(data).map_err(|_| NetError::Io),
-            #[cfg(feature = "net-tls")]
-            NetSocket::Tls(s) => s.write_all(data).map_err(|_| NetError::Io),
+            NetSocket::Plain(socket) => socket.write_all(data).map_err(NetError::from),
+            #[cfg(all(feature = "net-tls", not(target_arch = "wasm32")))]
+            NetSocket::Tls(socket) => socket.write_all(data).map_err(NetError::from),
         }
     }
-
 }
 
 /// Build a rustls client config: verify against the Mozilla roots when
 /// `verify` is on, or accept any certificate when it is off (`verify:false`).
-#[cfg(feature = "net-tls")]
+#[cfg(all(feature = "net-tls", not(target_arch = "wasm32")))]
 fn net_tls_config(verify: bool) -> std::result::Result<rustls::ClientConfig, NetError> {
     use rustls::client::danger::{
         HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
@@ -1031,7 +1174,7 @@ fn net_tls_config(verify: bool) -> std::result::Result<rustls::ClientConfig, Net
 
 /// Wrap a connected TCP stream in TLS for an https host, driving the
 /// handshake to completion so certificate verification fails loudly.
-#[cfg(feature = "net-tls")]
+#[cfg(all(feature = "net-tls", not(target_arch = "wasm32")))]
 fn net_tls_connect(
     stream: std::net::TcpStream,
     host: &str,
@@ -1045,7 +1188,7 @@ fn net_tls_connect(
         rustls::ClientConnection::new(config, server_name).map_err(|_| NetError::Io)?;
     let mut tcp = stream;
     while conn.is_handshaking() {
-        conn.complete_io(&mut tcp).map_err(|_| NetError::Io)?;
+        conn.complete_io(&mut tcp).map_err(NetError::from)?;
     }
     Ok(NetSocket::Tls(Box::new(rustls::StreamOwned::new(conn, tcp))))
 }
@@ -1347,18 +1490,32 @@ impl<'a> Vm<'a> {
     /// Create a VM for a chunk. The CLI defaults (256 MiB / 50M instructions,
     /// seed `0x4c414e41`) match `tools/c/cli.c` `load_command`.
     pub fn new(chunk: &'a Chunk) -> Self {
+        let heap = Heap::new(256 * 1024 * 1024);
         let mut vm = Self {
             chunk,
             ip: chunk.entry as usize,
             running: true,
             instruction_limit: 50_000_000,
             instruction_count: 0,
+            dataset_work_remaining: None,
+            dataset_decisions: Vec::new(),
             opcode_counts: vec![0; OpCode::Count as usize],
+            object_descriptors: None,
+            class_owner: Arc::new(()),
+            class_objects: Vec::new(),
+            class_objects_reservation: Arc::new(Mutex::new(heap.reserve(0).expect("empty class arena reservation"))),
+            class_allocations_since_gc: 0,
+            owned_cycles: Buffer::new(&heap, 0, 0).expect("empty collector registry"),
+            host_roots: class_gc::RootOwner::new(&heap),
+            constructing: Vec::new(),
+            constructions: Vec::new(),
+            object_methods: HashMap::new(),
+            object_function_entries: Vec::new(),
             state_transition_count: 0,
             allocation_count: 0,
             memory_limit: 256 * 1024 * 1024,
             allocated_bytes: 0,
-            heap: Heap::new(256 * 1024 * 1024),
+            heap,
             rng: Rng::new(),
             root_seed: 0,
             lineage: 0,
@@ -1380,6 +1537,7 @@ impl<'a> Vm<'a> {
             result: Value::null(),
             error: VmError::default(),
             pending_error_message: None,
+            pending_io_outcome: None,
             scheduler: None,
             scheduler_owner: true,
             spawn_counter: 0,
@@ -1398,12 +1556,15 @@ impl<'a> Vm<'a> {
             host_call_extension: None,
             captured_output: None,
             virtual_fs: None,
+            package_paths: HashMap::new(),
             breakpoint_line: None,
             breakpoint_hit: false,
             ffi_sigs: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             ffi_lib: None,
             sockets: Vec::new(),
+            pure_callback_depth: 0,
+            evaluation_callback_depth: 0,
         };
         vm.seed(0x4c414e41);
         vm
@@ -1416,8 +1577,8 @@ impl<'a> Vm<'a> {
     }
 
     /// The value left in the result register by `RETURN` from the main frame.
-    pub fn result(&self) -> &Value {
-        &self.result
+    pub fn result(&self) -> Result<RootedValue, LanaError> {
+        self.rooted_result()
     }
 
     pub fn set_breakpoint_line(&mut self, line: u32) { self.breakpoint_line = Some(line); self.breakpoint_hit = false; }
@@ -1426,9 +1587,15 @@ impl<'a> Vm<'a> {
         let function = self.frames.last().map(|frame| frame.function)
             .and_then(|index| self.chunk.functions.get(index as usize))
             .map(|function| function.name.clone()).unwrap_or_else(|| "<entry>".to_string());
+        let function = self.frames.last().and_then(|frame| frame.object_method)
+            .and_then(|(owner, member)| self.object_descriptors.as_ref()?.get(&owner).map(|descriptor| {
+                let name = descriptor.qualified_name.rsplit('/').next().unwrap();
+                if let Some(method) = descriptor.methods.get(member as usize) { format!("{name}.{}", method.name) }
+                else { format!("{name}.<default:{}>", descriptor.fields[member as usize - descriptor.methods.len()].name) }
+            })).unwrap_or(function);
         Some((self.ip, instruction.line, function, self.frames.len()))
     }
-    pub fn debug_step(&mut self) -> LanaError { self.breakpoint_line = None; self.running = true; self.dispatch_loop() }
+    pub fn debug_step(&mut self) -> LanaError { self.breakpoint_line = None; self.running = true; self.dispatch_loop(true) }
     pub fn debug_continue(&mut self) -> LanaError { self.breakpoint_line = None; self.running = true; self.run() }
 
     /// The error recorded by the last failed run.
@@ -1439,6 +1606,16 @@ impl<'a> Vm<'a> {
     /// The instruction count, for `--stats` output.
     pub fn instruction_count(&self) -> u64 {
         self.instruction_count
+    }
+
+    /// Charge bounded native host work to the same limit as bytecode execution.
+    pub fn charge_bounded_work(&mut self, steps: u64) -> Result<(), LanaError> {
+        if self.cancelled.load(Ordering::Relaxed) { return Err(LanaError::Cancelled); }
+        if steps > self.instruction_limit.saturating_sub(self.instruction_count) {
+            return Err(LanaError::Limit);
+        }
+        self.instruction_count += steps;
+        Ok(())
     }
 
     /// The state transition count, for `--stats` output.
@@ -1457,6 +1634,18 @@ impl<'a> Vm<'a> {
     }
 
     pub fn heap(&self) -> Heap { self.heap.clone() }
+
+    /// Construct an isolated replay root using the same boundary as Core source values.
+    pub fn information_root(&mut self, source: &Value) -> Result<Value, LanaError> {
+        self.reactive_root(source, DerivationExactness::Exact)
+    }
+
+    /// Replay explicit evidence through the ordinary transactional Core observation.
+    pub fn information_observe(&mut self, root: &Value, evidence: &Value) -> Result<Value, LanaError> {
+        if self.chunk.version < lana_bytecode::opcode::LABC_VERSION_5 { return Err(LanaError::UnsupportedOperation); }
+        self.reactive_observe(root, evidence, 0)?;
+        Ok(self.reactive_value(root))
+    }
 
     /// Per-opcode execution counts, for `--stats` output.
     pub fn opcode_counts(&self) -> &[u64] {
@@ -1486,26 +1675,24 @@ impl<'a> Vm<'a> {
                         let scheduler = scheduler.clone();
                         workers.push(scope.spawn(move || worker_loop(&scheduler)));
                     }
-                    let result = self.dispatch_loop();
-                    scheduler.shutdown();
-                    result
+                    let _shutdown = SchedulerShutdown(&scheduler);
+                    self.dispatch_loop(false)
                 })
             }
             #[cfg(target_arch = "wasm32")]
             {
                 let scheduler = Scheduler::new();
                 self.scheduler = Some(scheduler.clone());
-                let result = self.dispatch_loop();
-                scheduler.shutdown();
-                result
+                let _shutdown = SchedulerShutdown(&scheduler);
+                self.dispatch_loop(false)
             }
         } else {
-            self.dispatch_loop()
+            self.dispatch_loop(false)
         }
     }
 
     /// The dispatch loop, mirroring the body of `lana_vm_run`.
-    fn dispatch_loop(&mut self) -> LanaError {
+    fn dispatch_loop(&mut self, single_step: bool) -> LanaError {
         while self.running {
             // The event loop (LIP-024 §6) drives async frames. When an async
             // frame returns or suspends, the frame stack returns to the depth
@@ -1549,6 +1736,7 @@ impl<'a> Vm<'a> {
                 return self.fail(error, self.ip - 1, instruction.opcode as u8, instruction.line,
                                  instruction.opcode.name(), message);
             }
+            if single_step { self.running = false; }
         }
         LanaError::Ok
     }
@@ -1562,6 +1750,7 @@ impl<'a> Vm<'a> {
             if guard.exhausted || guard.queued {
                 false
             } else {
+                self.heap.mutate_cycle(Arc::as_ptr(&future) as usize);
                 guard.queued = true;
                 guard.ready = true;
                 true
@@ -1580,6 +1769,7 @@ impl<'a> Vm<'a> {
         while let Some(future) = self.ready_futures.pop_front() {
             {
                 let mut guard = future.lock().unwrap();
+                self.heap.mutate_cycle(Arc::as_ptr(&future) as usize);
                 guard.queued = false;
                 if guard.exhausted {
                     continue;
@@ -1614,7 +1804,7 @@ impl<'a> Vm<'a> {
             self.frames.push(callee);
             self.ip = ip;
             self.event_loop_active = true;
-            let error = self.dispatch_loop();
+            let error = self.dispatch_loop(false);
             if error != LanaError::Ok {
                 return error;
             }
@@ -1650,9 +1840,12 @@ impl<'a> Vm<'a> {
 
     /// Set the memory limit in bytes, mirroring the `--memory-limit-mib` CLI
     /// flag. Child VMs inherit the parent's limit at FORK time.
-    pub fn set_memory_limit(&mut self, bytes: usize) {
+    /// A limit below current live allocations fails without changing the limit.
+    pub fn set_memory_limit(&mut self, bytes: usize) -> Result<(), LanaError> {
+        let available = bytes.checked_sub(self.allocated_bytes).ok_or(LanaError::Oom)?;
+        self.heap.set_limit(available)?;
         self.memory_limit = bytes;
-        let _ = self.heap.set_limit(bytes.saturating_sub(self.allocated_bytes));
+        Ok(())
     }
 
     /// Set the program arguments exposed to the `args` host call, mirroring
@@ -1663,14 +1856,20 @@ impl<'a> Vm<'a> {
         self.program_argv = args.iter().map(|s| Arc::from(s.as_str())).collect();
     }
 
+    /// Compiler-only roots supplied after the CLI verifies the lock and cache.
+    pub fn set_package_paths(&mut self, paths: HashMap<String, String>) {
+        self.package_paths = paths;
+    }
+
     /// Register a handler for host-call IDs beyond the built-in set (54). When
     /// `execute_host_call` sees an ID it does not recognize, it delegates to
     /// this handler. The CLI uses this to expose the durable pipeline
     /// (store/policy/ledger) to Lana bytecode without `lana-vm` depending on
-    /// `lana-runtime`.
+    /// `lana-runtime`. The handler receives the same VM so a store call can
+    /// evaluate a pure named plan before committing its result.
     pub fn set_host_call_extension(
         &mut self,
-        handler: Box<dyn FnMut(u32, &[Value], &mut Value) -> LanaError + Send>,
+        handler: Box<dyn FnMut(&mut Vm<'a>, u32, &[Value], &mut Value) -> LanaError + Send>,
     ) {
         self.host_call_extension = Some(handler);
     }
@@ -1731,31 +1930,51 @@ impl<'a> Vm<'a> {
         child.ip = function.entry as usize;
         child.frames[0].function = function_index;
         child.instruction_limit = self.instruction_limit;
-        child.set_memory_limit(self.memory_limit);
+        if let Err(error) = child.set_memory_limit(self.memory_limit) {
+            scheduler.state.lock().unwrap().live_tasks -= 1;
+            return Err(error);
+        }
         child.program_argc = self.program_argc;
         child.program_argv = self.program_argv.clone();
+        child.package_paths = self.package_paths.clone();
         child.captured_output = self.captured_output.clone();
         child.lineage = mix64(self.lineage ^ { self.spawn_counter += 1; self.spawn_counter });
         child.seed(mix64(self.root_seed ^ child.lineage));
         child.root_seed = self.root_seed;
-        child.cancelled = handle.cancelled.clone();
-        let mut memo = DeepCloneMemo::default();
+        child.cancelled = self.cancelled.clone();
+        let mut memo = DeepCloneMemo { transfer: true, ..DeepCloneMemo::default() };
         for index in 0..argc as usize {
             let argument = self.current_frame().registers[(first_arg as usize) + index].clone();
-            let cloned = child.deep_clone_value(&argument, &mut memo)?;
+            let cloned = match child.deep_clone_value(&argument, &mut memo) {
+                Ok(value) => value,
+                Err(error) => { scheduler.state.lock().unwrap().live_tasks -= 1; return Err(error); }
+            };
             child.frames[0].registers[index] = cloned;
         }
         for index in 0..argc as usize {
             let history = self.current_frame().histories[(first_arg as usize) + index].clone();
             child.frames[0].histories[index] = history;
         }
+        if let Err(error) = self.track_cycle(crate::heap::CycleWeak::Task(Arc::downgrade(&handle))) {
+            scheduler.state.lock().unwrap().live_tasks -= 1;
+            return Err(error);
+        }
+        let service_root = match self.host_roots.register_root(Value::task(handle.clone()), 0, 0) {
+            Ok(root) => root,
+            Err(error) => { scheduler.state.lock().unwrap().live_tasks -= 1; return Err(error); }
+        };
         {
             let mut state = scheduler.state.lock().unwrap();
+            if self.cancelled.load(Ordering::Relaxed) || state.stopping {
+                state.live_tasks -= 1;
+                return Err(if self.cancelled.load(Ordering::Relaxed) { LanaError::Cancelled } else { LanaError::Task });
+            }
+            child.cancelled = handle.cancelled.clone();
             state.queue.push_back(QueuedTask {
                 child,
                 handle: handle.clone(),
             });
-            state.all_tasks.push(handle.clone());
+            state.all_tasks.push((handle.clone(), service_root));
             scheduler.available.notify_one();
         }
         self.tasks.push(handle.clone());
@@ -1767,6 +1986,8 @@ impl<'a> Vm<'a> {
     /// helper mechanism); a non-negative timeout waits on the condition
     /// variable and returns `Timeout` if it expires.
     fn wait_task(&mut self, task: &Task, timeout: f64) -> Result<Value, LanaError> {
+        #[cfg(target_arch = "wasm32")]
+        if timeout >= 0.0 { return Err(LanaError::UnsupportedOperation); }
         if timeout < 0.0 {
             loop {
                 if task.state.lock().unwrap().completed {
@@ -1803,23 +2024,36 @@ impl<'a> Vm<'a> {
                 }
             }
         }
+        class_gc::RootOwner::drain_retired(&mut |steps| self.charge_bounded_work(steps))?;
         let mut state = task.state.lock().unwrap();
         if state.status != LanaError::Ok {
             self.error = state.error.clone();
             return Err(state.status);
         }
         if !state.joined {
-            let mut memo = DeepCloneMemo::default();
-            let cloned = self.deep_clone_value(&state.result, &mut memo)?;
+            let mut memo = DeepCloneMemo { transfer: true, ..DeepCloneMemo::default() };
+            let checkpoint = self.class_objects.len();
+            let cloned = match self.deep_clone_value(&state.result, &mut memo) {
+                Ok(value) => value,
+                Err(error) => { self.class_objects.truncate(checkpoint); return Err(error); }
+            };
+            let _defer = class_gc::RootOwner::defer_retired();
+            self.heap.mutate_cycle(task as *const Task as usize);
             state.result = cloned;
+            state.result_root = None;
             state.joined = true;
             let scheduler = self.scheduler.as_ref().expect("scheduler exists");
             let mut scheduler_state = scheduler.state.lock().unwrap();
             if scheduler_state.live_tasks > 0 {
                 scheduler_state.live_tasks -= 1;
             }
+            scheduler_state.all_tasks.retain(|(handle, _)| handle.id != task.id);
+            self.tasks.retain(|handle| handle.id != task.id);
         }
-        Ok(state.result.clone())
+        let result = state.result.clone();
+        drop(state);
+        class_gc::RootOwner::drain_retired(&mut |steps| self.charge_bounded_work(steps))?;
+        Ok(result)
     }
 
     /// Cancel a task, mirroring `cancel_task` in `vm/c/vm.c`.
@@ -1857,6 +2091,12 @@ impl<'a> Vm<'a> {
     /// of the failing instruction (the caller passes the pre-increment ip).
     fn fail(&mut self, code: LanaError, ip: usize, opcode: u8, line: u32,
             operation: &str, message: impl Into<String>) -> LanaError {
+        if let Some(construction) = self.constructions.first() {
+            let checkpoint = construction.checkpoint;
+            self.class_objects.truncate(checkpoint);
+            self.constructing.clear();
+            self.constructions.clear();
+        }
         // Mirror `vm_fail` in `vm/c/vm.c:362-366`: when an error is already
         // recorded (e.g. a child task's error propagated by JOIN), preserve it
         // instead of overwriting with the failing instruction's own span.
@@ -1866,6 +2106,7 @@ impl<'a> Vm<'a> {
             return code;
         }
         let message = message.into();
+        let io_outcome = self.pending_io_outcome.take();
         let (resolution_reason, remaining_alternatives) =
             self.resolution_reason_for(code, ip, &message);
         let mut error = VmError {
@@ -1881,6 +2122,8 @@ impl<'a> Vm<'a> {
             cancellation: None,
             resource_limit: None,
             exact_support: None,
+            durability: io_outcome.as_ref().and_then(|(uncertain, _)| uncertain.then(|| "uncertain".to_string())),
+            path: io_outcome.map(|(_, path)| path),
         };
         match code {
             LanaError::Cancelled => {
@@ -2055,7 +2298,25 @@ impl<'a> Vm<'a> {
         outcome: DerivationOutcome,
         reason: &str,
     ) -> Option<Arc<Derivation>> {
+        let payload = self.record_derivation_payload(kind, operation, inputs, label, line,
+            exactness, details, outcome, reason)?;
+        self.managed_payload(payload).ok()
+    }
+
+    fn record_derivation_payload(
+        &mut self,
+        kind: DerivationKind,
+        operation: &str,
+        inputs: &[&Value],
+        label: &str,
+        line: u32,
+        exactness: DerivationExactness,
+        details: &str,
+        outcome: DerivationOutcome,
+        reason: &str,
+    ) -> Option<Derivation> {
         let mut retained: Vec<Arc<Derivation>> = Vec::new();
+        retained.try_reserve_exact(inputs.len()).ok()?;
         for input in inputs {
             if let Some(derivation) = &input.derivation {
                 retained.push(derivation.clone());
@@ -2063,7 +2324,7 @@ impl<'a> Vm<'a> {
         }
         self.derivation_sequence += 1;
         let autodiff = details == "autodiff" && (operation == "autodiff" || operation == "input");
-        Some(Arc::new(Derivation {
+        Some(Derivation {
             task_lineage: self.lineage,
             local_sequence: self.derivation_sequence,
             revision: self.revision,
@@ -2071,27 +2332,27 @@ impl<'a> Vm<'a> {
             operation: if autodiff {
                 shared_derivation_text(if operation == "input" { "input" } else { "autodiff" })
             } else {
-                Arc::from(operation)
+                self.heap.string(operation).ok()?
             },
             inputs: retained,
             label: if autodiff {
                 shared_derivation_text("")
             } else {
-                Arc::from(label)
+                self.heap.string(label).ok()?
             },
-            function: Arc::from(self.current_function_name()),
+            function: self.heap.string(&self.current_function_name()).ok()?,
             line,
             exactness,
             details: if autodiff {
                 shared_derivation_text("autodiff")
             } else {
-                Arc::from(details)
+                self.heap.string(details).ok()?
             },
             outcome,
             reason: if autodiff {
                 shared_derivation_text("none")
             } else {
-                Arc::from(reason)
+                self.heap.string(reason).ok()?
             },
             ad_op: -1,
             ad_a: None,
@@ -2100,7 +2361,7 @@ impl<'a> Vm<'a> {
             ad_b_deriv: None,
             ad_grad: Arc::new(Mutex::new(None)),
             ad_axis: -1,
-        }))
+        })
     }
 
     /// Attach a derivation to a register value, mirroring `attach_derivation`.
@@ -2188,44 +2449,7 @@ impl<'a> Vm<'a> {
     /// execution loop used by `OP_BOOTSTRAP`. The result is written to
     /// `scratch_register` in the caller frame and copied to `result`.
     fn run_function(&mut self, function_index: u32, arg: &Value, scratch_register: u32, result: &mut Value) -> LanaError {
-        let arity = self.chunk.functions[function_index as usize].arity;
-        let entry = self.chunk.functions[function_index as usize].entry as usize;
-        if arity != 1 {
-            return LanaError::Type;
-        }
-        if self.frames.len() >= LANA_MAX_CALL_FRAMES as usize {
-            return LanaError::Limit;
-        }
-        let saved_frame_count = self.frames.len();
-        let mut callee = Frame::new(self.max_registers[function_index as usize]);
-        callee.return_ip = self.ip;
-        callee.return_register = scratch_register;
-        callee.function = function_index;
-        callee.registers[0] = arg.clone();
-        self.frames.push(callee);
-        self.ip = entry;
-        while self.frames.len() > saved_frame_count && self.running {
-            if self.ip >= self.chunk.code.len() {
-                self.frames.truncate(saved_frame_count);
-                return LanaError::Jump;
-            }
-            let old_count = self.instruction_count;
-            self.instruction_count += 1;
-            if old_count >= self.instruction_limit {
-                self.frames.truncate(saved_frame_count);
-                return LanaError::Limit;
-            }
-            let instruction = self.chunk.code[self.ip];
-            self.ip += 1;
-            self.opcode_counts[instruction.opcode as usize] += 1;
-            let error = self.execute(&instruction);
-            if error != LanaError::Ok {
-                self.frames.truncate(saved_frame_count);
-                return error;
-            }
-        }
-        *result = self.frames[saved_frame_count - 1].registers[scratch_register as usize].clone();
-        LanaError::Ok
+        self.run_function_args(function_index, std::slice::from_ref(arg), scratch_register, result)
     }
 
     /// Run a two-argument function to completion, mirroring `run_function2` in
@@ -2239,32 +2463,63 @@ impl<'a> Vm<'a> {
         scratch_register: u32,
         result: &mut Value,
     ) -> LanaError {
-        let arity = self.chunk.functions[function_index as usize].arity;
+        self.run_function_args(function_index, &[arg0.clone(), arg1.clone()], scratch_register, result)
+    }
+
+    fn run_function_args(&mut self, function_index: u32, args: &[Value], scratch_register: u32, result: &mut Value) -> LanaError {
+        self.run_function_args_owned(function_index, args, scratch_register, result, None)
+    }
+
+    fn run_function_args_owned(&mut self, function_index: u32, args: &[Value], scratch_register: u32,
+        result: &mut Value, owner: Option<(u32, u32)>) -> LanaError {
+        let Some(function) = self.chunk.functions.get(function_index as usize) else { return LanaError::Type; };
+        let arity = function.arity;
         let entry = self.chunk.functions[function_index as usize].entry as usize;
-        if arity != 2 {
+        if arity as usize != args.len() {
             return LanaError::Type;
+        }
+        if args.len() > self.max_registers[function_index as usize] as usize
+            || scratch_register as usize >= self.current_frame().registers.len() {
+            return LanaError::Format;
         }
         if self.frames.len() >= LANA_MAX_CALL_FRAMES as usize {
             return LanaError::Limit;
         }
         let saved_frame_count = self.frames.len();
-        let mut callee = Frame::new(self.max_registers[function_index as usize]);
+        let saved_ip = self.ip;
+        let mut callee = if self.chunk.version == 6 {
+            match Frame::charged(self.max_registers[function_index as usize], &self.heap) {
+                Ok(frame) => frame, Err(error) => return error,
+            }
+        } else { Frame::new(self.max_registers[function_index as usize]) };
         callee.return_ip = self.ip;
         callee.return_register = scratch_register;
         callee.function = function_index;
-        callee.registers[0] = arg0.clone();
-        callee.registers[1] = arg1.clone();
+        callee.object_method = owner;
+        callee.registers[..args.len()].clone_from_slice(args);
         self.frames.push(callee);
         self.ip = entry;
         while self.frames.len() > saved_frame_count && self.running {
+            if self.cancelled.load(Ordering::Relaxed) {
+                self.frames.truncate(saved_frame_count);
+                self.ip = saved_ip;
+                return LanaError::Cancelled;
+            }
+            if self.allocated_bytes() > self.memory_limit {
+                self.frames.truncate(saved_frame_count);
+                self.ip = saved_ip;
+                return LanaError::Oom;
+            }
             if self.ip >= self.chunk.code.len() {
                 self.frames.truncate(saved_frame_count);
+                self.ip = saved_ip;
                 return LanaError::Jump;
             }
             let old_count = self.instruction_count;
             self.instruction_count += 1;
             if old_count >= self.instruction_limit {
                 self.frames.truncate(saved_frame_count);
+                self.ip = saved_ip;
                 return LanaError::Limit;
             }
             let instruction = self.chunk.code[self.ip];
@@ -2273,12 +2528,63 @@ impl<'a> Vm<'a> {
             let error = self.execute(&instruction);
             if error != LanaError::Ok {
                 self.frames.truncate(saved_frame_count);
+                self.ip = saved_ip;
                 return error;
             }
         }
         *result = self.frames[saved_frame_count - 1].registers[scratch_register as usize].clone();
         LanaError::Ok
     }
+
+    /// Execute a named dataset plan inside the current VM and its resource limits.
+    /// The caller owns publication; a failed plan returns no result.
+    pub fn run_pure_dataset_plan(&mut self, name: &str, args: &[Value]) -> Result<Value, LanaError> {
+        self.dataset_decisions.clear();
+        let index = self.chunk.functions.iter().position(|function| function.name == name)
+            .ok_or(LanaError::NotFound)? as u32;
+        if self.chunk.functions[index as usize].arity as usize != args.len() { return Err(LanaError::Type); }
+        let saved = self.current_frame().registers[0].clone();
+        let mut result = Value::null();
+        let previous_budget = self.dataset_work_remaining.replace(5_000_000);
+        self.pure_callback_depth += 1;
+        let error = self.run_function_args(index, args, 0, &mut result);
+        self.pure_callback_depth -= 1;
+        self.dataset_work_remaining = previous_budget;
+        self.current_frame_mut().registers[0] = saved;
+        if error != LanaError::Ok { self.dataset_decisions.clear(); return Err(error); }
+        let ValueKind::Array(rows) = &result.kind else { self.dataset_decisions.clear(); return Err(LanaError::Type); };
+        let rows = rows.lock().unwrap();
+        if rows.items().len() > 100_000 { self.dataset_decisions.clear(); return Err(LanaError::Limit); }
+        if rows.items().iter().any(|row| !matches!(row.kind, ValueKind::Map(_))) {
+            self.dataset_decisions.clear();
+            return Err(LanaError::Type);
+        }
+        drop(rows);
+        Ok(result)
+    }
+
+    /// Attach a source identity without inserting an `id` column into the row.
+    pub fn dataset_source_row(&mut self, source_id: &str, row_id: &str, mut row: Value) -> Result<Value, LanaError> {
+        if source_id.is_empty() || source_id.len() > 128 || row_id.is_empty() || row_id.len() > 128 {
+            return Err(LanaError::InvalidParameters);
+        }
+        let ValueKind::Map(source) = &row.kind else { return Err(LanaError::Type); };
+        let label = format!("{}:{}{}:{}", source_id.len(), source_id, row_id.len(), row_id);
+        row.derivation = self.record_derivation(DerivationKind::Evidence, "dataset_source", &[&row], &label, 0,
+            DerivationExactness::Exact, "source_row", DerivationOutcome::Success, "none");
+        let mut cells = Map::new(&self.heap, source.lock().unwrap().entries().len())?;
+        for entry in source.lock().unwrap().entries() {
+            let mut cell = entry.value.clone();
+            if cell.derivation.is_none() { cell.derivation = row.derivation.clone(); }
+            cells.set(entry.key.clone(), cell, false)?;
+        }
+        row.kind = ValueKind::Map(Arc::new(Mutex::new(cells)));
+        Ok(row)
+    }
+
+    pub fn dataset_decisions(&self) -> &[DatasetDecision] { &self.dataset_decisions }
+
+    pub fn clear_dataset_decisions(&mut self) { self.dataset_decisions.clear(); }
 
     /// Record a differentiable primitive onto `result`'s derivation, mirroring
     /// `ad_record` in `vm/c/vm.c`. `ad_op` is 0=add 1=sub 2=mul 3=div 4=matmul
@@ -2314,20 +2620,20 @@ impl<'a> Vm<'a> {
         };
         self.derivation_sequence += 1;
         let function_name = self.current_function_name();
-        let node = Arc::new(Derivation {
+        let node = match self.managed_payload(Derivation {
             task_lineage: self.lineage,
             local_sequence: self.derivation_sequence,
             revision: self.revision,
             kind: DerivationKind::Operation,
-            operation: Arc::from("autodiff"),
+            operation: shared_derivation_text("autodiff"),
             inputs: retained,
-            label: Arc::from(""),
-            function: Arc::from(function_name),
+            label: shared_derivation_text(""),
+            function: match self.heap.string(&function_name) { Ok(text) => text, Err(error) => return error },
             line: 0,
             exactness: DerivationExactness::Exact,
-            details: Arc::from("autodiff"),
+            details: shared_derivation_text("autodiff"),
             outcome: DerivationOutcome::Success,
-            reason: Arc::from("none"),
+            reason: shared_derivation_text("none"),
             ad_op,
             ad_a: Some(a_tensor.clone()),
             ad_b: b_tensor,
@@ -2335,7 +2641,7 @@ impl<'a> Vm<'a> {
             ad_b_deriv: b.and_then(|bv| bv.derivation.clone()),
             ad_grad: Arc::new(Mutex::new(None)),
             ad_axis,
-        });
+        }) { Ok(node) => node, Err(error) => return error };
         result.derivation = Some(node);
         LanaError::Ok
     }
@@ -2942,20 +3248,20 @@ impl<'a> Vm<'a> {
         }
         self.derivation_sequence += 1;
         let function_name = self.current_function_name();
-        let leaf = Arc::new(Derivation {
+        let leaf = match self.managed_payload(Derivation {
             task_lineage: self.lineage,
             local_sequence: self.derivation_sequence,
             revision: self.revision,
             kind: DerivationKind::Operation,
-            operation: Arc::from("input"),
+            operation: shared_derivation_text("input"),
             inputs: Vec::new(),
-            label: Arc::from(""),
-            function: Arc::from(function_name),
+            label: shared_derivation_text(""),
+            function: match self.heap.string(&function_name) { Ok(text) => text, Err(error) => return error },
             line: 0,
             exactness: DerivationExactness::Exact,
-            details: Arc::from("autodiff"),
+            details: shared_derivation_text("autodiff"),
             outcome: DerivationOutcome::Success,
-            reason: Arc::from("none"),
+            reason: shared_derivation_text("none"),
             ad_op: -1,
             ad_a: Some(x_tensor.clone()),
             ad_b: None,
@@ -2963,7 +3269,7 @@ impl<'a> Vm<'a> {
             ad_b_deriv: None,
             ad_grad: Arc::new(Mutex::new(None)),
             ad_axis: -1,
-        });
+        }) { Ok(node) => node, Err(error) => return error };
         let mut x_with_deriv = x.clone();
         x_with_deriv.derivation = Some(leaf.clone());
         self.ad_recording = true;
@@ -3015,20 +3321,20 @@ impl<'a> Vm<'a> {
         leaf_value.derivation = Some(leaf.clone());
         self.derivation_sequence += 1;
         let function_name = self.current_function_name();
-        let grad_deriv = Arc::new(Derivation {
+        let grad_deriv = match self.managed_payload(Derivation {
             task_lineage: self.lineage,
             local_sequence: self.derivation_sequence,
             revision: self.revision,
             kind: DerivationKind::Operation,
-            operation: Arc::from(operation),
+            operation: match self.heap.string(operation) { Ok(text) => text, Err(error) => return error },
             inputs: vec![leaf.clone()],
-            label: Arc::from(""),
-            function: Arc::from(function_name),
+            label: shared_derivation_text(""),
+            function: match self.heap.string(&function_name) { Ok(text) => text, Err(error) => return error },
             line: 0,
             exactness: DerivationExactness::Exact,
-            details: Arc::from("autodiff"),
+            details: shared_derivation_text("autodiff"),
             outcome: DerivationOutcome::Success,
-            reason: Arc::from("none"),
+            reason: shared_derivation_text("none"),
             ad_op: -1,
             ad_a: None,
             ad_b: None,
@@ -3036,7 +3342,7 @@ impl<'a> Vm<'a> {
             ad_b_deriv: None,
             ad_grad: Arc::new(Mutex::new(None)),
             ad_axis: -1,
-        });
+        }) { Ok(node) => node, Err(error) => return error };
         let mut grad_value = Value::tensor(Arc::new(result_tensor));
         grad_value.derivation = Some(grad_deriv);
         *out = grad_value;
@@ -3462,7 +3768,7 @@ impl<'a> Vm<'a> {
                     let target = pair_items.items[1].clone();
                     drop(pair_items);
 
-                    let leaf = self.record_derivation(
+                    let leaf = self.record_derivation_payload(
                         DerivationKind::Operation,
                         "input",
                         &[],
@@ -3476,7 +3782,8 @@ impl<'a> Vm<'a> {
                     let Some(mut leaf) = leaf else {
                         return Err(LanaError::Oom);
                     };
-                    Arc::get_mut(&mut leaf).unwrap().ad_a = Some(params.clone());
+                    leaf.ad_a = Some(params.clone());
+                let leaf = self.managed_payload(leaf)?;
 
                     let mut params_with_deriv = Value::tensor(params.clone());
                     params_with_deriv.derivation = Some(leaf.clone());
@@ -3653,7 +3960,7 @@ impl<'a> Vm<'a> {
         data_copy.reactive = None;
         data_copy.claim = None;
         data_copy.planned_effect = None;
-        let result = Arc::new(TrainingResult {
+        let result = self.managed_payload(TrainingResult {
             params,
             steps: Arc::new(Mutex::new(steps)),
             model_function: model_fn,
@@ -3661,7 +3968,7 @@ impl<'a> Vm<'a> {
             optimizer: optimizer.clone(),
             data: data_copy,
             batch_size: batch,
-        });
+        })?;
         let mut result_value = Value::training_result(result);
         if data_is_reactive {
             // Wire the training result into the reactive DAG: a TRAIN node whose
@@ -3690,6 +3997,7 @@ impl<'a> Vm<'a> {
                 history: Vec::new(),
                 is_training_data: false,
             }));
+            self.track_cycle(crate::heap::CycleWeak::Reactive(Arc::downgrade(&node)))?;
             result_value.reactive = Some(node);
         }
         *out = result_value;
@@ -3854,7 +4162,7 @@ impl<'a> Vm<'a> {
                 let target = pair_items.items[1].clone();
                 drop(pair_items);
 
-                let leaf = self.record_derivation(
+                let leaf = self.record_derivation_payload(
                     DerivationKind::Operation,
                     "input",
                     &[],
@@ -3868,7 +4176,8 @@ impl<'a> Vm<'a> {
                 let Some(mut leaf) = leaf else {
                     return Err(LanaError::Oom);
                 };
-                Arc::get_mut(&mut leaf).unwrap().ad_a = Some(params.clone());
+                leaf.ad_a = Some(params.clone());
+                let leaf = self.managed_payload(leaf)?;
 
                 let mut params_with_deriv = Value::tensor(params.clone());
                 params_with_deriv.derivation = Some(leaf.clone());
@@ -4030,7 +4339,7 @@ impl<'a> Vm<'a> {
             params_deriv = Some(step_deriv);
         }
 
-        *out = Value::training_result(Arc::new(TrainingResult {
+        *out = Value::training_result(self.managed_payload(TrainingResult {
             params,
             steps: Arc::new(Mutex::new(steps)),
             model_function: prior.model_function,
@@ -4038,7 +4347,7 @@ impl<'a> Vm<'a> {
             optimizer: prior.optimizer.clone(),
             data: prior.data.clone(),
             batch_size: prior.batch_size,
-        }));
+        })?);
         Ok(())
     }
 
@@ -4334,7 +4643,7 @@ impl<'a> Vm<'a> {
                 let target = pair_items.items[1].clone();
                 drop(pair_items);
 
-                let leaf = self.record_derivation(
+                let leaf = self.record_derivation_payload(
                     DerivationKind::Operation,
                     "input",
                     &[],
@@ -4348,7 +4657,8 @@ impl<'a> Vm<'a> {
                 let Some(mut leaf) = leaf else {
                     return Err(LanaError::Oom);
                 };
-                Arc::get_mut(&mut leaf).unwrap().ad_a = Some(params.clone());
+                leaf.ad_a = Some(params.clone());
+                let leaf = self.managed_payload(leaf)?;
 
                 let mut params_with_deriv = Value::tensor(params.clone());
                 params_with_deriv.derivation = Some(leaf.clone());
@@ -4527,7 +4837,7 @@ impl<'a> Vm<'a> {
             params_deriv = Some(step_deriv);
         }
 
-        let mut result_value = Value::training_result(Arc::new(TrainingResult {
+        let mut result_value = Value::training_result(self.managed_payload(TrainingResult {
             params,
             steps: Arc::new(Mutex::new(steps)),
             model_function: prior.model_function,
@@ -4535,7 +4845,7 @@ impl<'a> Vm<'a> {
             optimizer: prior.optimizer.clone(),
             data: prior.data.clone(),
             batch_size: prior.batch_size,
-        }));
+        })?);
 
         // Record the resumption point as a run-level derivation.
         let resume_inputs = [run];
@@ -5184,9 +5494,6 @@ impl<'a> Vm<'a> {
             return Err(LanaError::Capability);
         }
 
-        if self.alloc_bytes(std::mem::size_of::<Posterior>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
 
         let posterior = if &*algorithm.name == "mcmc" {
             self.infer_mcmc(
@@ -5217,7 +5524,7 @@ impl<'a> Vm<'a> {
             return Err(LanaError::InvalidParameters);
         };
 
-        *out = Value::posterior(Arc::new(posterior));
+        *out = Value::posterior(self.managed_payload(posterior)?);
         Ok(())
     }
 
@@ -5233,8 +5540,89 @@ impl<'a> Vm<'a> {
 
     /// Dispatch one instruction, mirroring the `switch` in `lana_vm_run`.
     fn execute(&mut self, ins: &Instruction) -> LanaError {
+        // Scratch capacity is charged to the heap; retain tracing headroom.
+        let allocated = self.allocated_bytes();
+        let pressure = allocated > self.memory_limit.saturating_sub(self.memory_limit / 4);
+        let object_pressure = allocated > self.memory_limit / 2;
+        let class_collection_due = !self.class_objects.is_empty()
+            && (self.class_allocations_since_gc >= self.class_objects.len().saturating_sub(self.class_allocations_since_gc).max(64)
+                || (object_pressure && (self.class_allocations_since_gc > 0 || ins.opcode == OpCode::ObjectNew)));
+        let active_collection = self.host_roots.collection_major();
+        let containers_due = self.heap.cycles_due(pressure);
+        let severe_container_pressure = containers_due && ins.opcode == OpCode::ArrayNew;
+        if self.constructions.is_empty()
+            && (active_collection.is_some() || containers_due || class_collection_due) {
+            let major = active_collection.unwrap_or_else(|| class_collection_due || self.heap.major_collection_due(pressure));
+            let severe_object_pressure = object_pressure && ins.opcode == OpCode::ObjectNew;
+            let mut collected = if severe_object_pressure || severe_container_pressure { self.collect_classes() }
+                else { self.collect_safepoint_slice(major).map(|_| ()) };
+            if collected == Err(LanaError::Oom) && !major {
+                collected = self.collect_classes();
+            }
+            match collected {
+                // Scratch admission can fail while the next mutator allocation
+                // still fits. Leave the graph intact and let that allocation decide.
+                // Failed admission did not perform a major collection, so do
+                // not advance the major-generation pressure baseline.
+                Err(LanaError::Oom) => self.heap.defer_cycles(),
+                Err(error) => return error,
+                Ok(()) => {},
+            }
+        }
+        // Check the whole v6 feature set before effects, including debugger entry.
+        if self.chunk.version == 6 {
+            if let Err(error) = self.prepare_object_values() { return error; }
+            let entry = self.object_function_entries.partition_point(|(entry, _)| *entry <= self.ip.saturating_sub(1));
+            let owner = self.object_function_entries[entry.saturating_sub(1)].1;
+            if owner != self.current_frame().object_method
+                || self.object_methods.get(&self.current_frame().function).copied() != self.current_frame().object_method {
+                return LanaError::UnsupportedOperation;
+            }
+            // Retain effect promises across indirect callbacks and ordinary helper frames.
+            for frame in &self.frames {
+                if let Some((owner, member)) = frame.object_method {
+                    let descriptor = &self.object_descriptors.as_ref().unwrap()[&owner];
+                    let method = descriptor.methods.get(member as usize);
+                    let allowed = method.map_or(0, |m| m.effect_mask);
+                    let effect = match object_effects::instruction_effect(ins) {
+                        Ok(effect) => effect,
+                        Err(error) => return error,
+                    };
+                    if effect & !allowed != 0 || (method.is_none_or(|m| m.is_init)
+                        && effect != 0 && !matches!(ins.opcode, OpCode::ObjectNew | OpCode::OoSet)) {
+                        return LanaError::UnsupportedOperation;
+                    }
+                }
+            }
+        }
         use OpCode::*;
+        if self.pure_callback_depth > 0 {
+            if self.evaluation_callback_depth > 0 && ins.opcode == HostCall &&
+                (ins.b == LANA_HOST_ARRAY_PUSH ||
+                    (LANA_HOST_DATASET..=LANA_HOST_DATASET_EXPLAIN).contains(&ins.b)) {
+                return LanaError::UnsupportedOperation;
+            }
+            let allowed = matches!(ins.opcode, Nop | LoadConst | Move | GetField | GetIndex
+                | Binary | Unary | Compare | Jump | JumpIfTrue | JumpIfFalse
+                | ArrayNew | ArrayGet | Call | Return | LoadFunction | AdtBuild
+                | AdtCase | AdtGet | ValueNew | OoGet | OoCall | OoStaticCall)
+                || (ins.opcode == HostCall && matches!(ins.b,
+                    LANA_HOST_ARRAY_LENGTH | LANA_HOST_INDEX_GET
+                    | LANA_HOST_MAP_NEW | LANA_HOST_MAP_GET | LANA_HOST_MAP_HAS
+                    | LANA_HOST_MAP_KEYS | LANA_HOST_TYPE_OF | LANA_HOST_FLOOR
+                    | LANA_HOST_INFORMATION_SNAPSHOT))
+                || (ins.opcode == HostCall && ins.b == LANA_HOST_ARRAY_PUSH && self.dataset_work_remaining.is_none())
+                || (ins.opcode == HostCall && matches!(ins.b,
+                    LANA_HOST_RULES_LEARN | LANA_HOST_RULES_PREDICT
+                    | LANA_HOST_TREES_FIT | LANA_HOST_TREES_PREDICT | LANA_HOST_TREES_EXPLAIN))
+                    || (ins.opcode == HostCall && (LANA_HOST_DATASET..=LANA_HOST_DATASET_EXPLAIN).contains(&ins.b));
+            if !allowed { return LanaError::UnsupportedOperation; }
+        }
         match ins.opcode {
+            ValueNew | OoGet => self.execute_object_value(ins),
+            OoAsInterface => self.execute_interface_conversion(ins),
+            ObjectNew | OoSet => self.execute_class_instruction(ins),
+            OoCall | OoStaticCall => self.execute_object_method(ins),
             Nop => LanaError::Ok,
             LoadConst => {
                 let value = Value::from(&self.chunk.constants[ins.imm as usize]);
@@ -5615,13 +6003,13 @@ impl<'a> Vm<'a> {
             }
             ArrayNew => {
                 let count = ins.c as usize;
-                let mut items = match self.allocate_array_items(count) {
-                    Ok(items) => items,
-                    Err(error) => return error,
+                let build = |vm: &mut Self| -> Result<Value, LanaError> {
+                    let mut items = vm.allocate_array_items(count)?;
+                    items.extend((0..count).map(|i| vm.current_frame().registers[ins.b as usize + i].clone()))?;
+                    Ok(Value::array(Arc::new(Mutex::new(Array::from_buffer(items)?))))
                 };
-                if let Err(error) = items.extend((0..count).map(|i| self.current_frame().registers[ins.b as usize + i].clone())) { return error; }
-                let array = Arc::new(Mutex::new(Array { items }));
-                self.current_frame_mut().registers[ins.a as usize] = Value::array(array);
+                let value = match self.allocate_with_collection(build) { Ok(value) => value, Err(error) => return error };
+                self.current_frame_mut().registers[ins.a as usize] = value;
                 LanaError::Ok
             }
             ArrayGet | ArraySet => {
@@ -5644,7 +6032,7 @@ impl<'a> Vm<'a> {
                     ValueKind::Array(array) => array.clone(),
                     _ => unreachable!("checked above"),
                 };
-                let mut array = array.lock().unwrap();
+                let array = array.lock().unwrap();
                 if index >= array.items.len() {
                     return LanaError::Limit;
                 }
@@ -5654,6 +6042,13 @@ impl<'a> Vm<'a> {
                     self.current_frame_mut().registers[ins.c as usize] = value;
                 } else {
                     let value = self.current_frame().registers[ins.c as usize].clone();
+                    if array.frozen { return LanaError::UnsupportedOperation; }
+                    drop(array);
+                    if let Err(error) = self.prepare_container_write(&array_value, &value) { return error; }
+                    let ValueKind::Array(array) = &array_value.kind else { unreachable!() };
+                    let mut array = array.lock().unwrap();
+                    if index >= array.items.len() { return LanaError::Limit; }
+                    if array.frozen { return LanaError::UnsupportedOperation; }
                     array.items[index] = value;
                 }
                 LanaError::Ok
@@ -5666,22 +6061,27 @@ impl<'a> Vm<'a> {
                 if self.frames.len() >= LANA_MAX_CALL_FRAMES as usize {
                     return LanaError::Limit;
                 }
-                let args: Vec<Value> = (0..ins.imm as usize)
-                    .map(|i| self.current_frame().registers[ins.c as usize + i].clone())
-                    .collect();
-                let histories: Vec<History> = (0..ins.imm as usize)
-                    .map(|i| self.current_frame().histories[ins.c as usize + i].clone())
-                    .collect();
-                let mut callee = Frame::new(self.max_registers[ins.b as usize]);
+                let entry = function.entry as usize;
+                if !self.constructing.is_empty() {
+                    for index in 0..ins.imm as usize {
+                        let value = self.current_frame().registers[ins.c as usize + index].clone();
+                        if let Err(error) = self.check_complete_objects(&value) { return error; }
+                    }
+                }
+                let mut callee = if self.chunk.version == 6 {
+                    match Frame::charged(self.max_registers[ins.b as usize], &self.heap) {
+                        Ok(frame) => frame, Err(error) => return error,
+                    }
+                } else { Frame::new(self.max_registers[ins.b as usize]) };
                 callee.return_ip = self.ip;
                 callee.return_register = ins.a;
                 callee.function = ins.b;
-                for (index, arg) in args.into_iter().enumerate() {
-                    callee.registers[index] = arg;
-                    callee.histories[index] = histories[index].clone();
+                for index in 0..ins.imm as usize {
+                    callee.registers[index] = self.current_frame().registers[ins.c as usize + index].clone();
+                    callee.histories[index] = self.current_frame().histories[ins.c as usize + index].clone();
                 }
                 self.frames.push(callee);
-                self.ip = function.entry as usize;
+                self.ip = entry;
                 LanaError::Ok
             }
             Lazy => {
@@ -5746,8 +6146,9 @@ impl<'a> Vm<'a> {
                     registers,
                     exhausted: false,
                 };
-                self.current_frame_mut().registers[ins.a as usize] =
-                    Value::generator(Arc::new(Mutex::new(generator)));
+                let generator = Arc::new(Mutex::new(generator));
+                if let Err(error) = self.track_cycle(crate::heap::CycleWeak::Generator(Arc::downgrade(&generator))) { return error; }
+                self.current_frame_mut().registers[ins.a as usize] = Value::generator(generator);
                 LanaError::Ok
             }
             Yield => {
@@ -5758,6 +6159,7 @@ impl<'a> Vm<'a> {
                     return LanaError::Type;
                 };
                 {
+                    self.heap.mutate_cycle(Arc::as_ptr(&generator) as usize);
                     let mut generator = generator.lock().unwrap();
                     generator.ip = self.ip;
                     for index in 1..generator.registers.len() {
@@ -5838,8 +6240,9 @@ impl<'a> Vm<'a> {
                     ready: true,
                     queued: false,
                 };
-                self.current_frame_mut().registers[ins.a as usize] =
-                    Value::future(Arc::new(Mutex::new(future)));
+                let future = Arc::new(Mutex::new(future));
+                if let Err(error) = self.track_cycle(crate::heap::CycleWeak::Future(Arc::downgrade(&future))) { return error; }
+                self.current_frame_mut().registers[ins.a as usize] = Value::future(future);
                 LanaError::Ok
             }
             Await => {
@@ -5862,6 +6265,7 @@ impl<'a> Vm<'a> {
                 };
                 let current = current.clone();
                 {
+                    self.heap.mutate_cycle(Arc::as_ptr(&current) as usize);
                     let mut current = current.lock().unwrap();
                     // Re-execute this AWAIT on resume so the result lands in
                     // `dest` once the awaited future completes.
@@ -5983,12 +6387,18 @@ impl<'a> Vm<'a> {
             }
             Return => {
                 let returned = self.current_frame().registers[ins.a as usize].clone();
+                if let Err(error) = self.check_object_return(&returned) { return error; }
+                if self.constructions.last().is_some_and(|construction| construction.caller_depth + 1 == self.frames.len()) {
+                    self.frames.pop();
+                    return self.resume_construction(Some(returned)).err().unwrap_or(LanaError::Ok);
+                }
                 if self.current_frame().is_async {
                     let future_value = self.current_frame().registers[0].clone();
                     let ValueKind::Future(future) = future_value.kind else {
                         return LanaError::Type;
                     };
                     {
+                        self.heap.mutate_cycle(Arc::as_ptr(&future) as usize);
                         let mut future = future.lock().unwrap();
                         future.exhausted = true;
                         future.ready = false;
@@ -6006,6 +6416,7 @@ impl<'a> Vm<'a> {
                     let ValueKind::Generator(generator) = gen_value.kind else {
                         return LanaError::Type;
                     };
+                    self.heap.mutate_cycle(Arc::as_ptr(&generator) as usize);
                     generator.lock().unwrap().exhausted = true;
                     if self.frames.len() == 1 {
                         return LanaError::Type;
@@ -6156,7 +6567,7 @@ impl<'a> Vm<'a> {
                 let fields: Vec<Value> = (0..count)
                     .map(|i| self.current_frame().registers[ins.b as usize + i].clone())
                     .collect();
-                let adt = Arc::new(Adt { variant, fields });
+                let adt = match self.managed_payload(Adt { variant, fields }) { Ok(payload) => payload, Err(error) => return error };
                 self.current_frame_mut().registers[ins.a as usize] = Value::adt(adt);
                 LanaError::Ok
             }
@@ -6704,7 +7115,11 @@ impl<'a> Vm<'a> {
             }
             HostCall => {
                 let host_id = ins.b;
-                let accepts_unresolved = matches!(
+                let core_measure = matches!(host_id, LANA_HOST_CORE_ENTROPY
+                    | LANA_HOST_CORE_CONDITIONAL_ENTROPY | LANA_HOST_CORE_MUTUAL_INFORMATION
+                    | LANA_HOST_CORE_BROJA
+                    | LANA_HOST_CORE_FORGET_WEIGHTS | LANA_HOST_CORE_ASSIGN_WEIGHTS);
+                let accepts_unresolved = (LANA_HOST_DATASET..=LANA_HOST_DATASET_EXPLAIN).contains(&host_id) || matches!(
                     host_id,
                     LANA_HOST_MAP_NEW
                         | LANA_HOST_MAP_HAS
@@ -6726,6 +7141,7 @@ impl<'a> Vm<'a> {
                         | LANA_HOST_SHARED_INFORMATION
                         | LANA_HOST_SHARED_OBSERVE
                         | LANA_HOST_INFORMATION_INSPECT
+                        | LANA_HOST_INFORMATION_SNAPSHOT
                 );
                 let materialize = matches!(
                     host_id,
@@ -6734,12 +7150,13 @@ impl<'a> Vm<'a> {
                         | LANA_HOST_CSV_WRITE
                         | LANA_HOST_ASSERT
                 );
-                if self.active_path_count > 1 {
+                if self.active_path_count > 1 && host_id != LANA_HOST_INFORMATION_SNAPSHOT {
                     return LanaError::UnsupportedOperation;
                 }
                 let argc = ins.imm as usize;
                 for argument in 0..argc {
-                    if !accepts_unresolved {
+                    if !accepts_unresolved && !(host_id == LANA_HOST_DATASET_APPLY && argument == 3)
+                        && !((core_measure || host_id == LANA_HOST_CORE_NETWORK) && argument == 0) {
                         if let Err(error) = self.check_resolved(&self.current_frame().registers[ins.c as usize + argument]) { return error; }
                     }
                 }
@@ -6788,6 +7205,10 @@ impl<'a> Vm<'a> {
                         Ok(()) => LanaError::Ok,
                         Err(error) => error,
                     }
+                } else if host_id == LANA_HOST_CORE_KERNEL {
+                    self.core_kernel(&arguments, ins.a, &mut out)
+                } else if host_id == LANA_HOST_EVALUATION_WALK_FORWARD {
+                    self.evaluation_walk_forward(&arguments, ins.a, &mut out)
                 } else {
                     self.execute_host_call(host_id, &arguments, &mut out)
                 };
@@ -6859,7 +7280,17 @@ impl<'a> Vm<'a> {
     }
 
     fn allocate_array_items(&mut self, count: usize) -> Result<crate::heap::Buffer<Value>, LanaError> {
-        Ok(Array::new(&self.heap, count)?.items)
+        crate::heap::Buffer::new(&self.heap, count, std::mem::size_of::<Array>())
+    }
+
+    fn allocate_with_collection<T>(&mut self, mut build: impl FnMut(&mut Self) -> Result<T, LanaError>) -> Result<T, LanaError> {
+        match build(self) {
+            Err(LanaError::Oom) if self.constructions.is_empty() => {
+                self.collect_classes()?;
+                build(self)
+            }
+            result => result,
+        }
     }
 
     fn string_value(&self, text: &str) -> Result<Value, LanaError> {
@@ -6890,19 +7321,13 @@ impl<'a> Vm<'a> {
         if !state::state_valid(&state.state) {
             return Err(LanaError::InvalidState);
         }
-        if self.alloc_bytes(std::mem::size_of::<StateDist>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        Ok(Arc::new(StateDist {
+        self.managed_payload(StateDist {
             kind: StateDistKind::Dirac(state.clone()),
-        }))
+        })
     }
 
     /// Build an append node, mirroring `lana_vm_state_dist_append`.
     fn state_dist_append(&mut self, left: &Value, right: &Value) -> Result<Arc<StateDist>, LanaError> {
-        if self.alloc_bytes(std::mem::size_of::<StateDist>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
         let left_operand = state_dist::distribution_from_value(left)?;
         let right_operand = state_dist::distribution_from_value(right)?;
         let mut has_cached_parameters = false;
@@ -6924,7 +7349,7 @@ impl<'a> Vm<'a> {
             }
             has_cached_parameters = true;
         }
-        Ok(Arc::new(StateDist {
+        self.managed_payload(StateDist {
             kind: StateDistKind::Append {
                 left: left_operand,
                 right: right_operand,
@@ -6934,7 +7359,7 @@ impl<'a> Vm<'a> {
                 m_im,
                 sigma,
             },
-        }))
+        })
     }
 
     /// Build a transform node, mirroring `lana_vm_state_dist_transform`.
@@ -6950,12 +7375,9 @@ impl<'a> Vm<'a> {
         if !specification.distribution_liftable {
             return Err(LanaError::UnsupportedOperation);
         }
-        if self.alloc_bytes(std::mem::size_of::<StateDist>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        Ok(Arc::new(StateDist {
+        self.managed_payload(StateDist {
             kind: StateDistKind::Transform { child, transform_id },
-        }))
+        })
     }
 
     /// Build an attenuate node, mirroring `lana_vm_state_dist_attenuate`.
@@ -6967,12 +7389,9 @@ impl<'a> Vm<'a> {
         if !factor.is_finite() || factor < 0.0 || factor > 1.0 {
             return Err(LanaError::InvalidParameters);
         }
-        if self.alloc_bytes(std::mem::size_of::<StateDist>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
-        Ok(Arc::new(StateDist {
+        self.managed_payload(StateDist {
             kind: StateDistKind::Attenuate { child, factor },
-        }))
+        })
     }
 
     /// Build a relationship-aware append node, mirroring
@@ -6991,9 +7410,6 @@ impl<'a> Vm<'a> {
         }
         if !matches!(left.kind, ValueKind::State(_)) || !matches!(right.kind, ValueKind::State(_)) {
             return Err(LanaError::Type);
-        }
-        if self.alloc_bytes(std::mem::size_of::<StateDist>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
         }
         let left_operand = state_dist::distribution_from_value(left)?;
         let right_operand = state_dist::distribution_from_value(right)?;
@@ -7014,7 +7430,7 @@ impl<'a> Vm<'a> {
         if error != LanaError::Ok {
             return Err(error);
         }
-        Ok(Arc::new(StateDist {
+        self.managed_payload(StateDist {
             kind: StateDistKind::Append {
                 left: left_operand,
                 right: right_operand,
@@ -7024,7 +7440,7 @@ impl<'a> Vm<'a> {
                 m_im,
                 sigma,
             },
-        }))
+        })
     }
 
     /// Consume one unit of the sampling budget, mirroring
@@ -7578,19 +7994,250 @@ impl<'a> Vm<'a> {
         self.validate_result("valid", "none")
     }
 
-    /// Deep-clone a value, mirroring `clone_value` in `vm/c/vm.c`. Mutable
-    /// containers (arrays, maps) are copied with a memo so shared substructure
-    /// is preserved; immutable payloads are shared via `Arc`. Tasks cannot be
-    /// cloned (`Type`), matching the C11.
+    /// Import validated historical evidence with a fresh VM-local identity.
+    pub fn import_derivation(&mut self, mut node: Derivation) -> Result<Arc<Derivation>, LanaError> {
+        self.charge_bounded_work(1)?;
+        let mut memo = DeepCloneMemo::default();
+        node.operation = self.clone_string(&node.operation, &mut memo)?;
+        node.label = self.clone_string(&node.label, &mut memo)?;
+        node.function = self.clone_string(&node.function, &mut memo)?;
+        node.details = self.clone_string(&node.details, &mut memo)?;
+        node.reason = self.clone_string(&node.reason, &mut memo)?;
+        self.derivation_sequence += 1;
+        node.task_lineage = self.lineage;
+        node.local_sequence = self.derivation_sequence;
+        self.managed_payload(node)
+    }
+
+    /// Capture current Information without resolution or a live dependency.
+    /// Copy and freeze containers; reject effectful or executable payloads.
+    pub fn information_snapshot(&mut self, source: &Value) -> Result<Value, LanaError> {
+        self.deep_clone_value(source, &mut DeepCloneMemo { freeze: true, ..DeepCloneMemo::default() })
+    }
+
+    /// Copy a host-owned snapshot into this heap, preserving aliases and cycles.
+    /// Live Information becomes a snapshot at this ownership boundary.
+    pub fn import_value(&mut self, source: &Value) -> Result<Value, LanaError> {
+        let checkpoint = self.class_objects.len();
+        let result = self.deep_clone_value(source, &mut DeepCloneMemo { transfer: true, ..DeepCloneMemo::default() });
+        if result.is_err() { self.class_objects.truncate(checkpoint); }
+        result
+    }
+
     fn deep_clone_value(&mut self, value: &Value, memo: &mut DeepCloneMemo) -> Result<Value, LanaError> {
+        if memo.transfer && value.reactive.is_some() && !memo.freeze {
+            let mut capture = DeepCloneMemo { freeze: true, transfer: true, depth: memo.depth,
+                classes: std::mem::take(&mut memo.classes),
+                derivations: std::mem::take(&mut memo.derivations),
+                distributions: std::mem::take(&mut memo.distributions),
+                strings: std::mem::take(&mut memo.strings), ..DeepCloneMemo::default() };
+            let result = self.deep_clone_value(value, &mut capture);
+            memo.classes = capture.classes;
+            memo.derivations = capture.derivations;
+            memo.distributions = capture.distributions;
+            memo.strings = capture.strings;
+            return result;
+        }
+        if memo.transfer {
+            if memo.depth >= 64 { return Err(LanaError::Limit); }
+            self.charge_bounded_work(1)?;
+            memo.depth += 1;
+        }
+        let result = self.deep_clone_value_checked(value, memo);
+        if memo.transfer { memo.depth -= 1; }
+        result
+    }
+
+    fn deep_clone_value_checked(&mut self, value: &Value, memo: &mut DeepCloneMemo) -> Result<Value, LanaError> {
+        if !memo.freeze { return self.deep_clone_value_inner(value, memo); }
+        if memo.depth >= 64 { return Err(LanaError::Limit); }
+        self.charge_bounded_work(1)?;
+        if value.claim.is_some() || value.planned_effect.is_some() { return Err(LanaError::UnsupportedValue); }
+        let (mut current, captured_revision) = if let Some(reactive) = &value.reactive {
+            let reactive = reactive.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
+            (reactive.current.clone().unwrap_or_else(|| value.clone()), Some(reactive.revision))
+        } else { (value.clone(), None) };
+        if !matches!(current.kind, ValueKind::Null | ValueKind::Number(_) | ValueKind::Bool(_)
+            | ValueKind::String(_) | ValueKind::State(_) | ValueKind::StateDist(_) | ValueKind::Tensor(_)
+            | ValueKind::Array(_) | ValueKind::Map(_) | ValueKind::Possibility(_)
+            | ValueKind::Joint(_) | ValueKind::PathSet(_) | ValueKind::Adt(_) | ValueKind::ObjectValue(_)) && !(memo.transfer && matches!(current.kind, ValueKind::ClassObject(_))) {
+            return Err(LanaError::UnsupportedValue);
+        }
+        current.reactive = None;
+        memo.depth += 1;
+        let mut result = self.deep_clone_value_inner(&current, memo);
+        memo.depth -= 1;
+        if memo.depth == 0 || value.reactive.is_some() {
+            if let Ok(captured) = &mut result {
+                let prior = current.derivation.as_ref().or(value.derivation.as_ref());
+                let revision = captured_revision.or_else(|| prior.map(|node| node.revision)).unwrap_or(0);
+                let mut original_input = Value::null();
+                let mut current_input = Value::null();
+                if memo.transfer {
+                    original_input.derivation = value.derivation.as_ref()
+                        .map(|node| self.deep_clone_derivation(node, memo)).transpose()?;
+                    current_input.derivation = captured.derivation.clone();
+                }
+                let inputs = if memo.transfer { [&original_input, &current_input] } else { [value, &current] };
+                let mut derivation = self.record_derivation_payload(DerivationKind::Operation, "snapshot",
+                    &inputs, "", 0,
+                    prior.map_or(DerivationExactness::Exact, |node| node.exactness), "immutable_capture",
+                    prior.map_or(DerivationOutcome::Success, |node| node.outcome), "none").ok_or(LanaError::Oom)?;
+                derivation.revision = revision;
+                let derivation = self.managed_payload(derivation)?;
+                captured.derivation = Some(derivation);
+            }
+        }
+        result
+    }
+
+    fn deep_clone_state(&self, state: &StateValue, memo: &mut DeepCloneMemo) -> Result<StateValue, LanaError> {
+        let mut copy = state.clone();
+        if memo.transfer {
+            copy.indexes.source = state.indexes.source.as_ref().map(|source| self.clone_string(source, memo)).transpose()?;
+        }
+        Ok(copy)
+    }
+
+    fn deep_clone_value_inner(&mut self, value: &Value, memo: &mut DeepCloneMemo) -> Result<Value, LanaError> {
         let mut cloned = Value {
             kind: ValueKind::Null,
-            derivation: value.derivation.clone(),
+            derivation: if memo.transfer { value.derivation.as_ref().map(|node| self.deep_clone_derivation(node, memo)).transpose()? } else { value.derivation.clone() },
             reactive: value.reactive.clone(),
             claim: value.claim.clone(),
             planned_effect: value.planned_effect.clone(),
         };
+        if memo.transfer {
+            if let Some(claim) = &value.claim {
+                let key = Arc::as_ptr(claim) as usize;
+                cloned.claim = Some(if let Some(copy) = memo.claims.get(&key) { copy.clone() }
+                    else {
+                        let claimed = self.deep_clone_value(&claim.value, memo)?;
+                        let copy = self.managed_payload(Claim {
+                            value: claimed, proposition: claim.proposition.clone(), exactness: claim.exactness,
+                            tolerance: claim.tolerance, source_valid: claim.source_valid,
+                        })?;
+                        memo.claims.insert(key, copy.clone());
+                        copy
+                    });
+            }
+            if let Some(effect) = &value.planned_effect {
+                let key = Arc::as_ptr(effect) as usize;
+                cloned.planned_effect = Some(if let Some(copy) = memo.effects.get(&key) { copy.clone() }
+                    else {
+                        let payload = self.deep_clone_value(&effect.payload, memo)?;
+                        let source = effect.state.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
+                        let copy = Arc::new(PlannedEffect {
+                            id: effect.id, kind: effect.kind.clone(), payload,
+                            state: Mutex::new(PlannedEffectState {
+                                receipts: vec![EffectReceipt { revision: 0, result: Value::null() }; source.receipts.len()],
+                                execution_count: source.execution_count,
+                            }),
+                        });
+                        self.track_cycle(crate::heap::CycleWeak::Effect(Arc::downgrade(&copy)))?;
+                        memo.effects.insert(key, copy.clone());
+                        for (index, receipt) in source.receipts.iter().enumerate() {
+                            let result = self.deep_clone_value(&receipt.result, memo)?;
+                            copy.state.lock().unwrap().receipts[index] = EffectReceipt { revision: receipt.revision, result };
+                        }
+                        copy
+                    });
+            }
+        }
         match &value.kind {
+            ValueKind::ClassObject(object) => { cloned.kind = ValueKind::ClassObject(self.clone_class_reference(object, memo)?); }
+            ValueKind::Generator(generator) if memo.transfer => {
+                let key = Arc::as_ptr(generator) as usize;
+                if let Some(copy) = memo.generators.get(&key) {
+                    cloned.kind = ValueKind::Generator(copy.clone());
+                    return Ok(cloned);
+                }
+                let source = generator.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
+                let copy = Arc::new(Mutex::new(Generator {
+                    function: source.function, ip: source.ip,
+                    registers: vec![Value::null(); source.registers.len()], exhausted: source.exhausted,
+                }));
+                self.track_cycle(crate::heap::CycleWeak::Generator(Arc::downgrade(&copy)))?;
+                memo.generators.insert(key, copy.clone());
+                for (index, register) in source.registers.iter().enumerate() {
+                    if index == 0 && !source.exhausted { continue; }
+                    let register = self.deep_clone_value(register, memo)?;
+                    copy.lock().unwrap().registers[index] = register;
+                }
+                cloned.kind = ValueKind::Generator(copy);
+            }
+            ValueKind::Future(future) if memo.transfer => {
+                let key = Arc::as_ptr(future) as usize;
+                if let Some(copy) = memo.futures.get(&key) {
+                    cloned.kind = ValueKind::Future(copy.clone());
+                    return Ok(cloned);
+                }
+                let source = future.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
+                let copy = Arc::new(Mutex::new(Future {
+                    function: source.function, ip: source.ip,
+                    registers: vec![Value::null(); source.registers.len()], exhausted: source.exhausted,
+                    ready: source.ready, queued: false,
+                }));
+                self.track_cycle(crate::heap::CycleWeak::Future(Arc::downgrade(&copy)))?;
+                memo.futures.insert(key, copy.clone());
+                for (index, register) in source.registers.iter().enumerate() {
+                    if index == 0 && !source.exhausted && source.function != u32::MAX { continue; }
+                    let register = self.deep_clone_value(register, memo)?;
+                    copy.lock().unwrap().registers[index] = register;
+                }
+                if source.function == u32::MAX && !source.exhausted {
+                    let registers = copy.lock().unwrap().registers.clone();
+                    for register in registers.iter().skip(1) {
+                        if let ValueKind::Future(dependency) = &register.kind {
+                            self.awaiters.entry(Arc::as_ptr(dependency) as usize).or_default().push(copy.clone());
+                            self.enqueue_future(dependency.clone());
+                        }
+                    }
+                } else if !source.ready && !source.exhausted {
+                    let instruction = self.chunk.code.get(source.ip).ok_or(LanaError::Task)?;
+                    if instruction.opcode != OpCode::Await { return Err(LanaError::Task); }
+                    let dependency = copy.lock().unwrap().registers.get(instruction.a as usize)
+                        .cloned().ok_or(LanaError::Task)?;
+                    let ValueKind::Future(dependency) = dependency.kind else { return Err(LanaError::Task); };
+                    if dependency.lock().unwrap().exhausted { copy.lock().unwrap().ready = true; }
+                    else {
+                        self.awaiters.entry(Arc::as_ptr(&dependency) as usize).or_default().push(copy.clone());
+                        self.enqueue_future(dependency);
+                    }
+                }
+                cloned.kind = ValueKind::Future(copy);
+            }
+            ValueKind::TrainingResult(training) if memo.transfer => {
+                let ValueKind::Array(steps) = self.deep_clone_value(&Value::array(training.steps.clone()), memo)?.kind else { return Err(LanaError::Type); };
+                let data = self.deep_clone_value(&training.data, memo)?;
+                cloned.kind = ValueKind::TrainingResult(self.managed_payload(TrainingResult {
+                    params: training.params.clone(), steps, model_function: training.model_function,
+                    loss_function: training.loss_function, optimizer: training.optimizer.clone(),
+                    data, batch_size: training.batch_size,
+                })?);
+            }
+            ValueKind::Posterior(posterior) if memo.transfer => {
+                let ValueKind::Array(steps) = self.deep_clone_value(&Value::array(posterior.steps.clone()), memo)?.kind else { return Err(LanaError::Type); };
+                cloned.kind = ValueKind::Posterior(self.managed_payload(Posterior {
+                    mean: posterior.mean.clone(), variance: posterior.variance.clone(), samples: posterior.samples.clone(),
+                    steps, seed: posterior.seed,
+                })?);
+            }
+            ValueKind::Dataset(dataset) if memo.transfer => {
+                let mut copy = (**dataset).clone();
+                copy.source = self.deep_clone_value(&dataset.source, memo)?;
+                copy.columns = self.deep_clone_value(&dataset.columns, memo)?;
+                copy.key = self.deep_clone_value(&dataset.key, memo)?;
+                copy.limit = self.deep_clone_value(&dataset.limit, memo)?;
+                copy.other = self.deep_clone_value(&dataset.other, memo)?;
+                copy.aggregate = self.deep_clone_value(&dataset.aggregate, memo)?;
+                cloned.kind = ValueKind::Dataset(self.managed_payload(copy)?);
+            }
+            ValueKind::ObjectValue(object) if memo.transfer || memo.freeze => {
+                let mut fields = Vec::with_capacity(object.fields.len());
+                for field in &object.fields { fields.push(self.deep_clone_value(field, memo)?); }
+                cloned.kind = ValueKind::ObjectValue(self.managed_payload(ObjectValue { descriptor: object.descriptor.clone(), fields })?);
+            }
             ValueKind::Null
             | ValueKind::Number(_)
             | ValueKind::Bool(_)
@@ -7611,25 +8258,29 @@ impl<'a> Vm<'a> {
             | ValueKind::TrainingResult(_)
             | ValueKind::InferenceAlgorithm(_)
             | ValueKind::Posterior(_)
-            | ValueKind::Dataset(_) => {
+            | ValueKind::Dataset(_)
+            | ValueKind::ObjectValue(_) => {
                 cloned.kind = value.kind.clone();
             }
             ValueKind::String(string) => cloned.kind = ValueKind::String(self.clone_string(string, memo)?),
-            ValueKind::State(state) => cloned.kind = ValueKind::State(state.clone()),
+            ValueKind::State(state) => cloned.kind = ValueKind::State(self.deep_clone_state(state, memo)?),
             ValueKind::Array(array) => {
                 let key = Arc::as_ptr(array) as usize;
                 if let Some(existing) = memo.arrays.get(&key) {
                     cloned.kind = ValueKind::Array(existing.clone());
                 } else {
-                    let count = array.lock().unwrap().items.len();
+                    let array = array.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
+                    let count = array.items.len();
                     let items = self.allocate_array_items(count)?;
-                    let copy = Arc::new(Mutex::new(Array { items }));
+                    let copy = Arc::new(Mutex::new(Array::from_buffer(items)?));
+                    let _ = Value::array(copy.clone());
                     memo.arrays.insert(key, copy.clone());
                     for index in 0..count {
-                        let item = array.lock().unwrap().items[index].clone();
+                        let item = array.items[index].clone();
                         let item = self.deep_clone_value(&item, memo)?;
                         copy.lock().unwrap().items.push(item)?;
                     }
+                    copy.lock().unwrap().frozen = memo.freeze || array.frozen;
                     cloned.kind = ValueKind::Array(copy);
                 }
             }
@@ -7638,20 +8289,26 @@ impl<'a> Vm<'a> {
                 if let Some(existing) = memo.maps.get(&key) {
                     cloned.kind = ValueKind::Map(existing.clone());
                 } else {
-                    let copy = Arc::new(Mutex::new(Map::new(&self.heap, map.lock().unwrap().entries.len())?));
+                    let map = map.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
+                    let copy = Arc::new(Mutex::new(Map::new(&self.heap, map.entries.len())?));
+                    let _ = Value::map(copy.clone());
                     memo.maps.insert(key, copy.clone());
-                    let count = map.lock().unwrap().entries.len();
+                    let count = map.entries.len();
                     for index in 0..count {
-                        let entry = map.lock().unwrap().entries[index].clone();
+                        let entry = map.entries[index].clone();
                         let value = self.deep_clone_value(&entry.value, memo)?;
-                        copy.lock().unwrap().set(entry.key.clone(), value, true)?;
+                        let key = if memo.transfer { self.clone_string(&entry.key, memo)? } else { entry.key.clone() };
+                        copy.lock().unwrap().set(key, value, true)?;
                     }
+                    copy.lock().unwrap().frozen = memo.freeze || map.frozen;
                     cloned.kind = ValueKind::Map(copy);
                 }
             }
             ValueKind::Joint(joint) => {
-                if self.alloc_bytes(std::mem::size_of::<JointState>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
+                let key = Arc::as_ptr(joint) as usize;
+                if let Some(existing) = memo.joints.get(&key) {
+                    cloned.kind = ValueKind::Joint(existing.clone());
+                    return Ok(cloned);
                 }
                 let mut values = Vec::with_capacity(joint.values.len());
                 for value in &joint.values {
@@ -7665,37 +8322,66 @@ impl<'a> Vm<'a> {
                     }
                     rows.push(JointRow { values: row_values, weight: row.weight });
                 }
-                cloned.kind = ValueKind::Joint(Arc::new(JointState {
+                let copy = self.managed_payload(JointState {
                     names: joint.names.clone(),
                     domains: joint.domains.clone(),
                     values,
                     rows,
                     kind: joint.kind,
                     capabilities: joint.capabilities,
-                }));
+                })?;
+                memo.joints.insert(key, copy.clone());
+                cloned.kind = ValueKind::Joint(copy);
+            }
+            ValueKind::Kernel(kernel) => {
+                let cells = kernel.rows.iter().try_fold(0usize, |total, row|
+                    total.checked_add(row.len())).ok_or(LanaError::Oom)?;
+                let _bytes = cells.checked_mul(std::mem::size_of::<f64>())
+                    .and_then(|bytes| bytes.checked_add(std::mem::size_of::<FiniteKernel>()))
+                    .ok_or(LanaError::Oom)?;
+                let mut input_domains = Vec::with_capacity(kernel.input_domains.len());
+                for domain in &kernel.input_domains {
+                    let mut copied = Vec::with_capacity(domain.len());
+                    for value in domain { copied.push(self.deep_clone_value(value, memo)?); }
+                    input_domains.push(copied);
+                }
+                let mut output_domain = Vec::with_capacity(kernel.output_domain.len());
+                for value in &kernel.output_domain { output_domain.push(self.deep_clone_value(value, memo)?); }
+                cloned.kind = ValueKind::Kernel(self.managed_payload(FiniteKernel {
+                    input_domains, output_domain, rows: kernel.rows.clone(),
+                })?);
+            }
+            ValueKind::Network(network) => {
+                let ValueKind::Joint(root) = self.deep_clone_value(&Value::joint(network.root.clone()), memo)?.kind
+                    else { unreachable!() };
+                let mut nodes = Vec::with_capacity(network.nodes.len());
+                for node in &network.nodes {
+                    let ValueKind::Kernel(kernel) = self.deep_clone_value(&Value::kernel(node.kernel.clone()), memo)?.kind
+                        else { unreachable!() };
+                    nodes.push(NetworkNode { name: node.name.clone(), parents: node.parents.clone(), kernel });
+                }
+                cloned.kind = ValueKind::Network(self.managed_payload(FiniteNetwork {
+                    root, nodes, order: network.order.clone(),
+                })?);
+            }
+            ValueKind::StateDist(distribution) if memo.freeze && !memo.transfer => {
+                cloned.kind = ValueKind::StateDist(distribution.clone());
             }
             ValueKind::StateDist(distribution) => {
-                let kind = self.deep_clone_state_dist_kind(&distribution.kind, memo)?;
-                cloned.kind = ValueKind::StateDist(Arc::new(StateDist { kind }));
+                cloned.kind = ValueKind::StateDist(self.deep_clone_state_dist(distribution, memo)?);
             }
             ValueKind::Possibility(possibility) => {
-                if self.alloc_bytes(std::mem::size_of::<Possibility>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
-                }
                 let mut values = Vec::with_capacity(possibility.values.len());
                 for value in &possibility.values {
                     values.push(self.deep_clone_value(value, memo)?);
                 }
-                cloned.kind = ValueKind::Possibility(Arc::new(Possibility {
+                cloned.kind = ValueKind::Possibility(self.managed_payload(Possibility {
                     values,
                     weights: possibility.weights.clone(),
                     dependency_id: possibility.dependency_id,
-                }));
+                })?);
             }
             ValueKind::PathSet(paths) => {
-                if self.alloc_bytes(std::mem::size_of::<PathSet>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
-                }
                 let mut alternatives = Vec::with_capacity(paths.alternatives.len());
                 for alternative in &paths.alternatives {
                     alternatives.push(PathAlternative {
@@ -7704,31 +8390,30 @@ impl<'a> Vm<'a> {
                         result: self.deep_clone_value(&alternative.result, memo)?,
                     });
                 }
-                cloned.kind = ValueKind::PathSet(Arc::new(PathSet {
+                cloned.kind = ValueKind::PathSet(self.managed_payload(PathSet {
                     alternatives,
                     dependency_id: paths.dependency_id,
-                }));
+                })?);
             }
             ValueKind::Adt(adt) => {
-                if self.alloc_bytes(std::mem::size_of::<Adt>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
-                }
                 let mut fields = Vec::with_capacity(adt.fields.len());
                 for field in &adt.fields {
                     fields.push(self.deep_clone_value(field, memo)?);
                 }
-                cloned.kind = ValueKind::Adt(Arc::new(Adt { variant: adt.variant, fields }));
+                cloned.kind = ValueKind::Adt(self.managed_payload(Adt { variant: adt.variant, fields })?);
             }
             ValueKind::Set(set) => {
                 let key = Arc::as_ptr(set) as usize;
                 if let Some(existing) = memo.sets.get(&key) {
                     cloned.kind = ValueKind::Set(existing.clone());
                 } else {
-                    let count = set.lock().unwrap().items.len();
+                    let set = set.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
+                    let count = set.items.len();
                     let copy = Arc::new(Mutex::new(Set::new(&self.heap, count)?));
+                    let _ = Value::set(copy.clone());
                     memo.sets.insert(key, copy.clone());
                     for index in 0..count {
-                        let item = set.lock().unwrap().items[index].clone();
+                        let item = set.items[index].clone();
                         let item = self.deep_clone_value(&item, memo)?;
                         copy.lock().unwrap().items.push(item)?;
                     }
@@ -7740,19 +8425,117 @@ impl<'a> Vm<'a> {
         Ok(cloned)
     }
 
-    /// Deep-clone a state-dist node kind, mirroring `clone_state_dist_node`.
-    /// State dists are immutable trees, so no memo is needed.
+    fn deep_clone_derivation(
+        &mut self,
+        source: &Arc<Derivation>,
+        memo: &mut DeepCloneMemo,
+    ) -> Result<Arc<Derivation>, LanaError> {
+        let root = Arc::as_ptr(source) as usize;
+        if let Some(copy) = memo.derivations.get(&root) { return Ok(copy.clone()); }
+        let mut pending = crate::heap::Buffer::new(&self.heap, 0, 0)?;
+        pending.push((source.clone(), false))?;
+        while let Some((node, expanded)) = pending.pop() {
+            self.charge_bounded_work(1)?;
+            let key = Arc::as_ptr(&node) as usize;
+            if memo.derivations.contains_key(&key) { continue; }
+            if !expanded {
+                pending.push((node.clone(), true))?;
+                for child in node.inputs.iter().chain(node.ad_a_deriv.iter()).chain(node.ad_b_deriv.iter()) {
+                    pending.push((child.clone(), false))?;
+                }
+            } else {
+                self.deep_clone_derivation_node(&node, memo)?;
+            }
+        }
+        Ok(memo.derivations.get(&root).unwrap().clone())
+    }
+
+    /// Preserve provenance identity while isolating task-local graph and gradients.
+    fn deep_clone_derivation_node(
+        &mut self,
+        source: &Arc<Derivation>,
+        memo: &mut DeepCloneMemo,
+    ) -> Result<Arc<Derivation>, LanaError> {
+        let key = Arc::as_ptr(source) as usize;
+        if let Some(copy) = memo.derivations.get(&key) { return Ok(copy.clone()); }
+        if memo.depth >= 64 { return Err(LanaError::Limit); }
+        self.charge_bounded_work(1)?;
+        memo.depth += 1;
+        let result = (|| {
+            let mut copy = (**source).clone();
+            copy.inputs = Vec::new();
+            copy.inputs.try_reserve_exact(source.inputs.len()).map_err(|_| LanaError::Oom)?;
+            for input in &source.inputs { copy.inputs.push(self.deep_clone_derivation(input, memo)?); }
+            copy.ad_a_deriv = source.ad_a_deriv.as_ref().map(|node| self.deep_clone_derivation(node, memo)).transpose()?;
+            copy.ad_b_deriv = source.ad_b_deriv.as_ref().map(|node| self.deep_clone_derivation(node, memo)).transpose()?;
+            copy.operation = self.clone_string(&source.operation, memo)?;
+            copy.label = self.clone_string(&source.label, memo)?;
+            copy.function = self.clone_string(&source.function, memo)?;
+            copy.details = self.clone_string(&source.details, memo)?;
+            copy.reason = self.clone_string(&source.reason, memo)?;
+            let gradient = source.ad_grad.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
+            let gradient = gradient.as_ref().map(|tensor| {
+                self.charge_bounded_work(tensor.data.len() as u64)?;
+                let mut copy = tensor.try_clone(&self.heap)?;
+                copy.data = Arc::new(crate::heap::Buffer::from_slice(&self.heap, &tensor.data)?);
+                copy.metal_buffer = None;
+                copy.metal_charge = None;
+                Ok::<_, LanaError>(copy)
+            }).transpose()?;
+            copy.ad_grad = Arc::new(Mutex::new(gradient));
+            self.managed_payload(copy)
+        })();
+        memo.depth -= 1;
+        let copy = result?;
+        memo.derivations.try_reserve(1).map_err(|_| LanaError::Oom)?;
+        memo.derivations.insert(key, copy.clone());
+        Ok(copy)
+    }
+
+    /// Copy a distribution DAG with charged work and a heap-owned traversal stack.
+    fn deep_clone_state_dist(
+        &mut self,
+        distribution: &Arc<StateDist>,
+        memo: &mut DeepCloneMemo,
+    ) -> Result<Arc<StateDist>, LanaError> {
+        let root = Arc::as_ptr(distribution) as usize;
+        if let Some(copy) = memo.distributions.get(&root) { return Ok(copy.clone()); }
+        let mut pending = crate::heap::Buffer::new(&self.heap, 0, 0)?;
+        pending.push((distribution.clone(), false))?;
+        while let Some((node, expanded)) = pending.pop() {
+            self.charge_bounded_work(1)?;
+            let key = Arc::as_ptr(&node) as usize;
+            if memo.distributions.contains_key(&key) { continue; }
+            if !expanded {
+                pending.push((node.clone(), true))?;
+                match &node.kind {
+                    StateDistKind::Append { left, right, .. } => {
+                        for operand in [right, left] {
+                            if let DistOperand::Node(child) = operand { pending.push((child.clone(), false))?; }
+                        }
+                    }
+                    StateDistKind::Transform { child, .. } | StateDistKind::Attenuate { child, .. } => pending.push((child.clone(), false))?,
+                    StateDistKind::Dirac(_) => {},
+                }
+                continue;
+            }
+            let kind = self.deep_clone_state_dist_kind(&node.kind, memo)?;
+            let copy = self.managed_payload(StateDist { kind })?;
+            memo.distributions.try_reserve(1).map_err(|_| LanaError::Oom)?;
+            memo.distributions.insert(key, copy);
+        }
+        Ok(memo.distributions.get(&root).unwrap().clone())
+    }
+
+    /// Clone edges through the shared distribution memo.
     fn deep_clone_state_dist_kind(
         &mut self,
         kind: &StateDistKind,
         memo: &mut DeepCloneMemo,
     ) -> Result<StateDistKind, LanaError> {
         match kind {
-            StateDistKind::Dirac(state) => Ok(StateDistKind::Dirac(state.clone())),
+            StateDistKind::Dirac(state) => Ok(StateDistKind::Dirac(self.deep_clone_state(state, memo)?)),
             StateDistKind::Append { left, right, has_cached_parameters, p, m_re, m_im, sigma } => {
-                if self.alloc_bytes(std::mem::size_of::<StateDist>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
-                }
                 Ok(StateDistKind::Append {
                     left: self.deep_clone_dist_operand(left, memo)?,
                     right: self.deep_clone_dist_operand(right, memo)?,
@@ -7764,24 +8547,14 @@ impl<'a> Vm<'a> {
                 })
             }
             StateDistKind::Transform { child, transform_id } => {
-                if self.alloc_bytes(std::mem::size_of::<StateDist>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
-                }
                 Ok(StateDistKind::Transform {
-                    child: Arc::new(StateDist {
-                        kind: self.deep_clone_state_dist_kind(&child.kind, memo)?,
-                    }),
+                    child: self.deep_clone_state_dist(child, memo)?,
                     transform_id: *transform_id,
                 })
             }
             StateDistKind::Attenuate { child, factor } => {
-                if self.alloc_bytes(std::mem::size_of::<StateDist>()) != LanaError::Ok {
-                    return Err(LanaError::Oom);
-                }
                 Ok(StateDistKind::Attenuate {
-                    child: Arc::new(StateDist {
-                        kind: self.deep_clone_state_dist_kind(&child.kind, memo)?,
-                    }),
+                    child: self.deep_clone_state_dist(child, memo)?,
                     factor: *factor,
                 })
             }
@@ -7795,10 +8568,8 @@ impl<'a> Vm<'a> {
         memo: &mut DeepCloneMemo,
     ) -> Result<DistOperand, LanaError> {
         match operand {
-            DistOperand::Inline(state) => Ok(DistOperand::Inline(state.clone())),
-            DistOperand::Node(node) => Ok(DistOperand::Node(Arc::new(StateDist {
-                kind: self.deep_clone_state_dist_kind(&node.kind, memo)?,
-            }))),
+            DistOperand::Inline(state) => Ok(DistOperand::Inline(self.deep_clone_state(state, memo)?)),
+            DistOperand::Node(node) => Ok(DistOperand::Node(self.deep_clone_state_dist(node, memo)?)),
         }
     }
 
@@ -7916,7 +8687,7 @@ impl<'a> Vm<'a> {
                 {
                     return LanaError::UnsupportedOperation;
                 }
-                let paths = Arc::new(PathSet {
+                let paths = match self.managed_payload(PathSet {
                     alternatives: vec![
                         PathAlternative {
                             guard: true,
@@ -7930,7 +8701,7 @@ impl<'a> Vm<'a> {
                         },
                     ],
                     dependency_id,
-                });
+                }) { Ok(payload) => payload, Err(error) => return error };
                 let inputs = [true_value, &false_value];
                 let derivation = self.record_derivation(
                     DerivationKind::Path,
@@ -7956,6 +8727,1257 @@ impl<'a> Vm<'a> {
         LanaError::Ok
     }
 
+    fn core_measure_names(joint: &JointState, value: &Value) -> Result<Vec<usize>, LanaError> {
+        let ValueKind::Array(array) = &value.kind else { return Err(LanaError::Type); };
+        let array = array.lock().unwrap();
+        if array.items.is_empty() || array.items.len() > joint.names.len() { return Err(LanaError::InvalidParameters); }
+        let mut positions = Vec::with_capacity(array.items.len());
+        for item in array.items.iter() {
+            let ValueKind::String(name) = &item.kind else { return Err(LanaError::Type); };
+            let position = joint_find(joint, name).ok_or(LanaError::InvalidParameters)?;
+            if positions.contains(&position) { return Err(LanaError::InvalidParameters); }
+            positions.push(position);
+        }
+        positions.sort_unstable();
+        Ok(positions)
+    }
+
+    fn core_entropy(&mut self, joint: &JointState, positions: &[usize]) -> Result<f64, LanaError> {
+        let mut entropy = 0.0;
+        if joint.rows.is_empty() {
+            if joint.values.len() != joint.names.len() { return Err(LanaError::UnsupportedOperation); }
+            for &position in positions {
+                let marginal = &joint.values[position];
+                match &marginal.kind {
+                    ValueKind::Possibility(possibility) => {
+                        let weights = possibility.weights.as_ref().ok_or(LanaError::UnsupportedOperation)?;
+                        let count = weights.len();
+                        let work = count.checked_mul(count).ok_or(LanaError::Limit)? as u64;
+                        self.charge_core_work(work)?;
+                        let bytes = count.checked_mul(std::mem::size_of::<(usize, f64)>()).ok_or(LanaError::Oom)?;
+                        let _reservation = self.heap.reserve(bytes)?;
+                        let mut groups: Vec<(usize, f64)> = Vec::new();
+                        groups.try_reserve(count).map_err(|_| LanaError::Oom)?;
+                        for (index, &weight) in weights.iter().enumerate() {
+                            if !weight.is_finite() || weight < 0.0 { return Err(LanaError::InvalidDistribution); }
+                            if let Some(group) = groups.iter_mut().find(|(prior, _)|
+                                joint_value_equal(&possibility.values[*prior], &possibility.values[index])) {
+                                group.1 += weight;
+                            } else { groups.push((index, weight)); }
+                        }
+                        if (groups.iter().map(|(_, weight)| weight).sum::<f64>() - 1.0).abs() > 1e-12 {
+                            return Err(LanaError::InvalidDistribution);
+                        }
+                        entropy += groups.iter().filter(|(_, weight)| *weight > 0.0)
+                            .map(|(_, weight)| -weight * weight.log2()).sum::<f64>();
+                    }
+                    _ if joint_value_is_definite(marginal) => {}
+                    _ => return Err(LanaError::UnsupportedOperation),
+                }
+            }
+        } else {
+            let count = joint.rows.len();
+            let work = count.checked_mul(count).and_then(|n| n.checked_mul(positions.len()))
+                .ok_or(LanaError::Limit)? as u64;
+            self.charge_core_work(work)?;
+            let bytes = count.checked_mul(std::mem::size_of::<(usize, f64)>()).ok_or(LanaError::Oom)?;
+            let _reservation = self.heap.reserve(bytes)?;
+            let mut groups: Vec<(usize, f64)> = Vec::new();
+            groups.try_reserve(count).map_err(|_| LanaError::Oom)?;
+            for (index, row) in joint.rows.iter().enumerate() {
+                if !row.weight.is_finite() || row.weight < 0.0 { return Err(LanaError::InvalidDistribution); }
+                if let Some(group) = groups.iter_mut().find(|(prior, _)| positions.iter().all(|&position|
+                    joint_value_equal(&joint.rows[*prior].values[position], &row.values[position]))) {
+                    group.1 += row.weight;
+                } else { groups.push((index, row.weight)); }
+            }
+            if (groups.iter().map(|(_, weight)| weight).sum::<f64>() - 1.0).abs() > 1e-12 {
+                return Err(LanaError::InvalidDistribution);
+            }
+            entropy = groups.iter().filter(|(_, weight)| *weight > 0.0)
+                .map(|(_, weight)| -weight * weight.log2()).sum();
+        }
+        if !entropy.is_finite() || entropy < -1e-10 { return Err(LanaError::InvalidDistribution); }
+        Ok(entropy.max(0.0))
+    }
+
+    fn charge_core_work(&mut self, work: u64) -> Result<(), LanaError> {
+        if work > self.instruction_limit.saturating_sub(self.instruction_count) { return Err(LanaError::Limit); }
+        self.instruction_count += work;
+        Ok(())
+    }
+
+    fn kernel_domain(&mut self, source: &Value) -> Result<Vec<Value>, LanaError> {
+        let ValueKind::Array(array) = &source.kind else { return Err(LanaError::Type); };
+        let items = array.lock().unwrap();
+        let count = items.items.len();
+        if count == 0 { return Err(LanaError::InvalidParameters); }
+        self.charge_core_work(count.checked_mul(count).ok_or(LanaError::Limit)? as u64)?;
+        let mut domain = Vec::new();
+        domain.try_reserve(count).map_err(|_| LanaError::Oom)?;
+        let mut memo = DeepCloneMemo::default();
+        for (index, candidate) in items.items.iter().enumerate() {
+            if !matches!(candidate.kind, ValueKind::Null | ValueKind::Number(_) | ValueKind::Bool(_)
+                | ValueKind::String(_) | ValueKind::Sample(_) | ValueKind::State(_)
+                | ValueKind::Array(_) | ValueKind::Map(_)) { return Err(LanaError::Type); }
+            self.check_resolved(candidate)?;
+            if items.items[..index].iter().any(|prior| joint_value_equal(prior, candidate)) {
+                return Err(LanaError::InvalidParameters);
+            }
+            domain.push(self.deep_clone_value(candidate, &mut memo)?);
+        }
+        Ok(domain)
+    }
+
+    fn core_kernel(&mut self, arguments: &[Value], scratch: u32, out: &mut Value) -> LanaError {
+        if arguments.len() != 3 { return LanaError::Type; }
+        let ValueKind::Function(function) = arguments[2].kind else { return LanaError::Type; };
+        let saved = self.current_frame().registers[scratch as usize].clone();
+        let result = (|| -> Result<Value, LanaError> {
+            let ValueKind::Array(inputs) = &arguments[0].kind else { return Err(LanaError::Type); };
+            let sources: Vec<Value> = inputs.lock().unwrap().items.iter().cloned().collect();
+            if sources.is_empty() { return Err(LanaError::InvalidParameters); }
+            let mut input_domains = Vec::new();
+            input_domains.try_reserve(sources.len()).map_err(|_| LanaError::Oom)?;
+            let mut row_count = 1usize;
+            for source in &sources {
+                let domain = self.kernel_domain(source)?;
+                row_count = row_count.checked_mul(domain.len()).ok_or(LanaError::Limit)?;
+                input_domains.push(domain);
+            }
+            let output_domain = self.kernel_domain(&arguments[1])?;
+            let width = output_domain.len();
+            let cells = row_count.checked_mul(width).ok_or(LanaError::Limit)?;
+            self.charge_core_work(u64::try_from(cells).map_err(|_| LanaError::Limit)?)?;
+            let _bytes = cells.checked_mul(std::mem::size_of::<f64>())
+                .and_then(|n| n.checked_add(row_count.checked_mul(std::mem::size_of::<Vec<f64>>())?))
+                .and_then(|n| n.checked_add(std::mem::size_of::<FiniteKernel>()))
+                .ok_or(LanaError::Oom)?;
+            let mut rows = Vec::new();
+            rows.try_reserve(row_count).map_err(|_| LanaError::Oom)?;
+            for index in 0..row_count {
+                if self.cancelled.load(Ordering::Relaxed) { return Err(LanaError::Cancelled); }
+                let mut offset = index;
+                let mut tuple = Vec::new();
+                tuple.try_reserve(input_domains.len()).map_err(|_| LanaError::Oom)?;
+                for domain in input_domains.iter().rev() {
+                    let mut memo = DeepCloneMemo::default();
+                    tuple.push(self.deep_clone_value(&domain[offset % domain.len()], &mut memo)?);
+                    offset /= domain.len();
+                }
+                tuple.reverse();
+                let tuple = self.array_value(tuple)?;
+                let mut returned = Value::null();
+                self.pure_callback_depth += 1;
+                let error = self.run_function(function, &tuple, scratch, &mut returned);
+                self.pure_callback_depth -= 1;
+                if error != LanaError::Ok { return Err(error); }
+                let ValueKind::Array(pairs) = &returned.kind else { return Err(LanaError::Type); };
+                let pairs: Vec<Value> = pairs.lock().unwrap().items.iter().cloned().collect();
+                if pairs.len() != width { return Err(LanaError::InvalidDistribution); }
+                let mut row = Vec::new();
+                row.try_reserve(width).map_err(|_| LanaError::Oom)?;
+                let mut total = 0.0;
+                for (pair, output) in pairs.iter().zip(&output_domain) {
+                    let ValueKind::Array(pair) = &pair.kind else { return Err(LanaError::Type); };
+                    let pair = pair.lock().unwrap();
+                    if pair.items.len() != 2 { return Err(LanaError::Type); }
+                    if !joint_value_equal(&pair.items[0], output) { return Err(LanaError::InvalidDistribution); }
+                    let ValueKind::Number(weight) = pair.items[1].kind else { return Err(LanaError::Type); };
+                    if !weight.is_finite() || weight < 0.0 { return Err(LanaError::InvalidDistribution); }
+                    total += weight;
+                    row.push(weight);
+                }
+                if !total.is_finite() || (total - 1.0).abs() > 1e-12 { return Err(LanaError::InvalidDistribution); }
+                for weight in &mut row { *weight /= total; }
+                rows.push(row);
+            }
+            Ok(Value::kernel(self.managed_payload(FiniteKernel { input_domains, output_domain, rows })?))
+        })();
+        self.current_frame_mut().registers[scratch as usize] = saved;
+        match result { Ok(value) => { *out = value; LanaError::Ok }, Err(error) => error }
+    }
+
+    fn core_kernel_identity(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        if arguments.len() != 1 { return LanaError::Type; }
+        let domain = match self.kernel_domain(&arguments[0]) { Ok(domain) => domain, Err(error) => return error };
+        let count = domain.len();
+        let cells = match count.checked_mul(count) { Some(cells) => cells, None => return LanaError::Limit };
+        if let Err(error) = self.charge_core_work(cells as u64) { return error; }
+        let _bytes = match cells.checked_mul(std::mem::size_of::<f64>()) { Some(bytes) => bytes, None => return LanaError::Oom };
+        let mut rows = Vec::new();
+        if rows.try_reserve(count).is_err() { return LanaError::Oom; }
+        for index in 0..count {
+            let mut row = Vec::new();
+            if row.try_reserve(count).is_err() { return LanaError::Oom; }
+            row.resize(count, 0.0);
+            row[index] = 1.0;
+            rows.push(row);
+        }
+        let output_domain = domain.clone();
+        *out = Value::kernel(match self.managed_payload(FiniteKernel { input_domains: vec![domain], output_domain, rows }) { Ok(payload) => payload, Err(error) => return error });
+        LanaError::Ok
+    }
+
+    fn core_kernel_compose(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        if arguments.len() != 2 { return LanaError::Type; }
+        let ValueKind::Kernel(later) = &arguments[0].kind else { return LanaError::Type; };
+        let ValueKind::Kernel(earlier) = &arguments[1].kind else { return LanaError::Type; };
+        if later.input_domains.len() != 1 { return LanaError::InvalidParameters; }
+        let middle = earlier.output_domain.len();
+        if middle == 0 || middle != later.input_domains[0].len() ||
+            !earlier.output_domain.iter().zip(&later.input_domains[0]).all(|(a, b)| joint_value_equal(a, b)) {
+            return LanaError::InvalidParameters;
+        }
+        let left = earlier.rows.len();
+        let right = later.output_domain.len();
+        if right == 0 || later.rows.len() != middle ||
+            earlier.rows.iter().any(|row| row.len() != middle) ||
+            later.rows.iter().any(|row| row.len() != right) {
+            return LanaError::InvalidParameters;
+        }
+        let Some(cells) = left.checked_mul(right) else { return LanaError::Limit; };
+        let Some(work) = cells.checked_mul(middle) else { return LanaError::Limit; };
+        if let Err(error) = self.charge_core_work(work as u64) { return error; }
+        let Some(_bytes) = cells.checked_mul(std::mem::size_of::<f64>()) else { return LanaError::Oom; };
+        let mut rows = Vec::new();
+        if rows.try_reserve(left).is_err() { return LanaError::Oom; }
+        for input in 0..left {
+            let mut row = Vec::new();
+            if row.try_reserve(right).is_err() { return LanaError::Oom; }
+            for output in 0..right {
+                let mut weight = 0.0;
+                for intermediate in 0..middle {
+                    weight += earlier.rows[input][intermediate] * later.rows[intermediate][output];
+                }
+                if !weight.is_finite() || weight < 0.0 { return LanaError::InvalidDistribution; }
+                row.push(weight);
+            }
+            let total = row.iter().sum::<f64>();
+            if !total.is_finite() || (total - 1.0).abs() > 1e-12 { return LanaError::InvalidDistribution; }
+            for weight in &mut row { *weight /= total; }
+            rows.push(row);
+        }
+        let mut memo = DeepCloneMemo::default();
+        let mut input_domains = Vec::new();
+        for domain in &earlier.input_domains {
+            let mut copied = Vec::new();
+            for candidate in domain {
+                match self.deep_clone_value(candidate, &mut memo) {
+                    Ok(candidate) => copied.push(candidate), Err(error) => return error,
+                }
+            }
+            input_domains.push(copied);
+        }
+        let mut output_domain = Vec::new();
+        for candidate in &later.output_domain {
+            match self.deep_clone_value(candidate, &mut memo) {
+                Ok(candidate) => output_domain.push(candidate), Err(error) => return error,
+            }
+        }
+        *out = Value::kernel(match self.managed_payload(FiniteKernel { input_domains, output_domain, rows }) { Ok(payload) => payload, Err(error) => return error });
+        LanaError::Ok
+    }
+
+    fn network_root_domains(&mut self, root: &JointState) -> Result<Vec<Vec<Value>>, LanaError> {
+        if root.names.is_empty() { return Err(LanaError::InvalidParameters); }
+        let mut domains = vec![Vec::new(); root.names.len()];
+        match root.kind {
+            JointKind::FiniteLaw if !root.rows.is_empty() => {
+                let work = root.rows.len().checked_mul(root.rows.len())
+                    .and_then(|count| count.checked_mul(root.names.len())).ok_or(LanaError::Limit)?;
+                self.charge_core_work(u64::try_from(work).map_err(|_| LanaError::Limit)?)?;
+                let mut total = 0.0;
+                for row in &root.rows {
+                    self.charge_core_work(root.names.len() as u64)?;
+                    if row.values.len() != root.names.len() || !row.weight.is_finite() || row.weight < 0.0 {
+                        return Err(LanaError::InvalidDistribution);
+                    }
+                    total += row.weight;
+                    if row.weight == 0.0 { continue; }
+                    for (domain, value) in domains.iter_mut().zip(&row.values) {
+                        if !joint_value_is_definite(value) { return Err(LanaError::Type); }
+                        if !domain.iter().any(|prior| joint_value_equal(prior, value)) { domain.push(value.clone()); }
+                    }
+                }
+                if !total.is_finite() || (total - 1.0).abs() > 1e-12 { return Err(LanaError::InvalidDistribution); }
+            }
+            JointKind::Independent if root.values.len() == root.names.len() => {
+                for (domain, marginal) in domains.iter_mut().zip(&root.values) {
+                    if let ValueKind::Possibility(possibility) = &marginal.kind {
+                        let weights = possibility.weights.as_ref().ok_or(LanaError::UnsupportedOperation)?;
+                        if weights.len() != possibility.values.len() { return Err(LanaError::InvalidDistribution); }
+                        let work = weights.len().checked_mul(weights.len()).ok_or(LanaError::Limit)?;
+                        self.charge_core_work(u64::try_from(work).map_err(|_| LanaError::Limit)?)?;
+                        let mut total = 0.0;
+                        for (value, weight) in possibility.values.iter().zip(weights) {
+                            self.charge_core_work(1)?;
+                            if !weight.is_finite() || *weight < 0.0 { return Err(LanaError::InvalidDistribution); }
+                            total += weight;
+                            if *weight > 0.0 && !domain.iter().any(|prior| joint_value_equal(prior, value)) {
+                                domain.push(value.clone());
+                            }
+                        }
+                        if !total.is_finite() || (total - 1.0).abs() > 1e-12 { return Err(LanaError::InvalidDistribution); }
+                    } else if joint_value_is_definite(marginal) { domain.push(marginal.clone()); }
+                    else { return Err(LanaError::UnsupportedOperation); }
+                }
+            }
+            _ => return Err(LanaError::UnsupportedOperation),
+        }
+        if domains.iter().any(Vec::is_empty) { return Err(LanaError::InvalidDistribution); }
+        Ok(domains)
+    }
+
+    fn core_network(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        let result = (|| -> Result<Value, LanaError> {
+            if arguments.len() != 2 { return Err(LanaError::Type); }
+            let ValueKind::Joint(root) = &arguments[0].kind else { return Err(LanaError::Type); };
+            let ValueKind::Array(source_nodes) = &arguments[1].kind else { return Err(LanaError::Type); };
+            let node_values: Vec<Value> = source_nodes.lock().unwrap().items.iter().cloned().collect();
+            let mut domains = self.network_root_domains(root)?;
+            let root_count = root.names.len();
+            let mut names = root.names.clone();
+            let mut declarations = Vec::new();
+            declarations.try_reserve(node_values.len()).map_err(|_| LanaError::Oom)?;
+            for record in &node_values {
+                self.charge_core_work(names.len() as u64)?;
+                let ValueKind::Map(record) = &record.kind else { return Err(LanaError::Type); };
+                let record = record.lock().unwrap();
+                let Some(name) = record.get("name") else { return Err(LanaError::InvalidParameters); };
+                let ValueKind::String(name) = &name.kind else { return Err(LanaError::Type); };
+                if name.is_empty() || names.iter().any(|prior| prior == name) { return Err(LanaError::InvalidParameters); }
+                let Some(parents) = record.get("parents") else { return Err(LanaError::InvalidParameters); };
+                let ValueKind::Array(parents) = &parents.kind else { return Err(LanaError::Type); };
+                let parents: Vec<Value> = parents.lock().unwrap().items.iter().cloned().collect();
+                let Some(kernel) = record.get("kernel") else { return Err(LanaError::InvalidParameters); };
+                let ValueKind::Kernel(kernel) = &kernel.kind else { return Err(LanaError::Type); };
+                declarations.push((name.clone(), parents, kernel.clone()));
+                names.push(name.clone());
+                domains.push(kernel.output_domain.clone());
+            }
+            let mut nodes = Vec::new();
+            nodes.try_reserve(declarations.len()).map_err(|_| LanaError::Oom)?;
+            for (name, parent_names, kernel) in declarations {
+                if parent_names.len() != kernel.input_domains.len() { return Err(LanaError::InvalidParameters); }
+                let mut parents = Vec::new();
+                for (index, parent) in parent_names.iter().enumerate() {
+                    self.charge_core_work(names.len() as u64)?;
+                    let ValueKind::String(parent) = &parent.kind else { return Err(LanaError::Type); };
+                    let Some(position) = names.iter().position(|candidate| candidate == parent) else {
+                        return Err(LanaError::InvalidParameters);
+                    };
+                    self.charge_core_work(u64::try_from(domains[position].len()).map_err(|_| LanaError::Limit)?)?;
+                    if parents.contains(&position) || domains[position].len() != kernel.input_domains[index].len()
+                        || !domains[position].iter().zip(&kernel.input_domains[index])
+                            .all(|(left, right)| joint_value_equal(left, right)) {
+                        return Err(LanaError::InvalidParameters);
+                    }
+                    parents.push(position);
+                }
+                nodes.push(NetworkNode { name, parents, kernel });
+            }
+            let mut order = Vec::new();
+            let mut done = vec![false; nodes.len()];
+            while order.len() < nodes.len() {
+                self.charge_core_work(nodes.len() as u64)?;
+                let Some(index) = nodes.iter().enumerate().position(|(index, node)|
+                    !done[index] && node.parents.iter().all(|parent|
+                        *parent < root_count || done[*parent - root_count])) else {
+                    return Err(LanaError::InvalidParameters);
+                };
+                done[index] = true;
+                order.push(index);
+            }
+            let mut memo = DeepCloneMemo::default();
+            let ValueKind::Joint(root) = self.deep_clone_value(&Value::joint(root.clone()), &mut memo)?.kind
+                else { unreachable!() };
+            for node in &mut nodes {
+                let ValueKind::Kernel(kernel) = self.deep_clone_value(&Value::kernel(node.kernel.clone()), &mut memo)?.kind
+                    else { unreachable!() };
+                node.kernel = kernel;
+            }
+            Ok(Value::network(self.managed_payload(FiniteNetwork { root, nodes, order })?))
+        })();
+        match result { Ok(value) => { *out = value; LanaError::Ok }, Err(error) => error }
+    }
+
+    fn core_infer(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        let result = (|| -> Result<Value, LanaError> {
+            if arguments.len() != 3 { return Err(LanaError::Type); }
+            let ValueKind::Network(network) = &arguments[0].kind else { return Err(LanaError::Type); };
+            let ValueKind::Array(query) = &arguments[1].kind else { return Err(LanaError::Type); };
+            let ValueKind::Map(evidence) = &arguments[2].kind else { return Err(LanaError::Type); };
+            let root_count = network.root.names.len();
+            let mut names = network.root.names.clone();
+            names.extend(network.nodes.iter().map(|node| node.name.clone()));
+            let mut positions = Vec::new();
+            for item in query.lock().unwrap().items.iter() {
+                let ValueKind::String(name) = &item.kind else { return Err(LanaError::Type); };
+                let Some(position) = names.iter().position(|candidate| candidate == name) else {
+                    return Err(LanaError::InvalidParameters);
+                };
+                if positions.contains(&position) { return Err(LanaError::InvalidParameters); }
+                positions.push(position);
+            }
+            if positions.is_empty() { return Err(LanaError::InvalidParameters); }
+            let mut domains = self.network_root_domains(&network.root)?;
+            domains.extend(network.nodes.iter().map(|node| node.kernel.output_domain.clone()));
+            let mut conditions = Vec::new();
+            for entry in evidence.lock().unwrap().entries() {
+                let Some(position) = names.iter().position(|candidate| candidate == &entry.key) else {
+                    return Err(LanaError::InvalidParameters);
+                };
+                if !joint_value_is_definite(&entry.value)
+                    || !domains[position].iter().any(|candidate| joint_value_equal(candidate, &entry.value)) {
+                    return Err(LanaError::InvalidParameters);
+                }
+                conditions.push((position, entry.value.clone()));
+            }
+            let mut max_rows = if network.root.kind == JointKind::FiniteLaw {
+                network.root.rows.len()
+            } else { 1 };
+            if network.root.kind == JointKind::Independent {
+                for domain in &domains[..root_count] {
+                    max_rows = max_rows.checked_mul(domain.len()).ok_or(LanaError::Limit)?;
+                }
+            }
+            for node in &network.nodes {
+                max_rows = max_rows.checked_mul(node.kernel.output_domain.len()).ok_or(LanaError::Limit)?;
+            }
+            let bytes = max_rows.checked_mul(names.len().checked_mul(std::mem::size_of::<Value>())
+                .and_then(|n| n.checked_add(std::mem::size_of::<JointRow>())).ok_or(LanaError::Oom)?)
+                .and_then(|n| n.checked_mul(2)).ok_or(LanaError::Oom)?;
+            let reservation = self.heap.reserve(bytes)?;
+            let mut rows = Vec::new();
+            if network.root.kind == JointKind::FiniteLaw {
+                rows.try_reserve(network.root.rows.len()).map_err(|_| LanaError::Oom)?;
+                for root_row in &network.root.rows {
+                    self.charge_core_work(root_count as u64)?;
+                    if root_row.weight <= 0.0 { continue; }
+                    let mut values = vec![Value::null(); names.len()];
+                    values[..root_count].clone_from_slice(&root_row.values);
+                    rows.push(JointRow { values, weight: root_row.weight });
+                }
+            } else {
+                rows.push(JointRow { values: vec![Value::null(); names.len()], weight: 1.0 });
+                for (position, marginal) in network.root.values.iter().enumerate() {
+                    let choices: Vec<(Value, f64)> = if let ValueKind::Possibility(possibility) = &marginal.kind {
+                        possibility.values.iter().cloned().zip(possibility.weights.as_ref().unwrap().iter().copied()).collect()
+                    } else { vec![(marginal.clone(), 1.0)] };
+                    let mut expanded = Vec::new();
+                    for row in &rows {
+                        for (value, weight) in &choices {
+                            self.charge_core_work(1)?;
+                            if *weight == 0.0 { continue; }
+                            let mut next = row.clone();
+                            next.values[position] = value.clone();
+                            next.weight *= weight;
+                            if row.weight > 0.0 && *weight > 0.0 && next.weight == 0.0 {
+                                return Err(LanaError::InvalidDistribution);
+                            }
+                            expanded.push(next);
+                        }
+                    }
+                    rows = expanded;
+                }
+            }
+            for &node_index in &network.order {
+                let node = &network.nodes[node_index];
+                let mut expanded = Vec::new();
+                for row in &rows {
+                    let mut kernel_row = 0usize;
+                    for (parent, domain) in node.parents.iter().zip(&node.kernel.input_domains) {
+                        self.charge_core_work(domain.len() as u64)?;
+                        let Some(index) = domain.iter().position(|candidate|
+                            joint_value_equal(candidate, &row.values[*parent])) else {
+                            return Err(LanaError::InvalidParameters);
+                        };
+                        kernel_row = kernel_row.checked_mul(domain.len()).and_then(|n| n.checked_add(index))
+                            .ok_or(LanaError::Limit)?;
+                    }
+                    let Some(chances) = node.kernel.rows.get(kernel_row) else { return Err(LanaError::InvalidDistribution); };
+                    if chances.len() != node.kernel.output_domain.len() { return Err(LanaError::InvalidDistribution); }
+                    for (value, weight) in node.kernel.output_domain.iter().zip(chances) {
+                        self.charge_core_work(1)?;
+                        if *weight == 0.0 { continue; }
+                        let mut next = row.clone();
+                        next.values[root_count + node_index] = value.clone();
+                        next.weight *= weight;
+                        if !next.weight.is_finite() || next.weight == 0.0 { return Err(LanaError::InvalidDistribution); }
+                        expanded.push(next);
+                    }
+                }
+                rows = expanded;
+            }
+            let mut groups: Vec<JointRow> = Vec::new();
+            let mut mass = 0.0;
+            for row in &rows {
+                self.charge_core_work(conditions.len() as u64)?;
+                if !conditions.iter().all(|(position, value)| joint_value_equal(&row.values[*position], value)) {
+                    continue;
+                }
+                mass += row.weight;
+                let selected: Vec<Value> = positions.iter().map(|position| row.values[*position].clone()).collect();
+                let mut match_index = None;
+                for (index, group) in groups.iter().enumerate() {
+                    self.charge_core_work(positions.len() as u64)?;
+                    if group.values.iter().zip(&selected).all(|(left, right)| joint_value_equal(left, right)) {
+                        match_index = Some(index);
+                        break;
+                    }
+                }
+                if let Some(index) = match_index { groups[index].weight += row.weight; }
+                else { groups.push(JointRow { values: selected, weight: row.weight }); }
+            }
+            if !mass.is_finite() || mass <= 0.0 { return Err(LanaError::InvalidConditioning); }
+            drop(reservation);
+            let output_bytes = groups.len().checked_mul(positions.len().checked_mul(std::mem::size_of::<Value>())
+                .and_then(|n| n.checked_add(std::mem::size_of::<JointRow>())).ok_or(LanaError::Oom)?)
+                .and_then(|n| n.checked_add(std::mem::size_of::<JointState>())).ok_or(LanaError::Oom)?;
+            if self.alloc_bytes(output_bytes) != LanaError::Ok { return Err(LanaError::Oom); }
+            let mut memo = DeepCloneMemo::default();
+            for group in &mut groups {
+                group.weight /= mass;
+                for value in &mut group.values { *value = self.deep_clone_value(value, &mut memo)?; }
+            }
+            let query_names = positions.iter().map(|position| names[*position].clone()).collect();
+            let types = positions.iter().map(|position| domains[*position][0].value_type()).collect();
+            Ok(Value::joint(self.managed_payload(JointState {
+                names: query_names, domains: types, values: Vec::new(), rows: groups,
+                kind: JointKind::FiniteLaw,
+                capabilities: LANA_JOINT_CAN_PROJECT | LANA_JOINT_CAN_CONDITION
+                    | LANA_JOINT_CAN_SAMPLE | LANA_JOINT_CAN_RESOLVE,
+            })?))
+        })();
+        match result { Ok(value) => { *out = value; LanaError::Ok }, Err(error) => error }
+    }
+
+    fn core_information_measure(&mut self, host_id: u32, arguments: &[Value], out: &mut Value) -> LanaError {
+        let expected = if host_id == LANA_HOST_CORE_ENTROPY { 2 } else { 3 };
+        if arguments.len() != expected { return LanaError::Type; }
+        let current = self.reactive_value(&arguments[0]);
+        let ValueKind::Joint(joint) = &current.kind else { return LanaError::Type; };
+        let mut selected = Vec::new();
+        let result = (|| {
+            let left = Self::core_measure_names(joint, &arguments[1])?;
+            selected.push(left.clone());
+            if expected == 2 { return self.core_entropy(joint, &left); }
+            let right = Self::core_measure_names(joint, &arguments[2])?;
+            selected.push(right.clone());
+            let mut union = left.clone();
+            for &position in &right { if !union.contains(&position) { union.push(position); } }
+            union.sort_unstable();
+            let union_entropy = self.core_entropy(joint, &union)?;
+            let value = if host_id == LANA_HOST_CORE_CONDITIONAL_ENTROPY {
+                union_entropy - self.core_entropy(joint, &right)?
+            } else {
+                self.core_entropy(joint, &left)? + self.core_entropy(joint, &right)? - union_entropy
+            };
+            if !value.is_finite() || value < -1e-10 { return Err(LanaError::InvalidDistribution); }
+            Ok(value.max(0.0))
+        })();
+        match result {
+            Ok(value) => {
+                let operation = match host_id {
+                    LANA_HOST_CORE_ENTROPY => "entropy",
+                    LANA_HOST_CORE_CONDITIONAL_ENTROPY => "conditional_entropy",
+                    _ => "mutual_information",
+                };
+                let names = selected.iter().map(|group| group.iter().map(|&position|
+                    joint.names[position].as_ref()).collect::<Vec<_>>().join(","))
+                    .collect::<Vec<_>>().join(";");
+                let revision = arguments[0].reactive.as_ref().map(|reactive| reactive.lock().unwrap().revision)
+                    .or_else(|| arguments[0].derivation.as_ref().map(|node| node.revision))
+                    .unwrap_or(self.revision);
+                let details = format!("names={names}; input_revision={revision}");
+                let Some(mut derivation) = self.record_derivation_payload(
+                    DerivationKind::Operation, operation, &[&arguments[0]], "", 0,
+                    DerivationExactness::Exact, &details, DerivationOutcome::Success, "none",
+                ) else { return LanaError::Oom; };
+                derivation.revision = revision;
+            let derivation = match self.managed_payload(derivation) { Ok(node) => node, Err(error) => return error };
+                *out = Value::number(value);
+                out.derivation = Some(derivation);
+                LanaError::Ok
+            }
+            Err(error) => error,
+        }
+    }
+
+    fn core_broja(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
+        let result = (|| -> Result<Value, LanaError> {
+            if arguments.len() != 4 { return Err(LanaError::Type); }
+            let current = self.reactive_value(&arguments[0]);
+            let ValueKind::Joint(joint) = &current.kind else { return Err(LanaError::Type); };
+            if joint.kind != JointKind::FiniteLaw || joint.rows.is_empty() {
+                return Err(LanaError::UnsupportedOperation);
+            }
+            let mut positions = Vec::new();
+            for argument in &arguments[1..] {
+                let ValueKind::String(name) = &argument.kind else { return Err(LanaError::Type); };
+                let position = joint_find(joint, name).ok_or(LanaError::InvalidParameters)?;
+                if positions.contains(&position) { return Err(LanaError::InvalidParameters); }
+                positions.push(position);
+            }
+            let [target, x, y] = [positions[0], positions[1], positions[2]];
+            let ht = self.core_entropy(joint, &[target])?;
+            let hx = self.core_entropy(joint, &[x])?;
+            let hy = self.core_entropy(joint, &[y])?;
+            let htx = self.core_entropy(joint, &[target, x])?;
+            let hty = self.core_entropy(joint, &[target, y])?;
+            let hxy = self.core_entropy(joint, &[x, y])?;
+            let htxy = self.core_entropy(joint, &[target, x, y])?;
+            let a = (ht + hx - htx).max(0.0);
+            let b = (ht + hy - hty).max(0.0);
+            let c = (ht + hxy - htxy).max(0.0);
+            if !a.is_finite() || !b.is_finite() || !c.is_finite() { return Err(LanaError::InvalidParameters); }
+            let lower = a.max(b);
+            if c < lower - 1e-10 { return Err(LanaError::InvalidParameters); }
+            let mut upper = c;
+            let mut marginal_residual = 0.0_f64;
+            let mut mass = 0.0_f64;
+            let count = joint.rows.len();
+            let work = count.checked_mul(count).and_then(|n| n.checked_mul(3)).ok_or(LanaError::Limit)?;
+            self.charge_core_work(u64::try_from(work).map_err(|_| LanaError::Limit)?)?;
+            let domain_bytes = count.checked_mul(3).and_then(|n| n.checked_mul(std::mem::size_of::<Value>()))
+                .ok_or(LanaError::Oom)?;
+            let _domain_reservation = self.heap.reserve(domain_bytes)?;
+            let mut domains = [Vec::<Value>::new(), Vec::new(), Vec::new()];
+            for domain in &mut domains { domain.try_reserve(count).map_err(|_| LanaError::Oom)?; }
+            for row in &joint.rows {
+                if row.values.len() != joint.names.len() || !row.weight.is_finite() || row.weight < 0.0 {
+                    return Err(LanaError::InvalidDistribution);
+                }
+                mass += row.weight;
+                if row.weight == 0.0 { continue; }
+                for (domain, position) in domains.iter_mut().zip(&positions) {
+                    let value = &row.values[*position];
+                    if !domain.iter().any(|prior| joint_value_equal(prior, value)) { domain.push(value.clone()); }
+                }
+            }
+            let mut mass_residual = (mass - 1.0).abs();
+            if !mass.is_finite() || mass_residual > 1e-12 { return Err(LanaError::InvalidDistribution); }
+            let [nt, nx, ny] = [domains[0].len(), domains[1].len(), domains[2].len()];
+            let tx_cells = nt.checked_mul(nx).ok_or(LanaError::Limit)?;
+            let ty_cells = nt.checked_mul(ny).ok_or(LanaError::Limit)?;
+            let cells = nt.checked_add(nx).and_then(|n| n.checked_add(ny))
+                .and_then(|n| n.checked_add(tx_cells)).and_then(|n| n.checked_add(ty_cells))
+                .ok_or(LanaError::Limit)?;
+            let bytes = cells.checked_mul(std::mem::size_of::<f64>()).ok_or(LanaError::Oom)?;
+            let _reservation = self.heap.reserve(bytes)?;
+            let mut pt = vec![0.0; nt];
+            let mut px = vec![0.0; nx];
+            let mut py = vec![0.0; ny];
+            let mut ptx = vec![0.0; tx_cells];
+            let mut pty = vec![0.0; ty_cells];
+            for row in &joint.rows {
+                self.charge_core_work((nt + nx + ny) as u64)?;
+                if row.weight == 0.0 { continue; }
+                let t = domains[0].iter().position(|value| joint_value_equal(value, &row.values[target])).unwrap();
+                let xv = domains[1].iter().position(|value| joint_value_equal(value, &row.values[x])).unwrap();
+                let yv = domains[2].iter().position(|value| joint_value_equal(value, &row.values[y])).unwrap();
+                pt[t] += row.weight;
+                px[xv] += row.weight;
+                py[yv] += row.weight;
+                ptx[t * nx + xv] += row.weight;
+                pty[t * ny + yv] += row.weight;
+            }
+            // When both source marginals factor exactly, T-independent Q is
+            // feasible and has objective zero; nonnegativity certifies optimality.
+            let mut factorized = mass_residual == 0.0;
+            for t in 0..nt {
+                for xv in 0..nx {
+                    self.charge_core_work(1)?;
+                    let residual = (ptx[t * nx + xv] - pt[t] * px[xv]).abs();
+                    marginal_residual = marginal_residual.max(residual);
+                    if residual != 0.0 { factorized = false; }
+                }
+                for yv in 0..ny {
+                    self.charge_core_work(1)?;
+                    let residual = (pty[t * ny + yv] - pt[t] * py[yv]).abs();
+                    marginal_residual = marginal_residual.max(residual);
+                    if residual != 0.0 { factorized = false; }
+                }
+            }
+            let mut bound = (upper - lower).max(0.0) + 1e-10;
+            if factorized { upper = 0.0; bound = 1e-10; }
+            else {
+                marginal_residual = 0.0; // Original P is the feasible upper candidate.
+                if nx >= 2 && ny >= 2 {
+                    let optimized = if nx == 2 && ny == 2 {
+                        self.broja_binary(&pt, &ptx, &pty)?
+                    } else if ny == 2 {
+                        self.broja_one_binary(&pt, &ptx, nx, &pty)?
+                    } else if nx == 2 {
+                        self.broja_one_binary(&pt, &pty, ny, &ptx)?
+                    } else {
+                        self.broja_general(&pt, &ptx, nx, &pty, ny)?
+                    };
+                    if let Some((candidate, gap, residual, candidate_mass)) = optimized {
+                        if candidate < upper && residual <= 1e-9 && candidate_mass <= 1e-9 {
+                            if candidate < lower - 1e-10 { return Err(LanaError::InvalidParameters); }
+                            upper = candidate;
+                            marginal_residual = residual;
+                            mass_residual = candidate_mass;
+                            bound = gap.min((upper - lower).max(0.0)) + 1e-10;
+                        }
+                    }
+                }
+            }
+            drop((domains, pt, px, py, ptx, pty));
+            drop(_reservation);
+            drop(_domain_reservation);
+            let converged = bound <= 1e-6 && marginal_residual <= 1e-9 && mass_residual <= 1e-9;
+            let revision = arguments[0].reactive.as_ref().map(|reactive| reactive.lock().unwrap().revision)
+                .or_else(|| arguments[0].derivation.as_ref().map(|node| node.revision))
+                .unwrap_or(self.revision);
+            let mut map = Map::new(&self.heap, if converged { 11 } else { 9 })?;
+            map.set(Arc::from("status"), Value::string(Arc::from(if converged { "converged" } else { "unconverged" })), true)?;
+            map.set(Arc::from("error_bound_bits"), Value::number(bound), true)?;
+            map.set(Arc::from("input_revision"), Value::number(revision as f64), true)?;
+            map.set(Arc::from("target"), Value::string(joint.names[target].clone()), true)?;
+            map.set(Arc::from("x"), Value::string(joint.names[x].clone()), true)?;
+            map.set(Arc::from("y"), Value::string(joint.names[y].clone()), true)?;
+            if converged {
+                map.set(Arc::from("shared"), Value::number((a + b - upper).max(0.0)), true)?;
+                map.set(Arc::from("unique_x"), Value::number((upper - b).max(0.0)), true)?;
+                map.set(Arc::from("unique_y"), Value::number((upper - a).max(0.0)), true)?;
+                map.set(Arc::from("synergy"), Value::number((c - upper).max(0.0)), true)?;
+                map.set(Arc::from("total"), Value::number(c), true)?;
+            } else {
+                map.set(Arc::from("reason"), Value::string(Arc::from("objective_gap")), true)?;
+                map.set(Arc::from("marginal_residual"), Value::number(0.0), true)?;
+                map.set(Arc::from("mass_residual"), Value::number(mass_residual), true)?;
+            }
+            let details = format!("target={}; x={}; y={}; input_revision={revision}",
+                joint.names[target], joint.names[x], joint.names[y]);
+            let Some(mut derivation) = self.record_derivation_payload(
+                DerivationKind::Operation, "broja", &[&arguments[0]], "", 0,
+                DerivationExactness::Exact, &details, DerivationOutcome::Success, "none",
+            ) else { return Err(LanaError::Oom); };
+            derivation.revision = revision;
+            let derivation = self.managed_payload(derivation)?;
+            let mut output = Value::map(Arc::new(Mutex::new(map)));
+            output.derivation = Some(derivation);
+            Ok(output)
+        })();
+        match result { Ok(value) => { *out = value; LanaError::Ok }, Err(error) => error }
+    }
+
+    fn broja_binary(
+        &mut self, pt: &[f64], ptx: &[f64], pty: &[f64],
+    ) -> Result<Option<(f64, f64, f64, f64)>, LanaError> {
+        let count = pt.len();
+        let scratch_bytes = count.checked_mul(7).and_then(|n| n.checked_mul(std::mem::size_of::<f64>()))
+            .ok_or(LanaError::Oom)?;
+        let _scratch = self.heap.reserve(scratch_bytes)?;
+        let row = |t: usize, z: f64| {
+            let a = ptx[2 * t];
+            let b = pty[2 * t];
+            [z, a - z, b - z, pt[t] - a - b + z]
+        };
+        let mut lower = Vec::with_capacity(count);
+        let mut upper = Vec::with_capacity(count);
+        let mut coupling = Vec::with_capacity(count);
+        for t in 0..count {
+            let a = ptx[2 * t];
+            let b = pty[2 * t];
+            let lo = (a + b - pt[t]).max(0.0);
+            let hi = a.min(b);
+            if lo > hi + 1e-12 { return Err(LanaError::InvalidDistribution); }
+            lower.push(lo);
+            upper.push(hi.max(lo));
+            coupling.push((lo + hi.max(lo)) / 2.0);
+        }
+        let gradient = |t: usize, candidate: f64, current: &[f64]| -> Option<f64> {
+            let own = row(t, candidate);
+            let mut xy = own;
+            for other in 0..count {
+                if other == t { continue; }
+                let contribution = row(other, current[other]);
+                for cell in 0..4 { xy[cell] += contribution[cell]; }
+            }
+            if own.iter().any(|value| *value <= 0.0) || xy.iter().any(|value| *value <= 0.0) {
+                return None;
+            }
+            let logs = [0, 1, 2, 3].map(|cell| (own[cell] / xy[cell]).log2());
+            Some(logs[0] - logs[1] - logs[2] + logs[3])
+        };
+        let mut gap = f64::INFINITY;
+        for _ in 0..128 {
+            if self.cancelled.load(Ordering::Relaxed) { return Err(LanaError::Cancelled); }
+            for t in 0..count {
+                let width = upper[t] - lower[t];
+                if width <= 0.0 { continue; }
+                let mut lo = lower[t] + width * 1e-14;
+                let mut hi = upper[t] - width * 1e-14;
+                for _ in 0..48 {
+                    self.charge_core_work(u64::try_from(count.checked_mul(4).ok_or(LanaError::Limit)?)
+                        .map_err(|_| LanaError::Limit)?)?;
+                    let mid = (lo + hi) / 2.0;
+                    let Some(slope) = gradient(t, mid, &coupling) else { return Ok(None); };
+                    if slope > 0.0 { hi = mid; } else { lo = mid; }
+                }
+                coupling[t] = (lo + hi) / 2.0;
+            }
+            gap = 0.0;
+            // Convexity of I(T;XY) at fixed P(T) makes this box-linearization
+            // gap an upper bound on the remaining objective error.
+            for t in 0..count {
+                if upper[t] == lower[t] { continue; }
+                self.charge_core_work(u64::try_from(count.checked_mul(4).ok_or(LanaError::Limit)?)
+                    .map_err(|_| LanaError::Limit)?)?;
+                let Some(slope) = gradient(t, coupling[t], &coupling) else { return Ok(None); };
+                gap += if slope >= 0.0 {
+                    (coupling[t] - lower[t]) * slope
+                } else {
+                    (upper[t] - coupling[t]) * -slope
+                };
+            }
+            if !gap.is_finite() { return Ok(None); }
+            if gap <= 1e-6 { break; }
+        }
+        let mut xy = [0.0; 4];
+        let mut rows = Vec::with_capacity(count);
+        for t in 0..count {
+            self.charge_core_work(4)?;
+            let values = row(t, coupling[t]);
+            for cell in 0..4 { xy[cell] += values[cell]; }
+            rows.push(values);
+        }
+        let mut objective = 0.0;
+        let mut residual = 0.0_f64;
+        let mut mass = 0.0;
+        for t in 0..count {
+            let q = rows[t];
+            self.charge_core_work(4)?;
+            residual = residual.max((q[0] + q[1] - ptx[2 * t]).abs());
+            residual = residual.max((q[2] + q[3] - ptx[2 * t + 1]).abs());
+            residual = residual.max((q[0] + q[2] - pty[2 * t]).abs());
+            residual = residual.max((q[1] + q[3] - pty[2 * t + 1]).abs());
+            for cell in 0..4 {
+                if q[cell] < 0.0 { return Ok(None); }
+                let value = q[cell];
+                mass += value;
+                if value > 0.0 {
+                    objective += value * (value / (pt[t] * xy[cell])).log2();
+                }
+            }
+        }
+        if !objective.is_finite() || !residual.is_finite() || !mass.is_finite() {
+            return Err(LanaError::InvalidParameters);
+        }
+        if objective < -1e-10 { return Err(LanaError::InvalidParameters); }
+        Ok(Some((objective.max(0.0), gap.max(0.0), residual, (mass - 1.0).abs())))
+    }
+
+    fn broja_one_binary(
+        &mut self, pt: &[f64], wide: &[f64], width: usize, binary: &[f64],
+    ) -> Result<Option<(f64, f64, f64, f64)>, LanaError> {
+        let count = pt.len();
+        let cells = count.checked_mul(width).ok_or(LanaError::Limit)?;
+        let scratch_bytes = cells.checked_add(width.checked_mul(4).ok_or(LanaError::Oom)?)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f64>())).ok_or(LanaError::Oom)?;
+        let _scratch = self.heap.reserve(scratch_bytes)?;
+        let mut coupling = Vec::new();
+        coupling.try_reserve(cells).map_err(|_| LanaError::Oom)?;
+        let mut wide_total = vec![0.0; width];
+        for t in 0..count {
+            for i in 0..width {
+                self.charge_core_work(1)?;
+                let supply = wide[t * width + i];
+                if supply < 0.0 || !supply.is_finite() { return Err(LanaError::InvalidDistribution); }
+                wide_total[i] += supply;
+                coupling.push(if pt[t] > 0.0 { supply * binary[2 * t] / pt[t] } else { 0.0 });
+            }
+        }
+        let gradient = |t: usize, i: usize, candidate: f64, values: &[f64]| -> Option<f64> {
+            let supply = wide[t * width + i];
+            if supply == 0.0 { return Some(0.0); }
+            let mut xy0 = candidate;
+            for other in 0..count {
+                if other != t { xy0 += values[other * width + i]; }
+            }
+            let xy1 = wide_total[i] - xy0;
+            if candidate <= 0.0 || candidate >= supply || xy0 <= 0.0 || xy1 <= 0.0 {
+                return None;
+            }
+            Some((candidate / xy0).log2() - ((supply - candidate) / xy1).log2())
+        };
+        let mut gap = f64::INFINITY;
+        // ponytail: bounded pair sweeps; a full transport oracle is needed when both source domains exceed two.
+        for _ in 0..512 {
+            if self.cancelled.load(Ordering::Relaxed) { return Err(LanaError::Cancelled); }
+            for t in 0..count {
+                if binary[2 * t] <= 0.0 || binary[2 * t] >= pt[t] { continue; }
+                for i in 0..width {
+                    if wide[t * width + i] == 0.0 { continue; }
+                    for j in i + 1..width {
+                        if wide[t * width + j] == 0.0 { continue; }
+                        let left = t * width + i;
+                        let right = t * width + j;
+                        let lo = (-coupling[left]).max(coupling[right] - wide[right]);
+                        let hi = (wide[left] - coupling[left]).min(coupling[right]);
+                        if hi <= lo { continue; }
+                        let margin = (hi - lo) * 1e-14;
+                        let mut a = lo + margin;
+                        let mut b = hi - margin;
+                        for _ in 0..48 {
+                            self.charge_core_work(u64::try_from(count.checked_mul(2).ok_or(LanaError::Limit)?)
+                                .map_err(|_| LanaError::Limit)?)?;
+                            let delta = (a + b) / 2.0;
+                            let Some(gi) = gradient(t, i, coupling[left] + delta, &coupling) else { return Ok(None); };
+                            let Some(gj) = gradient(t, j, coupling[right] - delta, &coupling) else { return Ok(None); };
+                            if gi > gj { b = delta; } else { a = delta; }
+                        }
+                        let delta = (a + b) / 2.0;
+                        coupling[left] += delta;
+                        coupling[right] -= delta;
+                    }
+                }
+            }
+            gap = 0.0;
+            for t in 0..count {
+                if binary[2 * t] <= 0.0 || binary[2 * t] >= pt[t] { continue; }
+                let mut slopes = Vec::new();
+                slopes.try_reserve(width).map_err(|_| LanaError::Oom)?;
+                for i in 0..width {
+                    self.charge_core_work(count as u64)?;
+                    let Some(slope) = gradient(t, i, coupling[t * width + i], &coupling) else { return Ok(None); };
+                    if !slope.is_finite() { return Ok(None); }
+                    slopes.push((i, slope));
+                }
+                self.charge_core_work(u64::try_from(width.checked_mul(width).ok_or(LanaError::Limit)?)
+                    .map_err(|_| LanaError::Limit)?)?;
+                slopes.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+                let mut remaining = binary[2 * t];
+                for (i, slope) in slopes {
+                    let assigned = remaining.min(wide[t * width + i]).max(0.0);
+                    remaining -= assigned;
+                    gap += slope * (coupling[t * width + i] - assigned);
+                }
+                if remaining.abs() > 1e-9 { return Ok(None); }
+            }
+            if !gap.is_finite() || gap < -1e-8 { return Ok(None); }
+            if gap <= 1e-6 { break; }
+        }
+        let mut xy0 = vec![0.0; width];
+        for t in 0..count {
+            for i in 0..width { xy0[i] += coupling[t * width + i]; }
+        }
+        let mut objective = 0.0;
+        let mut residual = 0.0_f64;
+        let mut mass = 0.0;
+        for t in 0..count {
+            let mut binary_zero = 0.0;
+            let mut binary_one = 0.0;
+            for i in 0..width {
+                self.charge_core_work(2)?;
+                let q0 = coupling[t * width + i];
+                let q1 = wide[t * width + i] - q0;
+                if q0 < 0.0 || q1 < 0.0 { return Ok(None); }
+                binary_zero += q0;
+                binary_one += q1;
+                residual = residual.max((q0 + q1 - wide[t * width + i]).abs());
+                mass += q0 + q1;
+                if q0 > 0.0 { objective += q0 * (q0 / (pt[t] * xy0[i])).log2(); }
+                if q1 > 0.0 { objective += q1 * (q1 / (pt[t] * (wide_total[i] - xy0[i]))).log2(); }
+            }
+            residual = residual.max((binary_zero - binary[2 * t]).abs());
+            residual = residual.max((binary_one - binary[2 * t + 1]).abs());
+        }
+        if !objective.is_finite() || !residual.is_finite() || !mass.is_finite() || objective < -1e-10 {
+            return Err(LanaError::InvalidParameters);
+        }
+        Ok(Some((objective.max(0.0), gap.max(0.0), residual, (mass - 1.0).abs())))
+    }
+
+    fn broja_transport_dual(
+        &mut self, rows: &[f64], cols: &[f64], costs: &[f64],
+    ) -> Result<Option<f64>, LanaError> {
+        let (nx, ny) = (rows.len(), cols.len());
+        let nodes = nx.checked_add(ny).ok_or(LanaError::Limit)?;
+        let cells = nx.checked_mul(ny).ok_or(LanaError::Limit)?;
+        let bytes = cells.checked_mul(std::mem::size_of::<f64>())
+            .and_then(|n| nodes.checked_mul(3 * std::mem::size_of::<f64>()
+                + std::mem::size_of::<(usize, usize, bool)>()
+                + std::mem::size_of::<(usize, bool)>()).and_then(|extra| n.checked_add(extra)))
+            .ok_or(LanaError::Oom)?;
+        let _scratch = self.heap.reserve(bytes)?;
+        let mut flow = vec![0.0; cells];
+        let mut supply = rows.to_vec();
+        let mut demand = cols.to_vec();
+        // Northwest corner gives a feasible starting transport, including zero rows.
+        for i in 0..nx {
+            for j in 0..ny {
+                self.charge_core_work(1)?;
+                let amount = supply[i].min(demand[j]).max(0.0);
+                flow[i * ny + j] = amount;
+                supply[i] -= amount;
+                demand[j] -= amount;
+            }
+        }
+        if supply.iter().chain(&demand).any(|value| value.abs() > 1e-10) { return Ok(None); }
+        let mut dist = vec![0.0; nodes];
+        let mut previous = vec![(0usize, 0usize, false); nodes];
+        for _ in 0..10_000 {
+            if self.cancelled.load(Ordering::Relaxed) { return Err(LanaError::Cancelled); }
+            dist.fill(0.0);
+            let mut changed = None;
+            for _ in 0..nodes {
+                changed = None;
+                for i in 0..nx {
+                    for j in 0..ny {
+                        self.charge_core_work(2)?;
+                        let cell = i * ny + j;
+                        if dist[nx + j] > dist[i] + costs[cell] + 1e-12 {
+                            dist[nx + j] = dist[i] + costs[cell];
+                            previous[nx + j] = (i, cell, false);
+                            changed = Some(nx + j);
+                        }
+                        if flow[cell] > 1e-15 && dist[i] > dist[nx + j] - costs[cell] + 1e-12 {
+                            dist[i] = dist[nx + j] - costs[cell];
+                            previous[i] = (nx + j, cell, true);
+                            changed = Some(i);
+                        }
+                    }
+                }
+                if changed.is_none() { break; }
+            }
+            let Some(mut node) = changed else {
+                let mut dual = 0.0;
+                let mut violation = 0.0_f64;
+                for i in 0..nx { dual -= rows[i] * dist[i]; }
+                for j in 0..ny { dual += cols[j] * dist[nx + j]; }
+                // A feasible transport dual is a lower bound on every linearized coupling.
+                for i in 0..nx {
+                    for j in 0..ny {
+                        self.charge_core_work(1)?;
+                        violation = violation.max(dist[nx + j] - dist[i] - costs[i * ny + j]);
+                    }
+                }
+                if violation > 1e-9 { return Ok(None); }
+                return Ok(Some(dual - violation * rows.iter().sum::<f64>() - 1e-10));
+            };
+            for _ in 0..nodes { self.charge_core_work(1)?; node = previous[node].0; }
+            let start = node;
+            let mut cycle = Vec::with_capacity(nodes);
+            let mut amount = f64::INFINITY;
+            loop {
+                self.charge_core_work(1)?;
+                let (parent, cell, reverse) = previous[node];
+                if reverse { amount = amount.min(flow[cell]); }
+                cycle.push((cell, reverse));
+                node = parent;
+                if node == start { break; }
+                if cycle.len() > nodes { return Ok(None); }
+            }
+            if !amount.is_finite() || amount <= 1e-15 { return Ok(None); }
+            for (cell, reverse) in cycle {
+                self.charge_core_work(1)?;
+                if reverse { flow[cell] -= amount; } else { flow[cell] += amount; }
+            }
+        }
+        Ok(None)
+    }
+
+    fn broja_general(
+        &mut self, pt: &[f64], ptx: &[f64], nx: usize, pty: &[f64], ny: usize,
+    ) -> Result<Option<(f64, f64, f64, f64)>, LanaError> {
+        let plane = nx.checked_mul(ny).ok_or(LanaError::Limit)?;
+        let cells = pt.len().checked_mul(plane).ok_or(LanaError::Limit)?;
+        let bytes = cells.checked_add(plane.checked_mul(2).ok_or(LanaError::Oom)?)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f64>())).ok_or(LanaError::Oom)?;
+        let _scratch = self.heap.reserve(bytes)?;
+        let mut q = vec![0.0; cells];
+        let mut xy = vec![0.0; plane];
+        for t in 0..pt.len() {
+            for i in 0..nx {
+                for j in 0..ny {
+                    self.charge_core_work(1)?;
+                    let cell = i * ny + j;
+                    let value = if pt[t] > 0.0 { ptx[t * nx + i] * pty[t * ny + j] / pt[t] } else { 0.0 };
+                    q[t * plane + cell] = value;
+                    xy[cell] += value;
+                }
+            }
+        }
+        let mut gap = f64::INFINITY;
+        for _ in 0..512 {
+            if self.cancelled.load(Ordering::Relaxed) { return Err(LanaError::Cancelled); }
+            for t in 0..pt.len() {
+                for i in 0..nx {
+                    if ptx[t * nx + i] == 0.0 { continue; }
+                    for k in i + 1..nx {
+                        if ptx[t * nx + k] == 0.0 { continue; }
+                        for j in 0..ny {
+                            if pty[t * ny + j] == 0.0 { continue; }
+                            for l in j + 1..ny {
+                                if pty[t * ny + l] == 0.0 { continue; }
+                                let cells = [i * ny + j, i * ny + l, k * ny + j, k * ny + l];
+                                let signs = [1.0, -1.0, -1.0, 1.0];
+                                let lo = (-q[t * plane + cells[0]]).max(-q[t * plane + cells[3]]);
+                                let hi = q[t * plane + cells[1]].min(q[t * plane + cells[2]]);
+                                if hi <= lo { continue; }
+                                let margin = (hi - lo) * 1e-9;
+                                let (mut left, mut right) = (lo + margin, hi - margin);
+                                for _ in 0..48 {
+                                    self.charge_core_work(4)?;
+                                    let delta = (left + right) / 2.0;
+                                    let mut slope = 0.0;
+                                    for n in 0..4 {
+                                        let own = q[t * plane + cells[n]] + signs[n] * delta;
+                                        let total = xy[cells[n]] + signs[n] * delta;
+                                        if own <= 0.0 || total <= 0.0 { return Ok(None); }
+                                        slope += signs[n] * (own / total).log2();
+                                    }
+                                    if slope > 0.0 { right = delta; } else { left = delta; }
+                                }
+                                let delta = (left + right) / 2.0;
+                                for n in 0..4 {
+                                    q[t * plane + cells[n]] += signs[n] * delta;
+                                    xy[cells[n]] += signs[n] * delta;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            xy.fill(0.0);
+            for t in 0..pt.len() {
+                for cell in 0..plane {
+                    self.charge_core_work(1)?;
+                    xy[cell] += q[t * plane + cell];
+                }
+            }
+            gap = 0.0;
+            for t in 0..pt.len() {
+                let mut costs = vec![0.0; plane];
+                let mut current = 0.0;
+                for cell in 0..plane {
+                    self.charge_core_work(1)?;
+                    let own = q[t * plane + cell];
+                    let i = cell / ny;
+                    let j = cell % ny;
+                    if ptx[t * nx + i] > 0.0 && pty[t * ny + j] > 0.0 && own <= 0.0 {
+                        return Ok(None);
+                    }
+                    if own > 0.0 {
+                        costs[cell] = (own / xy[cell]).log2();
+                        current += own * costs[cell];
+                    }
+                    if !costs[cell].is_finite() { return Ok(None); }
+                }
+                let Some(dual) = self.broja_transport_dual(
+                    &ptx[t * nx..(t + 1) * nx], &pty[t * ny..(t + 1) * ny], &costs,
+                )? else { return Ok(None); };
+                gap += current - dual;
+            }
+            if !gap.is_finite() || gap < -1e-8 { return Ok(None); }
+            if gap <= 1e-6 { break; }
+        }
+        let mut objective = 0.0;
+        let mut residual = 0.0_f64;
+        let mut mass = 0.0;
+        for t in 0..pt.len() {
+            for i in 0..nx {
+                let mut row = 0.0;
+                for j in 0..ny {
+                    self.charge_core_work(1)?;
+                    let value = q[t * plane + i * ny + j];
+                    if value < -1e-14 { return Ok(None); }
+                    row += value;
+                    mass += value;
+                    if value > 0.0 { objective += value * (value / (pt[t] * xy[i * ny + j])).log2(); }
+                }
+                residual = residual.max((row - ptx[t * nx + i]).abs());
+            }
+            for j in 0..ny {
+                let mut column = 0.0;
+                for i in 0..nx { column += q[t * plane + i * ny + j]; }
+                residual = residual.max((column - pty[t * ny + j]).abs());
+            }
+        }
+        if !objective.is_finite() || !residual.is_finite() || !mass.is_finite() || objective < -1e-10 {
+            return Ok(None);
+        }
+        Ok(Some((objective.max(0.0), gap.max(0.0), residual, (mass - 1.0).abs())))
+    }
+
+    fn core_convert_weights(&mut self, host_id: u32, arguments: &[Value], out: &mut Value) -> LanaError {
+        let expected = if host_id == LANA_HOST_CORE_FORGET_WEIGHTS { 1 } else { 2 };
+        if arguments.len() != expected { return LanaError::Type; }
+        let current = self.reactive_value(&arguments[0]);
+        let ValueKind::Possibility(source) = &current.kind else { return LanaError::Type; };
+        let built = if host_id == LANA_HOST_CORE_FORGET_WEIGHTS {
+            let Some(source_weights) = &source.weights else { return LanaError::Type; };
+            if source_weights.len() != source.values.len() { return LanaError::InvalidDistribution; }
+            let mut total = 0.0;
+            let mut positive = Vec::new();
+            if positive.try_reserve(source.values.len()).is_err() { return LanaError::Oom; }
+            for (index, &weight) in source_weights.iter().enumerate() {
+                if !weight.is_finite() || weight < 0.0 { return LanaError::InvalidDistribution; }
+                total += weight;
+                if weight > 0.0 { positive.push(source.values[index].clone()); }
+            }
+            if !total.is_finite() || (total - 1.0).abs() > 1e-12 { return LanaError::InvalidDistribution; }
+            if positive.is_empty() { return LanaError::InvalidDistribution; }
+            let built = match self.possibility_build(&positive) { Ok(value) => value, Err(error) => return error };
+            let mut built = (*built).clone();
+            built.dependency_id = source.dependency_id;
+            built
+        } else {
+            if source.weights.is_some() { return LanaError::Type; }
+            let ValueKind::Array(rows) = &arguments[1].kind else { return LanaError::Type; };
+            let rows = rows.lock().unwrap();
+            let count = source.values.len();
+            if rows.items.len() != count { return LanaError::InvalidDistribution; }
+            // ponytail: Linear candidate matching is bounded by the VM work limit; index only if large finite supports become common.
+            let work = match count.checked_mul(count) { Some(work) => work as u64, None => return LanaError::Limit };
+            if let Err(error) = self.charge_core_work(work) { return error; }
+            let mut weights = Vec::new();
+            if weights.try_reserve(count).is_err() { return LanaError::Oom; }
+            weights.resize(count, None);
+            let mut total = 0.0;
+            for row in rows.items.iter() {
+                let ValueKind::Array(pair) = &row.kind else { return LanaError::Type; };
+                let pair = pair.lock().unwrap();
+                if pair.items.len() != 2 { return LanaError::Type; }
+                let ValueKind::Number(weight) = pair.items[1].kind else { return LanaError::Type; };
+                if !weight.is_finite() || weight <= 0.0 { return LanaError::InvalidDistribution; }
+                let Some(index) = source.values.iter().position(|candidate|
+                    joint_value_equal(candidate, &pair.items[0])) else { return LanaError::InvalidDistribution; };
+                if weights[index].replace(weight).is_some() { return LanaError::InvalidDistribution; }
+                total += weight;
+            }
+            if !total.is_finite() || (total - 1.0).abs() > 1e-12 { return LanaError::InvalidDistribution; }
+            let Some(weights) = weights.into_iter().collect::<Option<Vec<_>>>() else {
+                return LanaError::InvalidDistribution;
+            };
+            drop(rows);
+            let built = match self.possibility_build(&source.values) { Ok(value) => value, Err(error) => return error };
+            let mut built = (*built).clone();
+            built.weights = Some(weights);
+            built.dependency_id = source.dependency_id;
+            built
+        };
+        let operation = if host_id == LANA_HOST_CORE_FORGET_WEIGHTS { "forget_weights" } else { "assign_weights" };
+        let details = if host_id == LANA_HOST_CORE_FORGET_WEIGHTS { "probabilities_discarded" } else { "explicit_weights" };
+        let Some(mut derivation) = self.record_derivation_payload(
+            DerivationKind::Operation, operation, &[&arguments[0]], "", 0,
+            DerivationExactness::Exact, details, DerivationOutcome::Success, "none",
+        ) else { return LanaError::Oom; };
+        let revision = arguments[0].reactive.as_ref().map(|reactive| reactive.lock().unwrap().revision)
+            .or_else(|| arguments[0].derivation.as_ref().map(|node| node.revision))
+            .unwrap_or(self.revision);
+        derivation.revision = revision;
+            let derivation = match self.managed_payload(derivation) { Ok(node) => node, Err(error) => return error };
+        *out = Value::possibility(match self.managed_payload(built) { Ok(payload) => payload, Err(error) => return error });
+        out.derivation = Some(derivation);
+        LanaError::Ok
+    }
+
     /// Build a joint state from marginals, mirroring `lana_vm_joint_build`.
     fn joint_build(&mut self, values: &[Value], descriptor: &str) -> Result<Arc<JointState>, LanaError> {
         let count = values.len();
@@ -7973,9 +9995,6 @@ impl<'a> Vm<'a> {
             .map(|(index, name)| (name, index))
             .collect();
         ordered.sort_by(|a, b| a.0.cmp(&b.0));
-        if self.alloc_bytes(std::mem::size_of::<JointState>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
         let mut joint = JointState {
             names: Vec::with_capacity(count),
             domains: Vec::with_capacity(count),
@@ -7996,7 +10015,7 @@ impl<'a> Vm<'a> {
             joint.domains.push(value.value_type());
             joint.values.push(value);
         }
-        Ok(Arc::new(joint))
+        self.managed_payload(joint)
     }
 
     /// Build a finite correlated law, mirroring `lana_vm_joint_build_finite`.
@@ -8066,9 +10085,6 @@ impl<'a> Vm<'a> {
             return Err(LanaError::InvalidDistribution);
         }
         let unique_count = unique_weights.len();
-        if self.alloc_bytes(std::mem::size_of::<JointState>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
         let mut joint = JointState {
             names: Vec::with_capacity(variable_count),
             domains: Vec::with_capacity(variable_count),
@@ -8095,12 +10111,12 @@ impl<'a> Vm<'a> {
                 weight: unique_weights[row] / total,
             });
         }
-        Ok(Arc::new(joint))
+        self.managed_payload(joint)
     }
 
     /// Build a finite law from an array of rows, mirroring
     /// `joint_build_finite_array` in `vm/c/vm.c`.
-    fn joint_build_finite_array(
+    pub fn joint_build_finite_array(
         &mut self,
         rows_value: &Value,
         names_text: &str,
@@ -8183,7 +10199,7 @@ impl<'a> Vm<'a> {
             let joint = self.joint_build(&values, &descriptor)?;
             let mut joint = (*joint).clone();
             joint.kind = JointKind::Projected;
-            Ok(Arc::new(joint))
+            self.managed_payload(joint)
         } else {
             let mut values: Vec<Value> = Vec::with_capacity(source.rows.len() * count);
             let mut weights: Vec<f64> = Vec::with_capacity(source.rows.len());
@@ -8196,7 +10212,7 @@ impl<'a> Vm<'a> {
             let joint = self.joint_build_finite(names_text, &values, &weights, source.rows.len(), count)?;
             let mut joint = (*joint).clone();
             joint.kind = JointKind::Projected;
-            Ok(Arc::new(joint))
+            self.managed_payload(joint)
         }
     }
 
@@ -8235,7 +10251,7 @@ impl<'a> Vm<'a> {
             let joint = self.joint_build_finite(&names_text, &values, &weights, kept.len(), source.names.len())?;
             let mut joint = (*joint).clone();
             joint.kind = JointKind::Conditional;
-            Ok(Arc::new(joint))
+            self.managed_payload(joint)
         } else {
             if !joint_value_is_definite(&source.values[position]) {
                 return Err(LanaError::UnsupportedOperation);
@@ -8244,14 +10260,14 @@ impl<'a> Vm<'a> {
                 return Err(LanaError::InvalidConditioning);
             }
             let mut memo = DeepCloneMemo::default();
-            let wrapped = Value::joint(Arc::new(source.clone()));
+            let wrapped = Value::joint(self.managed_payload(source.clone())?);
             let mut cloned = self.deep_clone_value(&wrapped, &mut memo)?;
             let ValueKind::Joint(joint) = &mut cloned.kind else {
                 unreachable!("wrapped value is a joint");
             };
             let mut state = (**joint).clone();
             state.kind = JointKind::Conditional;
-            *joint = Arc::new(state);
+            *joint = self.managed_payload(state)?;
             Ok(joint.clone())
         }
     }
@@ -8315,9 +10331,6 @@ impl<'a> Vm<'a> {
             if indices.is_empty() {
                 return Err(LanaError::InvalidConditioning);
             }
-            if self.alloc_bytes(std::mem::size_of::<Possibility>()) != LanaError::Ok {
-                return Err(LanaError::Oom);
-            }
             let mut memo = DeepCloneMemo::default();
             let mut values = Vec::with_capacity(indices.len());
             for &index in &indices {
@@ -8327,9 +10340,9 @@ impl<'a> Vm<'a> {
                 let total: f64 = indices.iter().map(|&index| weights[index]).sum();
                 indices.iter().map(|&index| weights[index] / total).collect()
             });
-            return Ok(Value::possibility(Arc::new(Possibility {
+            return Ok(Value::possibility(self.managed_payload(Possibility {
                 values, weights, dependency_id: possibility.dependency_id,
-            })));
+            })?));
         }
         if !joint_value_is_definite(&current) {
             return Err(LanaError::Type);
@@ -8449,7 +10462,7 @@ impl<'a> Vm<'a> {
 
     /// Build a possibility from an array of values, mirroring
     /// `lana_vm_possibility_build`.
-    fn possibility_build(&mut self, values: &[Value]) -> Result<Arc<Possibility>, LanaError> {
+    pub fn possibility_build(&mut self, values: &[Value]) -> Result<Arc<Possibility>, LanaError> {
         if values.is_empty() {
             return Err(LanaError::Format);
         }
@@ -8462,9 +10475,6 @@ impl<'a> Vm<'a> {
                 unique.push(value);
             }
         }
-        if self.alloc_bytes(std::mem::size_of::<Possibility>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
         let mut memo = DeepCloneMemo::default();
         let mut cloned = Vec::with_capacity(unique.len());
         for value in &unique {
@@ -8472,15 +10482,15 @@ impl<'a> Vm<'a> {
         }
         let dependency_id = self.next_dependency_id;
         self.next_dependency_id += 1;
-        Ok(Arc::new(Possibility {
+        Ok(self.managed_payload(Possibility {
             values: cloned,
             weights: None,
             dependency_id,
-        }))
+        })?)
     }
 
     /// Build a finite weighted Core distribution from `[[value, weight], ...]`.
-    fn distribution_build(&mut self, rows: &[Value]) -> Result<Arc<Possibility>, LanaError> {
+    pub fn distribution_build(&mut self, rows: &[Value]) -> Result<Arc<Possibility>, LanaError> {
         if rows.is_empty() {
             return Err(LanaError::InvalidDistribution);
         }
@@ -8511,9 +10521,6 @@ impl<'a> Vm<'a> {
         if !total.is_finite() || (total - 1.0).abs() > 1e-12 {
             return Err(LanaError::InvalidDistribution);
         }
-        if self.alloc_bytes(std::mem::size_of::<Possibility>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
         let mut memo = DeepCloneMemo::default();
         let mut cloned = Vec::with_capacity(values.len());
         for value in &values {
@@ -8521,11 +10528,11 @@ impl<'a> Vm<'a> {
         }
         let dependency_id = self.next_dependency_id;
         self.next_dependency_id += 1;
-        Ok(Arc::new(Possibility { values: cloned, weights: Some(weights), dependency_id }))
+        Ok(self.managed_payload(Possibility { values: cloned, weights: Some(weights), dependency_id })?)
     }
 
     /// Resolve any information value, mirroring `lana_vm_information_resolve`.
-    fn information_resolve(&mut self, source: &Value) -> Result<Value, LanaError> {
+    pub fn information_resolve(&mut self, source: &Value) -> Result<Value, LanaError> {
         if source.reactive.is_some() {
             let current = self.reactive_value(source);
             return self.information_resolve(&current);
@@ -8533,7 +10540,8 @@ impl<'a> Vm<'a> {
         match &source.kind {
             ValueKind::Joint(joint) => self.joint_resolve(joint),
             ValueKind::Possibility(possibility) => {
-                if possibility.values.len() != 1 {
+                if possibility.values.is_empty() || possibility.values[1..].iter()
+                    .any(|value| !joint_value_equal(&possibility.values[0], value)) {
                     return Err(LanaError::UnresolvedValue);
                 }
                 let mut memo = DeepCloneMemo::default();
@@ -8587,7 +10595,7 @@ impl<'a> Vm<'a> {
                     let mut memo = DeepCloneMemo::default();
                     return self.deep_clone_value(&possibility.values[selected], &mut memo);
                 }
-                if self.chunk.version == lana_bytecode::opcode::LABC_VERSION_5 {
+                if self.chunk.version >= lana_bytecode::opcode::LABC_VERSION_5 {
                     return Err(LanaError::UnsupportedOperation);
                 }
                 if self.consume_sampling_budget() != LanaError::Ok {
@@ -8627,7 +10635,7 @@ impl<'a> Vm<'a> {
         let derivation = self.record_derivation(
             kind,
             operation,
-            &[],
+            &[source],
             label,
             line,
             if assumption { DerivationExactness::Approximate } else { DerivationExactness::Exact },
@@ -8777,6 +10785,7 @@ impl<'a> Vm<'a> {
             history: Vec::new(),
             is_training_data: false,
         }));
+        if let Err(error) = self.track_cycle(crate::heap::CycleWeak::Reactive(Arc::downgrade(&node))) { return error; }
         self.next_reactive_id += 1;
         out.reactive = Some(node);
         LanaError::Ok
@@ -8932,7 +10941,7 @@ impl<'a> Vm<'a> {
                 }
                 alternatives.push(PathAlternative { guard, weight, result });
             }
-            *out = Value::paths(Arc::new(PathSet { alternatives, dependency_id }));
+            *out = Value::paths(match self.managed_payload(PathSet { alternatives, dependency_id }) { Ok(payload) => payload, Err(error) => return error });
             return LanaError::Ok;
         }
         if left_possibility.is_some() || right_possibility.is_some() {
@@ -8974,22 +10983,22 @@ impl<'a> Vm<'a> {
                     results.push(result);
                 }
             }
-            let possibility = match self.possibility_build(&results) {
-                Ok(possibility) => possibility,
-                Err(error) => return error,
-            };
-            if zipped || left_possibility.is_none() || right_possibility.is_none() {
-                let dependency_id = if left_possibility.is_some() {
-                    left_possibility.as_ref().unwrap().dependency_id
-                } else {
-                    right_possibility.as_ref().unwrap().dependency_id
-                };
-                let mut possibility = (*possibility).clone();
-                possibility.dependency_id = dependency_id;
-                *out = Value::possibility(Arc::new(possibility));
-                return LanaError::Ok;
+            let source = left_possibility.as_ref().or(right_possibility.as_ref()).unwrap();
+            let weights = left_possibility.as_ref().and_then(|value| value.weights.as_ref())
+                .or_else(|| right_possibility.as_ref().and_then(|value| value.weights.as_ref()))
+                .cloned();
+            if let (Some(left), Some(right)) = (&left_possibility, &right_possibility) {
+                if let (Some(left_weights), Some(right_weights)) = (&left.weights, &right.weights) {
+                    if left_weights != right_weights {
+                        return LanaError::UnsupportedOperation;
+                    }
+                }
             }
-            *out = Value::possibility(possibility);
+            *out = Value::possibility(match self.managed_payload(Possibility {
+                values: results,
+                weights,
+                dependency_id: source.dependency_id,
+            }) { Ok(payload) => payload, Err(error) => return error });
             return LanaError::Ok;
         }
         pure_scalar_binary(left, right, kind, operation, out)
@@ -9007,12 +11016,27 @@ impl<'a> Vm<'a> {
     }
 
     fn lift_unary_raw(&mut self, source: &Value, operation: u32, out: &mut Value) -> LanaError {
+        self.lift_pointwise(source, out, 0, &mut |_, source, out| {
+            if matches!(source.kind, ValueKind::Number(_)) && operation == 0 {
+                *out = Value::number(-source.as_number());
+                LanaError::Ok
+            } else if matches!(source.kind, ValueKind::Bool(_)) && operation == 1 {
+                *out = Value::boolean(!source.as_bool());
+                LanaError::Ok
+            } else { LanaError::Type }
+        })
+    }
+
+    fn lift_pointwise<F>(&mut self, source: &Value, out: &mut Value, depth: usize, map: &mut F) -> LanaError
+    where F: FnMut(&mut Self, &Value, &mut Value) -> LanaError {
+        if depth >= 64 { return LanaError::Limit; }
+        if let Err(error) = self.charge_bounded_work(1) { return error; }
         match &source.kind {
             ValueKind::PathSet(paths) => {
                 let mut alternatives = Vec::with_capacity(paths.alternatives.len());
                 for alternative in &paths.alternatives {
                     let mut result = Value::null();
-                    let error = self.lift_unary_raw(&alternative.result, operation, &mut result);
+                    let error = self.lift_pointwise(&alternative.result, &mut result, depth + 1, map);
                     if error != LanaError::Ok {
                         return error;
                     }
@@ -9022,10 +11046,10 @@ impl<'a> Vm<'a> {
                         result,
                     });
                 }
-                *out = Value::paths(Arc::new(PathSet {
+                *out = Value::paths(match self.managed_payload(PathSet {
                     alternatives,
                     dependency_id: paths.dependency_id,
-                }));
+                }) { Ok(payload) => payload, Err(error) => return error });
                 LanaError::Ok
             }
             ValueKind::Possibility(possibility) => {
@@ -9033,34 +11057,23 @@ impl<'a> Vm<'a> {
                 let mut results = Vec::with_capacity(possibility.values.len());
                 for value in &possibility.values {
                     let mut result = Value::null();
-                    let error = self.lift_unary_raw(value, operation, &mut result);
+                    let error = self.lift_pointwise(value, &mut result, depth + 1, map);
                     if error != LanaError::Ok {
                         return error;
                     }
                     results.push(result);
                 }
-                let built = match self.possibility_build(&results) {
-                    Ok(possibility) => possibility,
-                    Err(error) => return error,
-                };
-                let mut built = (*built).clone();
-                built.dependency_id = source_dependency_id;
-                *out = Value::possibility(Arc::new(built));
+                *out = Value::possibility(match self.managed_payload(Possibility {
+                    values: results,
+                    weights: possibility.weights.clone(),
+                    dependency_id: source_dependency_id,
+                }) { Ok(payload) => payload, Err(error) => return error });
                 LanaError::Ok
             }
-            _ => {
-                if matches!(source.kind, ValueKind::Number(_)) && operation == 0 {
-                    *out = Value::number(-source.as_number());
-                    return LanaError::Ok;
-                }
-                if matches!(source.kind, ValueKind::Bool(_)) && operation == 1 {
-                    *out = Value::boolean(!source.as_bool());
-                    return LanaError::Ok;
-                }
-                LanaError::Type
-            }
+            _ => map(self, source, out),
         }
     }
+
 }
 
 impl<'a> Vm<'a> {
@@ -9115,7 +11128,8 @@ impl<'a> Vm<'a> {
                 }
                 let count = array.lock().unwrap().items.len();
                 let items = self.allocate_array_items(count)?;
-                let copy = Arc::new(Mutex::new(Array { items }));
+                let copy = Arc::new(Mutex::new(Array::from_buffer(items)?));
+                let _ = Value::array(copy.clone());
                 memo.arrays.insert(key, copy.clone());
                 for index in 0..count {
                     let item = array.lock().unwrap().items[index].clone();
@@ -9130,6 +11144,7 @@ impl<'a> Vm<'a> {
                     return Ok(Value::map(copy.clone()));
                 }
                 let copy = Arc::new(Mutex::new(Map::new(&self.heap, map.lock().unwrap().entries.len())?));
+                let _ = Value::map(copy.clone());
                 memo.maps.insert(key, copy.clone());
                 let count = map.lock().unwrap().entries.len();
                 for index in 0..count {
@@ -9196,6 +11211,7 @@ impl<'a> Vm<'a> {
             inputs: [None, None], constants: [None, None], current: None,
             history: Vec::new(), is_training_data,
         }));
+        self.track_cycle(crate::heap::CycleWeak::Reactive(Arc::downgrade(&copy)))?;
         memo.insert(key, copy.clone());
         let cloned_input0 = match &input0 {
             Some(input) => Some(self.deep_clone_reactive(input, memo, containers)?),
@@ -9295,7 +11311,9 @@ impl<'a> Vm<'a> {
             | ValueKind::TrainingResult(_)
             | ValueKind::InferenceAlgorithm(_)
             | ValueKind::Posterior(_)
-            | ValueKind::Dataset(_) => cloned.kind = value.kind.clone(),
+            | ValueKind::Dataset(_)
+            | ValueKind::ObjectValue(_)
+            | ValueKind::ClassObject(_) => cloned.kind = value.kind.clone(),
             ValueKind::String(string) => cloned.kind = ValueKind::String(self.clone_string(string, containers)?),
             ValueKind::State(state) => cloned.kind = ValueKind::State(state.clone()),
             ValueKind::Array(array) => {
@@ -9306,7 +11324,8 @@ impl<'a> Vm<'a> {
                 }
                 let count = array.lock().unwrap().items.len();
                 let items = self.allocate_array_items(count)?;
-                let copy = Arc::new(Mutex::new(Array { items }));
+                let copy = Arc::new(Mutex::new(Array::from_buffer(items)?));
+                let _ = Value::array(copy.clone());
                 containers.arrays.insert(key, copy.clone());
                 for index in 0..count {
                     let item = array.lock().unwrap().items[index].clone();
@@ -9322,6 +11341,7 @@ impl<'a> Vm<'a> {
                     return Ok(cloned);
                 }
                 let copy = Arc::new(Mutex::new(Map::new(&self.heap, 0)?));
+                let _ = Value::map(copy.clone());
                 containers.maps.insert(key, copy.clone());
                 let count = map.lock().unwrap().entries.len();
                 for index in 0..count {
@@ -9337,11 +11357,11 @@ impl<'a> Vm<'a> {
                     .iter()
                     .map(|v| self.deep_clone_live_value_memo(v, reactive_memo, containers))
                     .collect::<Result<Vec<_>, _>>()?;
-                cloned.kind = ValueKind::Possibility(Arc::new(Possibility {
+                cloned.kind = ValueKind::Possibility(self.managed_payload(Possibility {
                     values,
                     weights: possibility.weights.clone(),
                     dependency_id: possibility.dependency_id,
-                }));
+                })?);
             }
             ValueKind::PathSet(paths) => {
                 let mut alternatives = Vec::with_capacity(paths.alternatives.len());
@@ -9352,10 +11372,10 @@ impl<'a> Vm<'a> {
                         result: self.deep_clone_live_value_memo(&alternative.result, reactive_memo, containers)?,
                     });
                 }
-                cloned.kind = ValueKind::PathSet(Arc::new(PathSet {
+                cloned.kind = ValueKind::PathSet(self.managed_payload(PathSet {
                     alternatives,
                     dependency_id: paths.dependency_id,
-                }));
+                })?);
             }
             ValueKind::Adt(adt) => {
                 let fields = adt
@@ -9363,7 +11383,7 @@ impl<'a> Vm<'a> {
                     .iter()
                     .map(|field| self.deep_clone_live_value_memo(field, reactive_memo, containers))
                     .collect::<Result<Vec<_>, _>>()?;
-                cloned.kind = ValueKind::Adt(Arc::new(Adt { variant: adt.variant, fields }));
+                cloned.kind = ValueKind::Adt(self.managed_payload(Adt { variant: adt.variant, fields })?);
             }
             ValueKind::Set(set) => {
                 let key = Arc::as_ptr(set) as usize;
@@ -9373,6 +11393,7 @@ impl<'a> Vm<'a> {
                 }
                 let count = set.lock().unwrap().items.len();
                 let copy = Arc::new(Mutex::new(Set::new(&self.heap, count)?));
+                let _ = Value::set(copy.clone());
                 containers.sets.insert(key, copy.clone());
                 for index in 0..count {
                     let item = set.lock().unwrap().items[index].clone();
@@ -9381,7 +11402,7 @@ impl<'a> Vm<'a> {
                 }
                 cloned.kind = ValueKind::Set(copy);
             }
-            ValueKind::Joint(_) | ValueKind::StateDist(_) => {
+            ValueKind::Joint(_) | ValueKind::StateDist(_) | ValueKind::Kernel(_) | ValueKind::Network(_) => {
                 cloned.kind = self.deep_clone_value(value, containers)?.kind;
             }
             ValueKind::Task(_) => return Err(LanaError::Type),
@@ -9424,6 +11445,7 @@ impl<'a> Vm<'a> {
             history: Vec::new(),
             is_training_data: false,
         }));
+        self.track_cycle(crate::heap::CycleWeak::Reactive(Arc::downgrade(&node)))?;
         let mut out = source.clone();
         out.reactive = Some(node);
         Ok(out)
@@ -9456,7 +11478,7 @@ impl<'a> Vm<'a> {
             .current
             .clone()
             .unwrap_or_else(Value::null);
-        if self.chunk.version == lana_bytecode::opcode::LABC_VERSION_5 && !is_training_data {
+        if self.chunk.version >= lana_bytecode::opcode::LABC_VERSION_5 && !is_training_data {
             let refined = self.core_condition(&current, evidence)?;
             self.reactive_recompute_transaction(reactive, &refined, scratch_register)?;
             self.observation_count += 1;
@@ -9516,18 +11538,15 @@ impl<'a> Vm<'a> {
         if tolerance < 0.0 {
             return Err(LanaError::Format);
         }
-        if self.alloc_bytes(std::mem::size_of::<Claim>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
         let mut memo = DeepCloneMemo::default();
         let value = self.deep_clone_value(source, &mut memo)?;
-        let claim = Arc::new(Claim {
+        let claim = self.managed_payload(Claim {
             value,
             proposition: Arc::from(proposition),
             exactness,
             tolerance,
             source_valid,
-        });
+        })?;
         let mut out = source.clone();
         out.claim = Some(claim);
         Ok(out)
@@ -9538,9 +11557,6 @@ impl<'a> Vm<'a> {
         if kind.is_empty() {
             return Err(LanaError::Format);
         }
-        if self.alloc_bytes(std::mem::size_of::<PlannedEffect>()) != LanaError::Ok {
-            return Err(LanaError::Oom);
-        }
         let id = self.next_effect_id;
         self.next_effect_id += 1;
         let payload_plain = self.clone_without_runtime_metadata(payload)?;
@@ -9550,6 +11566,7 @@ impl<'a> Vm<'a> {
             payload: payload_plain,
             state: Mutex::new(PlannedEffectState::default()),
         });
+        self.track_cycle(crate::heap::CycleWeak::Effect(Arc::downgrade(&plan)))?;
         let mut out = payload.clone();
         out.planned_effect = Some(plan);
         Ok(out)
@@ -9583,6 +11600,12 @@ impl<'a> Vm<'a> {
         let returned = self.deep_clone_value(&receipt.result, &mut memo)?;
         {
             let mut state = plan.state.lock().unwrap();
+            let capacity = state.receipts.len().checked_add(1).ok_or(LanaError::Oom)?;
+            let growth = capacity.saturating_sub(state.receipts.capacity());
+            self.reserve_cycle_edges(Arc::as_ptr(plan) as usize, capacity.checked_add(1).ok_or(LanaError::Oom)?,
+                growth.checked_mul(std::mem::size_of::<EffectReceipt>()).ok_or(LanaError::Oom)?)?;
+            state.receipts.try_reserve_exact(growth).map_err(|_| LanaError::Oom)?;
+            self.heap.mutate_cycle(Arc::as_ptr(plan) as usize);
             state.receipts.push(receipt);
             state.execution_count += 1;
         }
@@ -9662,7 +11685,8 @@ impl<'a> Vm<'a> {
                     ReactiveKind::Compare => {
                         self.lift_binary_raw(&left, &right, PureKind::Compare, operation, &mut staged_value)
                     }
-                    ReactiveKind::Unary => self.lift_unary(&left, operation, &mut staged_value),
+                    ReactiveKind::Unary => self.lift_unary_raw(&left, operation, &mut staged_value),
+                    ReactiveKind::ObjectMethod => self.lift_object_method_raw(&left, &right, operation, scratch_register, &mut staged_value),
                     ReactiveKind::Train => {
                         self.reactive_train_recompute(&node, &left, scratch_register, &mut staged_value)
                     }
@@ -9674,12 +11698,23 @@ impl<'a> Vm<'a> {
             }
             staged[index] = Some(staged_value);
         }
+        // Admit every history extension before publishing any revision.
+        for index in 0..count {
+            if !affected[index] { continue; }
+            let mut guard = list[index].lock().unwrap();
+            let capacity = guard.history.len().checked_add(1).ok_or(LanaError::Oom)?;
+            let growth = capacity.saturating_sub(guard.history.capacity());
+            self.reserve_cycle_edges(Arc::as_ptr(&list[index]) as usize, capacity.checked_add(5).ok_or(LanaError::Oom)?,
+                growth.checked_mul(std::mem::size_of::<ReactiveVersion>()).ok_or(LanaError::Oom)?)?;
+            guard.history.try_reserve_exact(growth).map_err(|_| LanaError::Oom)?;
+        }
         let revision = self.revision + 1;
         for index in 0..count {
             if !affected[index] {
                 continue;
             }
             let mut guard = list[index].lock().unwrap();
+            self.heap.mutate_cycle(Arc::as_ptr(&list[index]) as usize);
             let old_revision = guard.revision;
             let old_current = guard.current.clone();
             guard.history.push(ReactiveVersion {
@@ -9741,7 +11776,25 @@ impl<'a> Vm<'a> {
     ) -> LanaError {
         let argc = arguments.len();
         *out = Value::null();
+        #[cfg(target_arch = "wasm32")]
+        if matches!(host_id, LANA_HOST_HTTP_GET | LANA_HOST_HTTP_POST | LANA_HOST_NOW
+            | LANA_HOST_SOCKET_CONNECT | LANA_HOST_SOCKET_SEND | LANA_HOST_SOCKET_RECV | LANA_HOST_SOCKET_CLOSE
+            | LANA_HOST_FFI_LOAD | LANA_HOST_FFI_CALL | LANA_HOST_SLEEP
+            | LANA_HOST_SHARED_WAIT | LANA_HOST_DIRECTORY_CREATE | LANA_HOST_DIRECTORY_LIST
+            | LANA_HOST_CSV_READ | LANA_HOST_CSV_WRITE)
+            || (self.virtual_fs.is_none() && matches!(host_id, LANA_HOST_READ_TEXT
+                | LANA_HOST_WRITE_TEXT | LANA_HOST_WRITE_TEXT_ATOMIC
+                | LANA_HOST_PATH_RESOLVE | LANA_HOST_PATH_EXISTS)) {
+            return LanaError::UnsupportedOperation;
+        }
         match host_id {
+            LANA_HOST_INFORMATION_SNAPSHOT => {
+                if argc != 1 { return LanaError::Type; }
+                match self.information_snapshot(&arguments[0]) {
+                    Ok(value) => { *out = value; LanaError::Ok },
+                    Err(error) => error,
+                }
+            }
             LANA_HOST_ARGS => {
                 if argc != 0 {
                     return LanaError::Type;
@@ -9758,7 +11811,7 @@ impl<'a> Vm<'a> {
                     };
                     if let Err(error) = items.push(item) { return error; }
                 }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                *out = Value::array(Arc::new(Mutex::new(match Array::from_buffer(items) { Ok(array) => array, Err(error) => return error })));
                 LanaError::Ok
             }
             LANA_HOST_READ_TEXT => {
@@ -9897,13 +11950,23 @@ impl<'a> Vm<'a> {
                 *out = Value::number(result);
                 LanaError::Ok
             }
+            LANA_HOST_CORE_ENTROPY | LANA_HOST_CORE_CONDITIONAL_ENTROPY | LANA_HOST_CORE_MUTUAL_INFORMATION => {
+                self.core_information_measure(host_id, arguments, out)
+            }
+            LANA_HOST_CORE_BROJA => self.core_broja(arguments, out),
+            LANA_HOST_CORE_FORGET_WEIGHTS | LANA_HOST_CORE_ASSIGN_WEIGHTS => {
+                self.core_convert_weights(host_id, arguments, out)
+            }
+            LANA_HOST_CORE_IDENTITY_KERNEL => self.core_kernel_identity(arguments, out),
+            LANA_HOST_CORE_COMPOSE_KERNELS => self.core_kernel_compose(arguments, out),
+            LANA_HOST_CORE_NETWORK => self.core_network(arguments, out),
+            LANA_HOST_CORE_INFER => self.core_infer(arguments, out),
             LANA_HOST_NOW => {
                 if argc != 0 {
                     return LanaError::Type;
                 }
-                // `SystemTime::now()` panics on wasm32-unknown-unknown (no
-                // clock); the embedded compiler never calls `now`, and a user
-                // program that does gets 0.0 rather than a trap.
+                // The WASM dispatch boundary rejects this host call before any
+                // clock access. Only native execution reaches this branch.
                 #[cfg(target_arch = "wasm32")]
                 let seconds = 0.0;
                 #[cfg(not(target_arch = "wasm32"))]
@@ -10246,7 +12309,7 @@ impl<'a> Vm<'a> {
                     Ok(items) => items, Err(error) => return error,
                 };
                 if let Err(error) = items.extend(t.shape.iter().map(|&dim| Value::number(dim as f64))) { return error; }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                *out = Value::array(Arc::new(Mutex::new(match Array::from_buffer(items) { Ok(array) => array, Err(error) => return error })));
                 LanaError::Ok
             }
             LANA_HOST_TENSOR_NDIM => {
@@ -10846,7 +12909,9 @@ impl<'a> Vm<'a> {
                 if argc % 2 != 0 {
                     return LanaError::Type;
                 }
-                let mut map = match Map::new(&self.heap, argc / 2) { Ok(map) => map, Err(error) => return error };
+                let mut map = match self.allocate_with_collection(|vm| Map::new(&vm.heap, argc / 2)) {
+                    Ok(map) => map, Err(error) => return error,
+                };
                 let mut index = 0;
                 while index < argc {
                     let ValueKind::String(key) = &arguments[index].kind else {
@@ -10902,6 +12967,7 @@ impl<'a> Vm<'a> {
                 let ValueKind::Map(map) = &arguments[0].kind else {
                     unreachable!()
                 };
+                if let Err(error) = self.prepare_container_write(&arguments[0], &arguments[2]) { return error; }
                 match map
                     .lock()
                     .unwrap()
@@ -10926,7 +12992,7 @@ impl<'a> Vm<'a> {
                     Ok(items) => items, Err(error) => return error,
                 };
                 if let Err(error) = items.extend(map.entries.iter().map(|entry| Value::string(entry.key.clone()))) { return error; }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                *out = Value::array(Arc::new(Mutex::new(match Array::from_buffer(items) { Ok(array) => array, Err(error) => return error })));
                 LanaError::Ok
             }
             LANA_HOST_INDEX_GET => {
@@ -10991,6 +13057,7 @@ impl<'a> Vm<'a> {
                     let ValueKind::Map(map) = &arguments[0].kind else {
                         unreachable!()
                     };
+                    if let Err(error) = self.prepare_container_write(&arguments[0], &arguments[2]) { return error; }
                     return match map
                         .lock()
                         .unwrap()
@@ -11011,8 +13078,11 @@ impl<'a> Vm<'a> {
                         unreachable!()
                     };
                     let index = arguments[1].as_number() as usize;
+                    if index >= array.lock().unwrap().items.len() { return LanaError::Limit; }
+                    if let Err(error) = self.prepare_container_write(&arguments[0], &arguments[2]) { return error; }
                     let mut array = array.lock().unwrap();
                     if index < array.items.len() {
+                        if array.frozen { return LanaError::UnsupportedOperation; }
                         array.items[index] = arguments[2].clone();
                         *out = arguments[2].clone();
                         return LanaError::Ok;
@@ -11123,12 +13193,12 @@ impl<'a> Vm<'a> {
                     return LanaError::Type;
                 }
                 let count = arguments[0].as_number() as usize;
-                let mut items = match self.allocate_array_items(count) {
-                    Ok(items) => items,
-                    Err(error) => return error,
-                };
-                if let Err(error) = items.resize(count, Value::null()) { return error; }
-                *out = Value::array(Arc::new(Mutex::new(Array { items })));
+                let value = self.allocate_with_collection(|vm| {
+                    let mut items = vm.allocate_array_items(count)?;
+                    items.resize(count, Value::null())?;
+                    Ok(Value::array(Arc::new(Mutex::new(Array::from_buffer(items)?))))
+                });
+                *out = match value { Ok(value) => value, Err(error) => return error };
                 LanaError::Ok
             }
             LANA_HOST_ARRAY_PUSH => {
@@ -11138,6 +13208,7 @@ impl<'a> Vm<'a> {
                 let ValueKind::Array(array) = &arguments[0].kind else {
                     unreachable!()
                 };
+                if let Err(error) = self.prepare_container_write(&arguments[0], &arguments[1]) { return error; }
                 if let Err(error) = array.lock().unwrap().push(arguments[1].clone()) { return error; }
                 *out = arguments[0].clone();
                 LanaError::Ok
@@ -11664,6 +13735,10 @@ impl<'a> Vm<'a> {
                     ValueKind::InferenceAlgorithm(_) => "inference_algorithm",
                     ValueKind::Posterior(_) => "posterior",
                     ValueKind::Dataset(_) => "dataset",
+                    ValueKind::Kernel(_) => "kernel",
+                    ValueKind::Network(_) => "network",
+                    ValueKind::ObjectValue(_) => "value",
+                    ValueKind::ClassObject(_) => "class",
                 };
                 self.string_output(name, out)
             }
@@ -11951,9 +14026,14 @@ impl<'a> Vm<'a> {
             LANA_HOST_SOCKET_SEND => self.host_socket_send(arguments, out),
             LANA_HOST_SOCKET_RECV => self.host_socket_recv(arguments, out),
             LANA_HOST_SOCKET_CLOSE => self.host_socket_close(arguments, out),
-            _ => match self.host_call_extension.as_mut() {
-                Some(handler) => handler(host_id, arguments, out),
-                None => LanaError::Format,
+            _ => {
+                let Some(mut handler) = self.host_call_extension.take() else { return LanaError::Format; };
+                let error = handler(self, host_id, arguments, out);
+                self.host_call_extension = Some(handler);
+                if error == LanaError::Ok && class_gc::has_gc_graph(out) {
+                    if let Err(error) = self.retain_value_impl(out, true) { return error; }
+                }
+                error
             },
         }
     }
@@ -12081,6 +14161,38 @@ impl<'a> Vm<'a> {
         LanaError::Ok
     }
 
+    fn net_receive_response(&mut self, socket: &mut NetSocket, timeout: u64) -> Result<http::Response, http::Error> {
+        let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_millis(timeout))
+            .ok_or(http::Error::Resource(LanaError::InvalidParameters))?;
+        let mut response = http::Response::new(&self.heap)?;
+        let mut buffer = [0u8; 4096];
+        while !response.complete() {
+            let remaining = deadline.checked_duration_since(std::time::Instant::now()).ok_or(http::Error::Timeout)?;
+            match socket.read(&mut buffer, (remaining.as_millis() as u64).max(1)) {
+                Ok(0) => response.eof()?,
+                Ok(count) => {
+                    self.charge_bounded_work(count as u64)?;
+                    response.feed(&buffer[..count])?;
+                }
+                Err(NetError::Timeout) => return Err(http::Error::Timeout),
+                Err(NetError::Io) => return Err(http::Error::Io),
+            }
+        }
+        Ok(response)
+    }
+
+    fn net_header_values(&self, headers: &http::Headers) -> Result<Value, LanaError> {
+        let mut map = Map::new(&self.heap, headers.len())?;
+        for (name, value) in headers {
+            if let Some(Value { kind: ValueKind::Array(values), .. }) = map.get(name) {
+                values.lock().unwrap().push(Value::string(value.clone()))?;
+            } else {
+                map.set(name.clone(), self.array_value(vec![Value::string(value.clone())])?, true)?;
+            }
+        }
+        Ok(Value::map(Arc::new(Mutex::new(map))))
+    }
+
     /// Perform an HTTP request and build the `Result<HttpResponse, E>` tagged
     /// pair. On success the response map is rooted as Information with a
     /// derivation recording the operation and URL (LIP-019 §4).
@@ -12091,14 +14203,26 @@ impl<'a> Vm<'a> {
         body: Option<&str>,
         timeout_ms: f64,
         verify: bool,
+        headers: &[u8],
         out: &mut Value,
     ) -> LanaError {
-        let timeout = if timeout_ms > 0.0 { timeout_ms as u64 } else { 5000 };
+        if !timeout_ms.is_finite() || timeout_ms > u64::MAX as f64 { return LanaError::InvalidParameters; }
+        let timeout = if timeout_ms > 0.0 { (timeout_ms as u64).max(1) } else { 5000 };
         let (scheme, host, port, path) = match net_parse_url(url) {
             Some(x) => x,
             None => return self.net_error_result("url", out),
         };
-        #[cfg(not(feature = "net-tls"))]
+        let authority = if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
+        let prefix = format!("{method} {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n", body.map_or(0, str::len));
+        if prefix.len().saturating_add(headers.len()).saturating_add(2) > http::HEADER_LIMIT {
+            return self.net_error_result("headers", out);
+        }
+        let mut request = match Buffer::new(&self.heap, prefix.len() + headers.len() + 2, 0) {
+            Ok(request) => request, Err(error) => return error,
+        };
+        if request.extend_from_slice(prefix.as_bytes()).is_err()
+            || request.extend_from_slice(headers).is_err() || request.extend_from_slice(b"\r\n").is_err() { return LanaError::Oom; }
+        #[cfg(any(not(feature = "net-tls"), target_arch = "wasm32"))]
         {
             let _ = verify;
             if scheme == "https" { return self.net_error_result("tls", out); }
@@ -12109,7 +14233,7 @@ impl<'a> Vm<'a> {
             Err(_) => return self.net_error_result("connect", out),
         };
         let mut sock = if scheme == "https" {
-            #[cfg(feature = "net-tls")]
+            #[cfg(all(feature = "net-tls", not(target_arch = "wasm32")))]
             {
                 match net_tls_connect(stream, &host, verify) {
                     Ok(s) => s,
@@ -12117,68 +14241,30 @@ impl<'a> Vm<'a> {
                     Err(_) => return self.net_error_result("tls", out),
                 }
             }
-            #[cfg(not(feature = "net-tls"))]
+            #[cfg(any(not(feature = "net-tls"), target_arch = "wasm32"))]
             {
                 unreachable!("HTTPS requires TLS support")
             }
         } else {
             NetSocket::Plain(stream)
         };
-        let mut request = format!(
-            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
-            method, path, host
-        );
-        match body {
-            Some(b) => request.push_str(&format!("Content-Length: {}\r\n\r\n{}", b.len(), b)),
-            None => request.push_str("Content-Length: 0\r\n\r\n"),
+        if let Err(error) = sock.write_all(&request).and_then(|_| sock.write_all(body.unwrap_or("").as_bytes())) {
+            return self.net_error_result(if matches!(error, NetError::Timeout) { "timeout" } else { "send" }, out);
         }
-        if sock.write_all(request.as_bytes()).is_err() {
-            return self.net_error_result("send", out);
-        }
-        let mut response = match Buffer::new(&self.heap, 0, 0) {
-            Ok(buffer) => buffer, Err(error) => return error,
+        drop(request);
+        let response = match self.net_receive_response(&mut sock, timeout) {
+            Ok(response) => response,
+            Err(http::Error::Resource(error)) => return error,
+            Err(http::Error::Protocol) => return self.net_error_result("response", out),
+            Err(http::Error::Timeout) => return self.net_error_result("timeout", out),
+            Err(http::Error::Io) => return self.net_error_result("recv", out),
         };
-        let mut expected_length = None;
-        let mut buf = [0u8; 4096];
-        loop {
-            match sock.read(&mut buf, timeout) {
-                Ok(0) => break,
-                Ok(n) => if let Err(error) = response.extend_from_slice(&buf[..n]) { return error; },
-                Err(NetError::Timeout) => return self.net_error_result("timeout", out),
-                Err(_) => return self.net_error_result("recv", out),
-            }
-            expected_length = match net_response_length(&response) {
-                Ok(length) => length, Err(_) => return self.net_error_result("response", out),
-            };
-            if let Some(length) = expected_length {
-                if response.len() >= length { response.truncate(length); break; }
-            }
-        }
-        if expected_length.is_some_and(|length| response.len() < length) {
-            return self.net_error_result("response", out);
-        }
-        let text = match self.heap.lossy_string(&response) {
-            Ok(text) => text, Err(error) => return error,
-        };
-        let header_end = match text.find("\r\n\r\n") {
-            Some(i) => i,
-            None => return self.net_error_result("response", out),
-        };
-        let status_line = &text[..text.find("\r\n").unwrap_or(0)];
-        let status = if let Some(sp) = status_line.find(' ') {
-            status_line[sp + 1..].split(' ').next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        let body_text = &text[header_end + 4..];
-        let mut resp = match Map::new(&self.heap, 3) { Ok(map) => map, Err(error) => return error };
-        let status_value = Value::number(status);
-        let body_value = match self.string_value(body_text) { Ok(value) => value, Err(error) => return error };
-        if resp.set(Arc::from("status"), status_value, false).is_err()
-            || resp.set(Arc::from("headers"), Value::map(Arc::new(Mutex::new(match Map::new(&self.heap, 0) { Ok(map) => map, Err(error) => return error }))), false).is_err()
-            || resp.set(Arc::from("body"), body_value, false).is_err()
-        {
-            return LanaError::Oom;
+        let mut resp = match Map::new(&self.heap, 4) { Ok(map) => map, Err(error) => return error };
+        let headers = match self.net_header_values(&response.headers) { Ok(value) => value, Err(error) => return error };
+        let trailers = match self.net_header_values(&response.trailers) { Ok(value) => value, Err(error) => return error };
+        let body = match self.heap.lossy_string(&response.body) { Ok(value) => Value::string(value), Err(error) => return error };
+        for (name, value) in [("status", Value::number(response.status as f64)), ("headers", headers), ("trailers", trailers), ("body", body)] {
+            if let Err(error) = resp.set(Arc::from(name), value, false) { return error; }
         }
         // LIP-019 §4: root the response as Information with an evidence
         // derivation recording the operation and URL, then wrap `[true, val]`.
@@ -12220,15 +14306,12 @@ impl<'a> Vm<'a> {
         if !self.has_named_capability("net") {
             return LanaError::Capability;
         }
-        // LIP-019 `verify:false` is an explicit per-call opt-out read from the
-        // headers map; TLS validation is otherwise ON by default.
-        let mut verify = true;
-        if let Some(v) = headers.lock().unwrap().get("verify") {
-            if let ValueKind::Bool(b) = &v.kind {
-                verify = *b;
-            }
-        }
-        self.net_http_request("GET", url, None, *timeout_ms, verify, out)
+        let (verify, bytes) = match http::request_headers(&self.heap, &headers.lock().unwrap()) {
+            Ok(headers) => headers,
+            Err(http::Error::Resource(error)) => return error,
+            Err(_) => return self.net_error_result("headers", out),
+        };
+        self.net_http_request("GET", url, None, *timeout_ms, verify, &bytes, out)
     }
 
     /// `http_post(url, body, headers, timeout_ms) -> Result<HttpResponse, E>`.
@@ -12251,13 +14334,12 @@ impl<'a> Vm<'a> {
         if !self.has_named_capability("net") {
             return LanaError::Capability;
         }
-        let mut verify = true;
-        if let Some(v) = headers.lock().unwrap().get("verify") {
-            if let ValueKind::Bool(b) = &v.kind {
-                verify = *b;
-            }
-        }
-        self.net_http_request("POST", url, Some(body), *timeout_ms, verify, out)
+        let (verify, bytes) = match http::request_headers(&self.heap, &headers.lock().unwrap()) {
+            Ok(headers) => headers,
+            Err(http::Error::Resource(error)) => return error,
+            Err(_) => return self.net_error_result("headers", out),
+        };
+        self.net_http_request("POST", url, Some(body), *timeout_ms, verify, &bytes, out)
     }
 
     /// `socket_connect(host, port) -> Result<Socket, E>` (LIP-019).
@@ -12423,6 +14505,7 @@ impl<'a> Vm<'a> {
             ready: true,
             queued: false,
         }));
+        if let Err(error) = self.track_cycle(crate::heap::CycleWeak::Future(Arc::downgrade(&composite))) { return error; }
         for item in &items {
             let ValueKind::Future(f) = &item.kind else {
                 continue;
@@ -12465,6 +14548,7 @@ impl<'a> Vm<'a> {
             ready: true,
             queued: false,
         }));
+        if let Err(error) = self.track_cycle(crate::heap::CycleWeak::Future(Arc::downgrade(&composite))) { return error; }
         for item in &items {
             let ValueKind::Future(f) = &item.kind else {
                 continue;
@@ -12482,7 +14566,7 @@ impl<'a> Vm<'a> {
 
     /// `sleep(ms) -> future` (LIP-024 §4): a composite future that completes
     /// after `ms` milliseconds, yielding `null`. The single-threaded VM blocks
-    /// for the duration; on wasm (no clock) it completes immediately.
+    /// for the duration; WASM rejects this host call at dispatch (no clock).
     fn host_sleep(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
         if arguments.len() != 1 {
             return LanaError::Type;
@@ -12501,6 +14585,7 @@ impl<'a> Vm<'a> {
             ready: true,
             queued: false,
         }));
+        if let Err(error) = self.track_cycle(crate::heap::CycleWeak::Future(Arc::downgrade(&composite))) { return error; }
         self.enqueue_future(composite.clone());
         *out = Value::future(composite);
         LanaError::Ok
@@ -12519,7 +14604,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[0].kind, ValueKind::Lazy { .. } | ValueKind::Array(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(match self.managed_payload(Dataset {
             op: DatasetOp::Source,
             source: arguments[0].clone(),
             function: 0,
@@ -12528,7 +14613,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        }) { Ok(payload) => payload, Err(error) => return error });
         LanaError::Ok
     }
 
@@ -12543,7 +14628,7 @@ impl<'a> Vm<'a> {
         let ValueKind::Function(function) = arguments[1].kind else {
             return LanaError::Type;
         };
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(match self.managed_payload(Dataset {
             op: DatasetOp::Filter,
             source: arguments[0].clone(),
             function,
@@ -12552,7 +14637,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        }) { Ok(payload) => payload, Err(error) => return error });
         LanaError::Ok
     }
 
@@ -12567,7 +14652,7 @@ impl<'a> Vm<'a> {
         let ValueKind::Function(function) = arguments[1].kind else {
             return LanaError::Type;
         };
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(match self.managed_payload(Dataset {
             op: DatasetOp::Map,
             source: arguments[0].clone(),
             function,
@@ -12576,7 +14661,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        }) { Ok(payload) => payload, Err(error) => return error });
         LanaError::Ok
     }
 
@@ -12591,7 +14676,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[1].kind, ValueKind::Array(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(match self.managed_payload(Dataset {
             op: DatasetOp::Select,
             source: arguments[0].clone(),
             function: 0,
@@ -12600,7 +14685,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        }) { Ok(payload) => payload, Err(error) => return error });
         LanaError::Ok
     }
 
@@ -12618,7 +14703,7 @@ impl<'a> Vm<'a> {
         if !n.is_finite() || n < 0.0 {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(match self.managed_payload(Dataset {
             op: DatasetOp::Limit,
             source: arguments[0].clone(),
             function: 0,
@@ -12627,7 +14712,7 @@ impl<'a> Vm<'a> {
             limit: arguments[1].clone(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        }) { Ok(payload) => payload, Err(error) => return error });
         LanaError::Ok
     }
 
@@ -12642,7 +14727,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[1].kind, ValueKind::String(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(match self.managed_payload(Dataset {
             op: DatasetOp::Sort,
             source: arguments[0].clone(),
             function: 0,
@@ -12651,7 +14736,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        }) { Ok(payload) => payload, Err(error) => return error });
         LanaError::Ok
     }
 
@@ -12666,7 +14751,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[1].kind, ValueKind::String(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(match self.managed_payload(Dataset {
             op: DatasetOp::GroupBy,
             source: arguments[0].clone(),
             function: 0,
@@ -12675,7 +14760,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: Value::null(),
-        }));
+        }) { Ok(payload) => payload, Err(error) => return error });
         LanaError::Ok
     }
 
@@ -12691,7 +14776,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[1].kind, ValueKind::Array(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(match self.managed_payload(Dataset {
             op: DatasetOp::Aggregate,
             source: arguments[0].clone(),
             function: 0,
@@ -12700,7 +14785,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: Value::null(),
             aggregate: arguments[1].clone(),
-        }));
+        }) { Ok(payload) => payload, Err(error) => return error });
         LanaError::Ok
     }
 
@@ -12719,7 +14804,7 @@ impl<'a> Vm<'a> {
         if !matches!(arguments[2].kind, ValueKind::String(_)) {
             return LanaError::Type;
         }
-        *out = Value::dataset(Arc::new(Dataset {
+        *out = Value::dataset(match self.managed_payload(Dataset {
             op: DatasetOp::Join,
             source: arguments[0].clone(),
             function: 0,
@@ -12728,7 +14813,7 @@ impl<'a> Vm<'a> {
             limit: Value::null(),
             other: arguments[1].clone(),
             aggregate: Value::null(),
-        }));
+        }) { Ok(payload) => payload, Err(error) => return error });
         LanaError::Ok
     }
 
@@ -12744,6 +14829,7 @@ impl<'a> Vm<'a> {
             Ok(rows) => rows,
             Err(error) => return error,
         };
+        if self.dataset_work_remaining.is_some() && rows.len() > 100_000 { return LanaError::Limit; }
         *out = match self.array_value(rows) { Ok(value) => value, Err(error) => return error };
         LanaError::Ok
     }
@@ -12769,13 +14855,21 @@ impl<'a> Vm<'a> {
     fn dataset_materialize_source(&mut self, lazy: &Value, scratch: u32) -> Result<Vec<Value>, LanaError> {
         /* LIP-015 §3: an in-memory array source is returned as-is. */
         if let ValueKind::Array(array) = &lazy.kind {
-            return Ok(array.lock().unwrap().items.to_vec());
+            let items = array.lock().unwrap();
+            if self.dataset_work_remaining.is_some() && items.items.len() > 100_000 { return Err(LanaError::Limit); }
+            self.charge_dataset_work(items.items.len() as u64)?;
+            return Ok(items.items.to_vec());
         }
         let ValueKind::Lazy { function, bound } = lazy.kind else {
             return Err(LanaError::Type);
         };
+        if self.dataset_work_remaining.is_some() && bound > 100_000 { return Err(LanaError::Limit); }
+        if self.dataset_work_remaining.is_some_and(|remaining| bound as u64 > remaining) {
+            return Err(LanaError::Limit);
+        }
         let mut rows = Vec::with_capacity(bound);
         for i in 0..bound {
+            self.charge_dataset_work(1)?;
             let index_value = Value::number(i as f64);
             let mut row = Value::null();
             let error = self.run_function(function, &index_value, scratch, &mut row);
@@ -12801,6 +14895,22 @@ impl<'a> Vm<'a> {
         Ok(self.reactive_value(&value))
     }
 
+    fn dataset_check_number(&self, value: &Value) -> Result<(), LanaError> {
+        match &self.reactive_value(value).kind {
+            ValueKind::Number(number) if number.is_finite() => Ok(()),
+            ValueKind::Possibility(possibility) => {
+                for candidate in &possibility.values { self.dataset_check_number(candidate)?; }
+                Ok(())
+            }
+            ValueKind::PathSet(paths) => {
+                for alternative in &paths.alternatives { self.dataset_check_number(&alternative.result)?; }
+                Ok(())
+            }
+            ValueKind::Joint(_) | ValueKind::StateDist(_) | ValueKind::Distribution { .. } => Err(LanaError::UnsupportedOperation),
+            _ => Err(LanaError::Type),
+        }
+    }
+
     /// Compare two values for sort ordering, mirroring `dataset_compare_values`.
     fn dataset_compare_values(a: &Value, b: &Value) -> i32 {
         match (&a.kind, &b.kind) {
@@ -12822,6 +14932,117 @@ impl<'a> Vm<'a> {
         }
     }
 
+    fn charge_dataset_work(&mut self, steps: u64) -> Result<(), LanaError> {
+        if let Some(remaining) = &mut self.dataset_work_remaining {
+            *remaining = remaining.checked_sub(steps).ok_or(LanaError::Limit)?;
+        }
+        Ok(())
+    }
+
+    fn dataset_key_identity(value: &Value, bytes: &mut Vec<u8>, depth: usize) -> Result<(), LanaError> {
+        if depth > 64 { return Err(LanaError::Limit); }
+        let append = |bytes: &mut Vec<u8>, part: &[u8]| -> Result<(), LanaError> {
+            if bytes.len().checked_add(part.len()).is_none_or(|size| size > 64 * 1024 * 1024) {
+                return Err(LanaError::Limit);
+            }
+            bytes.try_reserve(part.len()).map_err(|_| LanaError::Oom)?;
+            bytes.extend_from_slice(part);
+            Ok(())
+        };
+        match &value.kind {
+            ValueKind::Null => append(bytes, b"n"),
+            ValueKind::Bool(flag) => append(bytes, if *flag { b"t" } else { b"f" }),
+            ValueKind::String(text) => {
+                append(bytes, b"s")?;
+                append(bytes, &(text.len() as u64).to_le_bytes())?;
+                append(bytes, text.as_bytes())
+            }
+            ValueKind::Number(number) if number.is_finite() => {
+                append(bytes, b"d")?;
+                append(bytes, &(if *number == 0.0 { 0.0 } else { *number }).to_bits().to_le_bytes())
+            }
+            ValueKind::State(state) if state::state_valid(&state.state) => {
+                append(bytes, b"q")?;
+                for number in [state.state.p, state.state.d_re, state.state.d_im] {
+                    append(bytes, &(if number == 0.0 { 0.0 } else { number }).to_bits().to_le_bytes())?;
+                }
+                Ok(())
+            }
+            ValueKind::Array(items) => {
+                let items = items.lock().unwrap().items().to_vec();
+                append(bytes, b"a")?;
+                append(bytes, &(items.len() as u64).to_le_bytes())?;
+                for item in &items { Self::dataset_key_identity(item, bytes, depth + 1)?; }
+                Ok(())
+            }
+            ValueKind::Map(fields) => {
+                let mut fields = fields.lock().unwrap().entries().to_vec();
+                fields.sort_by(|a, b| a.key.cmp(&b.key));
+                append(bytes, b"m")?;
+                append(bytes, &(fields.len() as u64).to_le_bytes())?;
+                for entry in &fields {
+                    append(bytes, &(entry.key.len() as u64).to_le_bytes())?;
+                    append(bytes, entry.key.as_bytes())?;
+                    Self::dataset_key_identity(&entry.value, bytes, depth + 1)?;
+                }
+                Ok(())
+            }
+            _ => Err(LanaError::UnsupportedValue),
+        }
+    }
+
+    fn trace_dataset_row(&mut self, output: &mut Value, operation: &str, inputs: &[&Value]) -> Result<(), LanaError> {
+        if self.dataset_work_remaining.is_some() && inputs.iter().any(|input| input.derivation.is_some()) {
+            let label = if operation == "group_by" {
+                let key = Self::dataset_row_key(output, "key")?;
+                let mut bytes = Vec::new();
+                Self::dataset_key_identity(&key, &mut bytes, 0)?;
+                if bytes.len() > (64 * 1024 * 1024 - 32) / 2 { return Err(LanaError::Limit); }
+                format!("g{}:{}", bytes.len(), bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+            } else if operation == "join" {
+                let left = inputs[0].derivation.as_ref().ok_or(LanaError::UnsupportedValue)?.label.as_ref();
+                let right = inputs[1].derivation.as_ref().ok_or(LanaError::UnsupportedValue)?.label.as_ref();
+                if left.len().checked_add(right.len()).is_none_or(|size| size > 64 * 1024 * 1024 - 64) {
+                    return Err(LanaError::Limit);
+                }
+                format!("j{}:{}{}:{}", left.len(), left, right.len(), right)
+            } else {
+                inputs[0].derivation.as_ref().ok_or(LanaError::UnsupportedValue)?.label.to_string()
+            };
+            if label.len() > 64 * 1024 * 1024 { return Err(LanaError::Limit); }
+            output.derivation = self.record_derivation(DerivationKind::Operation, operation, inputs, &label, 0,
+                DerivationExactness::Exact, "dataset_row", DerivationOutcome::Success,
+                if operation == "filter" { "true" } else { "none" });
+            if let ValueKind::Map(fields) = &output.kind {
+                let guard = fields.lock().unwrap();
+                if guard.entries().iter().any(|entry| entry.value.derivation.is_none()) {
+                    let entries = guard.entries().to_vec();
+                    drop(guard);
+                    let mut traced = Map::new(&self.heap, entries.len())?;
+                    for entry in entries {
+                        let mut cell = entry.value;
+                        if cell.derivation.is_none() { cell.derivation = output.derivation.clone(); }
+                        traced.set(entry.key, cell, false)?;
+                    }
+                    output.kind = ValueKind::Map(Arc::new(Mutex::new(traced)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn exclude_dataset_row(&mut self, row: &Value, operation: &'static str, reason: &'static str, predicate: Option<&Value>) {
+        if self.dataset_work_remaining.is_some() {
+            if let Some(input) = &row.derivation {
+                self.dataset_decisions.push(DatasetDecision {
+                    operation, reason, input: input.clone(),
+                    predicate: predicate.and_then(|value| value.derivation.clone()),
+                    predicate_value: predicate.and_then(|value| match self.reactive_value(value).kind { ValueKind::Bool(result) => Some(result), _ => None }),
+                });
+            }
+        }
+    }
+
     /// Materialize a dataset plan to a `Vec<Value>` of rows, mirroring
     /// `dataset_materialize` in `vm/c/vm.c`.
     fn dataset_materialize(&mut self, dataset: &Dataset, scratch: u32) -> Result<Vec<Value>, LanaError> {
@@ -12833,6 +15054,7 @@ impl<'a> Vm<'a> {
                 let source_rows = self.dataset_materialize(&self.dataset_as(dataset)?, scratch)?;
                 let mut result = Vec::new();
                 for row in source_rows {
+                    self.charge_dataset_work(1)?;
                     let mut pred_result = Value::null();
                     let error = self.run_function(dataset.function, &row, scratch, &mut pred_result);
                     if error != LanaError::Ok {
@@ -12840,8 +15062,12 @@ impl<'a> Vm<'a> {
                     }
                     pred_result.check_dataset_key(self.memory_limit.saturating_sub(self.allocated_bytes()))?;
                     match self.reactive_value(&pred_result).kind {
-                        ValueKind::Bool(true) => result.push(row),
-                        ValueKind::Bool(false) => {},
+                        ValueKind::Bool(true) => {
+                            let mut retained = row.clone();
+                            self.trace_dataset_row(&mut retained, "filter", &[&row, &pred_result])?;
+                            result.push(retained);
+                        },
+                        ValueKind::Bool(false) => self.exclude_dataset_row(&row, "filter", "filter_false", Some(&pred_result)),
                         _ => return Err(LanaError::Type),
                     }
                 }
@@ -12851,11 +15077,15 @@ impl<'a> Vm<'a> {
                 let source_rows = self.dataset_materialize(&self.dataset_as(dataset)?, scratch)?;
                 let mut result = Vec::with_capacity(source_rows.len());
                 for row in source_rows {
+                    self.charge_dataset_work(1)?;
                     let mut mapped = Value::null();
                     let error = self.run_function(dataset.function, &row, scratch, &mut mapped);
                     if error != LanaError::Ok {
                         return Err(error);
                     }
+                    let mut mapped = mapped;
+                    let prior = mapped.clone();
+                    self.trace_dataset_row(&mut mapped, "map", &[&row, &prior])?;
                     result.push(mapped);
                 }
                 Ok(result)
@@ -12880,7 +15110,9 @@ impl<'a> Vm<'a> {
                         let col_value = row_map.get(&**col_name).cloned().ok_or(LanaError::Type)?;
                         projected.set(col_name.clone(), col_value, false)?;
                     }
-                    result.push(Value::map(Arc::new(Mutex::new(projected))));
+                    let mut selected = Value::map(Arc::new(Mutex::new(projected)));
+                    self.trace_dataset_row(&mut selected, "select", &[&row])?;
+                    result.push(selected);
                 }
                 Ok(result)
             }
@@ -12894,7 +15126,17 @@ impl<'a> Vm<'a> {
                 let n = n as usize;
                 let source_rows = self.dataset_materialize(&self.dataset_as(dataset)?, scratch)?;
                 let take = n.min(source_rows.len());
-                Ok(source_rows.into_iter().take(take).collect())
+                let mut result = Vec::with_capacity(take);
+                for (index, row) in source_rows.into_iter().enumerate() {
+                    if index < take {
+                        let mut retained = row.clone();
+                        self.trace_dataset_row(&mut retained, "limit", &[&row])?;
+                        result.push(retained);
+                    } else {
+                        self.exclude_dataset_row(&row, "limit", "limit_excluded", None);
+                    }
+                }
+                Ok(result)
             }
             DatasetOp::Sort => {
                 let ValueKind::String(key) = &dataset.key.kind else {
@@ -12908,6 +15150,7 @@ impl<'a> Vm<'a> {
                     let pivot = result[i].clone();
                     let mut j = i;
                     while j > 0 {
+                        self.charge_dataset_work(1)?;
                         let key_j = self.dataset_checked_key(&result[j - 1], key)?;
                         if Self::dataset_compare_values(&key_j, &key_i) <= 0 {
                             break;
@@ -12916,6 +15159,10 @@ impl<'a> Vm<'a> {
                         j -= 1;
                     }
                     result[j] = pivot;
+                }
+                for row in &mut result {
+                    let input = row.clone();
+                    self.trace_dataset_row(row, "sort", &[&input])?;
                 }
                 Ok(result)
             }
@@ -12928,20 +15175,22 @@ impl<'a> Vm<'a> {
                 for row in source_rows {
                     let key_value = self.dataset_checked_key(&row, key)?;
                     // Find an existing group record with this key.
-                    let mut group_map: Option<Arc<Mutex<Map>>> = None;
+                    let mut group_index: Option<usize> = None;
                     for g in 0..result.len() {
+                        self.charge_dataset_work(1)?;
                         let ValueKind::Map(existing) = &result[g].kind else {
                             return Err(LanaError::Type);
                         };
                         let existing_guard = existing.lock().unwrap();
                         let existing_key = existing_guard.get("key").cloned().ok_or(LanaError::Type)?;
                         if set_value_equal(&existing_key, &key_value) {
-                            group_map = Some(existing.clone());
+                            group_index = Some(g);
                             break;
                         }
                     }
                     let group_rows: Arc<Mutex<Array>>;
-                    if let Some(gm) = group_map {
+                    if let Some(index) = group_index {
+                        let ValueKind::Map(gm) = &result[index].kind else { return Err(LanaError::Type); };
                         let guard = gm.lock().unwrap();
                         let rows_value = guard.get("rows").cloned().ok_or(LanaError::Type)?;
                         let ValueKind::Array(rows) = rows_value.kind else {
@@ -12949,13 +15198,17 @@ impl<'a> Vm<'a> {
                         };
                         group_rows = rows;
                         drop(guard);
-                        group_rows.lock().unwrap().items.push(row)?;
+                        group_rows.lock().unwrap().items.push(row.clone())?;
+                        let prior = result[index].clone();
+                        self.trace_dataset_row(&mut result[index], "group_by", &[&prior, &row])?;
                     } else {
                         let mut new_map = Map::new(&self.heap, 2)?;
-                        let new_rows = Arc::new(Mutex::new(Array::from_items(&self.heap, vec![row])?));
+                        let new_rows = Arc::new(Mutex::new(Array::from_items(&self.heap, vec![row.clone()])?));
                         new_map.set(Arc::from("key"), key_value, false)?;
                         new_map.set(Arc::from("rows"), Value::array(new_rows.clone()), false)?;
-                        result.push(Value::map(Arc::new(Mutex::new(new_map))));
+                        let mut group = Value::map(Arc::new(Mutex::new(new_map)));
+                        self.trace_dataset_row(&mut group, "group_by", &[&row])?;
+                        result.push(group);
                     }
                 }
                 Ok(result)
@@ -12971,13 +15224,10 @@ impl<'a> Vm<'a> {
                 let ValueKind::String(agg_op) = &agg.items[0].kind else {
                     return Err(LanaError::Type);
                 };
-                let agg_col: Option<Arc<str>> = if agg.items.len() >= 2 {
-                    match &agg.items[1].kind {
-                        ValueKind::String(s) => Some(s.clone()),
-                        _ => return Err(LanaError::Type),
-                    }
-                } else {
-                    None
+                let agg_col: Option<Arc<str>> = match (&**agg_op, &agg.items[..]) {
+                    ("count", [_]) => None,
+                    ("sum" | "mean" | "min" | "max", [_, Value { kind: ValueKind::String(col), .. }]) => Some(col.clone()),
+                    _ => return Err(LanaError::Type),
                 };
                 let group_records = self.dataset_materialize(&self.dataset_as(dataset)?, scratch)?;
                 let mut result = Vec::with_capacity(group_records.len());
@@ -12992,38 +15242,57 @@ impl<'a> Vm<'a> {
                         return Err(LanaError::Type);
                     };
                     let rows = rows.lock().unwrap();
-                    let agg_value = if &**agg_op == "count" {
+                    let mut agg_value = if &**agg_op == "count" {
+                        self.charge_dataset_work(rows.items.len() as u64)?;
                         Value::number(rows.items.len() as f64)
                     } else {
                         let col = agg_col.as_ref().ok_or(LanaError::Type)?;
-                        let mut acc = 0.0;
-                        let mut have = false;
+                        let mut acc: Option<Value> = None;
                         for r in &rows.items {
+                            self.charge_dataset_work(1)?;
                             let cell = Self::dataset_row_key(r, &**col)?;
-                            let ValueKind::Number(cell_n) = cell.kind else {
-                                return Err(LanaError::Type);
-                            };
-                            if !have {
-                                acc = cell_n;
-                                have = true;
-                            } else if &**agg_op == "sum" || &**agg_op == "mean" {
-                                acc += cell_n;
-                            } else if &**agg_op == "max" {
-                                if cell_n > acc { acc = cell_n; }
-                            } else if &**agg_op == "min" {
-                                if cell_n < acc { acc = cell_n; }
-                            } else {
-                                return Err(LanaError::Type);
-                            }
+                            self.dataset_check_number(&cell)?;
+                            acc = Some(if let Some(previous) = acc {
+                                let operation = match &**agg_op {
+                                    "sum" | "mean" => 0,
+                                    "min" => 4,
+                                    "max" => 5,
+                                    _ => unreachable!(),
+                                };
+                                let mut next = Value::null();
+                                let error = self.lift_binary(&previous, &cell, PureKind::Binary, operation, &mut next);
+                                if error != LanaError::Ok { return Err(error); }
+                                self.dataset_check_number(&next)?;
+                                if previous.derivation.is_some() || cell.derivation.is_some() {
+                                    next.derivation = self.record_derivation(DerivationKind::Operation,
+                                        agg_op, &[&previous, &cell], "", 0,
+                                        DerivationExactness::Exact, "pure", DerivationOutcome::Success, "none");
+                                }
+                                next
+                            } else { cell });
                         }
+                        let mut acc = acc.unwrap_or_else(|| Value::number(0.0));
+                        if rows.items.is_empty() && &**agg_op != "sum" { return Err(LanaError::Type); }
                         if &**agg_op == "mean" {
-                            if rows.items.is_empty() {
-                                return Err(LanaError::Type);
+                            let count = Value::number(rows.items.len() as f64);
+                            let mut mean = Value::null();
+                            let error = self.lift_binary(&acc, &count, PureKind::Binary, 3, &mut mean);
+                            if error != LanaError::Ok { return Err(error); }
+                            self.dataset_check_number(&mean)?;
+                            if acc.derivation.is_some() {
+                                mean.derivation = self.record_derivation(DerivationKind::Operation,
+                                    "mean", &[&acc, &count], "", 0,
+                                    DerivationExactness::Exact, "pure", DerivationOutcome::Success, "none");
                             }
-                            acc /= rows.items.len() as f64;
+                            acc = mean;
                         }
-                        Value::number(acc)
+                        acc
                     };
+                    if self.dataset_work_remaining.is_some() {
+                        agg_value.derivation = self.record_derivation(DerivationKind::Operation,
+                            agg_op, &[record, &agg_value], "", 0,
+                            DerivationExactness::Exact, "dataset_cell", DerivationOutcome::Success, "none");
+                    }
                     // Output row: {<group key name>: key_value, <op>: agg_value}.
                     let mut key_name = Arc::from("key");
                     if let ValueKind::Dataset(source) = &dataset.source.kind {
@@ -13035,8 +15304,10 @@ impl<'a> Vm<'a> {
                     }
                     let mut out_row = Map::new(&self.heap, 2)?;
                     out_row.set(key_name, key_value, false)?;
-                    out_row.set(agg_op.clone(), agg_value, false)?;
-                    result.push(Value::map(Arc::new(Mutex::new(out_row))));
+                    out_row.set(agg_op.clone(), agg_value.clone(), false)?;
+                    let mut aggregated = Value::map(Arc::new(Mutex::new(out_row)));
+                    self.trace_dataset_row(&mut aggregated, "aggregate", &[record, &agg_value])?;
+                    result.push(aggregated);
                 }
                 Ok(result)
             }
@@ -13051,13 +15322,19 @@ impl<'a> Vm<'a> {
                 let right_rows = self.dataset_materialize(other, scratch)?;
                 for row in left_rows.iter().chain(&right_rows) { self.dataset_checked_key(row, key)?; }
                 let mut result = Vec::new();
+                let mut right_matches = self.dataset_work_remaining.map(|_| vec![false; right_rows.len()]);
                 for left in &left_rows {
                     let left_key = self.dataset_checked_key(left, key)?;
-                    for right in &right_rows {
+                    let mut matched_left = false;
+                    for (right_index, right) in right_rows.iter().enumerate() {
+                        self.charge_dataset_work(1)?;
                         let right_key = self.dataset_checked_key(right, key)?;
                         if !set_value_equal(&left_key, &right_key) {
                             continue;
                         }
+                        matched_left = true;
+                        if let Some(matches) = &mut right_matches { matches[right_index] = true; }
+                        if self.dataset_work_remaining.is_some() && result.len() == 100_000 { return Err(LanaError::Limit); }
                         // Merge left and right rows into one map.
                         let ValueKind::Map(left_map) = &left.kind else {
                             return Err(LanaError::Type);
@@ -13075,7 +15352,15 @@ impl<'a> Vm<'a> {
                         for entry in &right_entries {
                             merged.set(entry.key.clone(), entry.value.clone(), false)?;
                         }
-                        result.push(Value::map(Arc::new(Mutex::new(merged))));
+                        let mut joined = Value::map(Arc::new(Mutex::new(merged)));
+                        self.trace_dataset_row(&mut joined, "join", &[left, right])?;
+                        result.push(joined);
+                    }
+                    if !matched_left { self.exclude_dataset_row(left, "join", "no_matching_key", None); }
+                }
+                if let Some(matches) = right_matches {
+                    for (right, matched) in right_rows.iter().zip(matches) {
+                        if !matched { self.exclude_dataset_row(right, "join", "no_matching_key", None); }
                     }
                 }
                 Ok(result)
@@ -13189,6 +15474,7 @@ impl<'a> Vm<'a> {
                 }
             }
         } else if &*kind == "sleep" {
+            #[cfg(not(target_arch = "wasm32"))]
             let ms = match &inputs[0].kind {
                 ValueKind::Number(ms) => *ms,
                 _ => 0.0,
@@ -13202,6 +15488,7 @@ impl<'a> Vm<'a> {
         }
         if done {
             let mut guard = future.lock().unwrap();
+            self.heap.mutate_cycle(Arc::as_ptr(&future) as usize);
             guard.exhausted = true;
             guard.ready = false;
             guard.queued = false;
@@ -13335,15 +15622,23 @@ impl<'a> Vm<'a> {
             fs.insert(path.to_string(), contents.to_string());
             return LanaError::Ok;
         }
-        let temporary = format!("{path}.lana-tmp-{}", std::process::id());
-        if std::fs::write(&temporary, contents.as_bytes()).is_err() {
-            return LanaError::Io;
+        match write_text_atomic_with_sync(
+            Path::new(&**path),
+            contents.as_bytes(),
+            |file| file.sync_all(),
+            |directory| directory.sync_all(),
+        ) {
+            Ok(()) => LanaError::Ok,
+            Err((error, uncertain)) => {
+                self.pending_io_outcome = Some((uncertain, path.to_string()));
+                self.pending_error_message = Some(if uncertain {
+                    format!("file replaced; durability: uncertain; path: {path}; {error}")
+                } else {
+                    format!("atomic write failed before replacement; path: {path}; {error}")
+                });
+                LanaError::Io
+            }
         }
-        if std::fs::rename(&temporary, &**path).is_err() {
-            let _ = std::fs::remove_file(&temporary);
-            return LanaError::Io;
-        }
-        LanaError::Ok
     }
 
     fn host_hash_update(&mut self, seed: &Value, text: &Value, out: &mut Value) -> LanaError {
@@ -13389,7 +15684,34 @@ impl<'a> Vm<'a> {
         self.string_output(&result, out)
     }
 
+    fn package_path_allowed(&self, path: &std::path::Path) -> bool {
+        let mut in_lana = false;
+        for component in path.components() {
+            if in_lana && component.as_os_str() == "packages" {
+                return self.package_paths.values().any(|root| path.starts_with(root));
+            }
+            in_lana = component.as_os_str() == ".lana";
+        }
+        true
+    }
+
     fn host_path_resolve(&mut self, base: &str, relative: &str, out: &mut Value) -> LanaError {
+        if let Some(import) = relative.strip_prefix("pkg/") {
+            let parts = import.split('/').collect::<Vec<_>>();
+            if parts.len() < 4 || parts[2] != "src" ||
+                parts.iter().any(|part| part.is_empty() || *part == "." || *part == ".." ||
+                    part.contains(['\\', ':']) || part.chars().any(char::is_control)) {
+                return LanaError::Schema;
+            }
+            let identity = format!("{}/{}", parts[0], parts[1]);
+            let Some(root) = self.package_paths.get(&identity) else { return LanaError::UnsupportedValue; };
+            let root = std::path::Path::new(root);
+            let path = match std::fs::canonicalize(root.join(parts[2..].join("/"))) {
+                Ok(path) if path.starts_with(root.join("src")) && path.is_file() => path,
+                _ => return LanaError::Schema,
+            };
+            return self.string_output(&path.to_string_lossy(), out);
+        }
         // The virtual filesystem has no real directories, so `canonicalize`
         // (which needs the host filesystem) is replaced by a pure lexical
         // normalization. The compiler only uses `path_resolve` to compute
@@ -13411,6 +15733,7 @@ impl<'a> Vm<'a> {
                 Ok(resolved) => resolved,
                 Err(_) => return LanaError::Io,
             };
+            if !self.package_path_allowed(&resolved) { return LanaError::UnsupportedValue; }
             return self.string_output(&resolved.to_string_lossy(), out);
         }
         let candidate = match base.rfind('/') {
@@ -13421,6 +15744,13 @@ impl<'a> Vm<'a> {
             Ok(resolved) => resolved,
             Err(_) => return LanaError::Io,
         };
+        if !self.package_path_allowed(&resolved) { return LanaError::UnsupportedValue; }
+        for root in self.package_paths.values() {
+            let root = std::path::Path::new(root);
+            if std::path::Path::new(base).starts_with(root) && !resolved.starts_with(root) {
+                return LanaError::Schema;
+            }
+        }
         self.string_output(&resolved.to_string_lossy(), out)
     }
 
@@ -13708,6 +16038,25 @@ impl<'a> Vm<'a> {
                 Ok(())
             }
             ValueKind::String(string) => self.json_escape(string, buffer),
+            ValueKind::ObjectValue(object) => {
+                if object.descriptor.fields.iter().any(|field| field.visibility != "public") {
+                    return Err(LanaError::UnsupportedOperation);
+                }
+                buffer.extend_from_slice(b"{\"$lana_value\":")?;
+                self.json_escape(&object.descriptor.qualified_name, buffer)?;
+                buffer.extend_from_slice(b",\"fields\":{")?;
+                let mut fields = Buffer::new(&self.heap, object.fields.len(), 0)?;
+                fields.extend(object.descriptor.fields.iter().zip(&object.fields))?;
+                fields.sort_unstable_by(|a, b| a.0.name.cmp(&b.0.name));
+                for (index, (field, value)) in fields.iter().enumerate() {
+                    if index != 0 { buffer.push(b',')?; }
+                    self.json_escape(&field.name, buffer)?;
+                    buffer.push(b':')?;
+                    self.json_emit(value, buffer, stack, depth + 1)?;
+                }
+                buffer.extend_from_slice(b"}}")?;
+                Ok(())
+            }
             ValueKind::Array(array) => {
                 buffer.push(b'[')?;
                 let array = array.lock().unwrap();
@@ -13887,6 +16236,7 @@ impl<'a> Vm<'a> {
         if base_snapshot.reactive.is_none() {
             base_snapshot = self.reactive_root(&base_snapshot, DerivationExactness::Exact)?;
         }
+        self.promote_shared_graph(&base_snapshot)?;
         let shared = Arc::new(SharedInformation {
             identity,
             base_snapshot,
@@ -14035,6 +16385,7 @@ impl<'a> Vm<'a> {
         let shared = capability.shared.clone();
         let mut memo = DeepCloneMemo::default();
         let pending_evidence = self.deep_clone_value(evidence, &mut memo)?;
+        self.promote_shared_graph(&pending_evidence)?;
         let pending = SharedObservation {
             effective_time,
             sequence: 0,
@@ -14095,6 +16446,7 @@ impl<'a> Vm<'a> {
                 }
                 let mut candidate = candidate;
                 candidate.revision = NEXT_COMMIT_REVISION.fetch_add(1, Ordering::Relaxed);
+                self.heap.bump_mutation_epoch();
                 state.observations.push(pending);
                 state.next_observation_sequence += 1;
                 state.current = Some(candidate.clone());
@@ -14133,6 +16485,9 @@ impl<'a> Vm<'a> {
                 snapshot: snapshot.clone(),
             });
             source = snapshot;
+        }
+        for version in &versions {
+            self.promote_shared_graph(&version.snapshot)?;
         }
         Ok(SharedCommit { revision: 0, versions })
     }
@@ -14214,6 +16569,11 @@ impl<'a> Vm<'a> {
     }
 
     fn information_inspect(&mut self, argument: &Value, out: &mut Value) -> LanaError {
+        macro_rules! checked_set {
+            ($map:expr, $key:expr, $value:expr, $reject:expr $(,)?) => {
+                if let Err(error) = $map.set($key, $value, $reject) { return error; }
+            };
+        }
         let mut inspection = match Map::new(&self.heap, 28) { Ok(map) => map, Err(error) => return error };
         if let ValueKind::Capability(capability) = &argument.kind {
             let shared = capability.shared.clone();
@@ -14223,34 +16583,38 @@ impl<'a> Vm<'a> {
                 .as_ref()
                 .map(|commit| commit.revision)
                 .unwrap_or(0);
-            let _ = inspection.set(
+            checked_set!(inspection,
                 Arc::from("kind"),
                 Value::string(Arc::from("shared_information")),
                 true,
             );
-            let _ = inspection.set(Arc::from("record_schema"), Value::number(1.0), true);
-            let _ = inspection.set(Arc::from("id"), Value::string(Arc::from(format!("shared/{}", shared.identity))), true);
-            let _ = inspection.set(Arc::from("transport_status"), Value::string(Arc::from("ok")), true);
-            let _ = inspection.set(Arc::from("domain_status"), Value::string(Arc::from("available")), true);
-            let _ = inspection.set(Arc::from("payload"), Value::null(), true);
-            let _ = inspection.set(Arc::from("error"), Value::null(), true);
-            let _ = inspection.set(Arc::from("evidence"), Value::null(), true);
-            let _ = inspection.set(Arc::from("assumptions"), Value::null(), true);
-            let _ = inspection.set(Arc::from("exactness"), Value::string(Arc::from("exact")), true);
-            let _ = inspection.set(Arc::from("metadata"), Value::null(), true);
-            let _ = inspection.set(Arc::from("identity"), Value::number(shared.identity as f64), true);
-            let _ = inspection.set(Arc::from("revision"), Value::number(revision as f64), true);
-            let _ = inspection.set(
+            checked_set!(inspection, Arc::from("record_schema"), Value::number(1.0), true);
+            checked_set!(inspection, Arc::from("id"), Value::string(Arc::from(format!("shared/{}", shared.identity))), true);
+            checked_set!(inspection, Arc::from("transport_status"), Value::string(Arc::from("ok")), true);
+            checked_set!(inspection, Arc::from("domain_status"), Value::string(Arc::from("available")), true);
+            checked_set!(inspection, Arc::from("payload"), Value::null(), true);
+            checked_set!(inspection, Arc::from("error"), Value::null(), true);
+            let empty = match self.array_value(Vec::new()) { Ok(value) => value, Err(error) => return error };
+            checked_set!(inspection, Arc::from("evidence"), empty.clone(), true);
+            checked_set!(inspection, Arc::from("assumptions"), empty, true);
+            checked_set!(inspection, Arc::from("exactness"), Value::string(Arc::from("exact")), true);
+            let mut metadata = match Map::new(&self.heap, 2) { Ok(map) => map, Err(error) => return error };
+            checked_set!(metadata, Arc::from("identity"), Value::number(shared.identity as f64), true);
+            checked_set!(metadata, Arc::from("revision"), Value::number(revision as f64), true);
+            checked_set!(inspection, Arc::from("metadata"), Value::map(Arc::new(Mutex::new(metadata))), true);
+            checked_set!(inspection, Arc::from("identity"), Value::number(shared.identity as f64), true);
+            checked_set!(inspection, Arc::from("revision"), Value::number(revision as f64), true);
+            checked_set!(inspection,
                 Arc::from("can_read"),
                 Value::boolean(capability_allows_locked(&shared, capability, LANA_CAPABILITY_READ)),
                 true,
             );
-            let _ = inspection.set(
+            checked_set!(inspection,
                 Arc::from("can_observe"),
                 Value::boolean(capability_allows_locked(&shared, capability, LANA_CAPABILITY_OBSERVE)),
                 true,
             );
-            let _ = inspection.set(
+            checked_set!(inspection,
                 Arc::from("can_admin"),
                 Value::boolean(capability_allows_locked(&shared, capability, LANA_CAPABILITY_ADMIN)),
                 true,
@@ -14259,6 +16623,31 @@ impl<'a> Vm<'a> {
             return LanaError::Ok;
         }
         let value = self.reactive_value(argument);
+        let mut seen = HashSet::new();
+        let mut stack = argument.derivation.iter().cloned().collect::<Vec<_>>();
+        let mut evidence_nodes = Vec::new();
+        let mut assumption_nodes = Vec::new();
+        while let Some(node) = stack.pop() {
+            if !seen.insert((node.task_lineage, node.local_sequence)) { continue; }
+            match node.kind {
+                DerivationKind::Evidence => evidence_nodes.push(node.clone()),
+                DerivationKind::Assumption => assumption_nodes.push(node.clone()),
+                _ => {}
+            }
+            stack.extend(node.inputs.iter().cloned());
+        }
+        evidence_nodes.sort_by_key(|node| (node.task_lineage, node.local_sequence));
+        assumption_nodes.sort_by_key(|node| (node.task_lineage, node.local_sequence));
+        let mut evidence_ids = Vec::with_capacity(evidence_nodes.len());
+        let mut assumption_ids = Vec::with_capacity(assumption_nodes.len());
+        for node in evidence_nodes {
+            evidence_ids.push(match self.derivation_id_to_value(&node) { Ok(id) => id, Err(error) => return error });
+        }
+        for node in assumption_nodes {
+            assumption_ids.push(match self.derivation_id_to_value(&node) { Ok(id) => id, Err(error) => return error });
+        }
+        let evidence_ids = match self.array_value(evidence_ids) { Ok(value) => value, Err(error) => return error };
+        let assumption_ids = match self.array_value(assumption_ids) { Ok(value) => value, Err(error) => return error };
         let record_id = if let Some(reactive) = &argument.reactive {
             Value::string(Arc::from(format!("information/{}", reactive.lock().unwrap().id)))
         } else if let Some(derivation) = &argument.derivation {
@@ -14266,15 +16655,32 @@ impl<'a> Vm<'a> {
         } else {
             Value::null()
         };
-        let _ = inspection.set(Arc::from("record_schema"), Value::number(1.0), true);
-        let _ = inspection.set(Arc::from("id"), record_id, true);
-        let _ = inspection.set(Arc::from("transport_status"), Value::string(Arc::from("ok")), true);
-        let _ = inspection.set(Arc::from("domain_status"), Value::string(Arc::from("available")), true);
-        let _ = inspection.set(Arc::from("payload"), Value::null(), true);
-        let _ = inspection.set(Arc::from("error"), Value::null(), true);
-        let _ = inspection.set(Arc::from("evidence"), Value::null(), true);
-        let _ = inspection.set(Arc::from("assumptions"), Value::null(), true);
-        let _ = inspection.set(Arc::from("metadata"), Value::null(), true);
+        checked_set!(inspection, Arc::from("record_schema"), Value::number(1.0), true);
+        checked_set!(inspection, Arc::from("id"), record_id, true);
+        checked_set!(inspection, Arc::from("transport_status"), Value::string(Arc::from("ok")), true);
+        checked_set!(inspection, Arc::from("domain_status"), Value::string(Arc::from("available")), true);
+        checked_set!(inspection, Arc::from("payload"), Value::null(), true);
+        checked_set!(inspection, Arc::from("error"), Value::null(), true);
+        checked_set!(inspection, Arc::from("evidence"), evidence_ids, true);
+        checked_set!(inspection, Arc::from("assumptions"), assumption_ids, true);
+        let mut metadata = match Map::new(&self.heap, 5) { Ok(map) => map, Err(error) => return error };
+        if let Some(node) = &argument.derivation {
+            let id = match self.derivation_id_to_value(node) { Ok(id) => id, Err(error) => return error };
+            checked_set!(metadata, Arc::from("derivation_id"), id, true);
+        }
+        if let Some(reactive) = &argument.reactive {
+            let reactive = reactive.lock().unwrap();
+            let relationship = match reactive.relationship {
+                RelationshipKind::SameDependency => "same_dependency",
+                RelationshipKind::ExplicitJoint => "explicit_joint",
+                _ => "exact",
+            };
+            checked_set!(metadata, Arc::from("dependency_identity"), Value::number(reactive.dependency_id as f64), true);
+            checked_set!(metadata, Arc::from("relationship"), Value::string(Arc::from(relationship)), true);
+            checked_set!(metadata, Arc::from("revision"), Value::number(reactive.revision as f64), true);
+            checked_set!(metadata, Arc::from("history_count"), Value::number(reactive.history.len() as f64), true);
+        }
+        checked_set!(inspection, Arc::from("metadata"), Value::map(Arc::new(Mutex::new(metadata))), true);
         let alternatives = match &value.kind {
             ValueKind::Possibility(possibility) => possibility.values.len(),
             ValueKind::PathSet(paths) => paths.alternatives.len(),
@@ -14290,8 +16696,8 @@ impl<'a> Vm<'a> {
             ValueKind::StateDist(_) => "state_dist",
             _ => "definite",
         };
-        let _ = inspection.set(Arc::from("form"), Value::string(Arc::from(form)), true);
-        let _ = inspection.set(
+        checked_set!(inspection, Arc::from("form"), Value::string(Arc::from(form)), true);
+        checked_set!(inspection,
             Arc::from("finite_support"),
             Value::boolean(match &value.kind {
                 ValueKind::Joint(joint) => !joint.rows.is_empty(),
@@ -14300,43 +16706,45 @@ impl<'a> Vm<'a> {
             }),
             true,
         );
-        let _ = inspection.set(
+        checked_set!(inspection,
             Arc::from("kind"),
             Value::string(Arc::from("information_snapshot")),
             true,
         );
-        let _ = inspection.set(
+        checked_set!(inspection,
             Arc::from("type"),
             Value::string(Arc::from(value.type_name())),
             true,
         );
-        let _ = inspection.set(
+        checked_set!(inspection,
             Arc::from("revision"),
             Value::number(
                 argument
                     .reactive
                     .as_ref()
                     .map(|reactive| reactive.lock().unwrap().revision as f64)
-                    .unwrap_or(0.0),
+                    .unwrap_or_else(|| argument.derivation.as_ref()
+                        .filter(|node| node.operation.as_ref() == "snapshot")
+                        .map_or(0.0, |node| node.revision as f64)),
             ),
             true,
         );
-        let _ = inspection.set(
+        checked_set!(inspection,
             Arc::from("remaining_alternatives"),
             Value::number(alternatives as f64),
             true,
         );
-        let _ = inspection.set(
+        checked_set!(inspection,
             Arc::from("reactive"),
             Value::boolean(argument.reactive.is_some()),
             true,
         );
-        let _ = inspection.set(
+        checked_set!(inspection,
             Arc::from("sample"),
             Value::boolean(matches!(argument.kind, ValueKind::Sample(_))),
             true,
         );
-        let _ = inspection.set(
+        checked_set!(inspection,
             Arc::from("approximate"),
             Value::boolean(
                 argument
@@ -14347,26 +16755,35 @@ impl<'a> Vm<'a> {
             ),
             true,
         );
-        let _ = inspection.set(Arc::from("exactness"),
+        checked_set!(inspection, Arc::from("exactness"),
             Value::string(Arc::from(if argument.derivation.as_ref().is_some_and(|d| d.exactness == DerivationExactness::Approximate) { "approximate" } else { "exact" })),
             true);
         if let ValueKind::Possibility(possibility) = &value.kind {
-            let mut support = Vec::with_capacity(possibility.values.len());
+            let mut unique: Vec<(&Value, f64)> = Vec::new();
             for (index, candidate) in possibility.values.iter().enumerate() {
+                let weight = possibility.weights.as_ref().map_or(0.0, |weights| weights[index]);
+                if let Some((_, total)) = unique.iter_mut().find(|(value, _)| joint_value_equal(value, candidate)) {
+                    *total += weight;
+                } else {
+                    unique.push((candidate, weight));
+                }
+            }
+            let mut support = Vec::with_capacity(unique.len());
+            for (candidate, weight) in unique {
                 let mut row = match Map::new(&self.heap, 2) { Ok(map) => map, Err(error) => return error };
                 let mut memo = DeepCloneMemo::default();
                 let candidate = match self.deep_clone_value(candidate, &mut memo) {
                     Ok(value) => value,
                     Err(error) => return error,
                 };
-                let _ = row.set(Arc::from("value"), candidate, true);
-                if let Some(weights) = &possibility.weights {
-                    let _ = row.set(Arc::from("weight"), Value::number(weights[index]), true);
+                checked_set!(row, Arc::from("value"), candidate, true);
+                if possibility.weights.is_some() {
+                    checked_set!(row, Arc::from("weight"), Value::number(weight), true);
                 }
                 support.push(Value::map(Arc::new(Mutex::new(row))));
             }
             let support = match self.array_value(support) { Ok(value) => value, Err(error) => return error };
-            let _ = inspection.set(Arc::from("support"), support, true);
+            checked_set!(inspection, Arc::from("support"), support, true);
         }
         if let ValueKind::Joint(joint) = &value.kind {
             if !joint.rows.is_empty() {
@@ -14379,12 +16796,12 @@ impl<'a> Vm<'a> {
                         if let Err(error) = assignment.set(name.clone(), candidate, true) { return error; }
                     }
                     let mut row = match Map::new(&self.heap, 2) { Ok(map) => map, Err(error) => return error };
-                    let _ = row.set(Arc::from("assignment"), Value::map(Arc::new(Mutex::new(assignment))), true);
-                    let _ = row.set(Arc::from("weight"), Value::number(joint_row.weight), true);
+                    checked_set!(row, Arc::from("assignment"), Value::map(Arc::new(Mutex::new(assignment))), true);
+                    checked_set!(row, Arc::from("weight"), Value::number(joint_row.weight), true);
                     support.push(Value::map(Arc::new(Mutex::new(row))));
                 }
                 let support = match self.array_value(support) { Ok(value) => value, Err(error) => return error };
-                let _ = inspection.set(Arc::from("support"), support, true);
+                checked_set!(inspection, Arc::from("support"), support, true);
             }
         }
         if let Some(reactive) = &argument.reactive {
@@ -14394,47 +16811,47 @@ impl<'a> Vm<'a> {
                 RelationshipKind::ExplicitJoint => "explicit_joint",
                 _ => "exact",
             };
-            let _ = inspection.set(
+            checked_set!(inspection,
                 Arc::from("dependency_identity"),
                 Value::number(reactive.dependency_id as f64),
                 true,
             );
-            let _ = inspection.set(
+            checked_set!(inspection,
                 Arc::from("relationship"),
                 Value::string(Arc::from(relationship)),
                 true,
             );
-            let _ = inspection.set(
+            checked_set!(inspection,
                 Arc::from("history_count"),
                 Value::number(reactive.history.len() as f64),
                 true,
             );
-            let _ = inspection.set(
+            checked_set!(inspection,
                 Arc::from("exactness"),
                 Value::string(Arc::from(derivation::exactness_name(reactive.exactness))),
                 false,
             );
         }
-        let _ = inspection.set(
+        checked_set!(inspection,
             Arc::from("planned_effect"),
             Value::boolean(argument.planned_effect.is_some()),
             true,
         );
         if let Some(claim) = &argument.claim {
             let mut summary = match Map::new(&self.heap, 4) { Ok(map) => map, Err(error) => return error };
-            let _ = summary.set(Arc::from("proposition"), Value::string(claim.proposition.clone()), true);
-            let _ = summary.set(Arc::from("exactness"), Value::string(Arc::from(derivation::exactness_name(claim.exactness))), true);
-            let _ = summary.set(Arc::from("tolerance"), Value::number(claim.tolerance), true);
-            let _ = summary.set(Arc::from("source_valid"), Value::boolean(claim.source_valid), true);
-            let _ = inspection.set(Arc::from("claim"), Value::map(Arc::new(Mutex::new(summary))), true);
-            let _ = inspection.set(Arc::from("exactness"), Value::string(Arc::from(derivation::exactness_name(claim.exactness))), false);
+            checked_set!(summary, Arc::from("proposition"), Value::string(claim.proposition.clone()), true);
+            checked_set!(summary, Arc::from("exactness"), Value::string(Arc::from(derivation::exactness_name(claim.exactness))), true);
+            checked_set!(summary, Arc::from("tolerance"), Value::number(claim.tolerance), true);
+            checked_set!(summary, Arc::from("source_valid"), Value::boolean(claim.source_valid), true);
+            checked_set!(inspection, Arc::from("claim"), Value::map(Arc::new(Mutex::new(summary))), true);
+            checked_set!(inspection, Arc::from("exactness"), Value::string(Arc::from(derivation::exactness_name(claim.exactness))), false);
         }
         if argument.derivation.is_some() {
             let derivation = match self.vm_derivation(argument) {
                 Ok(derivation) => derivation,
                 Err(error) => return error,
             };
-            let _ = inspection.set(Arc::from("derivation"), derivation, true);
+            checked_set!(inspection, Arc::from("derivation"), derivation, true);
         }
         *out = Value::map(Arc::new(Mutex::new(inspection)));
         LanaError::Ok
@@ -15114,21 +17531,14 @@ fn csv_scalar(value: &Value, field: &mut String) -> bool {
 /// Collect reactive nodes reachable from a value, mirroring
 /// `reactive_collect_value` in `vm/c/vm.c`.
 fn reactive_collect_value(list: &mut Vec<Arc<Mutex<Reactive>>>, value: &Value) {
-    if let Some(reactive) = &value.reactive {
-        reactive_list_add(list, reactive);
-    }
-    match &value.kind {
-        ValueKind::Array(array) => {
-            for item in &array.lock().unwrap().items {
-                reactive_collect_value(list, item);
-            }
-        }
-        ValueKind::Map(map) => {
-            for entry in &map.lock().unwrap().entries {
-                reactive_collect_value(list, &entry.value);
-            }
-        }
-        _ => {}
+    let mut pending = vec![value.clone()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(value) = pending.pop() {
+        if let Some(reactive) = &value.reactive { reactive_list_add(list, reactive); }
+        let Some(identity) = value.container_identity() else { continue; };
+        if !seen.insert(identity) { continue; }
+        let mut index = 0;
+        while let Some(child) = value.inspection_child(index) { pending.push(child); index += 1; }
     }
 }
 
@@ -15232,6 +17642,10 @@ fn joint_value_equal(left: &Value, right: &Value) -> bool {
         return false;
     }
     match &left.kind {
+        ValueKind::ObjectValue(_) | ValueKind::ClassObject(_) => {
+            let mut equal = false;
+            values_equal(left, right, &mut equal) == LanaError::Ok && equal
+        }
         ValueKind::Null => true,
         ValueKind::Number(l) => *l == right.as_number(),
         ValueKind::Bool(l) => *l == right.as_bool(),
@@ -15391,7 +17805,8 @@ fn value_is_set_member(value: &Value) -> bool {
 fn joint_value_is_definite(value: &Value) -> bool {
     !matches!(
         value.kind,
-        ValueKind::StateDist(_) | ValueKind::Joint(_) | ValueKind::Task(_) | ValueKind::Function(_)
+        ValueKind::StateDist(_) | ValueKind::Joint(_) | ValueKind::Kernel(_) | ValueKind::Network(_)
+            | ValueKind::Task(_) | ValueKind::Function(_)
     )
 }
 
@@ -15478,6 +17893,8 @@ fn pure_scalar_binary(left: &Value, right: &Value, kind: PureKind, operation: u3
                 1 => *out = Value::number(l - r),
                 2 => *out = Value::number(l * r),
                 3 if r != 0.0 => *out = Value::number(l / r),
+                4 => *out = Value::number(l.min(r)),
+                5 => *out = Value::number(l.max(r)),
                 _ => return LanaError::Type,
             }
             LanaError::Ok
@@ -16424,9 +18841,14 @@ fn linalg_state_transform(
 /// identity for `Arc`-backed types and payloads for the value types, which
 /// agrees on every realistic input.
 fn values_equal(left: &Value, right: &Value, out: &mut bool) -> LanaError {
+    if matches!(left.kind, ValueKind::ObjectValue(_)) || matches!(right.kind, ValueKind::ObjectValue(_)) {
+        return objects::values_equal(left, right, out);
+    }
     if matches!(left.kind, ValueKind::StateDist(_) | ValueKind::Map(_) | ValueKind::Joint(_)
+        | ValueKind::Kernel(_) | ValueKind::Network(_)
         | ValueKind::Possibility(_) | ValueKind::PathSet(_) | ValueKind::Capability(_))
         || matches!(right.kind, ValueKind::StateDist(_) | ValueKind::Map(_) | ValueKind::Joint(_)
+        | ValueKind::Kernel(_) | ValueKind::Network(_)
         | ValueKind::Possibility(_) | ValueKind::PathSet(_) | ValueKind::Capability(_))
     {
         return LanaError::UnsupportedOperation;
@@ -16463,6 +18885,14 @@ fn values_equal(left: &Value, right: &Value, out: &mut bool) -> LanaError {
             ValueKind::Array(r) => Arc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
         },
+        ValueKind::ClassObject(left) => {
+            let ValueKind::ClassObject(right) = &right.kind else { unreachable!() };
+            if left.object.upgrade().is_none_or(|o| !o.initialized.load(Ordering::Acquire))
+                || right.object.upgrade().is_none_or(|o| !o.initialized.load(Ordering::Acquire)) {
+                return LanaError::UnsupportedOperation;
+            }
+            *out = std::sync::Weak::ptr_eq(&left.object, &right.object);
+        }
         ValueKind::Task(l) => *out = match &right.kind {
             ValueKind::Task(r) => Arc::ptr_eq(l, r),
             _ => unreachable!("same discriminant"),
@@ -16477,11 +18907,1003 @@ mod tests {
     use super::*;
     use lana_bytecode::assembler;
 
+    #[test]
+    fn locked_graph_imports_return_errors_and_preserve_source_values() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let array = vm.array_value(vec![Value::number(7.0)]).unwrap();
+        let ValueKind::Array(storage) = &array.kind else { unreachable!() };
+        let guard = storage.lock().unwrap();
+        assert!(matches!(vm.import_value(&array), Err(LanaError::UnsupportedOperation)));
+        assert_eq!(guard.items[0].as_number(), 7.0);
+        drop(guard);
+        let mut storage = Map::new(&vm.heap, 1).unwrap();
+        storage.set(Arc::from("x"), Value::number(7.0), true).unwrap();
+        let map = Value::map(Arc::new(Mutex::new(storage)));
+        let ValueKind::Map(storage) = &map.kind else { unreachable!() };
+        let guard = storage.lock().unwrap();
+        assert!(matches!(vm.import_value(&map), Err(LanaError::UnsupportedOperation)));
+        assert_eq!(guard.get("x").unwrap().as_number(), 7.0);
+        drop(guard);
+        let set = Value::set(Arc::new(Mutex::new(Set::new(&vm.heap, 1).unwrap())));
+        let ValueKind::Set(storage) = &set.kind else { unreachable!() };
+        let guard = storage.lock().unwrap();
+        assert!(matches!(vm.import_value(&set), Err(LanaError::UnsupportedOperation)));
+        drop(guard);
+        let live = vm.reactive_root(&Value::number(7.0), DerivationExactness::Exact).unwrap();
+        let node = live.reactive.as_ref().unwrap();
+        let guard = node.lock().unwrap();
+        assert!(matches!(vm.import_value(&live), Err(LanaError::UnsupportedOperation)));
+        assert_eq!(guard.current.as_ref().unwrap().as_number(), 7.0);
+        drop(guard);
+        assert_eq!(vm.import_value(&live).unwrap().as_number(), 7.0);
+    }
+
+    #[test]
+    fn derivation_text_admission_obeys_heap_limit_before_publication() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let baseline = vm.allocated_bytes();
+        vm.set_memory_limit(baseline + 512).unwrap();
+        let label = "x".repeat(8192);
+        assert!(vm.record_derivation(DerivationKind::Evidence, "input", &[], &label, 0,
+            DerivationExactness::Exact, "", DerivationOutcome::Success, "none").is_none());
+        assert!(vm.allocated_bytes() <= vm.memory_limit);
+        vm.heap.collect_strings();
+        assert_eq!(vm.allocated_bytes(), baseline);
+        assert!(matches!(vm.current_frame().registers[0].kind, ValueKind::Null));
+    }
+
+    #[test]
+    fn join_cleanup_obeys_budget_and_retries_without_partial_result() {
+        let chunk = assembler::assemble(".function main 0 4\nHALT\n.function worker 0 4\nLOAD_CONST R0 1000\nHOST_CALL array_new R0 1 R1\nRETURN R1\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let scheduler = Scheduler::new();
+        vm.scheduler = Some(scheduler.clone());
+        let task = vm.start_task(1, 0, 0).unwrap();
+        let queued = scheduler.state.lock().unwrap().queue.pop_front().unwrap();
+        run_task(queued);
+        let source = {
+            let state = task.state.lock().unwrap();
+            assert!(state.completed);
+            let ValueKind::Array(array) = &state.result.kind else { unreachable!() };
+            Arc::downgrade(array)
+        };
+        vm.set_instruction_limit(vm.instruction_count + 1100);
+        assert!(matches!(vm.wait_task(&task, -1.0), Err(LanaError::Limit)));
+        assert!(vm.instruction_count <= vm.instruction_limit);
+        assert!(source.upgrade().is_some(), "failed cleanup keeps the retired heap owned");
+        {
+            let state = task.state.lock().unwrap();
+            assert!(state.joined);
+            let ValueKind::Array(array) = &state.result.kind else { unreachable!() };
+            assert_eq!(array.lock().unwrap().items.len(), 1000);
+        }
+        vm.set_instruction_limit(1_000_000);
+        let result = vm.wait_task(&task, -1.0).unwrap();
+        assert!(source.upgrade().is_none());
+        let ValueKind::Array(array) = &result.kind else { unreachable!() };
+        assert_eq!(array.lock().unwrap().items.len(), 1000);
+        let root = vm.retain_value(&result).unwrap();
+        drop(result);
+        drop(task);
+        let heap = vm.heap();
+        drop(scheduler);
+        drop(vm);
+        assert_eq!(root.child(999).unwrap().unwrap().as_number(), 0.0);
+        drop(root);
+        assert_eq!(heap.live_bytes(), 0);
+    }
+
+    #[test]
+    fn live_distribution_transfer_copies_into_receiving_heap() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut source = Vm::new(&chunk);
+        let mut receiver = Vm::new(&chunk);
+        let source_heap = source.heap();
+        let receiver_heap = receiver.heap();
+        let distribution = source.state_dist_dirac(&StateValue::default()).unwrap();
+        let live = source.reactive_root(&Value::state_dist(distribution.clone()), DerivationExactness::Exact).unwrap();
+        let copied = receiver.import_value(&live).unwrap();
+        assert!(copied.reactive.is_none());
+        let ValueKind::StateDist(copied_distribution) = &copied.kind else { unreachable!() };
+        assert!(!Arc::ptr_eq(&distribution, copied_distribution));
+        let root = receiver.retain_value(&copied).unwrap();
+        drop(copied);
+        drop(live);
+        drop(distribution);
+        drop(source);
+        assert_eq!(source_heap.live_bytes(), 0);
+        drop(receiver);
+        assert!(root.inspect_state_dist(crate::InspectFormat::Json).is_ok());
+        drop(root);
+        assert_eq!(receiver_heap.live_bytes(), 0);
+    }
+
+    #[test]
+    fn foreign_immutable_retention_requires_import_and_keeps_heaps_independent() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut source = Vm::new(&chunk);
+        let mut receiver = Vm::new(&chunk);
+        let source_heap = source.heap();
+        let receiver_heap = receiver.heap();
+        let value = Value::adt(source.managed_payload(Adt { variant: 0, fields: vec![Value::number(9.0)] }).unwrap());
+        let root = source.retain_value(&value).unwrap();
+        assert!(matches!(receiver.retain_value(&value), Err(LanaError::Task)));
+        let copy = receiver.import_value(&value).unwrap();
+        let copied_root = receiver.retain_value(&copy).unwrap();
+        drop(copy);
+        drop(value);
+        drop(source);
+        assert_eq!(root.child(0).unwrap().unwrap().as_number(), 9.0);
+        drop(root);
+        assert_eq!(source_heap.live_bytes(), 0);
+        drop(receiver);
+        assert_eq!(copied_root.child(0).unwrap().unwrap().as_number(), 9.0);
+        drop(copied_root);
+        assert_eq!(receiver_heap.live_bytes(), 0);
+    }
+
+    #[test]
+    fn retained_deep_derivation_copies_and_releases_after_vm_teardown() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let heap = vm.heap();
+        let mut value = Value::number(1.0);
+        value.derivation = vm.record_derivation(DerivationKind::Evidence, "input", &[], "", 0,
+            DerivationExactness::Exact, "", DerivationOutcome::Success, "none");
+        let leaf = Arc::downgrade(value.derivation.as_ref().unwrap());
+        for _ in 0..20_000 {
+            value.derivation = vm.record_derivation(DerivationKind::Operation, "next", &[&value], "", 0,
+                DerivationExactness::Exact, "", DerivationOutcome::Success, "none");
+            assert!(value.derivation.is_some());
+        }
+        let top = Arc::downgrade(value.derivation.as_ref().unwrap());
+        let copied = vm.import_value(&value).unwrap();
+        assert!(!Arc::ptr_eq(value.derivation.as_ref().unwrap(), copied.derivation.as_ref().unwrap()));
+        drop(copied);
+        let root = vm.retain_value(&value).unwrap();
+        drop(value);
+        drop(vm);
+        assert!(top.upgrade().is_some());
+        assert!(leaf.upgrade().is_some());
+        drop(root);
+        assert!(top.upgrade().is_none());
+        assert!(leaf.upgrade().is_none());
+        assert_eq!(heap.live_bytes(), 0);
+    }
+
+    #[test]
+    fn retained_deep_distribution_releases_headers_after_vm_teardown() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let heap = vm.heap();
+        let mut node = vm.state_dist_dirac(&StateValue::default()).unwrap();
+        let leaf = Arc::downgrade(&node);
+        for _ in 0..20_000 { node = vm.state_dist_attenuate(node, 0.5).unwrap(); }
+        let top = Arc::downgrade(&node);
+        let value = Value::state_dist(node);
+        let copied = vm.import_value(&value).unwrap();
+        let ValueKind::StateDist(copied_node) = &copied.kind else { unreachable!() };
+        assert!(!Arc::ptr_eq(copied_node, &top.upgrade().unwrap()));
+        drop(copied);
+        let root = vm.retain_value(&value).unwrap();
+        drop(value);
+        drop(vm);
+        assert!(top.upgrade().is_some());
+        assert!(leaf.upgrade().is_some());
+        drop(root);
+        assert!(top.upgrade().is_none());
+        assert!(leaf.upgrade().is_none());
+        assert_eq!(heap.live_bytes(), 0);
+    }
+
+    #[test]
+    fn derivation_transfer_copies_shared_dag_and_gradient_storage() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let leaf = vm.record_derivation(DerivationKind::Evidence, "input", &[], "", 0,
+            DerivationExactness::Exact, "", DerivationOutcome::Success, "none").unwrap();
+        let mut gradient = tensor::tensor_new(&vm.heap, 1, &[1], false).unwrap();
+        tensor::tensor_set_real(&mut gradient, 0, 7.0);
+        *leaf.ad_grad.lock().unwrap() = Some(gradient);
+        let mut value = Value::number(1.0);
+        value.derivation = Some(leaf.clone());
+        let root = vm.record_derivation(DerivationKind::Operation, "add", &[&value, &value], "", 0,
+            DerivationExactness::Exact, "", DerivationOutcome::Success, "none").unwrap();
+        value.derivation = Some(root.clone());
+        let copied = vm.import_value(&value).unwrap().derivation.unwrap();
+        assert!(!Arc::ptr_eq(&root, &copied));
+        assert_eq!((root.task_lineage, root.local_sequence), (copied.task_lineage, copied.local_sequence));
+        assert!(Arc::ptr_eq(&copied.inputs[0], &copied.inputs[1]));
+        assert!(!Arc::ptr_eq(&leaf, &copied.inputs[0]));
+        let mut gradient = copied.inputs[0].ad_grad.lock().unwrap();
+        tensor::tensor_set_real(gradient.as_mut().unwrap(), 0, 9.0);
+        assert_eq!(tensor::tensor_get_real(leaf.ad_grad.lock().unwrap().as_ref().unwrap(), 0), 7.0);
+        drop(gradient);
+        let captured = vm.deep_clone_value_checked(&value, &mut DeepCloneMemo {
+            transfer: true, freeze: true, ..DeepCloneMemo::default()
+        }).unwrap().derivation.unwrap();
+        assert_eq!(&*captured.operation, "snapshot");
+        assert_eq!(captured.inputs.len(), 2);
+        assert!(Arc::ptr_eq(&captured.inputs[0], &captured.inputs[1]));
+        assert!(!Arc::ptr_eq(&root, &captured.inputs[0]));
+        let lock = leaf.ad_grad.lock().unwrap();
+        assert_eq!(vm.import_value(&value).unwrap_err(), LanaError::UnsupportedOperation);
+        drop(lock);
+    }
+
+    #[test]
+    fn distribution_transfer_preserves_dag_aliases_and_handles_depth() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let source_heap = crate::heap::Heap::new(1024);
+        let source_name = source_heap.string("distribution-source").unwrap();
+        let mut state = StateValue::default();
+        state.indexes.source = Some(source_name.clone());
+        let leaf = Arc::new(StateDist { kind: StateDistKind::Dirac(state) });
+        let dag = Arc::new(StateDist { kind: StateDistKind::Append {
+            left: DistOperand::Node(leaf.clone()), right: DistOperand::Node(leaf.clone()),
+            has_cached_parameters: false, p: 0.0, m_re: 0.0, m_im: 0.0, sigma: 0.0,
+        }});
+        let ValueKind::StateDist(copy) = vm.import_value(&Value::state_dist(dag)).unwrap().kind else { unreachable!() };
+        let StateDistKind::Append { left: DistOperand::Node(a), right: DistOperand::Node(b), .. } = &copy.kind else { unreachable!() };
+        assert!(Arc::ptr_eq(a, b));
+        assert!(!Arc::ptr_eq(a, &leaf));
+        let StateDistKind::Dirac(state) = &a.kind else { unreachable!() };
+        assert_eq!(state.indexes.source.as_deref(), Some("distribution-source"));
+        assert!(!Arc::ptr_eq(state.indexes.source.as_ref().unwrap(), &source_name));
+        let mut deep = leaf;
+        for _ in 0..100 {
+            deep = Arc::new(StateDist { kind: StateDistKind::Attenuate { child: deep, factor: 0.5 } });
+        }
+        let copied = vm.import_value(&Value::state_dist(deep)).unwrap();
+        assert!(matches!(copied.kind, ValueKind::StateDist(_)));
+    }
+
+    #[test]
+    fn v6_empty_interface_declarations_execute_and_debug() {
+        let descriptor = r#"{"fields":[],"implements":[],"kind":"interface","methods":[],"qualified_name":"file/main.lana/Sensor","schema_version":1}"#;
+        let hex: String = descriptor.bytes().map(|b| format!("{b:02x}")).collect();
+        let chunk = assembler::assemble(&format!(".version 6\n.function main 0 1\nLOAD_CONST R0 42\nPRINT R0\nLOAD_STRING R0 {hex}\nHALT\n")).unwrap();
+        let mut vm = Vm::new(&chunk);
+        assert_eq!(vm.run(), LanaError::Ok);
+        assert!(matches!(vm.current_frame().registers[0].kind, ValueKind::String(_)));
+        let mut vm = Vm::new(&chunk);
+        assert_eq!(vm.debug_step(), LanaError::Ok);
+        assert_eq!(vm.current_frame().registers[0].as_number(), 42.0);
+    }
+
+    #[test]
+    fn immutable_snapshot_preserves_joint_paths_and_rejects_nested_mutation() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let joint = Value::joint(vm.joint_build_finite("x,y", &[
+            Value::boolean(false), Value::boolean(false), Value::boolean(true), Value::boolean(true)
+        ], &[0.25, 0.75], 2, 2).unwrap());
+        let copied = vm.information_snapshot(&joint).unwrap();
+        let (ValueKind::Joint(original), ValueKind::Joint(captured)) = (&joint.kind, &copied.kind) else { panic!("joint"); };
+        assert_eq!(original.names, captured.names);
+        assert_eq!(captured.rows[1].weight, 0.75);
+        assert!(!Arc::ptr_eq(original, captured));
+        let aliases = vm.array_value(vec![joint.clone(), joint.clone()]).unwrap();
+        let aliases = vm.information_snapshot(&aliases).unwrap();
+        let ValueKind::Array(aliases) = aliases.kind else { panic!("array"); };
+        let aliases = aliases.lock().unwrap();
+        let (ValueKind::Joint(a), ValueKind::Joint(b)) = (&aliases.items()[0].kind, &aliases.items()[1].kind) else { panic!("joint"); };
+        assert!(Arc::ptr_eq(a, b));
+        let mut fields = Map::new(&vm.heap, 1).unwrap();
+        fields.set(Arc::from("x"), vm.array_value(vec![Value::number(7.0)]).unwrap(), false).unwrap();
+        let fields = Value::map(Arc::new(Mutex::new(fields)));
+        let paths = Value::paths(Arc::new(PathSet { dependency_id: 17, alternatives: vec![
+            PathAlternative { guard:true, weight:0.75, result:fields.clone() },
+            PathAlternative { guard:false, weight:0.25, result:Value::number(2.0) },
+        ] }));
+        let snapshot = vm.information_snapshot(&paths).unwrap();
+        let ValueKind::PathSet(captured) = snapshot.kind else { panic!("paths"); };
+        assert_eq!(captured.dependency_id, 17);
+        assert!(captured.alternatives[0].guard);
+        assert_eq!(captured.alternatives[1].weight, 0.25);
+        let ValueKind::Map(map) = &captured.alternatives[0].result.kind else { panic!("map"); };
+        let array = map.lock().unwrap().get("x").unwrap().clone();
+        assert_eq!(map.lock().unwrap().set(Arc::from("x"), Value::null(), false), Err(LanaError::UnsupportedOperation));
+        let mut out = Value::null();
+        assert_eq!(vm.execute_host_call(LANA_HOST_ARRAY_PUSH, &[array.clone(), Value::null()], &mut out), LanaError::UnsupportedOperation);
+        assert_eq!(vm.execute_host_call(LANA_HOST_INDEX_SET, &[array, Value::number(0.0), Value::null()], &mut out), LanaError::UnsupportedOperation);
+        assert!(matches!(vm.information_snapshot(&Value::function(0)), Err(LanaError::UnsupportedValue)));
+        let mut limited = Vm::new(&chunk);
+        limited.set_instruction_limit(0);
+        assert!(matches!(limited.information_snapshot(&fields), Err(LanaError::Limit)));
+    }
+
+    #[test]
+    fn failed_host_call_does_not_publish_partial_value_or_revision() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.current_frame_mut().registers[5] = Value::number(77.0);
+        vm.revision = 4;
+        vm.set_host_call_extension(Box::new(|_, _, _, out| {
+            *out = Value::number(99.0);
+            LanaError::Oom
+        }));
+        assert_eq!(vm.execute(&Instruction::new(OpCode::HostCall, 5, 9999, 0, 0, 1)), LanaError::Oom);
+        assert_eq!(vm.current_frame().registers[5].print(), "77");
+        assert_eq!(vm.revision, 4);
+        assert!(matches!(vm.result().unwrap().value.kind, ValueKind::Null));
+    }
+
+    #[test]
+    fn panicking_host_callback_stops_scheduler_workers() {
+        let chunk = assembler::assemble("HOST_CALL store_open R0 0 R1\nHALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.set_worker_count(2);
+        vm.set_host_call_extension(Box::new(|_, _, _, _| panic!("host callback")));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.run()));
+        assert!(result.is_err());
+        assert!(vm.scheduler.as_ref().unwrap().state.lock().unwrap().stopping);
+    }
+
+    #[test]
+    fn host_graph_output_is_admitted_before_register_publication() {
+        let chunk = assembler::assemble("HOST_CALL store_open R0 0 R1\nRETURN R1\n").unwrap();
+        for exhausted in [false, true] {
+            let mut vm = Vm::new(&chunk);
+            vm.current_frame_mut().registers[1] = Value::number(77.0);
+            vm.set_host_call_extension(Box::new(|vm, _, _, out| {
+                let source = Value::adt(Arc::new(Adt { variant: 0, fields: vec![Value::number(9.0)] }));
+                match vm.import_value(&source) {
+                    Ok(value) => { *out = value; LanaError::Ok },
+                    Err(error) => error,
+                }
+            }));
+            if exhausted { vm.set_memory_limit(vm.allocated_bytes()).unwrap(); }
+            let error = vm.run();
+            if exhausted {
+                assert_eq!(error, LanaError::Oom);
+                assert_eq!(vm.current_frame().registers[1].as_number(), 77.0);
+            } else {
+                assert_eq!(error, LanaError::Ok);
+                let root = vm.result().unwrap();
+                drop(vm);
+                assert_eq!(root.child(0).unwrap().unwrap().as_number(), 9.0);
+            }
+        }
+    }
+
+    #[test]
+    fn vm_failure_matrix_keeps_public_state_unchanged() {
+        for (failure, expected) in [
+            ("cancelled", LanaError::Cancelled),
+            ("instruction_limit", LanaError::Limit),
+            ("memory_limit", LanaError::Oom),
+            ("malformed_bytecode", LanaError::Format),
+        ] {
+            let mut chunk = assembler::assemble(
+                "LOAD_CONST R0 7\nARRAY_NEW R1 R0 1\nRETURN R1\n",
+            ).unwrap();
+            if failure == "malformed_bytecode" { chunk.entry = 999; }
+            let mut vm = Vm::new(&chunk);
+            vm.current_frame_mut().registers[1] = Value::number(77.0);
+            vm.revision = 4;
+            match failure {
+                "cancelled" => vm.cancelled.store(true, Ordering::Relaxed),
+                "instruction_limit" => vm.set_instruction_limit(0),
+                "memory_limit" => vm.set_memory_limit(vm.allocated_bytes()).unwrap(),
+                _ => {}
+            }
+            assert_eq!(vm.run(), expected, "{failure}");
+            assert_eq!(vm.current_frame().registers[1].print(), "77", "{failure}");
+            assert_eq!(vm.revision, 4, "{failure}");
+            assert_eq!(vm.observation_count, 0, "{failure}");
+            assert!(matches!(vm.result().unwrap().value.kind, ValueKind::Null), "{failure}");
+        }
+    }
+
+    #[test]
+    fn failed_observation_preserves_register_and_revision() {
+        let chunk = assembler::assemble(
+            ".version 5\nLOAD_CONST R0 1\nLOAD_CONST R1 2\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nLOAD_CONST R4 3\nLOAD_CONST R5 77\nOBSERVE_MAP R3 R5 R4\nRETURN R5\n",
+        ).unwrap();
+        let mut vm = Vm::new(&chunk);
+        assert_eq!(vm.run(), LanaError::InvalidConditioning);
+        assert_eq!(vm.current_frame().registers[5].print(), "77");
+        assert_eq!(vm.revision, 0);
+        assert_eq!(vm.observation_count, 0);
+        assert!(matches!(vm.result().unwrap().value.kind, ValueKind::Null));
+    }
+
+    #[test]
+    fn failed_planned_effect_does_not_record_receipt() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let payload = vm.array_value(vec![Value::number(7.0)]).unwrap();
+        let plan = vm.planned_effect("copy", &payload).unwrap();
+        let state = plan.planned_effect.as_ref().unwrap().state.lock().unwrap();
+        assert!(state.receipts.is_empty());
+        drop(state);
+        assert_eq!(vm.set_memory_limit(0), Err(LanaError::Oom));
+        vm.set_memory_limit(vm.allocated_bytes()).unwrap();
+        let failed = vm.execute_planned_effect(&plan);
+        assert!(matches!(failed, Err(LanaError::Oom)), "{failed:?}");
+        let state = plan.planned_effect.as_ref().unwrap().state.lock().unwrap();
+        assert!(state.receipts.is_empty());
+        assert_eq!(state.execution_count, 0);
+        assert_eq!(vm.revision, 0);
+    }
+
+    #[test]
+    fn pure_kernel_callback_rejects_effect_opcodes() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.pure_callback_depth = 1;
+        assert_eq!(vm.execute(&Instruction::new(OpCode::Print, 0, 0, 0, 0, 1)), LanaError::UnsupportedOperation);
+        assert_eq!(vm.execute(&Instruction::new(OpCode::HostCall, 0, LANA_HOST_WRITE_TEXT, 0, 0, 1)), LanaError::UnsupportedOperation);
+    }
+
+    #[test]
+    fn named_pure_dataset_plan_runs_with_ordered_sources_and_rejects_effects() {
+        let chunk = assembler::assemble(
+            ".function main 0 4\nHALT\n.function plan 2 5\nHOST_CALL dataset R0 1 R2\nHOST_CALL dataset_materialize R2 1 R3\nRETURN R3\n.function effect 0 2\nLOAD_CONST R0 1\nPRINT R0\nRETURN R0\n.function scalar 0 2\nLOAD_CONST R0 1\nRETURN R0\n.function mutate 1 4\nLOAD_CONST R1 1\nHOST_CALL array_push R0 2 R2\nRETURN R0\n",
+        ).unwrap();
+        let mut vm = Vm::new(&chunk);
+        let mut fields = Map::new(&vm.heap, 1).unwrap();
+        fields.set(Arc::from("v"), Value::number(7.0), false).unwrap();
+        let rows = vm.array_value(vec![Value::map(Arc::new(Mutex::new(fields)))]).unwrap();
+        vm.current_frame_mut().registers[0] = Value::number(99.0);
+        let result = vm.run_pure_dataset_plan("plan", &[rows, Value::null()]).unwrap();
+        assert_eq!(result.print(), "[{\"v\": 7}]");
+        let invalid_rows = vm.array_value(vec![Value::number(7.0)]).unwrap();
+        assert_eq!(vm.run_pure_dataset_plan("plan", &[invalid_rows, Value::null()]).unwrap_err(), LanaError::Type);
+        assert_eq!(vm.current_frame().registers[0].print(), "99");
+        assert!(matches!(vm.run_pure_dataset_plan("effect", &[]), Err(LanaError::UnsupportedOperation)));
+        assert!(matches!(vm.run_pure_dataset_plan("missing", &[]), Err(LanaError::NotFound)));
+        assert!(matches!(vm.run_pure_dataset_plan("plan", &[]), Err(LanaError::Type)));
+        assert!(matches!(vm.run_pure_dataset_plan("scalar", &[]), Err(LanaError::Type)));
+        let input = vm.array_value(vec![Value::number(3.0)]).unwrap();
+        assert!(matches!(vm.run_pure_dataset_plan("mutate", &[input.clone()]), Err(LanaError::UnsupportedOperation)));
+        assert_eq!(input.print(), "[3]");
+    }
+
+    #[test]
+    fn dataset_plan_budget_counts_source_and_filter_work_without_partial_result() {
+        let chunk = assembler::assemble(
+            ".function main 0 4\nHALT\n.function predicate 1 2\nLOAD_CONST R0 true\nRETURN R0\n.function plan 1 2\nRETURN R0\n",
+        ).unwrap();
+        let mut vm = Vm::new(&chunk);
+        let rows = vm.array_value(vec![Value::number(1.0); 3]).unwrap();
+        let mut source = Value::null();
+        assert_eq!(vm.host_dataset(&[rows], &mut source), LanaError::Ok);
+        let mut filtered = Value::null();
+        assert_eq!(vm.host_dataset_filter(&[source, Value::function(1)], &mut filtered), LanaError::Ok);
+        vm.dataset_work_remaining = Some(5);
+        let mut output = Value::number(99.0);
+        assert_eq!(vm.host_dataset_materialize(&[filtered.clone()], &mut output), LanaError::Limit);
+        assert_eq!(output.as_number(), 99.0);
+        vm.dataset_work_remaining = Some(6);
+        assert_eq!(vm.host_dataset_materialize(&[filtered], &mut output), LanaError::Ok);
+        assert_eq!(vm.dataset_work_remaining, Some(0));
+        vm.dataset_work_remaining = None;
+        let oversized = vm.array_value(vec![Value::null(); 100_001]).unwrap();
+        assert_eq!(vm.run_pure_dataset_plan("plan", &[oversized]).unwrap_err(), LanaError::Limit);
+        assert_eq!(vm.dataset_work_remaining, None);
+    }
+
+    #[test]
+    fn dataset_plan_trace_keeps_source_ids_and_excluded_decisions() {
+        let chunk = assembler::assemble(
+            ".function main 0 4\nHALT\n.function plan 1 4\nHOST_CALL dataset_materialize R0 1 R1\nRETURN R1\n.function keep 1 2\nLOAD_CONST R0 true\nRETURN R0\n.function reject 1 2\nLOAD_CONST R0 false\nRETURN R0\n",
+        ).unwrap();
+        let mut vm = Vm::new(&chunk);
+        let row = |vm: &mut Vm, source: &str, id: &str, number: f64| {
+            let mut fields = Map::new(&vm.heap, 1).unwrap();
+            fields.set(Arc::from("v"), Value::number(number), false).unwrap();
+            vm.dataset_source_row(source, id, Value::map(Arc::new(Mutex::new(fields)))).unwrap()
+        };
+        let left_items = vec![row(&mut vm, "left", "a", 1.0), row(&mut vm, "left", "b", 2.0)];
+        let ValueKind::Map(first) = &left_items[0].kind else { panic!("source row"); };
+        assert!(Arc::ptr_eq(first.lock().unwrap().get("v").unwrap().derivation.as_ref().unwrap(),
+            left_items[0].derivation.as_ref().unwrap()));
+        let left_rows = vm.array_value(left_items).unwrap();
+        let mut left = Value::null();
+        assert_eq!(vm.host_dataset(&[left_rows], &mut left), LanaError::Ok);
+        let mut filtered = Value::null();
+        assert_eq!(vm.host_dataset_filter(&[left.clone(), Value::function(2)], &mut filtered), LanaError::Ok);
+        let mut limited = Value::null();
+        assert_eq!(vm.host_dataset_limit(&[filtered, Value::number(1.0)], &mut limited), LanaError::Ok);
+        let output = vm.run_pure_dataset_plan("plan", &[limited]).unwrap();
+        let ValueKind::Array(rows) = output.kind else { panic!("rows"); };
+        let rows = rows.lock().unwrap();
+        let derivation = rows.items()[0].derivation.as_ref().unwrap();
+        assert_eq!(derivation.operation.as_ref(), "limit");
+        assert_eq!(derivation.inputs[0].operation.as_ref(), "filter");
+        assert_eq!(derivation.inputs[0].inputs[0].label.as_ref(), "4:left1:a");
+        let ValueKind::Map(retained) = &rows.items()[0].kind else { panic!("retained row"); };
+        assert_eq!(retained.lock().unwrap().get("v").unwrap().derivation.as_ref().unwrap().label.as_ref(), "4:left1:a");
+        assert_eq!(vm.dataset_decisions().len(), 1);
+        assert_eq!(vm.dataset_decisions()[0].reason, "limit_excluded");
+        assert_eq!(vm.dataset_decisions()[0].predicate_value, None);
+        assert_eq!(vm.dataset_decisions()[0].input.inputs[0].label.as_ref(), "4:left1:b");
+        drop(rows);
+
+        let mut rejected = Value::null();
+        assert_eq!(vm.host_dataset_filter(&[left.clone(), Value::function(3)], &mut rejected), LanaError::Ok);
+        assert_eq!(vm.run_pure_dataset_plan("plan", &[rejected]).unwrap().print(), "[]");
+        assert_eq!(vm.dataset_decisions().len(), 2);
+        assert!(vm.dataset_decisions().iter().all(|decision| decision.reason == "filter_false"));
+        assert!(vm.dataset_decisions().iter().all(|decision| decision.predicate_value == Some(false)));
+
+        let right_items = vec![row(&mut vm, "right", "c", 2.0), row(&mut vm, "right", "d", 3.0)];
+        let right_rows = vm.array_value(right_items).unwrap();
+        let mut right = Value::null();
+        assert_eq!(vm.host_dataset(&[right_rows], &mut right), LanaError::Ok);
+        let mut joined = Value::null();
+        assert_eq!(vm.host_dataset_join(&[left.clone(), right, Value::string(Arc::from("v"))], &mut joined), LanaError::Ok);
+        let output = vm.run_pure_dataset_plan("plan", &[joined]).unwrap();
+        let ValueKind::Array(rows) = output.kind else { panic!("joined rows"); };
+        let rows = rows.lock().unwrap();
+        let derivation = rows.items()[0].derivation.as_ref().unwrap();
+        assert_eq!(derivation.operation.as_ref(), "join");
+        assert_eq!(derivation.label.as_ref(), "j9:4:left1:b10:5:right1:c");
+        assert_eq!(derivation.inputs[0].label.as_ref(), "4:left1:b");
+        assert_eq!(derivation.inputs[1].label.as_ref(), "5:right1:c");
+        assert_eq!(vm.dataset_decisions().len(), 2);
+        assert_eq!(vm.dataset_decisions()[0].reason, "no_matching_key");
+        assert_eq!(vm.dataset_decisions()[0].input.label.as_ref(), "4:left1:a");
+        assert_eq!(vm.dataset_decisions()[1].input.label.as_ref(), "5:right1:d");
+        assert!(matches!(vm.run_pure_dataset_plan("missing", &[]), Err(LanaError::NotFound)));
+        assert!(vm.dataset_decisions().is_empty());
+    }
+
+    #[test]
+    fn dataset_source_cell_trace_does_not_mutate_a_shared_input_map() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let mut fields = Map::new(&vm.heap, 1).unwrap();
+        fields.set(Arc::from("v"), Value::number(1.0), false).unwrap();
+        let original = Value::map(Arc::new(Mutex::new(fields)));
+        let traced = vm.dataset_source_row("s", "r", original.clone()).unwrap();
+        let ValueKind::Map(original_map) = &original.kind else { panic!("original map"); };
+        assert!(original_map.lock().unwrap().get("v").unwrap().derivation.is_none());
+        let ValueKind::Map(traced_map) = &traced.kind else { panic!("traced map"); };
+        assert!(Arc::ptr_eq(traced_map.lock().unwrap().get("v").unwrap().derivation.as_ref().unwrap(),
+            traced.derivation.as_ref().unwrap()));
+    }
+
+    #[test]
+    fn dataset_plan_trace_survives_map_projection_sort_and_group_aggregate() {
+        let chunk = assembler::assemble(
+            ".function main 0 4\nHALT\n.function plan 1 4\nHOST_CALL dataset_materialize R0 1 R1\nRETURN R1\n.function identity 1 2\nRETURN R0\n",
+        ).unwrap();
+        let mut vm = Vm::new(&chunk);
+        let mut items = Vec::new();
+        for (id, number) in [("a", 2.0), ("b", 1.0), ("c", 1.0)] {
+            let mut fields = Map::new(&vm.heap, 1).unwrap();
+            fields.set(Arc::from("v"), Value::number(number), false).unwrap();
+            items.push(vm.dataset_source_row("s", id, Value::map(Arc::new(Mutex::new(fields)))).unwrap());
+        }
+        let source_rows = vm.array_value(items).unwrap();
+        let mut source = Value::null();
+        assert_eq!(vm.host_dataset(&[source_rows], &mut source), LanaError::Ok);
+        let mut mapped = Value::null();
+        assert_eq!(vm.host_dataset_map(&[source.clone(), Value::function(2)], &mut mapped), LanaError::Ok);
+        let columns = vm.array_value(vec![Value::string(Arc::from("v"))]).unwrap();
+        let mut selected = Value::null();
+        assert_eq!(vm.host_dataset_select(&[mapped, columns], &mut selected), LanaError::Ok);
+        let mut sorted = Value::null();
+        assert_eq!(vm.host_dataset_sort(&[selected, Value::string(Arc::from("v"))], &mut sorted), LanaError::Ok);
+        let output = vm.run_pure_dataset_plan("plan", &[sorted]).unwrap();
+        assert_eq!(output.print(), "[{\"v\": 1}, {\"v\": 1}, {\"v\": 2}]");
+        let ValueKind::Array(rows) = output.kind else { panic!("sorted rows"); };
+        let rows = rows.lock().unwrap();
+        let first = rows.items()[0].derivation.as_ref().unwrap();
+        assert_eq!(first.operation.as_ref(), "sort");
+        assert_eq!(first.inputs[0].operation.as_ref(), "select");
+        assert_eq!(first.inputs[0].inputs[0].operation.as_ref(), "map");
+        assert_eq!(first.inputs[0].inputs[0].inputs[0].label.as_ref(), "1:s1:b");
+        let ValueKind::Map(first_row) = &rows.items()[0].kind else { panic!("sorted map"); };
+        assert_eq!(first_row.lock().unwrap().get("v").unwrap().derivation.as_ref().unwrap().label.as_ref(), "1:s1:b");
+        drop(rows);
+
+        let mut grouped = Value::null();
+        assert_eq!(vm.host_dataset_group_by(&[source, Value::string(Arc::from("v"))], &mut grouped), LanaError::Ok);
+        let descriptor = vm.array_value(vec![Value::string(Arc::from("count"))]).unwrap();
+        let mut aggregate = Value::null();
+        assert_eq!(vm.host_dataset_aggregate(&[grouped, descriptor], &mut aggregate), LanaError::Ok);
+        let output = vm.run_pure_dataset_plan("plan", &[aggregate]).unwrap();
+        assert_eq!(output.print(), "[{\"v\": 2, \"count\": 1}, {\"v\": 1, \"count\": 2}]");
+        let ValueKind::Array(rows) = output.kind else { panic!("aggregate rows"); };
+        let rows = rows.lock().unwrap();
+        let second = rows.items()[1].derivation.as_ref().unwrap();
+        assert_eq!(second.operation.as_ref(), "aggregate");
+        let group = &second.inputs[0];
+        assert_eq!(group.operation.as_ref(), "group_by");
+        assert_eq!(second.label, group.label);
+        assert!(second.label.starts_with("g9:"));
+        assert_eq!(group.inputs[0].inputs[0].label.as_ref(), "1:s1:b");
+        assert_eq!(group.inputs[1].label.as_ref(), "1:s1:c");
+        let ValueKind::Map(aggregate_row) = &rows.items()[1].kind else { panic!("aggregate map"); };
+        let aggregate_row = aggregate_row.lock().unwrap();
+        let count = aggregate_row.get("count").unwrap().derivation.as_ref().unwrap();
+        assert_eq!(count.operation.as_ref(), "count");
+        assert_eq!(count.inputs[0].operation.as_ref(), "group_by");
+        assert!(vm.dataset_decisions().is_empty());
+    }
+
+    #[test]
+    fn dataset_group_key_identity_is_typed_and_order_independent() {
+        let mut number = Vec::new();
+        Vm::dataset_key_identity(&Value::number(1.0), &mut number, 0).unwrap();
+        let mut text = Vec::new();
+        Vm::dataset_key_identity(&Value::string(Arc::from("1")), &mut text, 0).unwrap();
+        assert_ne!(number, text);
+        let mut negative_zero = Vec::new();
+        Vm::dataset_key_identity(&Value::number(-0.0), &mut negative_zero, 0).unwrap();
+        let mut positive_zero = Vec::new();
+        Vm::dataset_key_identity(&Value::number(0.0), &mut positive_zero, 0).unwrap();
+        assert_eq!(negative_zero, positive_zero);
+
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let vm = Vm::new(&chunk);
+        let mut left = Map::new(&vm.heap, 2).unwrap();
+        left.set(Arc::from("z"), Value::number(2.0), false).unwrap();
+        left.set(Arc::from("a"), Value::boolean(true), false).unwrap();
+        let mut right = Map::new(&vm.heap, 2).unwrap();
+        right.set(Arc::from("a"), Value::boolean(true), false).unwrap();
+        right.set(Arc::from("z"), Value::number(2.0), false).unwrap();
+        let mut first = Vec::new();
+        Vm::dataset_key_identity(&Value::map(Arc::new(Mutex::new(left))), &mut first, 0).unwrap();
+        let mut second = Vec::new();
+        Vm::dataset_key_identity(&Value::map(Arc::new(Mutex::new(right))), &mut second, 0).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn host_extension_can_run_named_plan_in_same_vm() {
+        let chunk = assembler::assemble(
+            ".function main 0 4\nHOST_CALL store_open R0 0 R1\nRETURN R1\n.function plan 0 3\nARRAY_NEW R1 R0 0\nRETURN R1\n",
+        ).unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.set_host_call_extension(Box::new(|vm, _, _, out| match vm.run_pure_dataset_plan("plan", &[]) {
+            Ok(value) => { *out = value; LanaError::Ok }
+            Err(error) => error,
+        }));
+        assert_eq!(vm.run(), LanaError::Ok);
+        assert_eq!(vm.result().unwrap().print(), "[]");
+    }
+
+    #[test]
+    fn finite_identity_kernel_composes_without_changing_rows() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let domain = vm.array_value(vec![Value::number(0.0), Value::number(1.0)]).unwrap();
+        let mut identity = Value::null();
+        assert_eq!(vm.core_kernel_identity(&[domain], &mut identity), LanaError::Ok);
+        let mut composed = Value::null();
+        assert_eq!(vm.core_kernel_compose(&[identity.clone(), identity], &mut composed), LanaError::Ok);
+        let ValueKind::Kernel(kernel) = composed.kind else { panic!("expected kernel"); };
+        assert_eq!(kernel.rows, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
+        assert_eq!(kernel.input_domains.len(), 1);
+        let member = vm.array_value(vec![Value::number(7.0)]).unwrap();
+        let nested_domain = vm.array_value(vec![member.clone()]).unwrap();
+        let mut nested = Value::null();
+        assert_eq!(vm.core_kernel_identity(&[nested_domain], &mut nested), LanaError::Ok);
+        let mut nested_composed = Value::null();
+        assert_eq!(vm.core_kernel_compose(&[nested.clone(), nested.clone()], &mut nested_composed), LanaError::Ok);
+        let copied = vm.deep_clone_value(&nested_composed, &mut DeepCloneMemo::default()).unwrap();
+        assert!(matches!(copied.kind, ValueKind::Kernel(_)));
+        let duplicate_domain = vm.array_value(vec![member.clone(), member]).unwrap();
+        assert_eq!(vm.core_kernel_identity(&[duplicate_domain], &mut Value::null()), LanaError::InvalidParameters);
+    }
+
+    #[test]
+    fn atomic_text_write_preserves_old_or_absent_and_reports_uncertain_rename() {
+        let root = std::env::temp_dir().join(format!(
+            "lana-vm-atomic-{}-{}",
+            std::process::id(),
+            NEXT_ATOMIC_WRITE.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let destination = root.join("output");
+        for old in [Some(b"old".as_slice()), None] {
+            if let Some(old) = old { std::fs::write(&destination, old).unwrap(); }
+            else { let _ = std::fs::remove_file(&destination); }
+            let failure = write_text_atomic_with_sync(
+                &destination,
+                b"new",
+                |_| Err(std::io::Error::other("before rename")),
+                |_| Ok(()),
+            ).unwrap_err();
+            assert!(!failure.1);
+            assert_eq!(std::fs::read(&destination).ok().as_deref(), old);
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), usize::from(old.is_some()));
+        }
+        let failure = write_text_atomic_with_sync(
+            &destination,
+            b"complete",
+            |file| file.sync_all(),
+            |_| Err(std::io::Error::other("after rename")),
+        ).unwrap_err();
+        assert!(failure.1);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"complete");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_text_host_call_publishes_and_reports_failed_destination() {
+        let root = std::env::temp_dir().join(format!(
+            "lana-vm-host-atomic-{}-{}",
+            std::process::id(),
+            NEXT_ATOMIC_WRITE.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        for (destination, expected) in [(root.join("output"), LanaError::Ok), (root.join("directory"), LanaError::Io)] {
+            if expected == LanaError::Io { std::fs::create_dir(&destination).unwrap(); }
+            let path_hex: String = destination.to_string_lossy().as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+            let source = format!("LOAD_STRING R0 {path_hex}\nLOAD_STRING R1 6e6577\nHOST_CALL write_text_atomic R0 2 R2\nRETURN R2\n");
+            let chunk = assembler::assemble(&source).unwrap();
+            let mut vm = Vm::new(&chunk);
+            assert_eq!(vm.run(), expected);
+            if expected == LanaError::Ok {
+                assert_eq!(std::fs::read(&destination).unwrap(), b"new");
+            } else {
+                assert!(destination.is_dir());
+                assert_eq!(vm.error().path.as_deref(), Some(destination.to_str().unwrap()));
+                assert_eq!(vm.error().durability, None);
+            }
+        }
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn run_chunk(source: &str) -> (LanaError, String) {
         let chunk = assembler::assemble(source).expect("fixture assembles");
         let mut vm = Vm::new(&chunk);
         let error = vm.run();
-        (error, vm.result().print())
+        (error, vm.result().unwrap().print())
+    }
+
+    #[test]
+    fn scheduler_service_root_keeps_a_retired_task_heap_until_release() {
+        let chunk = assembler::assemble(
+            ".function main 0 4\nHALT\n.function worker 1 4\nRETURN R0\n"
+        ).unwrap();
+        let scheduler = Scheduler::new();
+        let mut source = Vm::new(&chunk);
+        source.scheduler = Some(scheduler.clone());
+        source.scheduler_owner = false;
+        source.frames[0].registers[0] = source.array_value(vec![Value::number(7.0)]).unwrap();
+        let owner = Arc::downgrade(&source.host_roots);
+        let task = source.start_task(1, 1, 0).unwrap();
+        let task_weak = Arc::downgrade(&task);
+        drop(task);
+        drop(source);
+        assert!(owner.upgrade().is_some());
+        let queued = scheduler.state.lock().unwrap().queue.pop_front().unwrap();
+        run_task(queued);
+        let result_weak = {
+            let task = task_weak.upgrade().unwrap();
+            let state = task.state.lock().unwrap();
+            let ValueKind::Array(array) = &state.result.kind else { unreachable!() };
+            Arc::downgrade(array)
+        };
+        assert!(result_weak.upgrade().is_some());
+        scheduler.state.lock().unwrap().all_tasks.clear();
+        assert!(owner.upgrade().is_none());
+        assert!(task_weak.upgrade().is_none());
+        assert!(result_weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn retained_joined_task_cycle_releases_after_last_root() {
+        let chunk = assembler::assemble(
+            ".function main 0 4\nFORK worker R1 0 R0\nJOIN R0 R1\nRETURN R0\n.function worker 0 2\nARRAY_NEW R0 R1 0\nRETURN R0\n"
+        ).unwrap();
+        let mut vm = Vm::new(&chunk);
+        vm.configured_worker_count = 0;
+        assert_eq!(vm.run(), LanaError::Ok);
+        let root = vm.result().unwrap();
+        let ValueKind::Task(task) = &root.value.kind else { unreachable!() };
+        let task_weak = Arc::downgrade(task);
+        let state = task.state.lock().unwrap();
+        let ValueKind::Array(array) = &state.result.kind else { unreachable!() };
+        let array_weak = Arc::downgrade(array);
+        array.lock().unwrap().items.push(Value::task(task.clone())).unwrap();
+        drop(state);
+        vm.heap.mutate_cycle(array_weak.as_ptr() as usize);
+        let heap = vm.heap();
+        drop(vm);
+        assert!(task_weak.upgrade().is_some());
+        assert!(array_weak.upgrade().is_some());
+        drop(root);
+        assert!(task_weak.upgrade().is_none());
+        assert!(array_weak.upgrade().is_none());
+        assert_eq!(heap.live_bytes(), 0);
+    }
+
+    #[test]
+    fn fork_transfers_composite_future_dependencies() {
+        for (composite, expected) in [("future_all", "[10, 20]"), ("future_race", "10")] {
+            let source = format!(
+                ".version 4\n.function main 0 10\nASYNC foo R0 0 R1\nASYNC bar R0 0 R2\nARRAY_NEW R3 R1 2\nHOST_CALL {composite} R3 1 R4\nFORK worker R4 1 R5\nJOIN R5 R6\nRETURN R6\n.function foo 0 3\nLOAD_CONST R1 10\nRETURN R1\n.function bar 0 3\nLOAD_CONST R1 20\nRETURN R1\n.function worker 1 3\nRUN_ASYNC R0 R1\nRETURN R1\n"
+            );
+            let (status, result) = run_chunk(&source);
+            assert_eq!(status, LanaError::Ok);
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn task_transfer_copies_dataset_and_claim_graphs_with_one_memo() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut source_vm = Vm::new(&chunk);
+        let mut receiver = Vm::new(&chunk);
+        let captured = source_vm.array_value(vec![Value::number(7.0)]).unwrap();
+        let dataset = Value::dataset(source_vm.managed_payload(Dataset {
+            op: DatasetOp::Source, source: captured.clone(), function: 0,
+            columns: captured.clone(), key: Value::null(), limit: Value::null(),
+            other: Value::null(), aggregate: Value::null(),
+        }).unwrap());
+        let mut claimed = captured.clone();
+        claimed.claim = Some(source_vm.managed_payload(Claim {
+            value: captured.clone(), proposition: Arc::from("captured"),
+            exactness: DerivationExactness::Exact, tolerance: 0.0, source_valid: true,
+        }).unwrap());
+        let graph = source_vm.array_value(vec![dataset, claimed]).unwrap();
+        let copy = receiver.deep_clone_value(&graph, &mut DeepCloneMemo {
+            transfer: true, ..DeepCloneMemo::default()
+        }).unwrap();
+        let ValueKind::Array(graph) = &copy.kind else { unreachable!() };
+        let graph = graph.lock().unwrap();
+        let ValueKind::Dataset(dataset) = &graph.items[0].kind else { unreachable!() };
+        let ValueKind::Array(source) = &dataset.source.kind else { unreachable!() };
+        let ValueKind::Array(columns) = &dataset.columns.kind else { unreachable!() };
+        let ValueKind::Array(claimed) = &graph.items[1].kind else { unreachable!() };
+        let claim = graph.items[1].claim.as_ref().unwrap();
+        let ValueKind::Array(claim_value) = &claim.value.kind else { unreachable!() };
+        assert!(Arc::ptr_eq(source, columns));
+        assert!(Arc::ptr_eq(source, claimed));
+        assert!(Arc::ptr_eq(source, claim_value));
+        source.lock().unwrap().items[0] = Value::number(9.0);
+        assert_eq!(captured.print(), "[7]");
+        assert_eq!(claim.proposition.as_ref(), "captured");
+        drop(graph);
+        let root = receiver.retain_value(&copy).unwrap();
+        drop(copy);
+        drop(receiver);
+        assert!(root.print().contains('9'));
+        drop(root);
+    }
+
+    #[test]
+    fn cancelled_task_transfer_publishes_no_task() {
+        let chunk = assembler::assemble(
+            ".function main 0 4\nHALT\n.function worker 1 4\nRETURN R0\n"
+        ).unwrap();
+        for arguments in [0, 1] {
+            let mut vm = Vm::new(&chunk);
+            let scheduler = Scheduler::new();
+            vm.scheduler = Some(scheduler.clone());
+            vm.frames[0].registers[0] = vm.array_value(vec![Value::number(7.0)]).unwrap();
+            vm.cancelled.store(true, Ordering::Relaxed);
+            let function = if arguments == 0 { 0 } else { 1 };
+            assert_eq!(vm.start_task(function, arguments, 0).unwrap_err(), LanaError::Cancelled);
+            let state = scheduler.state.lock().unwrap();
+            assert_eq!(state.live_tasks, 0);
+            assert!(state.queue.is_empty());
+            assert!(state.all_tasks.is_empty());
+            assert!(vm.tasks.is_empty());
+        }
+    }
+
+    #[test]
+    fn task_transfer_rebuilds_waiting_future_dependencies() {
+        let chunk = assembler::assemble(
+            ".version 4\n.function main 0 4\nHALT\n.function waiting 0 4\nAWAIT R1 R2\nRETURN R2\n.function dependency 0 3\nLOAD_CONST R1 42\nRETURN R1\n"
+        ).unwrap();
+        let dependency = Arc::new(Mutex::new(Future {
+            function: 2, ip: chunk.functions[2].entry as usize,
+            registers: vec![Value::null(); 3], exhausted: false, ready: true, queued: true,
+        }));
+        let waiting = Arc::new(Mutex::new(Future {
+            function: 1, ip: chunk.functions[1].entry as usize,
+            registers: vec![Value::null(), Value::future(dependency.clone()), Value::null(), Value::null()],
+            exhausted: false, ready: false, queued: false,
+        }));
+        let source = Value::future(waiting.clone());
+        let mut receiver = Vm::new(&chunk);
+        let copy = receiver.deep_clone_value(&source, &mut DeepCloneMemo {
+            transfer: true, ..DeepCloneMemo::default()
+        }).unwrap();
+        let mut result = Value::null();
+        assert_eq!(receiver.host_run_async(&[copy], &mut result), LanaError::Ok);
+        assert_eq!(result.as_number(), 42.0);
+        assert!(!waiting.lock().unwrap().exhausted);
+        assert!(!dependency.lock().unwrap().exhausted);
+        let guard = waiting.lock().unwrap();
+        assert_eq!(receiver.deep_clone_value(&source, &mut DeepCloneMemo {
+            transfer: true, ..DeepCloneMemo::default()
+        }).unwrap_err(), LanaError::UnsupportedOperation);
+        drop(guard);
+    }
+
+    #[test]
+    fn task_transfer_copies_suspended_captures_and_preserves_aliases() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        for future in [false, true] {
+            let source_vm = Vm::new(&chunk);
+            let mut receiver = Vm::new(&chunk);
+            let array = Arc::new(Mutex::new(Array::new(&source_vm.heap, 1).unwrap()));
+            let captured = Value::array(array.clone());
+            array.lock().unwrap().items.push(Value::number(7.0)).unwrap();
+            let registers = vec![Value::null(), captured.clone(), captured];
+            let source = if future {
+                Value { kind: ValueKind::Future(Arc::new(Mutex::new(Future {
+                    function: 0, ip: 0, registers, exhausted: false, ready: true, queued: true,
+                }))), ..Value::null() }
+            } else {
+                Value { kind: ValueKind::Generator(Arc::new(Mutex::new(Generator {
+                    function: 0, ip: 0, registers, exhausted: false,
+                }))), ..Value::null() }
+            };
+            let copy = receiver.deep_clone_value(&source, &mut DeepCloneMemo {
+                transfer: true, ..DeepCloneMemo::default()
+            }).unwrap();
+            let registers = match &copy.kind {
+                ValueKind::Future(frame) => {
+                    let frame = frame.lock().unwrap();
+                    assert!(!frame.queued);
+                    frame.registers.clone()
+                }
+                ValueKind::Generator(frame) => frame.lock().unwrap().registers.clone(),
+                _ => unreachable!(),
+            };
+            let ValueKind::Array(first) = &registers[1].kind else { unreachable!() };
+            let ValueKind::Array(second) = &registers[2].kind else { unreachable!() };
+            assert!(Arc::ptr_eq(first, second));
+            assert!(!Arc::ptr_eq(first, &array));
+            first.lock().unwrap().items[0] = Value::number(9.0);
+            assert_eq!(array.lock().unwrap().items[0].as_number(), 7.0);
+            let root = receiver.retain_value(&copy).unwrap();
+            drop(registers);
+            drop(copy);
+            drop(receiver);
+            assert_eq!(root.type_name(), if future { "future" } else { "generator" });
+            drop(root);
+        }
+    }
+
+    #[test]
+    fn cloned_set_cycles_keep_managed_ownership_through_teardown() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        for mode in 0..3 {
+            let mut vm = Vm::new(&chunk);
+            let set = Arc::new(Mutex::new(Set::new(&vm.heap, 1).unwrap()));
+            let source = Value::set(set.clone());
+            set.lock().unwrap().items.push(source.clone()).unwrap();
+            let copy = match mode {
+                0 => vm.deep_clone_value(&source, &mut DeepCloneMemo { transfer: true, ..DeepCloneMemo::default() }).unwrap(),
+                1 => vm.materialize_value(&source).unwrap(),
+                _ => vm.deep_clone_live_value(&source, &mut HashMap::new()).unwrap(),
+            };
+            let ValueKind::Set(copied) = &copy.kind else { unreachable!() };
+            let weak = Arc::downgrade(copied);
+            let back_edge = copied.lock().unwrap().items[0].clone();
+            let ValueKind::Set(back_edge) = back_edge.kind else { unreachable!() };
+            assert!(Arc::ptr_eq(copied, &back_edge));
+            drop(back_edge);
+            let root = vm.retain_value(&copy).unwrap();
+            drop(copy);
+            set.lock().unwrap().items.clear();
+            drop(source);
+            drop(set);
+            let heap = vm.heap();
+            drop(vm);
+            assert!(weak.upgrade().is_some());
+            drop(root);
+            assert!(weak.upgrade().is_none());
+            assert_eq!(heap.live_bytes(), 0);
+        }
     }
 
     #[test]
@@ -16538,19 +19960,38 @@ mod tests {
     }
 
     #[test]
+    fn lowering_memory_limit_is_transactional() {
+        let chunk = assembler::assemble("HALT\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        let value = vm.array_value(vec![Value::number(7.0)]).unwrap();
+        let bytes = vm.allocated_bytes();
+        let original = vm.memory_limit;
+        assert_eq!(vm.set_memory_limit(bytes - 1), Err(LanaError::Oom));
+        assert_eq!(vm.memory_limit, original);
+        assert_eq!(value.print(), "[7]");
+        assert!(vm.array_value(vec![Value::null()]).is_ok());
+        vm.set_memory_limit(vm.allocated_bytes()).unwrap();
+        assert!(matches!(vm.array_value(vec![Value::null()]), Err(LanaError::Oom)));
+        assert_eq!(value.print(), "[7]");
+        vm.set_memory_limit(original).unwrap();
+        assert!(vm.array_value(vec![Value::null()]).is_ok());
+    }
+
+    #[test]
     fn cross_heap_string_clones_are_charged_once_per_source() {
         let chunk = assembler::assemble("HALT\n").unwrap();
         let mut vm = Vm::new(&chunk);
         let source = Value::string(Arc::from("abc"));
-        vm.set_memory_limit(3);
+        let baseline = vm.allocated_bytes();
+        vm.set_memory_limit(vm.allocated_bytes() + 3).unwrap();
         assert!(matches!(vm.deep_clone_value(&source, &mut DeepCloneMemo::default()), Err(LanaError::Oom)));
-        vm.set_memory_limit(4);
+        vm.set_memory_limit(vm.allocated_bytes() + 4).unwrap();
         let mut memo = DeepCloneMemo::default();
         let first = vm.deep_clone_value(&source, &mut memo).unwrap().as_string();
         let second = vm.deep_clone_value(&source, &mut memo).unwrap().as_string();
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &source.as_string()));
-        assert_eq!(vm.heap.live_bytes(), 4);
+        assert_eq!(vm.heap.live_bytes(), baseline + 4);
     }
 
     #[test]
@@ -16567,12 +20008,13 @@ mod tests {
             "LOAD_CONST R0 1000000\nHOST_CALL array_new R0 1 R1\nRETURN R1\n",
         ).unwrap();
         let mut vm = Vm::new(&chunk);
-        vm.set_memory_limit(1024 * 1024);
+        vm.set_memory_limit(1024 * 1024).unwrap();
+        let baseline = vm.allocated_bytes();
         assert_eq!(vm.run(), LanaError::Oom);
-        assert!(matches!(vm.result().kind, ValueKind::Null));
-        assert_eq!(vm.allocated_bytes(), 0);
+        assert!(matches!(vm.result().unwrap().value.kind, ValueKind::Null));
+        assert_eq!(vm.allocated_bytes(), baseline);
         assert_eq!(vm.alloc_bytes(usize::MAX), LanaError::Oom);
-        assert_eq!(vm.allocated_bytes(), 0);
+        assert_eq!(vm.allocated_bytes(), baseline);
     }
 
     #[test]
@@ -16580,9 +20022,9 @@ mod tests {
         let source = "LOAD_CONST R0 \"abcdefgh\"\nMOVE R1 R0\nHOST_CALL string_concat R0 2 R2\nRETURN R2\n";
         let chunk = assembler::assemble(source).unwrap();
         let mut vm = Vm::new(&chunk);
-        vm.set_memory_limit(8);
+        vm.set_memory_limit(vm.allocated_bytes() + 8).unwrap();
         assert_eq!(vm.run(), LanaError::Oom);
-        assert!(matches!(vm.result().kind, ValueKind::Null));
+        assert!(matches!(vm.result().unwrap().value.kind, ValueKind::Null));
         for (host, arguments) in [
             (LANA_HOST_STRING_HEX, vec![Value::string(Arc::from("abc"))]),
             (LANA_HOST_STRING_UNESCAPE, vec![Value::string(Arc::from("abc"))]),
@@ -16594,12 +20036,14 @@ mod tests {
             (LANA_HOST_JSON_STRINGIFY, vec![Value::string(Arc::from("abc"))]),
         ] {
             let mut vm = Vm::new(&chunk);
-            vm.set_memory_limit(2);
+            vm.set_memory_limit(vm.allocated_bytes() + 2).unwrap();
             let mut out = Value::number(99.);
             assert_eq!(vm.execute_host_call(host, &arguments, &mut out), LanaError::Oom, "host {host}");
             assert!(matches!(out.kind, ValueKind::Null));
             vm.heap.collect_strings();
-            assert_eq!(vm.heap.live_bytes(), 0);
+            let heap = vm.heap();
+            drop(vm);
+            assert_eq!(heap.live_bytes(), 0);
         }
     }
 
@@ -16607,7 +20051,7 @@ mod tests {
     fn repeated_string_allocation_keeps_live_aliases_without_cumulative_exhaustion() {
         let chunk = assembler::assemble("HALT\n").unwrap();
         let mut vm = Vm::new(&chunk);
-        vm.set_memory_limit(16);
+        vm.set_memory_limit(vm.allocated_bytes() + 16).unwrap();
         let arguments = [Value::string(Arc::from("abc")), Value::number(0.), Value::number(3.)];
         let mut first = Value::null();
         assert_eq!(vm.execute_host_call(LANA_HOST_STRING_SLICE, &arguments, &mut first), LanaError::Ok);
@@ -16627,28 +20071,14 @@ mod tests {
         assert_eq!(heap.live_bytes(), 0);
     }
 
-    #[cfg(not(feature = "net-tls"))]
+    #[cfg(any(not(feature = "net-tls"), target_arch = "wasm32"))]
     #[test]
     fn https_without_tls_never_falls_back_to_plaintext() {
         let chunk = assembler::assemble("HALT\n").unwrap();
         let mut vm = Vm::new(&chunk);
         let mut out = Value::null();
-        assert_eq!(vm.net_http_request("GET", "https://127.0.0.1:9/", None, 1., true, &mut out), LanaError::Ok);
+        assert_eq!(vm.net_http_request("GET", "https://127.0.0.1:9/", None, 1., true, &[], &mut out), LanaError::Ok);
         assert_eq!(out.print(), "[false, tls]");
-    }
-
-    #[test]
-    fn http_lengths_are_checked_without_waiting_for_tls_eof() {
-        assert!(net_response_length(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n").unwrap().is_none());
-        let header = b"HTTP/1.1 200 OK\r\ncOnTeNt-LeNgTh: 3\r\n\r\n";
-        assert_eq!(net_response_length(header).unwrap(), Some(header.len() + 3));
-        assert!(net_response_length(b"HTTP/1.1 200 OK\r\n\r\n").unwrap().is_none());
-        for fields in ["Content-Length: 1\r\nContent-Length: 2", "Content-Length: -1",
-            "Content-Length: +1", "Content-Length: 2junk", "Content-Length: 18446744073709551615",
-            "Content-Length:", "Transfer-Encoding: chunked"] {
-            let header = format!("HTTP/1.1 200 OK\r\n{fields}\r\n\r\n");
-            assert!(net_response_length(header.as_bytes()).is_err(), "{fields}");
-        }
     }
 
     #[test]
@@ -16667,11 +20097,14 @@ mod tests {
     #[test]
     fn array_growth_failure_preserves_existing_items() {
         let chunk = assembler::assemble(
-            "LOAD_CONST R0 1\nARRAY_NEW R1 R0 1\nMOVE R2 R0\nHOST_CALL array_push R1 2 R3\nRETURN R3\n",
+            ".function main 0 4\nLOAD_CONST R0 1\nARRAY_NEW R1 R0 1\nMOVE R2 R0\nHOST_CALL array_push R1 2 R3\nRETURN R3\n",
         ).unwrap();
         let mut vm = Vm::new(&chunk);
-        vm.set_memory_limit(std::mem::size_of::<Array>() + std::mem::size_of::<Value>());
-        assert_eq!(vm.run(), LanaError::Oom);
+        for instruction in &chunk.code[..3] {
+            assert_eq!(vm.execute(instruction), LanaError::Ok);
+        }
+        vm.set_memory_limit(vm.allocated_bytes()).unwrap();
+        assert_eq!(vm.execute(&chunk.code[3]), LanaError::Oom);
         let ValueKind::Array(array) = &vm.frames[0].registers[1].kind else { panic!("array expected") };
         assert_eq!(array.lock().unwrap().items.len(), 1);
         assert!(matches!(vm.frames[0].registers[3].kind, ValueKind::Null));
@@ -16687,8 +20120,8 @@ mod tests {
                 ".function main 0 8\nLOAD_CONST R0 6000\nHOST_CALL array_new R0 1 R1\nFORK worker R1 1 R2\nJOIN R2 R3\nRETURN R3\n.function worker 1 4\n{body}"
             )).unwrap();
             let mut vm = Vm::new(&chunk);
-            vm.set_memory_limit(6000 * std::mem::size_of::<Value>() + 32768);
-            assert_eq!(vm.run(), expected);
+            vm.set_memory_limit(vm.allocated_bytes() + 6000 * (std::mem::size_of::<Value>() + 10 * std::mem::size_of::<usize>()) + 32768).unwrap();
+            assert_eq!(vm.run(), expected, "{:?}; live={} limit={}", vm.error(), vm.allocated_bytes(), vm.memory_limit);
         }
     }
 
@@ -16697,38 +20130,48 @@ mod tests {
         let chunk = assembler::assemble(
             "LOAD_CONST R0 1000\nLOAD_CONST R1 16\nLOAD_CONST R2 1\nloop:\nHOST_CALL array_new R1 1 R3\nBINARY R0 sub R2 R0\nLOAD_CONST R4 0\nCOMPARE R0 > R4 R5\nJUMP_IF_TRUE R5 loop\nRETURN R3\n",
         ).unwrap();
-        let array_bytes = std::mem::size_of::<Array>() + 16 * std::mem::size_of::<Value>();
+        let probe_heap = Heap::new(4096);
+        let probe = Array::new(&probe_heap, 16).unwrap();
+        let payload_bytes = probe_heap.live_bytes();
+        drop(probe);
+        let mut probe_vm = Vm::new(&chunk);
+        let first = probe_vm.array_value(vec![Value::null(); 16]).unwrap();
+        probe_vm.result = probe_vm.array_value(vec![Value::null(); 16]).unwrap();
+        let probe_root = probe_vm.result().unwrap();
+        let budget = probe_vm.heap.peak_bytes() + payload_bytes;
+        drop((first, probe_root, probe_vm));
         let mut vm = Vm::new(&chunk);
-        vm.set_memory_limit(array_bytes * 2);
+        vm.set_memory_limit(budget).unwrap();
         assert_eq!(vm.run(), LanaError::Ok);
-        assert_eq!(vm.allocated_bytes(), array_bytes);
         let heap = vm.heap();
-        let external_root = vm.result().clone();
+        let external_root = vm.result().unwrap();
         drop(vm);
-        assert_eq!(heap.live_bytes(), array_bytes);
+        assert!(heap.live_bytes() <= budget);
         drop(external_root);
         assert_eq!(heap.live_bytes(), 0);
-        assert!(heap.peak_bytes() <= array_bytes * 2);
+        assert!(heap.peak_bytes() <= budget);
     }
 
     #[test]
     fn set_allocation_is_fallible_and_releases_its_payload() {
         let chunk = assembler::assemble("HALT\n").unwrap();
         let mut vm = Vm::new(&chunk);
-        vm.set_memory_limit(1);
+        let baseline = vm.allocated_bytes();
+        assert_eq!(vm.set_memory_limit(1), Err(LanaError::Oom));
+        vm.set_memory_limit(baseline).unwrap();
         assert!(matches!(vm.set_host_call(LANA_HOST_SET_NEW, &[]), Err(LanaError::Oom)));
-        assert_eq!(vm.allocated_bytes(), 0);
-        let bytes = 3 * (std::mem::size_of::<Set>() + 2 * std::mem::size_of::<Value>());
-        vm.set_memory_limit(bytes);
+        assert_eq!(vm.allocated_bytes(), baseline);
+        vm.set_memory_limit(256 * 1024).unwrap();
         for _ in 0..1000 {
             let empty = vm.set_host_call(LANA_HOST_SET_NEW, &[]).unwrap();
             let single = vm.set_host_call(LANA_HOST_SET_ADD, &[empty, Value::number(7.)]).unwrap();
             let same = vm.set_host_call(LANA_HOST_SET_UNION, &[single.clone(), single.clone()]).unwrap();
             assert_eq!(same.print(), "set{7}");
             drop((single, same));
-            assert_eq!(vm.allocated_bytes(), 0);
+            vm.collect_classes().unwrap();
+            assert_eq!(vm.allocated_bytes(), baseline);
         }
-        assert!(vm.heap.peak_bytes() <= bytes);
+        assert!(vm.heap.peak_bytes() <= 256 * 1024);
     }
 
     #[test]
@@ -16869,6 +20312,36 @@ mod tests {
         let mut output = Value::null();
         assert_eq!(vm.host_dataset_materialize(&[joined], &mut output), LanaError::Ok);
         assert_eq!(output.print(), "[{\"key\": 1}]");
+    }
+
+    #[test]
+    fn dataset_aggregate_rejects_bad_descriptors_and_nonfinite_results() {
+        let chunk = Chunk::new(lana_bytecode::opcode::LABC_VERSION, 0);
+        let mut vm = Vm::new(&chunk);
+        let mut rows = Vec::new();
+        for number in [f64::MAX, f64::MAX] {
+            let mut row = Map::new(&vm.heap, 2).unwrap();
+            row.set(Arc::from("key"), Value::number(1.0), false).unwrap();
+            row.set(Arc::from("value"), Value::number(number), false).unwrap();
+            rows.push(Value::map(Arc::new(Mutex::new(row))));
+        }
+        let source_rows = vm.array_value(rows).unwrap();
+        let mut source = Value::null();
+        assert_eq!(vm.host_dataset(&[source_rows], &mut source), LanaError::Ok);
+        let mut grouped = Value::null();
+        assert_eq!(vm.host_dataset_group_by(&[source, Value::string(Arc::from("key"))], &mut grouped), LanaError::Ok);
+        for (descriptor, expected) in [
+            (vec![Value::string(Arc::from("sum"))], LanaError::Type),
+            (vec![Value::string(Arc::from("count")), Value::string(Arc::from("value"))], LanaError::Type),
+            (vec![Value::string(Arc::from("sum")), Value::string(Arc::from("value"))], LanaError::Type),
+        ] {
+            let descriptor = vm.array_value(descriptor).unwrap();
+            let mut plan = Value::null();
+            assert_eq!(vm.host_dataset_aggregate(&[grouped.clone(), descriptor], &mut plan), LanaError::Ok);
+            let mut output = Value::number(99.0);
+            assert_eq!(vm.host_dataset_materialize(&[plan], &mut output), expected);
+            assert_eq!(output.as_number(), 99.0);
+        }
     }
 
     #[test]
@@ -17629,14 +21102,24 @@ mod tests {
         for (name, prefix, joint, sample, resolve) in forms {
             for (operation, instruction, expected) in [
                 ("project", "JOINT_PROJECT R10 R11 x\n", if joint { LanaError::Ok } else { LanaError::Type }),
-                ("condition", "LOAD_CONST R12 1\nJOINT_CONDITION R10 R11 x R12\n", if joint { LanaError::Ok } else { LanaError::Type }),
-                ("observe", "LOAD_CONST R12 1\nOBSERVE R10 R11 x R12\n", if joint { LanaError::Ok } else { LanaError::Type }),
                 ("sample", "INFO_SAMPLE R10 R11\n", if sample { LanaError::Ok } else if name == "possibility" { LanaError::UnsupportedOperation } else { LanaError::Type }),
                 ("resolve", "RESOLVE R10 R11\n", if resolve { LanaError::Ok } else { LanaError::UnresolvedValue }),
                 ("inspect", "HOST_CALL information_inspect R10 1 R11\n", LanaError::Ok),
             ] {
                 let (actual, _) = run_chunk(&format!(".version 5\n{prefix}{instruction}RETURN R11\n"));
                 assert_eq!(actual, expected, "{name}/{operation}");
+            }
+            let evidence = if joint {
+                "LOAD_STRING R3 78\nLOAD_CONST R4 1\nHOST_CALL map_new R3 2 R12\n"
+            } else {
+                "LOAD_CONST R12 1\n"
+            };
+            for (operation, instruction) in [
+                ("condition", "JOINT_CONDITION_MAP R10 R11 R12\n"),
+                ("observe", "OBSERVE_MAP R10 R11 R12\n"),
+            ] {
+                let (actual, _) = run_chunk(&format!(".version 5\n{prefix}{evidence}{instruction}RETURN R11\n"));
+                assert_eq!(actual, if name == "paths" { LanaError::UnsupportedOperation } else { LanaError::Ok }, "{name}/{operation}");
             }
         }
     }
@@ -17766,7 +21249,7 @@ mod tests {
             let worker = scope.spawn(move || {
                 let mut vm = Vm::new(&chunk);
                 vm.cancelled = flag;
-                vm.set_host_call_extension(Box::new(move |_, _, _| {
+                vm.set_host_call_extension(Box::new(move |_, _, _, _| {
                     ready_tx.send(()).unwrap();
                     resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
                     LanaError::Ok
@@ -17806,7 +21289,7 @@ mod tests {
         vm.set_instruction_limit(1000);
         let (error, result) = {
             let error = vm.run();
-            (error, vm.result().print())
+            (error, vm.result().unwrap().print())
         };
         assert_eq!(error, LanaError::Ok);
         assert_eq!(result, "1");

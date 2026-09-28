@@ -30,3 +30,7 @@ ghost_*/
 .claude/worktrees/
 .experiments/
 RELEASE_CHECKLIST.md
+
+# Retain historical Lana proposals in version control.
+!lip/archive/
+!lip/archive/**

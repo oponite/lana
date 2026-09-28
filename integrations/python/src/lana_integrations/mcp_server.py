@@ -29,7 +29,7 @@ def build_server(
     server = MCPServer(
         "lana",
         instructions=(
-            "Check and run Lana 3.0 programs beneath configured roots. "
+            "Report the Lana version and optionally run programs beneath configured roots. "
             "Execution is local and may perform file effects."
         ),
     )
@@ -49,12 +49,6 @@ def build_server(
                 "executable": runner.executable,
             },
         }
-
-    @server.tool(annotations=read_only)
-    def lana_check(program: str) -> dict[str, Any]:
-        """Check a Lana source program beneath an allowed root without running it."""
-        resolved = policy.resolve_program(program)
-        return runner.check(resolved)
 
     if allow_run:
 

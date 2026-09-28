@@ -1,0 +1,30 @@
+import "std/core" as info;
+
+let weighted = info.distribution([[1, 0.25], [2, 0.75]]);
+let zero_worlds = weighted - weighted;
+assert(resolve(zero_worlds) == 0, "equal outcomes resolve");
+let restored = zero_worlds + weighted;
+assert(inspect_information(restored).support[1].value == 2, "same-root worlds stay aligned");
+let rows = dataset([{key: 1, value: weighted}, {key: 1, value: weighted}]);
+let groups = group_by(rows, "key");
+
+let summed = materialize(aggregate(groups, ["sum", "value"]))[0].sum;
+let sum_support = inspect_information(summed).support;
+assert(array_length(sum_support) == 2, "sum keeps both worlds");
+assert(sum_support[0].value == 2, "first same-root sum");
+assert(map_get(sum_support[0], "weight") == 0.25, "first weight");
+assert(sum_support[1].value == 4, "second same-root sum");
+assert(map_get(sum_support[1], "weight") == 0.75, "second weight");
+
+let mean_rows = materialize(aggregate(groups, ["mean", "value"]));
+assert(array_length(mean_rows) == 1, "one mean group");
+let mean = map_get(mean_rows[0], "mean");
+let mean_support = inspect_information(mean).support;
+assert(mean_support[0].value == 1, "first mean");
+assert(mean_support[1].value == 2, "second mean");
+
+let minimum = materialize(aggregate(groups, ["min", "value"]))[0].min;
+let maximum = materialize(aggregate(groups, ["max", "value"]))[0].max;
+assert(map_get(inspect_information(minimum).support[0], "weight") == 0.25, "min weight");
+assert(map_get(inspect_information(maximum).support[1], "weight") == 0.75, "max weight");
+print("DATASET_UNCERTAIN_AGGREGATE_PASS");

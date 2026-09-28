@@ -204,6 +204,71 @@ These are compatibility identities, not alternate implementations. In
 particular, embedding cannot add normalization, sampling, collapse, or a new
 equality rule to an existing operation.
 
+### 0.1.2a Finite information calculus (partial implementation)
+
+The following operations read one declared finite named joint law. They do
+not infer a law from provenance edges, sample, commit evidence, or change
+its revision. An independent product of finite marginals may be
+materialized only within the active budget. Opaque or lazy laws without
+exact materialization are unsupported.
+
+For a nonempty group of unique names `A`, project the joint to `A`,
+combine equal assignments, and define entropy in bits:
+
+```math
+H(A)=-\sum_{a:p(a)>0}p(a)\log_2 p(a).
+```
+
+Zero-mass terms contribute zero without evaluating `log(0)`. This equals
+expected natural-log `surprisal` divided by `ln(2)`. For groups `A` and
+`B` from the same joint, including overlapping groups, define
+`H(B|A)=H(A\cup B)-H(A)` and
+`I(A;B)=H(A)+H(B)-H(A\cup B)`. Thus `H(A|A)=0` and
+`I(A;A)=H(A)`. Results are finite nonnegative numbers. A mutual
+information result in `[-1e-10,0)` from rounding may become zero;
+a more negative result is numerical failure. Finite reference cases
+use absolute error at most `1e-10` bits.
+
+For three distinct single names `T,X,Y` in one finite joint `P`,
+two-source BROJA fixes the `(T,X)` and `(T,Y)` marginals. Over
+normalized nonnegative laws `Q` with those marginals, let
+`M=min_Q I_Q(T;(X,Y))`. Let `a=I_P(T;X)`,
+`b=I_P(T;Y)`, and `c=I_P(T;(X,Y))`. The four components are
+`shared=a+b-M`, `unique_x=M-b`, `unique_y=M-a`, and
+`synergy=c-M`; they sum to `c`. The optimization result is
+`converged` only when every required marginal-cell and total-mass
+residual is at most `1e-9` and a certified objective upper error bound
+is at most `1e-6` bits. It reports that bound and the input revision.
+Otherwise it is `unconverged` with a reason and residuals but no
+components. Resource exhaustion is an error without a partial result.
+This target-based quantity is distinct from `APPEND` synergy.
+
+A finite Markov kernel `K(y|x)` is an immutable normalized row for each
+Cartesian tuple of ordered finite input domains. Every output domain
+member appears exactly once in declared order; weights are finite,
+nonnegative, and each row sums to one within `1e-12` before one
+normalization. The identity kernel gives probability one to its input.
+Compatible composition obeys
+`(L\circ K)(z|x)=\sum_y L(z|y)K(y|x)`. Kernels declare
+conditional probabilities, not causation. A network consists of a finite
+root joint and named child kernels with parent names and domains matching
+their input domains. Its law is the root law multiplied by each child
+kernel in topological order. Exact inference conditions this declared
+law on definite named evidence and sums out unqueried variables.
+Impossible evidence fails; no absent edge, independence, causal claim,
+or approximate inference is supplied implicitly.
+
+The existing `STATE` and `STATE_DIST` embeddings remain unchanged.
+Forgetting a finite Distribution's weights returns its positive-mass
+support as unweighted Possibility and records that probability was lost.
+Assigning weights requires one caller-supplied positive finite weight
+per candidate, no extra candidate, and a total within `1e-12` of one.
+Neither operation mutates its input or resolves a non-singleton.
+`resolve` remains the only exact singleton extraction; `sample` is
+stochastic and `measure` is explicit. No general
+`Distribution(STATE) -> STATE_DIST` cast or universal implicit
+conversion is defined.
+
 ### 0.1.3 Information-aware execution
 
 An execution path is the immutable tuple
@@ -237,8 +302,53 @@ error, not false. Sorting, grouping, and joining require definite keys, includin
 their nested values. A distribution, joint, or path is not implicitly resolved
 or sampled to choose row membership or a key. This restriction also applies to
 singleton inputs and to either side of an empty join. Failed materialization
-publishes no partial result. These operations do not establish independence or
-provide uncertainty-preserving aggregation or durable evidence snapshots.
+publishes no partial result. These operations do not establish independence.
+The aggregation and durable-evidence rules are below.
+
+### 0.1.5 Dataset information and evidence
+
+A registered dataset query evaluates every source and operator against
+one fixed committed store revision. Row membership and keys follow the
+definite-selection rule above. Filter, map, select, sort, limit, group,
+and join retain each surviving cell's Information form, dependency,
+support or weights, and derivation rather than extracting an ordinary
+number. Projection or right-overwrite of a column does not erase the
+source-row decision from evidence.
+
+For an explicitly present empty group, `count=0` and `sum=0`.
+For nonempty groups, `count` is definite because membership is
+definite. `sum` folds numeric cells in source-row order using Core's
+pure lift; `mean` divides that sum by definite count. `min` and `max`
+lift pure comparison and selection across finite alternatives.
+Two unresolved cells can combine only through one existing dependency
+or a declared joint law. A provenance edge alone does not supply
+that law. No aggregate samples, resolves, assumes independence, or
+turns an unresolved value definite. Empty `mean`, `min`, and `max`
+fail; so do unsupported forms, nonnumeric cells, and non-finite results.
+
+Every dataset operator has an immutable derivation naming its operation,
+ordered inputs, output, source revision, plan digest, and cell
+derivations. Excluded filter rows record their definite false
+predicate and its derivation; limit and unmatched joins record their
+exclusion reason. Aggregates cite every contributing cell, including
+cells that did not determine a minimum or maximum. These records
+are historical evidence, not a probability law or a live
+observation subscription.
+
+Persisting a captured finite law preserves alternative alignment only for
+an already shared dependency or declared relationship. Durable identities
+are scoped to the first committed source batch that captures that relationship;
+equal marginal values alone never identify a relationship. An identical batch
+retry reasserts that batch's saved relationships, including after restart.
+
+A source change is an ordered add, correction, or deletion at an
+expected revision. All affected registered queries are recomputed
+against the same candidate source revision. One atomic store commit
+publishes the source and every resulting snapshot only when rows,
+order, Information, derivations, and serialized bytes equal a clean
+full rerun. Failure publishes neither a source revision nor a partial
+query revision. Historical snapshots retain their original evidence
+or report compacted history; they never substitute current rows.
 
 ## 0.2 Static uncertainty, effect, and failure foundation
 
@@ -289,6 +399,162 @@ exact-support status, cancellation context, and resource-limit context. A
 failure result contains no partial computational value. Human rendering may add
 formatting, but it cannot discard these structured fields or change their
 meaning.
+
+## 0.3 Additive object meaning (pending implementation)
+
+A `value` instance is a deeply immutable snapshot of ordered typed fields.
+It has no object identity. Structural equality is defined only when every
+field has equality; unsupported nested equality remains unsupported.
+Construction captures every field before publication. A live Information
+root cannot enter a value implicitly: `snapshot(info)` explicitly freezes
+its current form, law or alternatives, exactness, guards, provenance, and
+revision with no live dependency link. A value cannot contain a class
+reference, including through an interface-typed field.
+
+A `class` instance has identity within one task even when all fields are
+fixed. Its equality is identity, never structural equality. A fixed field
+is assigned once during construction; a mutable field may later be
+assigned with the mutation effect. Assignment does not constitute Core
+`observe` and does not advance an Information revision. A class may
+hold live Information. An unresolved `Information<Class>` cannot be
+used for field access or method calls until its identity is explicitly
+resolved. Creating a class identity has the mutation effect and cannot
+run under an unresolved guard or as part of a pure lifted calculation.
+
+`copies Parent` duplicates one same-module class blueprint at compile
+time. The child has an independent type and no runtime parent object;
+copying does not make the child a subtype of the parent. Replaced fields,
+methods, and initializer form the child's final shape. Copied bodies
+are rechecked against that shape and use the child's final methods when
+calling through `self`. `Self` in copied members binds to the child.
+Private copied members belong to the child. An interface is a separate
+explicit promise of public method signatures and maximum effects;
+implementing it permits shared use. Copying alone does not implement
+an interface.
+
+Initialization builds a private candidate object, evaluates pure field
+defaults once, and assigns every remaining field before publication.
+No incomplete `self` may escape or receive an instance-method call.
+An initializer may assign its own fields but perform no external effect.
+Failure leaves no visible object. Value methods cannot mutate their
+receiver or perform effects through live field references. A pure value
+method applied to `Information<Value>` maps pointwise under the
+existing Information lift, retaining dependency, guards, weights,
+exactness, and live revision links. For a named Joint whose coordinates
+contain instances of the receiver type, the map acts on each coordinate
+within the same law, preserving variable names and row weights. It does
+not convert a named assignment into a nominal value or introduce independence.
+Effectful calls on unresolved
+alternatives remain unsupported.
+
+Within a task, aliases to a class instance preserve one identity and
+class fields may form cycles. Transfer to another task deep-copies the
+reachable graph with fresh identities while preserving aliases and
+cycles inside the receiver. Live Information fields become immutable
+snapshots at transfer. Direct class serialization is unsupported; an
+explicit value snapshot can be serialized without restoring identity
+or exposing private fields. These rules do not alter `STATE`,
+`STATE_DIST`, or their existing Information embeddings.
+
+## 0.4 Bounded rule and tree learning
+
+Learning examples have distinct stable IDs, definite declared features,
+and definite targets. Training and holdout IDs are disjoint. A holdout
+target is never read for candidate construction, ranking, threshold
+choice, or hyperparameter choice. A candidate is evaluated on that
+immutable holdout only after selection. `validated` requires at
+least 20 holdout rows and one row per declared classification label.
+Symbolic classification also requires holdout accuracy at least
+`0.90`. A measured rule or model is a prediction, never proof of a
+universal law or authorization to execute an action.
+
+The first symbolic language is a disjunction of at most two conjunctions,
+each with at most three distinct comparison atoms. Atoms compare one
+declared feature to one like-typed constant with `eq`, `ne`, `lt`,
+`le`, `gt`, or `ge`; ordering is numeric only. Optional `not`
+negates one atom. Absent `and` or `or` restricts the form to one
+atom or one clause respectively. Numeric constants are observed
+training values or midpoints of adjacent distinct observed values;
+categorical constants come from declared domains. Duplicate atoms
+and contradictory clauses are discarded. A required missing
+feature makes that training candidate invalid and a prediction
+`unsupported`. No arbitrary arithmetic, recursion, learned program,
+or effect enters this language.
+
+Enumerate candidate rules by atom count, declared feature order,
+allowed-operator order, constant order, then canonical syntax bytes.
+The ordering key uses the sorted multiset of atom indices before the
+canonical rule bytes; clause order uses lexicographically sorted atom-index
+lists. Both partitions of unequal clause sizes are included. An atom may
+occur once in each clause. Contradictory clauses are rejected over the
+declared feature domain, not merely over observed training rows.
+Equivalent truth vectors on training rows retain the first candidate.
+Select the first zero-error rule; if none is found after complete
+bounded enumeration, select minimum training error with enumeration
+order breaking ties. Report every mistaken ID. `exhausted` means this
+bounded language lacks a zero-error rule; `limit_exhausted` means
+search stopped early. Validation never alters the selected rule.
+New counterexamples join training only in a later version with a fresh
+untouched holdout. Historical validation targets never feed future
+candidate selection.
+
+A decision tree chooses CART binary splits with strictly positive gain
+and minimum leaf size. Numeric thresholds are midpoints of adjacent
+distinct training values; Boolean/category splits test each declared
+value against the rest. Missing values use the better training branch,
+ties left. Gain is parent impurity minus row-count-weighted child
+impurity: Gini for classification, mean squared error for regression.
+Tie order is feature, threshold/category, then missing direction.
+Classification leaves use majority label with declared-label tie order;
+regression leaves use arithmetic mean.
+
+A forest draws `N` rows with replacement per tree for `N` training
+rows using seeded PCG32. Each split samples
+`max(1,floor(sqrt(feature_count)))` distinct features without
+replacement. Classification aggregates votes with declared-label
+ties; regression averages predictions. Boosted regression starts
+at the training mean and adds residual trees at learning rate `0.1`.
+Binary boosted classification starts at log odds of positive-label
+fraction clipped to `[1e-6,1-1e-6]`. In each round let
+`p=sigmoid(score)`, `g=p-y`, and
+`h=max(p(1-p),1e-6)`. A split maximizes child-minus-parent
+`sum(g)^2/(sum(h)+1)` subject to positive gain and leaf size;
+each leaf increment is `-sum(g)/(sum(h)+1)`. Add it at rate
+`0.1` and classify at probability `0.5` with declared-label ties.
+Multiclass boosting is unsupported. Prediction probabilities are
+labeled uncalibrated.
+
+## 0.5 Walk-forward evaluation
+
+At fold `k`, test starts at
+`initial_train + gap + k * step_size` and contains a complete
+`test_size` slice in ascending observation-time and ID order.
+Only earlier rows whose target became available strictly before
+the first test observation time can enter fitting. The last
+`max(20, ceil(eligible_count / 5))` eligible fitting rows form internal
+validation; at least one earlier row must remain for training. Feature values
+are available only when each feature's `available_at` is no
+later than its row's `observed_at`. Test rows and targets never
+enter training, feature normalization, threshold selection, or
+early stopping.
+
+Each fold starts a fresh model with seed `seed+k`; no weight, tree,
+or selector state carries forward. A complete final test slice
+is required, and an incomplete tail is reported but not scored.
+If no fold or too few eligible rows exist, return
+`insufficient_evidence`. Classification reports correct count
+and total, with accuracy `correct / total`. If every prediction
+has a complete normalized probability map and every true-label
+probability is positive, log loss is the arithmetic mean of
+`-ln(p_true)`. If a probability map is absent, log loss is
+unavailable; if any `p_true` is zero, it is infinite and has
+no finite numeric value. Classification ties use declared label
+order. A finite log loss is reported only after those checks.
+Regression reports MAE and RMSE. Aggregate metrics pool every
+tested prediction, identifying repeated test IDs when folds
+overlap; repeated tests are not presented as independent samples.
+An invalid time, failed trainer, or non-finite prediction fails
+the whole run without a partial score.
 
 ## 1. Mathematical Domains
 
@@ -1481,12 +1747,48 @@ d_C\sqrt{p_C(1-p_C)}.
 \operatorname{Dist}(\mathcal S).
 ```
 
+## Declared finite forecasts (pending implementation)
+
+A forecast is an explicit probability vector over distinct labels, supplied
+with a target and future horizon. It is not inferred from Brain logits or
+from an unweighted Possibility. For labels `1,...,K`, probabilities
+`p_i ∈ [0,1]` with `Σ_i p_i = 1`, and one observed label `j`, the
+multiclass Brier score is
+
+```math
+B(p,j) = \sum_{i=1}^{K} (p_i-\mathbf{1}[i=j])^2.
+```
+
+Scoring does not alter the forecast or the underlying Information law.
+It records an assessment only after the caller supplies the observed
+outcome. An absent probability law cannot yield a numerical information
+gain or forecast score. An undeclared observation relationship cannot
+yield value of information; Brain may report it as unscorable but cannot
+infer independence or authorize an action.
+
+## Durable finite Information evidence (pending implementation)
+
+A durable Brain record stores finite Information laws and explicit evidence,
+not a process-local pointer or a guessed concrete value. Reconstruction
+starts from each initial law and replays observations in commit order using
+the same `observe` refinement rule as a live root. Definite evidence retains
+one supported value; unweighted Possibility evidence retains a nonempty
+supported subset; named-joint evidence constrains declared variables.
+An impossible observation is invalid and cannot publish a new law.
+Sampling, approximation, or an unrelated marginal cannot stand in for
+exact replay. Historical derivation IDs identify evidence across process
+restarts but do not imply a new relationship law. Only a successful
+observation advances a root's Core derivation revision; adding an alias,
+forecast, or Brain memory root affects Brain metadata but does not perform
+a Core observation.
+
 ## Reactive ordinary Information
 
-For a process-local Information root $I$ with finite support $S_I$, a valid
-observation $e$ must satisfy $e \in S_I$. A committed observation refines the
-support to the singleton $\{e\}$; it never adds an alternative. If $e \notin
-S_I$, the operation fails and no revision is published.
+For a process-local Information root $I$ with finite support $S_I$, definite
+evidence $e$ must satisfy $e \in S_I$ and refines the support to $\{e\}$.
+Unweighted Possibility evidence $E$ refines the support to the nonempty
+intersection $S_I \cap E$. Observation never adds an alternative. Impossible
+evidence fails and publishes no revision.
 
 For an exact pure function $f$ and related uncertain inputs, lifting is the
 pointwise image of their declared relationship. Reusing one dependency is

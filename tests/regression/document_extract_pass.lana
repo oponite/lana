@@ -1,0 +1,13 @@
+let result = document_extract(args()[0], "markdown");
+assert(result.format == "markdown", "format is explicit");
+assert(result.status == "exact_text", "UTF-8 extraction is exact text");
+assert(array_length(result.chunks) == 3, "heading, paragraph, and fence are separate chunks");
+assert(result.chunks[0].start_byte == 0, "heading starts at zero");
+assert(result.chunks[0].end_byte == 7, "heading spans original CRLF bytes");
+assert(result.chunks[1].start_byte == 7, "Unicode paragraph starts after heading");
+assert(result.chunks[1].end_byte == 19, "Unicode paragraph uses byte offsets");
+assert(result.chunks[1].start_line == 2, "paragraph starts on line two");
+assert(result.chunks[1].end_line == 2, "CRLF is one line break");
+assert(result.chunks[1].heading_path[0] == "Top", "heading path follows heading");
+assert(result.chunks[2].heading_path[0] == "Top", "fence retains heading path");
+print("DOCUMENT_EXTRACT_PASS");

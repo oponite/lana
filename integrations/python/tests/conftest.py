@@ -16,11 +16,6 @@ if command == "version":
     print("Lana 3.0.0 (LABC v5, fake)")
     raise SystemExit(0)
 program = Path(sys.argv[2])
-if command == "check":
-    if program.name.startswith("bad"):
-        print("fake check failure", file=sys.stderr)
-        raise SystemExit(1)
-    raise SystemExit(0)
 if command != "run":
     raise SystemExit(2)
 if program.name.startswith("sleep"):

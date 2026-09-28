@@ -3,3 +3,35 @@
 fn distribution(rows) {
     return possibility(rows);
 }
+
+fn entropy(joint_value, names) { return core_entropy(joint_value, names); }
+
+fn conditional_entropy(joint_value, target_names, given_names) {
+    return core_conditional_entropy(joint_value, target_names, given_names);
+}
+
+fn mutual_information(joint_value, left_names, right_names) {
+    return core_mutual_information(joint_value, left_names, right_names);
+}
+
+fn broja(joint_value, target, x, y) { return core_broja(joint_value, target, x, y); }
+
+fn forget_weights(distribution_value) { return core_forget_weights(distribution_value); }
+
+fn assign_weights(possibility_value, rows) {
+    return core_assign_weights(possibility_value, rows);
+}
+
+fn identity_kernel(domain) { return core_identity_kernel(domain); }
+
+fn compose_kernels(later, earlier) { return core_compose_kernels(later, earlier); }
+
+fn kernel(input_domains, output_domain, chances_fn) {
+    return core_kernel(input_domains, output_domain, chances_fn);
+}
+
+fn network(root_joint, nodes) { return core_network(root_joint, nodes); }
+
+fn infer(network_value, query_names, evidence_map) {
+    return core_infer(network_value, query_names, evidence_map);
+}

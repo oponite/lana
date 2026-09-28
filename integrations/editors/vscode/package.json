@@ -11,6 +11,7 @@
   "categories": ["Programming Languages"],
   "files": [
     "out/**",
+    "node_modules/**",
     "syntaxes/**",
     "language-configuration.json",
     "README.md",
@@ -40,7 +41,7 @@
         "lana.server.path": {
           "type": "string",
           "default": "lana",
-          "description": "Path to a Lana 3.0 executable providing `lana lsp`."
+          "description": "Path to a Lana 3.x or 4.x executable providing `lana lsp`."
         }
       }
     }
@@ -48,7 +49,8 @@
   "scripts": {
     "compile": "tsc -p ./",
     "check": "tsc -p ./ --noEmit",
-    "package": "npm run compile && vsce package --no-dependencies"
+    "test": "npm run compile && node test.cjs",
+    "package": "npm run compile && vsce package"
   },
   "dependencies": {
     "vscode-languageclient": "^10.1.0"

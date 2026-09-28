@@ -1,0 +1,2 @@
+let captured = snapshot({x: [1, 2]});
+captured.x[0] = 3;

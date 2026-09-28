@@ -1,0 +1,16 @@
+fn discard_cycle() {
+    let array = [null];
+    array[0] = array;
+    let mapping = {value: array};
+    array[0] = mapping;
+}
+
+let kept = [null, 7];
+kept[0] = kept;
+let index = 0;
+while (index < 10000) {
+    discard_cycle();
+    index = index + 1;
+}
+assert(kept[0][1] == 7, "collection lost a live container cycle");
+print("CONTAINER_COLLECTION_PASS");

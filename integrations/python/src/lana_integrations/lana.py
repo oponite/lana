@@ -19,7 +19,7 @@ UNRESOLVED_MARKER = "__lana_unresolved__"
 
 @dataclass
 class LanaResult:
-    """Structured outcome of a Lana check or run.
+    """Structured outcome of a Lana run.
 
     ``status`` is one of ``"ok"``, ``"unavailable"``, ``"unresolved"``, or
     ``"failed"``. ``value`` is populated only for ``"ok"`` and ``"unresolved"``
@@ -73,13 +73,6 @@ class Lana:
         if self._bridge is not None:
             return "worker" if self._bridge.version.startswith("4.") else "subprocess"
         return "unavailable"
-
-    def check(self, program: str | os.PathLike[str]) -> LanaResult:
-        """Compile-check a source program. Always uses the subprocess compiler."""
-        if self._bridge is None:
-            return _unavailable_result(self._unavailable_reason or "no Lana runtime")
-        envelope = self._bridge.check(program)
-        return self._from_envelope(envelope, "subprocess")
 
     def run(self, program: str | os.PathLike[str], input_value: Any) -> LanaResult:
         """Run a source program with structured input."""

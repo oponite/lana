@@ -9,7 +9,7 @@
 //! value `Send`, so a child VM's value graph can cross a task boundary.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 
 use lana_bytecode::{LanaError, ValueType};
 
@@ -80,6 +80,9 @@ pub struct VmError {
     /// Exact-support detail `(support, detail)`, matching
     /// `LanaErrorInfo.exact_support`.
     pub exact_support: Option<(u32, String)>,
+    /// File publication may have completed even though directory sync failed.
+    pub durability: Option<String>,
+    pub path: Option<String>,
 }
 
 impl Default for VmError {
@@ -97,6 +100,8 @@ impl Default for VmError {
             cancellation: None,
             resource_limit: None,
             exact_support: None,
+            durability: None,
+            path: None,
         }
     }
 }
@@ -137,9 +142,29 @@ pub struct JointState {
     pub capabilities: u32,
 }
 
-/// A lazy state distribution, mirroring `struct LanaStateDist` in
-/// `vm/include/value.h`. Dirac/append/transform nodes form a tree, so `Arc`
-/// without cycle collection is sound.
+#[derive(Debug, Clone)]
+pub struct FiniteKernel {
+    pub input_domains: Vec<Vec<Value>>,
+    pub output_domain: Vec<Value>,
+    pub rows: Vec<Vec<f64>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NetworkNode {
+    pub name: Arc<str>,
+    pub parents: Vec<usize>,
+    pub kernel: Arc<FiniteKernel>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FiniteNetwork {
+    pub root: Arc<JointState>,
+    pub nodes: Vec<NetworkNode>,
+    pub order: Vec<usize>,
+}
+
+/// A lazy state distribution. Managed DAG nodes are traced and retired
+/// iteratively by their owning heap.
 #[derive(Debug, Clone)]
 pub struct StateDist {
     pub kind: StateDistKind,
@@ -180,26 +205,43 @@ pub enum DistOperand {
 #[derive(Debug)]
 pub struct Array {
     pub(crate) items: crate::heap::Buffer<Value>,
+    pub(crate) frozen: bool,
+    pub(crate) cycle: Arc<crate::heap::CycleSlot>,
 }
 
 impl Array {
+    /// Permanently prohibit mutation of this captured container.
+    pub fn freeze(&mut self) { self.frozen = true; }
+
     pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
-        Ok(Self { items: crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())? })
+        Self::from_buffer(crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())?)
     }
 
     pub fn from_items(heap: &crate::heap::Heap, items: Vec<Value>) -> Result<Self, LanaError> {
-        Ok(Self { items: crate::heap::Buffer::from_vec(heap, items, std::mem::size_of::<Self>())? })
+        Self::from_buffer(crate::heap::Buffer::from_vec(heap, items, std::mem::size_of::<Self>())?)
+    }
+
+    pub(crate) fn from_buffer(items: crate::heap::Buffer<Value>) -> Result<Self, LanaError> {
+        let cycle = items.heap().cycle_slot()?;
+        let mut items = items;
+        items.set_barrier(&cycle)?;
+        Ok(Self { items, frozen: false, cycle })
     }
 
     pub fn items(&self) -> &[Value] { &self.items }
 
-    pub fn push(&mut self, item: Value) -> Result<(), LanaError> { self.items.push(item) }
+    pub fn push(&mut self, item: Value) -> Result<(), LanaError> {
+        if self.frozen { return Err(LanaError::UnsupportedOperation); }
+        self.items.push(item)
+    }
 }
 
 /// A key/value map (increment 2).
 #[derive(Debug)]
 pub struct Map {
     pub(crate) entries: crate::heap::Buffer<MapEntry>,
+    pub(crate) frozen: bool,
+    pub(crate) cycle: Arc<crate::heap::CycleSlot>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,9 +251,15 @@ pub struct MapEntry {
 }
 
 impl Map {
+    /// Permanently prohibit mutation of this captured container.
+    pub fn freeze(&mut self) { self.frozen = true; }
+
     /// Create an empty map, mirroring `lana_map_new`.
     pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
-        Ok(Self { entries: crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())? })
+        let cycle = heap.cycle_slot()?;
+        let mut entries = crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())?;
+        entries.set_barrier(&cycle)?;
+        Ok(Self { entries, frozen: false, cycle })
     }
 
     pub fn entries(&self) -> &[MapEntry] { &self.entries }
@@ -229,6 +277,7 @@ impl Map {
     /// Insert or replace a key, mirroring `lana_map_set`. With
     /// `reject_existing` the insert fails with `Key` when the key is present.
     pub fn set(&mut self, key: Arc<str>, value: Value, reject_existing: bool) -> Result<(), LanaError> {
+        if self.frozen { return Err(LanaError::UnsupportedOperation); }
         if let Some(entry) = self.entries.iter_mut().find(|entry| &*entry.key == &*key) {
             if reject_existing {
                 return Err(LanaError::Key);
@@ -313,11 +362,15 @@ pub struct Future {
 #[derive(Debug)]
 pub struct Set {
     pub(crate) items: crate::heap::Buffer<Value>,
+    pub(crate) cycle: Arc<crate::heap::CycleSlot>,
 }
 
 impl Set {
     pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
-        Ok(Self { items: crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())? })
+        let cycle = heap.cycle_slot()?;
+        let mut items = crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())?;
+        items.set_barrier(&cycle)?;
+        Ok(Self { items, cycle })
     }
 
     pub fn items(&self) -> &[Value] { &self.items }
@@ -565,6 +618,7 @@ pub struct TaskState {
     pub result: Value,
     pub completed: bool,
     pub joined: bool,
+    pub(crate) result_root: Option<crate::vm::RootedValue>,
 }
 
 impl Task {
@@ -579,6 +633,7 @@ impl Task {
                 result: Value::null(),
                 completed: false,
                 joined: false,
+                result_root: None,
             })),
             completed_cond: Arc::new(Condvar::new()),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -601,6 +656,7 @@ pub enum ReactiveKind {
     Compare,
     Unary,
     Train,
+    ObjectMethod,
 }
 
 /// The relationship kind, matching `LanaRelationshipKind`.
@@ -760,6 +816,41 @@ pub struct Value {
     pub planned_effect: Option<Arc<PlannedEffect>>,
 }
 
+/// Task-owned storage. References are weak so class cycles do not retain a task.
+#[derive(Debug)]
+pub struct ClassObject {
+    pub(crate) fields: Mutex<Vec<Option<Value>>>,
+    pub(crate) initialized: AtomicBool,
+    pub(crate) generation: std::sync::atomic::AtomicU8,
+    pub(crate) remembered: AtomicBool,
+    pub(crate) reference: Weak<ClassReference>,
+    pub(crate) _allocation: crate::heap::Reservation,
+}
+
+impl ClassObject {
+    pub(crate) fn set_field(&self, index: usize, value: Value) {
+        self._allocation.heap().bump_mutation_epoch();
+        if self.generation.load(Ordering::Acquire) == crate::heap::Generation::Old as u8 {
+            self.remembered.store(true, Ordering::Release);
+        }
+        self.fields.lock().unwrap()[index] = Some(value);
+    }
+}
+
+#[derive(Debug)]
+pub struct ClassReference {
+    pub(crate) descriptor: Arc<lana_bytecode::objects::Descriptor>,
+    pub(crate) owner: Arc<()>,
+    pub(crate) object: Weak<ClassObject>,
+}
+
+/// Constructed only by the checked object runtime. Fields cannot be replaced.
+#[derive(Debug)]
+pub struct ObjectValue {
+    pub(crate) descriptor: Arc<lana_bytecode::objects::Descriptor>,
+    pub(crate) fields: Vec<Value>,
+}
+
 /// The value payload, mirroring the C11 `Value.as` union.
 #[derive(Debug, Clone)]
 pub enum ValueKind {
@@ -771,6 +862,8 @@ pub enum ValueKind {
     Distribution { p0: f64, p1: f64 },
     Sample(i32),
     Joint(Arc<JointState>),
+    Kernel(Arc<FiniteKernel>),
+    Network(Arc<FiniteNetwork>),
     Array(Arc<Mutex<Array>>),
     Function(u32),
     Task(Arc<Task>),
@@ -795,6 +888,8 @@ pub enum ValueKind {
     InferenceAlgorithm(Arc<InferenceAlgorithm>),
     Posterior(Arc<Posterior>),
     Dataset(Arc<Dataset>),
+    ObjectValue(Arc<ObjectValue>),
+    ClassObject(Arc<ClassReference>),
 }
 
 impl Value {
@@ -827,11 +922,22 @@ impl Value {
     }
 
     pub fn array(array: Arc<Mutex<Array>>) -> Self {
+        if let Ok(value) = array.try_lock() {
+            value.cycle.bind(crate::heap::CycleWeak::Array(Arc::downgrade(&array)));
+        }
         Self { kind: ValueKind::Array(array), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
     pub fn function(function: u32) -> Self {
         Self { kind: ValueKind::Function(function), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn kernel(kernel: Arc<FiniteKernel>) -> Self {
+        Self { kind: ValueKind::Kernel(kernel), derivation: None, reactive: None, claim: None, planned_effect: None }
+    }
+
+    pub fn network(network: Arc<FiniteNetwork>) -> Self {
+        Self { kind: ValueKind::Network(network), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
     pub fn task(task: Arc<Task>) -> Self {
@@ -843,6 +949,9 @@ impl Value {
     }
 
     pub fn map(map: Arc<Mutex<Map>>) -> Self {
+        if let Ok(value) = map.try_lock() {
+            value.cycle.bind(crate::heap::CycleWeak::Map(Arc::downgrade(&map)));
+        }
         Self { kind: ValueKind::Map(map), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
@@ -899,6 +1008,9 @@ impl Value {
     }
 
     pub fn set(set: Arc<Mutex<Set>>) -> Self {
+        if let Ok(value) = set.try_lock() {
+            value.cycle.bind(crate::heap::CycleWeak::Set(Arc::downgrade(&set)));
+        }
         Self { kind: ValueKind::Set(set), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
@@ -937,6 +1049,8 @@ impl Value {
             ValueKind::Distribution { .. } => ValueType::Distribution,
             ValueKind::Sample(_) => ValueType::Sample,
             ValueKind::Joint(_) => ValueType::JointState,
+            ValueKind::Kernel(_) => ValueType::Kernel,
+            ValueKind::Network(_) => ValueType::Network,
             ValueKind::Array(_) => ValueType::Array,
             ValueKind::Function(_) => ValueType::Function,
             ValueKind::Task(_) => ValueType::Task,
@@ -963,6 +1077,8 @@ impl Value {
             ValueKind::InferenceAlgorithm(_) => ValueType::InferenceAlgorithm,
             ValueKind::Posterior(_) => ValueType::Posterior,
             ValueKind::Dataset(_) => ValueType::Dataset,
+            ValueKind::ObjectValue(_) => ValueType::ObjectValue,
+            ValueKind::ClassObject(_) => ValueType::ClassObject,
         }
     }
 
@@ -977,6 +1093,8 @@ impl Value {
             ValueKind::Distribution { .. } => "distribution",
             ValueKind::Sample(_) => "sample",
             ValueKind::Joint(_) => "joint_state",
+            ValueKind::Kernel(_) => "kernel",
+            ValueKind::Network(_) => "network",
             ValueKind::Array(_) => "array",
             ValueKind::Function(_) => "function",
             ValueKind::Task(_) => "task",
@@ -1003,6 +1121,8 @@ impl Value {
             ValueKind::InferenceAlgorithm(_) => "inference_algorithm",
             ValueKind::Posterior(_) => "posterior",
             ValueKind::Dataset(_) => "dataset",
+            ValueKind::ObjectValue(_) => "value",
+            ValueKind::ClassObject(_) => "class",
         }
     }
 
@@ -1061,7 +1181,7 @@ impl Value {
         self.check_graph(limit, LanaError::ClaimRevoked, false)
     }
 
-    fn container_identity(&self) -> Option<usize> {
+    pub(crate) fn container_identity(&self) -> Option<usize> {
         match &self.kind {
             ValueKind::Array(v) => Some(Arc::as_ptr(v) as usize),
             ValueKind::Map(v) => Some(Arc::as_ptr(v) as usize),
@@ -1070,16 +1190,20 @@ impl Value {
             ValueKind::Possibility(v) => Some(Arc::as_ptr(v) as usize),
             ValueKind::PathSet(v) => Some(Arc::as_ptr(v) as usize),
             ValueKind::Adt(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::ObjectValue(v) => Some(Arc::as_ptr(v) as usize),
+            ValueKind::ClassObject(v) => Some(v.object.as_ptr() as usize),
             _ => None,
         }
     }
 
-    fn inspection_child(&self, index: usize) -> Option<Value> {
+    pub(crate) fn inspection_child(&self, index: usize) -> Option<Value> {
         match &self.kind {
             ValueKind::Array(v) => v.lock().unwrap().items.get(index).cloned(),
             ValueKind::Map(v) => v.lock().unwrap().entries.get(index).map(|e| e.value.clone()),
             ValueKind::Set(v) => v.lock().unwrap().items.get(index).cloned(),
             ValueKind::Adt(v) => v.fields.get(index).cloned(),
+            ValueKind::ObjectValue(v) => v.fields.get(index).cloned(),
+            ValueKind::ClassObject(v) => v.object.upgrade().and_then(|o| o.fields.lock().unwrap().get(index).cloned().flatten()),
             ValueKind::Possibility(v) => v.values.get(index).cloned(),
             ValueKind::PathSet(v) => v.alternatives.get(index).map(|a| a.result.clone()),
             ValueKind::Joint(v) => {
@@ -1115,6 +1239,11 @@ impl Value {
         let mut seen = crate::heap::Buffer::new(&budget, 0, 0)?;
         stack.push(PrintFrame { value: root, next: 0, identity: None })?;
         while let Some(frame) = stack.last_mut() {
+            // A definite class identity stays definite when a field holds Information.
+            if rejected == LanaError::UnresolvedValue && matches!(frame.value.kind, ValueKind::ClassObject(_)) {
+                stack.pop();
+                continue;
+            }
             if frame.identity.is_none() {
                 check(&frame.value, rejected, dataset_key)?;
                 let Some(identity) = frame.value.container_identity() else { stack.pop(); continue; };
@@ -1269,6 +1398,8 @@ impl Value {
                 let _ = write!(out, "{sample}");
             }
             ValueKind::Joint(_) => unreachable!("container handled by iterative renderer"),
+            ValueKind::Kernel(_) => out.push_str("kernel"),
+            ValueKind::Network(_) => out.push_str("network"),
             ValueKind::Array(_) => unreachable!("container handled by iterative renderer"),
             ValueKind::Function(function) => {
                 let _ = write!(out, "function({function})");
@@ -1352,6 +1483,12 @@ impl Value {
             ValueKind::Posterior(posterior) => {
                 let _ = write!(out, "posterior(steps={})", posterior.steps.lock().unwrap().items.len());
             }
+            ValueKind::ClassObject(value) => {
+                let _ = write!(out, "class<{}>", value.descriptor.qualified_name);
+            }
+            ValueKind::ObjectValue(value) => {
+                let _ = write!(out, "value<{}>", value.descriptor.qualified_name);
+            }
             ValueKind::Dataset(dataset) => {
                 let _ = write!(out, "dataset(op={})", dataset.op as i32);
             }
@@ -1407,9 +1544,10 @@ mod tests {
 
     #[test]
     fn map_keys_cannot_bypass_the_heap_budget() {
-        let heap = crate::heap::Heap::new(std::mem::size_of::<Map>() + std::mem::size_of::<MapEntry>());
+        let heap = crate::heap::Heap::new(4096);
         let mut map = Map::new(&heap, 1).unwrap();
         let before = heap.live_bytes();
+        heap.set_limit(before).unwrap();
         assert_eq!(map.set(Arc::from("retained key"), Value::number(1.0), false), Err(LanaError::Oom));
         assert!(map.entries().is_empty());
         assert_eq!(heap.live_bytes(), before);

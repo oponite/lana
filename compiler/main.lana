@@ -9,27 +9,142 @@ fn stack_with(stack, value) {
     array_push(result, value); return result;
 }
 
+// Symbol locations come from lexer tokens, never from text matching in the editor.
+fn symbol_location(tokens, name, line, column) {
+    let low = 0; let high = array_length(tokens);
+    while (low < high) {
+        let middle = floor((low + high) / 2); let token = tokens[middle];
+        let before = token[2] < line; if (token[2] == line) { before = token[3] < column; }
+        if (before) { low = middle + 1; } else { high = middle; }
+    }
+    while (low < array_length(tokens)) {
+        let token = tokens[low];
+        if (token[0] == "identifier") { if (token[1] == name) { return [token[2], token[3]]; } }
+        low = low + 1;
+    }
+    assert(false, string_concat("missing symbol source span: ", name)); return [line, column];
+}
+
+fn module_symbols(box, path, source, imports, declarations) {
+    let result = resolver.symbol_table_json(box); let tokens = parser.source_tokens(source);
+    let definitions = result["definitions"]; let references = result["references"]; let index = 0;
+    let exported = map_new(); let identities = map_new();
+    while (index < array_length(definitions)) {
+        let entry = definitions[index];
+        let location = symbol_location(tokens, entry["name"], entry["line"], entry["column"]);
+        entry["line"] = location[0]; entry["column"] = location[1]; entry["path"] = path;
+        let old = entry["identity"]; entry["identity"] = string_concat(path, "#", resolver.symbol_identity(entry["name"], location[0], location[1]));
+        identities[old] = entry["identity"];
+        if (entry["kind"] == "function") { exported[entry["name"]] = entry["identity"]; }
+        if (entry["kind"] == "type") { exported[entry["name"]] = entry["identity"]; }
+        if (entry["kind"] == "class") { exported[entry["name"]] = entry["identity"]; }
+        if (entry["kind"] == "value") { exported[entry["name"]] = entry["identity"]; }
+        if (entry["kind"] == "interface") { exported[entry["name"]] = entry["identity"]; }
+        if (entry["kind"] == "field") { exported[old] = entry["identity"]; }
+        if (entry["kind"] == "method") { exported[old] = entry["identity"]; }
+        index = index + 1;
+    }
+    index = 0;
+    while (index < array_length(declarations)) {
+        let imported = declarations[index]; let location = symbol_location(tokens, imported[1], imported[2], 1);
+        let identity = string_concat(path, "#", resolver.symbol_identity(imported[1], location[0], location[1]));
+        array_push(definitions, {"name":imported[1],"kind":"module","type":"module","line":location[0],"column":location[1],"identity":identity,"path":path});
+        identities[string_concat("alias:", imported[1])] = identity;
+        index = index + 1;
+    }
+    index = 0; let count = array_length(references);
+    while (index < count) {
+        let entry = references[index]; entry["path"] = path;
+        let identity = entry["identity"];
+        if (map_has(identities, identity)) { entry["identity"] = identities[identity]; }
+        else { if (map_has(exported, identity)) { entry["identity"] = exported[identity]; }
+        else {
+            entry["identity"] = string_concat(path, "#export:", identity);
+            let aliases = map_keys(imports); let alias_index = 0;
+            while (alias_index < array_length(aliases)) {
+                let alias = aliases[alias_index]; let prefix = string_concat(alias, ".");
+                if (string_length(identity) > string_length(prefix)) { if (string_slice(identity, 0, string_length(prefix)) == prefix) {
+                    let member = string_slice(identity, string_length(prefix), string_length(identity));
+                    entry["identity"] = string_concat(imports[alias], "#export:", member);
+                    // A qualified function token contains the module prefix; each part has its own edit span.
+                    if (entry["name"] == identity) {
+                        array_push(references, {"name":alias,"line":entry["line"],"column":entry["column"],"identity":identities[string_concat("alias:", alias)],"path":path});
+                        entry["name"] = resolver.name_suffix(identity);
+                        entry["column"] = entry["column"] + string_length(alias) + 1;
+                    }
+                } }
+                alias_index = alias_index + 1;
+            }
+        } }
+        let location = symbol_location(tokens, entry["name"], entry["line"], entry["column"]);
+        entry["line"] = location[0]; entry["column"] = location[1];
+        index = index + 1;
+    }
+    result["exports"] = exported; return result;
+}
+
+fn workspace_symbols(modules) {
+    let result = {"definitions":[],"references":[],"reserved":map_keys(resolver.compiler_reserved_calls())}; let paths = map_keys(modules); let exports = map_new(); let index = 0;
+    while (index < array_length(paths)) {
+        let path = paths[index]; let names = map_keys(modules[path]["exports"]); let item = 0;
+        while (item < array_length(names)) { exports[string_concat(path, "#export:", names[item])] = modules[path]["exports"][names[item]]; item = item + 1; }
+        index = index + 1;
+    }
+    index = 0;
+    while (index < array_length(paths)) {
+        let symbols = modules[paths[index]]; let item = 0;
+        while (item < array_length(symbols["definitions"])) { array_push(result["definitions"], symbols["definitions"][item]); item = item + 1; }
+        item = 0;
+        while (item < array_length(symbols["references"])) {
+            let entry = symbols["references"][item];
+            if (map_has(exports, entry["identity"])) { entry["identity"] = exports[entry["identity"]]; }
+            array_push(result["references"], entry); item = item + 1;
+        }
+        index = index + 1;
+    }
+    return result;
+}
+
+fn overlay_target(base, relative, overlays) {
+    let end = string_length(base) - 1;
+    let scanning = true; while (scanning) { if (end < 0) { scanning = false; } else { if (string_byte_at(base, end) == 47) { scanning = false; } else { end = end - 1; } } }
+    let joined = string_concat(string_slice(base, 0, end + 1), relative);
+    let parts = []; let start = 0; let index = 0;
+    while (index <= string_length(joined)) {
+        let separator = index == string_length(joined);
+        if (!separator) { separator = string_byte_at(joined, index) == 47; }
+        if (separator) {
+            let part = string_slice(joined, start, index);
+            if (part == "..") { if (array_length(parts) > 0) { let shorter = []; let item = 0; while (item + 1 < array_length(parts)) { array_push(shorter, parts[item]); item = item + 1; } parts = shorter; } }
+            else { if (part != "") { if (part != ".") { array_push(parts, part); } } }
+            start = index + 1;
+        }
+        index = index + 1;
+    }
+    let path = string_concat("/", string_join(parts, "/"));
+    if (map_has(overlays, path)) { return path; }
+    return path_resolve(base, relative);
+}
+
 fn load_module(path, prefix, modules, stack, root) {
-    let canonical = path_resolve(path, "");
+    let canonical = path;
+    let overlay = false;
+    if (map_has(modules, "overlays")) { overlay = map_has(modules["overlays"], path); }
+    if (!overlay) { if (!root) { canonical = path_resolve(path, ""); } else { if (!map_has(modules, "source_override")) { canonical = path_resolve(path, ""); } } }
     let index = 0; while (index < array_length(stack)) { if (stack[index] == canonical) { assert(false, "import cycle detected"); } index = index + 1; }
     if (map_has(modules, canonical)) { return map_get(modules, canonical); }
-    let syntax_tree = parser.parse(read_text(canonical));
+    let source = "";
+    if (overlay) { source = modules["overlays"][canonical]; }
+    else { if (root) { if (map_has(modules, "source_override")) { source = modules["source_override"]; } else { source = read_text(canonical); } }
+    else { source = read_text(canonical); } }
+    let syntax_tree = parser.parse_for_symbols(source, map_has(modules, "source_override"));
     if (!root) { assert(array_length(syntax_tree[2]) == 0, "imported modules cannot execute statements"); }
-    let semantic_ir = ir.lower(resolver.resolve_program(syntax_tree));
     let module_index = array_length(modules["items"]);
     let module_index_str = number_to_string(module_index);
     map_set(modules, canonical, module_index);
     array_push(modules["items"], null);
-    let local_names = map_new();
-    let index2 = 0;
-    while (index2 < array_length(semantic_ir[1])) {
-        let name = semantic_ir[1][index2][1];
-        map_set(local_names, name, string_concat(prefix, name));
-        index2 = index2 + 1;
-    }
-    map_set(modules["mappings"], module_index_str, local_names);
     let next_stack = stack_with(stack, canonical);
-    let import_names = map_new();
+    let import_names = map_new(); let imported_objects = map_new(); let symbol_imports = map_new();
     let import_index = 0;
     while (import_index < array_length(syntax_tree[3])) {
         let imported = syntax_tree[3][import_index];
@@ -42,22 +157,51 @@ fn load_module(path, prefix, modules, stack, root) {
             let rest = string_slice(imported[0], 4, string_length(imported[0]));
             target = string_concat(map_get(modules, "stdlib_dir"), "/", rest, ".lana");
         } else {
-            target = path_resolve(canonical, imported[0]);
+            if (map_has(modules, "overlays")) { target = overlay_target(canonical, imported[0], modules["overlays"]); }
+            else { target = path_resolve(canonical, imported[0]); }
         }
+        emitter.register_package_module(modules, imported[0], target);
         let child_prefix = string_concat("__m", number_to_string(array_length(modules["items"])), "__");
         let child_index = load_module(target, child_prefix, modules, next_stack, false);
         let child_record = modules["items"][child_index];
+        symbol_imports[imported[1]] = child_record[0];
+        let child_objects = child_record[2][4][3]; let object_names = map_keys(child_objects); let object_index = 0;
+        while (object_index < array_length(object_names)) {
+            let original = child_objects[object_names[object_index]];
+            if (!map_has(original, "imported")) {
+                let alias = string_concat(imported[1], ".", object_names[object_index]);
+                imported_objects[alias] = resolver.oo_import(original, imported[1], child_objects);
+            }
+            object_index = object_index + 1;
+        }
         let child_exports = child_record[2][1];
         let exp_index = 0;
         while (exp_index < array_length(child_exports)) {
             let name = child_exports[exp_index][1];
             let mapped = string_concat(child_record[1], name);
-            if (imported[0] == "std/core") { if (name == "distribution") { mapped = "__core_distribution__"; } }
+            if (imported[0] == "std/core") {
+                if (name == "distribution") { mapped = "__core_distribution__"; }
+                if (name == "kernel") { mapped = "__core_kernel__"; }
+            }
+            if (imported[0] == "std/evaluation") {
+                if (name == "walk_forward") { mapped = "__evaluation_walk_forward__"; }
+            }
             map_set(import_names, string_concat(imported[1], ".", name), mapped);
             exp_index = exp_index + 1;
         }
         import_index = import_index + 1;
     }
+    let resolved = resolver.resolve_program_with_symbols(syntax_tree, imported_objects, map_has(modules, "source_override"));
+    if (map_has(modules, "source_override")) {
+        let symbols = module_symbols(resolved[4], canonical, source, symbol_imports, syntax_tree[3]);
+        modules["symbol_modules"][canonical] = symbols;
+    }
+    let semantic_ir = ir.lower(resolved);
+    let local_names = map_new(); let local_index = 0;
+    while (local_index < array_length(semantic_ir[1])) {
+        let name = semantic_ir[1][local_index][1]; local_names[name] = string_concat(prefix, name); local_index = local_index + 1;
+    }
+    modules["mappings"][module_index_str] = local_names;
     let record = [canonical, prefix, semantic_ir, import_names];
     index_set(modules["items"], module_index, record);
     map_set(modules["import_mappings"], module_index_str, import_names);
@@ -373,13 +517,18 @@ if (argv[0] == "--project-new") {
             project_document(argv[1]);
         } else {
         if (argv[0] == "--symbols") {
-            assert(array_length(argv) == 3, "usage: lana-compiler --symbols <input.lana> <output.json>");
-            let source = read_text(argv[1]);
-            let syntax_tree = parser.parse(source);
-            let semantic_ir = resolver.resolve_program(syntax_tree);
-            write_text(argv[2], json_stringify(resolver.symbol_table_json(semantic_ir[4])));
+            assert(array_length(argv) >= 3, "usage: lana-compiler --symbols <input.lana> <output.json> [original.lana]");
+            let source = read_text(argv[1]); let path = argv[1];
+            if (array_length(argv) > 3) { path = argv[3]; }
+            let modules = {"items":[],"mappings":map_new(),"import_mappings":map_new(),"package_roots":map_new(),"source_override":source,"symbol_modules":map_new(),"overlays":map_new()};
+            if (array_length(argv) > 4) { modules["overlays"] = result_value(json_parse(read_text(argv[4]))); }
+            let stdlib_dir = getenv("LANA_STDLIB_DIR"); if (stdlib_dir == "") { stdlib_dir = "stdlib"; }
+            modules["stdlib_dir"] = stdlib_dir;
+            let root = load_module(path, "", modules, [], true);
+            emitter.emit_modules(modules, root);
+            write_text(argv[2], json_stringify(workspace_symbols(modules["symbol_modules"])));
         } else {
-            let modules = map_new(); map_set(modules, "items", array_new(0)); map_set(modules, "mappings", map_new()); map_set(modules, "import_mappings", map_new());
+            let modules = map_new(); map_set(modules, "items", array_new(0)); map_set(modules, "mappings", map_new()); map_set(modules, "import_mappings", map_new()); map_set(modules, "package_roots", map_new());
             let stdlib_dir = getenv("LANA_STDLIB_DIR");
             if (stdlib_dir == "") { stdlib_dir = "stdlib"; }
             map_set(modules, "stdlib_dir", stdlib_dir);

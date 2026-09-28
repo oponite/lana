@@ -83,7 +83,7 @@ pub fn load(bytes: &[u8]) -> Result<Chunk, LanaErrorInfo> {
     let entry = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
 
     if version != LABC_VERSION && version != LABC_VERSION_1 && version != LABC_VERSION_3
-        && version != LABC_VERSION_4 && version != LABC_VERSION_5
+        && version != LABC_VERSION_4 && version != LABC_VERSION_5 && version != 6
     {
         return Err(LanaErrorInfo::new(
             LanaError::IncompatibleFormat, 0, 0, 0,
@@ -126,7 +126,10 @@ pub fn load(bytes: &[u8]) -> Result<Chunk, LanaErrorInfo> {
                 let bytes = reader
                     .read_bytes(length as usize)
                     .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-                Value::String(String::from_utf8_lossy(bytes).into_owned())
+                Value::String(if version == 6 {
+                    std::str::from_utf8(bytes).map_err(|_| LanaErrorInfo::new(
+                        LanaError::Format, 0, 0, 0, "invalid UTF-8 in v6 string constant"))?.to_string()
+                } else { String::from_utf8_lossy(bytes).into_owned() })
             }
             ValueType::Null => Value::Null,
             _ => {

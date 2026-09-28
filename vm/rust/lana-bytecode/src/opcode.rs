@@ -109,6 +109,13 @@ pub enum OpCode {
     JointConditionMap,
     /// LABC v5: record a map-based refinement event.
     ObserveMap,
+    ValueNew,
+    ObjectNew,
+    OoGet,
+    OoSet,
+    OoCall,
+    OoStaticCall,
+    OoAsInterface,
     Count,
 }
 
@@ -200,6 +207,13 @@ impl OpCode {
             JointConditionMap => "JOINT_CONDITION_MAP",
             ObserveMap => "OBSERVE_MAP",
             LoadFunction => "LOAD_FUNCTION",
+            ValueNew => "VALUE_NEW",
+            ObjectNew => "OBJECT_NEW",
+            OoGet => "OO_GET",
+            OoSet => "OO_SET",
+            OoCall => "OO_CALL",
+            OoStaticCall => "OO_STATIC_CALL",
+            OoAsInterface => "OO_AS_INTERFACE",
             Count => "COUNT",
         }
     }
@@ -226,5 +240,6 @@ pub const LABC_VERSION_4: u32 = 4;
 /// LABC v5 reserves the balanced Core information surface. It keeps the
 /// existing binary layout and adds no implicit compatibility conversion.
 pub const LABC_VERSION_5: u32 = 5;
+pub const LABC_VERSION_6: u32 = 6;
 pub const LANA_MAX_REGISTERS: u32 = 256;
 pub const LANA_MAX_CALL_FRAMES: u32 = 64;

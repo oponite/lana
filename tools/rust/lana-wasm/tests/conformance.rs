@@ -45,3 +45,11 @@ fn run_escapes_string_result() {
     let source = "return \"a\\\"b\\n\";\n";
     assert_eq!(run(source, ""), "{\"ok\":true,\"result\":\"a\\\"b\\n\"}");
 }
+
+#[test]
+fn embedded_stdlib_and_tasks_execute() {
+    assert_eq!(run("import \"std/core\" as core; return type_of(core.identity_kernel([0, 1]));", ""),
+        "{\"ok\":true,\"result\":\"kernel\"}");
+    assert_eq!(run("fn worker() { return 7; } let task = fork worker(); return join(task);", ""),
+        "{\"ok\":true,\"result\":\"7\"}");
+}

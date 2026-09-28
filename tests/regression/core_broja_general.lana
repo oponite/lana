@@ -1,0 +1,12 @@
+import "std/core" as info;
+
+let law = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.2], [0, 1, 1, 0.2], [0, 2, 2, 0.1],
+     [1, 0, 1, 0.1], [1, 1, 2, 0.2], [1, 2, 0, 0.2]];
+let result = info.broja(law, "t", "x", "y");
+assert(result.status == "converged", "general transport certificate");
+assert(result.error_bound_bits <= 0.000001, "general transport error bound");
+let parts = result.shared + result.unique_x + result.unique_y + result.synergy;
+assert(parts > result.total - 0.000001, "general components lower bound");
+assert(parts < result.total + 0.000001, "general components upper bound");
+print("CORE_BROJA_GENERAL_PASS");

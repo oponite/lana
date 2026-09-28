@@ -16,8 +16,8 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 lana-bytecode = { path = "vm/rust/lana-bytecode" }
-lana-vm = { path = "vm/rust/lana-vm" }
-lana-runtime = { path = "runtime/rust/lana-runtime" }
+lana-vm = { path = "vm/rust/lana-vm", default-features = false }
+lana-runtime = { path = "runtime/rust/lana-runtime", default-features = false }
 
 # Keep the Rust VM optimized for the published performance gate.
 [profile.release]

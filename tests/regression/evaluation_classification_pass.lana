@@ -1,0 +1,31 @@
+import "std/evaluation" as evaluation;
+
+fn fit_rows(training, validation, seed) {
+    return {calculation_version: "classification-v1", payload: {seed: seed}};
+}
+
+fn predict_row(model, features) {
+    return {label: true, probabilities: {"false": 0.25, "true": 0.75}};
+}
+
+let rows = array_new(0);
+let index = 0;
+while (index < 43) {
+    array_push(rows, {id: string_concat("r", number_to_string(index)),
+        observed_at: index, target_at: index,
+        features: {x: {value: index, available_at: index}}, target: true});
+    index = index + 1;
+}
+let report = evaluation.walk_forward(rows, {fit: fit_rows, predict: predict_row,
+    kind: "classification", labels: [false, true], calculation_version: "classification-v1"},
+    {initial_train: 41, test_size: 2, step_size: 2, gap: 0, seed: 3});
+assert(report.status == "complete", "classification report");
+assert(report.aggregate.correct == 2, "correct count");
+assert(report.aggregate.log_loss_status == "finite", "finite log loss");
+assert(report.aggregate.log_loss > 0, "positive log loss");
+let wide_seed = evaluation.walk_forward(rows, {fit: fit_rows, predict: predict_row,
+    kind: "classification", labels: [false, true], calculation_version: "classification-v1"},
+    {initial_train: 41, test_size: 2, step_size: 2, gap: 0,
+        seed: "18446744073709551615"});
+assert(wide_seed.folds[0].seed == "18446744073709551615", "full u64 seed is exact");
+print("EVALUATION_CLASSIFICATION_PASS");

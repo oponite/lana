@@ -1,0 +1,25 @@
+import "std/core" as info;
+
+let original = info.distribution([[1, 0.75], [2, 0.25]]);
+let unweighted = info.forget_weights(original);
+let plain = inspect_information(unweighted);
+assert(plain.form == "possibility", "weights were not forgotten");
+assert(array_length(plain.support) == 2, "support changed");
+let loss = derivation(unweighted);
+assert(loss.details.summary == "probabilities_discarded", "weight loss not recorded");
+
+let restored = info.assign_weights(unweighted, [[2, 0.25], [1, 0.75]]);
+let weighted = inspect_information(restored);
+assert(weighted.form == "distribution", "weights were not assigned");
+let support = weighted.support;
+let first = support[0];
+let second = support[1];
+assert(first["weight"] == 0.75, "candidate order changed");
+assert(second["weight"] == 0.25, "candidate weight changed");
+let assignment = derivation(restored);
+assert(assignment.details.summary == "explicit_weights", "assignment not recorded");
+let original_snapshot = inspect_information(original);
+let original_support = original_snapshot.support;
+let original_first = original_support[0];
+assert(original_first["weight"] == 0.75, "source changed");
+print("CORE_WEIGHT_CONVERSION_PASS");

@@ -1,0 +1,4 @@
+import "std/core" as info;
+
+let invalid = info.identity_kernel([1, 1]);
+print(invalid);

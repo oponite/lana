@@ -115,7 +115,8 @@ fn run_program(operation: &str, path: &Path, compiler: Option<&Path>, bytecode: 
     vm.capture_output();
     vm.set_program_args(&[request.to_string_lossy().into_owned(), response.to_string_lossy().into_owned()]);
     let mut host = lana_runtime::host_calls::StoreHost::new();
-    vm.set_host_call_extension(Box::new(move |id, args, out| host.dispatch(id, args, out)));
+    host.set_chunk_bytes(bytes);
+    vm.set_host_call_extension(Box::new(move |vm, id, args, out| host.dispatch(vm, id, args, out)));
     let status = vm.run();
     let stdout = vm.output().unwrap_or_default();
     if status != LanaError::Ok {

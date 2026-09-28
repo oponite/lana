@@ -15,7 +15,9 @@ net-tls = ["dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 lana-bytecode = { workspace = true }
-# LIP-018 two-way FFI: dlopen a shared library and resolve typed symbols.
+serde_json = "1.0.151"
+serde = "1.0.229"
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libloading = "0.8"
 # LIP-019 TLS client for https hosts. Optional (see the `net-tls` feature).
 rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"], optional = true }

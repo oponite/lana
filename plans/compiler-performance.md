@@ -1,5 +1,8 @@
 # Compiler Bootstrap Performance
 
+Historical measurement and commands. For the current Cargo build and acceptance
+workflow, use [Contributing](../CONTRIBUTING.md).
+
 ## Result
 
 The compiler-performance work is complete. The self-hosted compiler remains

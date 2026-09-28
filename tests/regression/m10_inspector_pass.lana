@@ -4,11 +4,19 @@ assert(snapshot.kind == "information_snapshot", "snapshot kind missing");
 assert(snapshot.record_schema == 1, "inspection record schema missing");
 assert(snapshot.remaining_alternatives == 2, "alternatives missing");
 assert(snapshot.reactive, "dependency graph status missing");
+assert(array_length(snapshot.evidence) == 0, "unlabeled information invented evidence");
+
+let rooted = assume(evidence(7, "sensor-a"), "calibrated");
+let provenance = inspect_information(rooted);
+assert(array_length(provenance.evidence) == 1, "evidence reference missing");
+assert(array_length(provenance.assumptions) == 1, "assumption reference missing");
+assert(provenance.metadata.derivation_id[1] == provenance.assumptions[0][1], "assumption ID mismatch");
 
 let admin = shared_information(source);
 let shared = inspect_information(admin);
 assert(shared.kind == "shared_information", "shared kind missing");
 assert(shared.identity > 0, "shared identity missing");
+assert(shared.metadata.identity == shared.identity, "shared metadata identity mismatch");
 assert(shared.can_admin, "admin authority missing");
 assert(!shared.can_read, "admin incorrectly implied read authority");
 print("M10_INSPECTOR_PASS");

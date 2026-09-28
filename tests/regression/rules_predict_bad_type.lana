@@ -1,0 +1,4 @@
+import "std/rules" as rules;
+
+rules.predict({clauses: [[{feature: "x", operator: "gt", constant: 2,
+    negated: false}]]}, {x: "not a number"});

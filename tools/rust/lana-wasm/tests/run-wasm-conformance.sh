@@ -5,7 +5,6 @@
 # Prerequisites (one-time):
 #   rustup target add wasm32-unknown-unknown
 #   cargo install wasm-bindgen-cli --version 0.2.100
-#   cmake --build build          # produces build/lana-compiler.labc
 #
 # The wasm-bindgen CLI version must match the `wasm-bindgen` crate version
 # pinned in tools/rust/lana-wasm/Cargo.toml.
@@ -18,15 +17,13 @@ cd "$REPO_ROOT"
 WASM_BINDGEN="${WASM_BINDGEN:-wasm-bindgen}"
 OUT_DIR="$REPO_ROOT/target/wasm-bindgen-nodejs"
 
-if [[ -z "${LANA_COMPILER_LABC:-}" ]]; then
-    export LANA_COMPILER_LABC="$REPO_ROOT/build/lana-compiler.labc"
+RUSTC="$(rustup which rustc)"
+export RUSTC
+if [[ "$(uname -s)" == Darwin ]]; then
+    # rust-lld's rpath can omit the toolchain's top-level LLVM library directory.
+    export DYLD_FALLBACK_LIBRARY_PATH="$("$RUSTC" --print sysroot)/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
 fi
-if [[ ! -f "$LANA_COMPILER_LABC" ]]; then
-    echo "lana-compiler.labc not found at $LANA_COMPILER_LABC (cmake --build build first)" >&2
-    exit 1
-fi
-
-cargo build -p lana-wasm --target wasm32-unknown-unknown
+"$(rustup which cargo)" build --locked -p lana-wasm --target wasm32-unknown-unknown
 
 mkdir -p "$OUT_DIR"
 "$WASM_BINDGEN" --target nodejs --out-dir "$OUT_DIR" \

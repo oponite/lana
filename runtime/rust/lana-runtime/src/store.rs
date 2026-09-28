@@ -87,6 +87,10 @@ impl Store {
         if self.staged.is_empty() { Ok(()) } else { Err(LanaError::InvalidState) }
     }
 
+    pub(crate) fn discard_staged(&mut self) {
+        self.staged.clear();
+    }
+
     fn ensure_open(&self) -> Result<(), LanaError> {
         if self.journal.is_some() { Ok(()) } else { Err(LanaError::InvalidState) }
     }
@@ -144,6 +148,13 @@ fn build_payload(mutations: &[Mutation]) -> Result<Vec<u8>, LanaError> {
     for mutation in mutations {
         let key = mutation.key.as_bytes();
         if key.len() > u32::MAX as usize {
+            return Err(LanaError::Limit);
+        }
+        let added = 5usize.checked_add(key.len())
+            .and_then(|size| size.checked_add(if mutation.deleted { 0 } else { 40 }))
+            .and_then(|size| size.checked_add(mutation.data.len()))
+            .ok_or(LanaError::Limit)?;
+        if payload.len().checked_add(added).is_none_or(|size| size > STORE_LIMIT) {
             return Err(LanaError::Limit);
         }
         payload.push(if mutation.deleted { b'D' } else { b'P' });

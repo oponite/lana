@@ -1,13 +1,18 @@
 import "std/core" as info;
 
 let source = information(possibility([1, 2, 3]));
+let known = information(4);
+assert(resolve(condition(known, 4)) == 4, "definite condition");
+assert(resolve(observe(known, 4)) == 4, "definite observation");
+assert(inspect_information(known).revision == 1, "definite observation revision");
 let subset = condition(source, possibility([2, 3]));
 assert(inspect_information(subset).form == "possibility", "condition form");
 assert(inspect_information(subset).remaining_alternatives == 2, "subset support");
 assert(inspect_information(source).remaining_alternatives == 3, "condition changed source");
 
+let before = inspect_information(known).revision;
 let observed = observe(source, possibility([1, 3]));
-assert(inspect_information(observed).revision == 1, "observation revision");
+assert(inspect_information(observed).revision == before + 1, "observation revision");
 assert(inspect_information(source).remaining_alternatives == 2, "observation support");
 assert(resolve(condition(source, 3)) == 3, "singleton resolution");
 

@@ -10,6 +10,8 @@ Usage: test_lsp.py <path-to-lana-binary>
 import json
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 
 def frame(message):
@@ -50,6 +52,106 @@ BAD_SOURCE = (
     "let x = ;\n"
 )
 BAD_URI = "file:///tmp/lana-lsp-bad.lana"
+
+
+def workspace_checks(cli):
+    with tempfile.TemporaryDirectory(prefix="lana-lsp-workspace-") as directory:
+        root = Path(directory).resolve()
+        dep = root / "math lib.lana"
+        main = root / "main.lana"
+        scopes = root / "scopes.lana"
+        dep.write_text("fn twice(value) { return value * 2; }\n")
+        main.write_text('import "./math lib.lana" as lib;\nlet icon = "🌊"; let answer = lib.twice(2); print(answer);\n')
+        scopes.write_text("fn first(value) { value = value + 1; return value; }\nfn second(value) { return value; }\n")
+        proc = subprocess.Popen([cli, "lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        counter = 0
+
+        def request(method, params):
+            nonlocal counter
+            counter += 1
+            proc.stdin.write(frame({"jsonrpc":"2.0", "id":counter, "method":method, "params":params}))
+            proc.stdin.flush()
+            while True:
+                reply = read_message(proc.stdout)
+                assert reply is not None, proc.stderr.read().decode()
+                if reply.get("id") == counter:
+                    return reply
+
+        def opened(file, text):
+            proc.stdin.write(frame({"jsonrpc":"2.0", "method":"textDocument/didOpen", "params":{"textDocument":{"uri":file.as_uri(), "text":text}}}))
+            proc.stdin.flush()
+
+        def at(file, line, character, **extra):
+            return dict(textDocument={"uri":file.as_uri()}, position={"line":line,"character":character}, **extra)
+
+        try:
+            init = request("initialize", {"rootUri":root.as_uri()})
+            assert init["result"]["serverInfo"]["version"] == (Path(__file__).resolve().parents[1]/"VERSION").read_text().strip(), init
+            opened(main, main.read_text())
+            line = main.read_text().splitlines()[1]
+            byte_index = line.index("twice")
+            column = len(line[:byte_index].encode("utf-16-le"))//2
+            definition = request("textDocument/definition", at(main,1,column))["result"]
+            assert definition[0]["uri"] == dep.as_uri(), definition
+            assert definition[0]["range"]["start"] == {"line":0,"character":3}, definition
+            prepared = request("textDocument/prepareRename", at(main,1,column))["result"]
+            assert prepared["range"]["start"]["character"] == column, prepared
+            renamed = request("textDocument/rename", at(main,1,column,newName="double_value"))["result"]["changes"]
+            assert set(renamed) == {main.as_uri(),dep.as_uri()}, renamed
+            assert renamed[main.as_uri()][0]["range"]["start"]["character"] == column, renamed
+            assert "error" in request("textDocument/rename", at(main,1,column,newName="bad-name"))
+            assert "error" in request("textDocument/rename", at(main,1,column,newName="answer"))
+            local = request("textDocument/rename", at(scopes,0,10,newName="input_value"))["result"]["changes"]
+            assert len(local[scopes.as_uri()]) == 4, local
+            assert all(edit["range"]["start"]["line"] == 0 for edit in local[scopes.as_uri()]), local
+            alias = request("textDocument/rename", at(main,0,28,newName="maths"))["result"]["changes"]
+            assert len(alias[main.as_uri()]) == 2 and len(alias) == 1, alias
+            bindings = root / "bindings.lana"
+            text = "let values = [item for item in [1, 2]];\n"
+            opened(bindings, text)
+            renamed_binding = request("textDocument/rename", at(bindings,0,text.index("for item")+4,newName="element"))["result"]["changes"][bindings.as_uri()]
+            assert len(renamed_binding) == 2, renamed_binding
+            assert sorted(e["range"]["start"]["character"] for e in renamed_binding) == [text.index("item"), text.index("for item")+4], renamed_binding
+            objects = root / "objects.lana"
+            opened(objects, "class Counter { public count: number = 1; }\nlet counter: Counter = new Counter();\nprint(counter.count);\n")
+            renamed_type = request("textDocument/rename", at(objects,1,14,newName="Tally"))["result"]["changes"][objects.as_uri()]
+            assert len(renamed_type) == 3, renamed_type
+            renamed_field = request("textDocument/rename", at(objects,2,16,newName="total"))["result"]["changes"][objects.as_uri()]
+            assert len(renamed_field) == 2, renamed_field
+            # Both the imported declaration and use exist only in editor overlays.
+            opened(dep, "fn triple(value) { return value * 3; }\n")
+            opened(main, main.read_text().replace("twice", "triple"))
+            definition = request("textDocument/definition", at(main,1,column))["result"]
+            assert definition[0]["uri"] == dep.as_uri(), definition
+            rename = request("textDocument/rename", at(main,1,column,newName="triple_value"))["result"]["changes"]
+            assert set(rename) == {main.as_uri(),dep.as_uri()}, rename
+            # A missing/invalid source aborts the whole edit, even if other modules resolve.
+            broken = root / "broken.lana"
+            opened(broken, "let bad = ;")
+            failure = request("textDocument/rename", at(main,1,column,newName="another"))
+            assert "error" in failure and "result" not in failure, failure
+            proc.stdin.write(frame({"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":broken.as_uri()}}})); proc.stdin.flush()
+            missing = root / "unsaved.lana"
+            opened(missing, "fn fresh(value) { return value; }\n")
+            opened(main, 'import "./unsaved.lana" as lib;\nlet answer = lib.fresh(1);\n')
+            definition = request("textDocument/definition", at(main,1,18))["result"]
+            assert definition[0]["uri"] == missing.as_uri(), definition
+            private = root / ".lana" / "deps"
+            private.mkdir(parents=True)
+            dependency = private / "locked.lana"
+            dependency.write_text("fn locked(value) { return value; }\n")
+            opened(main, 'import "./.lana/deps/locked.lana" as lib;\nlet answer = lib.locked(1);\n')
+            definition = request("textDocument/definition", at(main,1,18))["result"]
+            assert definition[0]["uri"] == dependency.as_uri(), definition
+            denied = request("textDocument/rename", at(main,1,18,newName="changed"))
+            assert "error" in denied and "read-only" in denied["error"]["message"], denied
+            request("shutdown", None)
+            proc.stdin.write(frame({"jsonrpc":"2.0","method":"exit"})); proc.stdin.flush()
+            proc.wait(timeout=10)
+            assert proc.returncode == 0
+        finally:
+            if proc.poll() is None:
+                proc.kill(); proc.wait()
 
 
 def main():
@@ -164,6 +266,7 @@ def main():
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
 
+    workspace_checks(sys.argv[1])
     print("LSP_ROUNDTRIP_PASS")
     return 0
 

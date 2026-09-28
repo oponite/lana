@@ -25,12 +25,12 @@ function M.setup(options)
             if not compatibility_checked then
                 local output = vim.fn.system({ command[1], "version" })
                 compatible = vim.v.shell_error == 0
-                    and output:match("^Lana 3%.%d+%.%d+ %(LABC v[2-5],") ~= nil
+                    and output:match("^Lana [34]%.%d+%.%d+ %(LABC v[2-6],") ~= nil
                 compatibility_checked = true
             end
             if not compatible then
                 vim.notify(
-                    "Lana integration requires Lana 3.0 with supported LABC: "
+                    "Lana integration requires Lana 3.x or 4.x with LABC v2-v6: "
                         .. command[1],
                     vim.log.levels.ERROR
                 )

@@ -1,0 +1,13 @@
+let admin = capability("net");
+let read = grant(admin, "use");
+let response = http_post(args()[0], "abc", {"X-Test": "sent"}, 1000);
+assert(result_is_ok(response), "HTTP request failed");
+let value = resolve(result_value(response));
+assert(value.status == 200, "status");
+assert(value.body == "ok", "body");
+assert(value.headers["set-cookie"][0] == "a", "first duplicate");
+assert(value.headers["set-cookie"][1] == "b", "second duplicate");
+assert(value.trailers["x-end"][0] == "yes", "trailer");
+let rejected = http_get("http://127.0.0.1:9/", {"X-Test": "bad\r\ninjected"}, 1000);
+assert(result_error_value(rejected) == "headers", "injection reached transport");
+print("HTTP_HEADERS_PASS");

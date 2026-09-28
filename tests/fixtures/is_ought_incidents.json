@@ -1,0 +1,2199 @@
+{
+  "schema": 1,
+  "sources": {
+    "autrey": {
+      "url": "https://www.carnegiehero.org/hero-search/wesley-james-autrey/",
+      "title": "Wesley James Autrey, Carnegie Hero Fund",
+      "locator": "citation paragraphs 1-3",
+      "retrieved": "2026-09-25",
+      "retrieved_html_sha256": "437eb060625678baade25cf4002b8efff4011f0cb2657ecdac009158c4b72bf3"
+    },
+    "catania": {
+      "url": "https://www.carnegiehero.org/carnegie-medal-presentation-to-john-catania/",
+      "title": "Carnegie Medal presentation to John Catania",
+      "locator": "incident narrative paragraphs 1-3; published 2025-07-11",
+      "retrieved": "2026-09-25",
+      "retrieved_html_sha256": "418abd34c3a4507546b2cc7b9dab6e33f94296c7ad789cea13c8011635c7bfb4"
+    },
+    "menezes": {
+      "url": "https://lagen.nu/dom/echr/001-161975",
+      "origin": "https://hudoc.echr.coe.int/eng?i=001-161975",
+      "title": "Armani Da Silva v. United Kingdom, ECHR, 2016-03-30",
+      "locator": "paragraphs 29-41, 52, 66, 127",
+      "access_note": "Primary judgment reproduced on lagen.nu; BAILII blocked automated access and HUDOC converter failed.",
+      "retrieved": "2026-09-25",
+      "retrieved_html_sha256": "07ef1ab0679f22e05bdb386b96ee427513219fcc6d4700e2568fa37c3dbec203"
+    }
+  },
+  "incidents": [
+    {
+      "id": "autrey",
+      "limitations": [
+        "This is a bounded sensitivity reconstruction, not a moral truth label, legal judgment, or assessment of personal blame.",
+        "Later knowledge is not attributed to the decision-maker. Successful outcomes do not set forecast success to 100.",
+        "Only the listed complete action alternatives are modeled. Other options, institutional duties, timing detail, and unreported context can change conclusions.",
+        "Numeric probability values are representatives of threshold intervals, not estimates or frequencies: 0 represents [0,50), 50 represents [50,90), 90 represents [90,100].",
+        "Impact and burden grades are model categories, not measurements from a historical source; all listed alternatives are retained without weights.",
+        "Fixed deadline/time/duration values encode a timely bounded intervention. Extending force past the threat is separately tested by fictional fixtures."
+      ],
+      "views": {
+        "available_then": {
+          "world": {
+            "active": true,
+            "threat_grade": 3,
+            "threat_probability": 100,
+            "deadline": 1,
+            "people": [
+              {
+                "id": "person_at_risk",
+                "role": "protected"
+              }
+            ],
+            "actions": [
+              {
+                "id": "wait",
+                "feasible": true,
+                "protects": false,
+                "success": 0,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false
+                ],
+                "refused": [
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "help",
+                "feasible": true,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 1,
+                "burden": 0,
+                "impacts": [
+                  1
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  true
+                ],
+                "refused": [
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "lesser",
+                "feasible": false,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false
+                ],
+                "refused": [
+                  false
+                ],
+                "uses_uninvolved": false
+              }
+            ],
+            "require": [],
+            "forbid": [],
+            "context": {}
+          },
+          "alternatives": [
+            {
+              "path": [
+                "threat_probability"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "success"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "burden"
+              ],
+              "values": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                2,
+                "feasible"
+              ],
+              "values": [
+                false,
+                true
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "impacts",
+                0
+              ],
+              "values": [
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "unavailable",
+                0
+              ],
+              "values": [
+                false,
+                true
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "consents",
+                0
+              ],
+              "values": [
+                [
+                  true,
+                  true,
+                  true,
+                  true,
+                  false
+                ],
+                [
+                  true,
+                  true,
+                  true,
+                  false,
+                  false
+                ]
+              ]
+            }
+          ],
+          "coding": [
+            {
+              "paths": [
+                [
+                  "active"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_grade"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "deadline"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "people"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "actions"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "require"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "forbid"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "context"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "active"
+                ],
+                [
+                  "threat_grade"
+                ]
+              ],
+              "kind": "source_observation",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "At the chosen decision point, a train approached and earlier attempts to lift the fallen man back to the platform had failed. The proposed action is holding him in the trough."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ],
+                [
+                  "actions",
+                  1,
+                  "success"
+                ],
+                [
+                  "actions",
+                  1,
+                  "burden"
+                ],
+                [
+                  "actions",
+                  2,
+                  "feasible"
+                ],
+                [
+                  "actions",
+                  1,
+                  "impacts",
+                  0
+                ],
+                [
+                  "actions",
+                  1,
+                  "unavailable",
+                  0
+                ],
+                [
+                  "actions",
+                  1,
+                  "consents",
+                  0
+                ]
+              ],
+              "kind": "unknown_alternatives",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "The source does not quantify these forecasts or establish the counterfactual alternative. Enumerate the declared domains; do not fill from outcome."
+            }
+          ]
+        },
+        "later_record": {
+          "world": {
+            "active": true,
+            "threat_grade": 3,
+            "threat_probability": 100,
+            "deadline": 1,
+            "people": [
+              {
+                "id": "person_at_risk",
+                "role": "protected"
+              }
+            ],
+            "actions": [
+              {
+                "id": "wait",
+                "feasible": true,
+                "protects": false,
+                "success": 0,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false
+                ],
+                "refused": [
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "help",
+                "feasible": true,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 1,
+                "burden": 0,
+                "impacts": [
+                  1
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  true
+                ],
+                "refused": [
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "lesser",
+                "feasible": false,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false
+                ],
+                "refused": [
+                  false
+                ],
+                "uses_uninvolved": false
+              }
+            ],
+            "require": [],
+            "forbid": [],
+            "context": {}
+          },
+          "alternatives": [
+            {
+              "path": [
+                "threat_probability"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "success"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "burden"
+              ],
+              "values": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                2,
+                "feasible"
+              ],
+              "values": [
+                false,
+                true
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "impacts",
+                0
+              ],
+              "values": [
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "unavailable",
+                0
+              ],
+              "values": [
+                false,
+                true
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "consents",
+                0
+              ],
+              "values": [
+                [
+                  true,
+                  true,
+                  true,
+                  true,
+                  false
+                ],
+                [
+                  true,
+                  true,
+                  true,
+                  false,
+                  false
+                ]
+              ]
+            }
+          ],
+          "coding": [
+            {
+              "paths": [
+                [
+                  "active"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_grade"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "deadline"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "people"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "actions"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "require"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "forbid"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "context"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "active"
+                ],
+                [
+                  "threat_grade"
+                ]
+              ],
+              "kind": "source_observation",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "The record reports survival and bruising after removal. These outcomes are context only; consent, forecast success, and untried alternatives remain unestablished."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ],
+                [
+                  "actions",
+                  1,
+                  "success"
+                ],
+                [
+                  "actions",
+                  1,
+                  "burden"
+                ],
+                [
+                  "actions",
+                  2,
+                  "feasible"
+                ],
+                [
+                  "actions",
+                  1,
+                  "impacts",
+                  0
+                ],
+                [
+                  "actions",
+                  1,
+                  "unavailable",
+                  0
+                ],
+                [
+                  "actions",
+                  1,
+                  "consents",
+                  0
+                ]
+              ],
+              "kind": "unknown_alternatives",
+              "source_refs": [
+                "autrey"
+              ],
+              "note": "The source does not quantify these forecasts or establish the counterfactual alternative. Enumerate the declared domains; do not fill from outcome."
+            }
+          ]
+        }
+      },
+      "decision_point": "After unsuccessful platform-lift attempts, before holding the person between the rails, 2007-01-02."
+    },
+    {
+      "id": "catania",
+      "limitations": [
+        "This is a bounded sensitivity reconstruction, not a moral truth label, legal judgment, or assessment of personal blame.",
+        "Later knowledge is not attributed to the decision-maker. Successful outcomes do not set forecast success to 100.",
+        "Only the listed complete action alternatives are modeled. Other options, institutional duties, timing detail, and unreported context can change conclusions.",
+        "Numeric probability values are representatives of threshold intervals, not estimates or frequencies: 0 represents [0,50), 50 represents [50,90), 90 represents [90,100].",
+        "Impact and burden grades are model categories, not measurements from a historical source; all listed alternatives are retained without weights.",
+        "Fixed deadline/time/duration values encode a timely bounded intervention. Extending force past the threat is separately tested by fictional fixtures."
+      ],
+      "views": {
+        "available_then": {
+          "world": {
+            "active": true,
+            "threat_grade": 3,
+            "threat_probability": 100,
+            "deadline": 1,
+            "people": [
+              {
+                "id": "Alice",
+                "role": "source"
+              },
+              {
+                "id": "Bob",
+                "role": "protected"
+              }
+            ],
+            "actions": [
+              {
+                "id": "wait",
+                "feasible": true,
+                "protects": false,
+                "success": 0,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "help",
+                "feasible": true,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 1,
+                "burden": 0,
+                "impacts": [
+                  1,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "lesser",
+                "feasible": false,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              }
+            ],
+            "require": [],
+            "forbid": [],
+            "context": {}
+          },
+          "alternatives": [
+            {
+              "path": [
+                "threat_probability"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "success"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "burden"
+              ],
+              "values": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                2,
+                "feasible"
+              ],
+              "values": [
+                false,
+                true
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "impacts",
+                0
+              ],
+              "values": [
+                1,
+                2,
+                3
+              ]
+            }
+          ],
+          "coding": [
+            {
+              "paths": [
+                [
+                  "active"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_grade"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "deadline"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "people"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "actions"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "require"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "forbid"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "context"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "active"
+                ],
+                [
+                  "people"
+                ]
+              ],
+              "kind": "source_observation",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "After an ignored warning and a second blade strike, intervention was directed at the person attacking the woman. The proposed action is pushing him away."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ],
+                [
+                  "actions",
+                  1,
+                  "success"
+                ],
+                [
+                  "actions",
+                  1,
+                  "burden"
+                ],
+                [
+                  "actions",
+                  2,
+                  "feasible"
+                ],
+                [
+                  "actions",
+                  1,
+                  "impacts",
+                  0
+                ]
+              ],
+              "kind": "unknown_alternatives",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "The source does not quantify these forecasts or establish the counterfactual alternative. Enumerate the declared domains; do not fill from outcome."
+            }
+          ]
+        },
+        "later_record": {
+          "world": {
+            "active": true,
+            "threat_grade": 3,
+            "threat_probability": 100,
+            "deadline": 1,
+            "people": [
+              {
+                "id": "Alice",
+                "role": "source"
+              },
+              {
+                "id": "Bob",
+                "role": "protected"
+              }
+            ],
+            "actions": [
+              {
+                "id": "wait",
+                "feasible": true,
+                "protects": false,
+                "success": 0,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "help",
+                "feasible": true,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 1,
+                "burden": 0,
+                "impacts": [
+                  1,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "lesser",
+                "feasible": false,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              }
+            ],
+            "require": [],
+            "forbid": [],
+            "context": {}
+          },
+          "alternatives": [
+            {
+              "path": [
+                "threat_probability"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "success"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "burden"
+              ],
+              "values": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                2,
+                "feasible"
+              ],
+              "values": [
+                false,
+                true
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "impacts",
+                0
+              ],
+              "values": [
+                1,
+                2,
+                3
+              ]
+            }
+          ],
+          "coding": [
+            {
+              "paths": [
+                [
+                  "active"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_grade"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "deadline"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "people"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "actions"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "require"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "forbid"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "context"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "active"
+                ],
+                [
+                  "people"
+                ]
+              ],
+              "kind": "source_observation",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "The woman escaped and both she and the intervener survived injuries. These outcomes do not establish prior success probabilities or alternative-action effectiveness."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ],
+                [
+                  "actions",
+                  1,
+                  "success"
+                ],
+                [
+                  "actions",
+                  1,
+                  "burden"
+                ],
+                [
+                  "actions",
+                  2,
+                  "feasible"
+                ],
+                [
+                  "actions",
+                  1,
+                  "impacts",
+                  0
+                ]
+              ],
+              "kind": "unknown_alternatives",
+              "source_refs": [
+                "catania"
+              ],
+              "note": "The source does not quantify these forecasts or establish the counterfactual alternative. Enumerate the declared domains; do not fill from outcome."
+            }
+          ]
+        }
+      },
+      "decision_point": "After the ignored warning and second strike, before physical intervention, 2022-11-22."
+    },
+    {
+      "id": "menezes",
+      "limitations": [
+        "This is a bounded sensitivity reconstruction, not a moral truth label, legal judgment, or assessment of personal blame.",
+        "Later knowledge is not attributed to the decision-maker. Successful outcomes do not set forecast success to 100.",
+        "Only the listed complete action alternatives are modeled. Other options, institutional duties, timing detail, and unreported context can change conclusions.",
+        "Numeric probability values are representatives of threshold intervals, not estimates or frequencies: 0 represents [0,50), 50 represents [50,90), 90 represents [90,100].",
+        "Impact and burden grades are model categories, not measurements from a historical source; all listed alternatives are retained without weights.",
+        "Fixed deadline/time/duration values encode a timely bounded intervention. Extending force past the threat is separately tested by fictional fixtures."
+      ],
+      "views": {
+        "available_then": {
+          "world": {
+            "active": true,
+            "threat_grade": 3,
+            "threat_probability": 100,
+            "deadline": 1,
+            "people": [
+              {
+                "id": "Alice",
+                "role": "source"
+              },
+              {
+                "id": "Bob",
+                "role": "protected"
+              }
+            ],
+            "actions": [
+              {
+                "id": "wait",
+                "feasible": true,
+                "protects": false,
+                "success": 0,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "help",
+                "feasible": true,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 1,
+                "burden": 0,
+                "impacts": [
+                  3,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "lesser",
+                "feasible": false,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  1,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              }
+            ],
+            "require": [],
+            "forbid": [],
+            "context": {}
+          },
+          "alternatives": [
+            {
+              "path": [
+                "threat_probability"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "success"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "burden"
+              ],
+              "values": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                2,
+                "feasible"
+              ],
+              "values": [
+                false,
+                true
+              ]
+            },
+            {
+              "path": [
+                "active"
+              ],
+              "values": [
+                false,
+                true
+              ]
+            }
+          ],
+          "coding": [
+            {
+              "paths": [
+                [
+                  "active"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_grade"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "deadline"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "people"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "actions"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "require"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "forbid"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "context"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "actions",
+                  1,
+                  "impacts"
+                ]
+              ],
+              "kind": "source_observation",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "The record contains uncertain identification and conflicting accounts of what was communicated before the shooting. A reported threat is not encoded as established fact."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ],
+                [
+                  "actions",
+                  1,
+                  "success"
+                ],
+                [
+                  "actions",
+                  1,
+                  "burden"
+                ],
+                [
+                  "actions",
+                  2,
+                  "feasible"
+                ],
+                [
+                  "active"
+                ]
+              ],
+              "kind": "unknown_alternatives",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "The source does not quantify these forecasts or establish the counterfactual alternative. Enumerate the declared domains; do not fill from outcome."
+            }
+          ]
+        },
+        "later_record": {
+          "world": {
+            "active": false,
+            "threat_grade": 0,
+            "threat_probability": 0,
+            "deadline": 1,
+            "people": [
+              {
+                "id": "Alice",
+                "role": "source"
+              },
+              {
+                "id": "Bob",
+                "role": "protected"
+              }
+            ],
+            "actions": [
+              {
+                "id": "wait",
+                "feasible": true,
+                "protects": false,
+                "success": 0,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  0,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "help",
+                "feasible": true,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 1,
+                "burden": 0,
+                "impacts": [
+                  3,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              },
+              {
+                "id": "lesser",
+                "feasible": false,
+                "protects": true,
+                "success": 100,
+                "time": 1,
+                "duration": 0,
+                "burden": 0,
+                "impacts": [
+                  1,
+                  0
+                ],
+                "consents": [
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ],
+                  [
+                    true,
+                    true,
+                    true,
+                    false,
+                    false
+                  ]
+                ],
+                "unavailable": [
+                  false,
+                  false
+                ],
+                "refused": [
+                  false,
+                  false
+                ],
+                "uses_uninvolved": false
+              }
+            ],
+            "require": [],
+            "forbid": [],
+            "context": {}
+          },
+          "alternatives": [
+            {
+              "path": [
+                "actions",
+                1,
+                "success"
+              ],
+              "values": [
+                0,
+                50,
+                90
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                1,
+                "burden"
+              ],
+              "values": [
+                0,
+                1,
+                2,
+                3
+              ]
+            },
+            {
+              "path": [
+                "actions",
+                2,
+                "feasible"
+              ],
+              "values": [
+                false,
+                true
+              ]
+            }
+          ],
+          "coding": [
+            {
+              "paths": [
+                [
+                  "active"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_grade"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "threat_probability"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "deadline"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "people"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "actions"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "require"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "forbid"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "context"
+                ]
+              ],
+              "kind": "model_assumption",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "Bounded encoding convention; the cited record does not establish this complete field."
+            },
+            {
+              "paths": [
+                [
+                  "active"
+                ],
+                [
+                  "threat_grade"
+                ],
+                [
+                  "threat_probability"
+                ]
+              ],
+              "kind": "source_observation",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "The later record establishes that the man was uninvolved in the attempted attacks. The hypothesized terrorist threat is absent in this reconstruction."
+            },
+            {
+              "paths": [
+                [
+                  "actions",
+                  1,
+                  "success"
+                ],
+                [
+                  "actions",
+                  1,
+                  "burden"
+                ],
+                [
+                  "actions",
+                  2,
+                  "feasible"
+                ]
+              ],
+              "kind": "unknown_alternatives",
+              "source_refs": [
+                "menezes"
+              ],
+              "note": "The source does not quantify these forecasts or establish the counterfactual alternative. Enumerate the declared domains; do not fill from outcome."
+            }
+          ]
+        }
+      },
+      "decision_point": "Officers on the train immediately before shooting, 2005-07-22."
+    }
+  ]
+}

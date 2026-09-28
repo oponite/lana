@@ -17,7 +17,7 @@ from .evidence import validate_evidence
 
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 30.0
-_VERSION_PATTERN = re.compile(r"^Lana ([34]\.\d+\.\d+) \(LABC v[2-5],")
+_VERSION_PATTERN = re.compile(r"^Lana ([34]\.\d+\.\d+) \(LABC v[2-6],")
 
 
 class LanaCompatibilityError(RuntimeError):
@@ -160,41 +160,6 @@ class BridgeRunner:
                 execution={"elapsed_seconds": elapsed, "lana_version": self.version},
             )
         return completed, time.monotonic() - started, None
-
-    def check(
-        self,
-        program: str | os.PathLike[str],
-        *,
-        timeout_seconds: float | None = None,
-    ) -> dict[str, Any]:
-        path = self._program_path(program)
-        completed, elapsed, timeout_error = self._execute(
-            [self.executable, "check", str(path)],
-            cwd=path.parent,
-            timeout_seconds=timeout_seconds,
-        )
-        if timeout_error is not None:
-            return timeout_error
-        assert completed is not None
-        execution = {"elapsed_seconds": elapsed, "lana_version": self.version}
-        if completed.returncode != 0:
-            return _error_envelope(
-                "check",
-                "Lana rejected the program",
-                code="LANA_CHECK_FAILED",
-                exit_code=completed.returncode,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-                execution=execution,
-            )
-        return {
-            "schema": SCHEMA_VERSION,
-            "ok": True,
-            "result": {"checked": str(path)},
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-            "execution": execution,
-        }
 
     def run_plain(
         self,

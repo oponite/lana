@@ -6,7 +6,6 @@ MCP hosts, and IPython. It does not add dependencies to Lana itself.
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -e integrations/python
-.venv/bin/lana-bridge check integrations/lana/echo_bridge.lana
 printf '{"message":"hello"}' |
   .venv/bin/lana-bridge run integrations/lana/echo_bridge.lana
 ```
@@ -37,6 +36,7 @@ Optional components:
 .venv/bin/lana-mcp --root .
 ```
 
-Execution-capable MCP tools are disabled unless `--allow-run` is passed.
+The MCP server exposes only `lana_version` by default. `--allow-run` also
+exposes `lana_run`.
 Configured roots restrict which program can be selected; they do not sandbox
 file operations performed by that program.

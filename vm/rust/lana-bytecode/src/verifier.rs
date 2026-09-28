@@ -13,7 +13,7 @@ use crate::opcode::{OpCode, LANA_MAX_REGISTERS};
 /// calls (run_async/future_all/future_race/sleep) occupy ids 126-129 and the
 /// LIP-015 dataset calls ids 130-140, LIP-018 FFI calls 157-159, LIP-019 net
 /// calls 160-165, LIP-027 cast at 166, matching the C11 VM.
-pub const LANA_HOST_COUNT: u32 = 189;
+pub const LANA_HOST_COUNT: u32 = 221;
 
 const LANA_TRANSFORM_NEUTRALIZE: u32 = 1;
 const LANA_MEASURE_SAMPLE: u32 = 2;
@@ -90,6 +90,7 @@ pub fn verify(chunk: &Chunk) -> Result<(), LanaErrorInfo> {
         && chunk.version != crate::opcode::LABC_VERSION_3
         && chunk.version != crate::opcode::LABC_VERSION_4
         && chunk.version != crate::opcode::LABC_VERSION_5
+        && chunk.version != crate::opcode::LABC_VERSION_6
     {
         return Err(LanaErrorInfo::new(
             LanaError::Format, 0, OpCode::Nop as u8, 0,
@@ -117,13 +118,15 @@ pub fn verify(chunk: &Chunk) -> Result<(), LanaErrorInfo> {
             return Err(LanaErrorInfo::new(code, ip, ins.opcode as u8, ins.line, message));
         }
     }
+    if chunk.version == 6 { crate::objects::verify(chunk)?; }
     Ok(())
 }
 
 /// First invalid opcode for a given LABC version. New opcodes are appended, so
 /// each version accepts exactly the range it introduced.
 fn max_opcode_for_version(version: u32) -> u8 {
-    if version == crate::opcode::LABC_VERSION_5 { return OpCode::Count as u8; }
+    if version == crate::opcode::LABC_VERSION_6 { return OpCode::Count as u8; }
+    if version == crate::opcode::LABC_VERSION_5 { return OpCode::ValueNew as u8; }
     if version == crate::opcode::LABC_VERSION_4 { return OpCode::DistributionBuild as u8; }
     if version == crate::opcode::LABC_VERSION_3 { return OpCode::Async as u8; }
     OpCode::Generator as u8
@@ -622,6 +625,7 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
                 result = Err(LanaError::Register);
             }
         }
+        ValueNew | ObjectNew | OoGet | OoSet | OoCall | OoStaticCall | OoAsInterface => {} // checked by objects::verify
         Count => {
             result = Err(LanaError::Opcode);
         }

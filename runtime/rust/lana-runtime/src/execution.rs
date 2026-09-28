@@ -1,16 +1,23 @@
 //! LIP-029's narrow, origin-bound webhook execution boundary.
 
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::{self, OpenOptions};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::process::{Command, Stdio};
 
+#[cfg(not(target_arch = "wasm32"))]
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+#[cfg(not(target_arch = "wasm32"))]
 use ring::rand::{SecureRandom, SystemRandom};
 
 use lana_bytecode::LanaError;
-use lana_vm::value::{Value, ValueKind};
+use lana_vm::value::{Map, Value, ValueKind};
 
 use crate::codec;
 use crate::sha256;
@@ -30,6 +37,7 @@ pub struct ExecutionConfig {
     pub ca_file: Option<Arc<str>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn private_file(path: &Path) -> Result<(), LanaError> {
     #[cfg(unix)] {
         use std::os::unix::fs::PermissionsExt;
@@ -39,6 +47,7 @@ fn private_file(path: &Path) -> Result<(), LanaError> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn create_private_file(path: &Path) -> Result<fs::File, LanaError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -49,8 +58,10 @@ fn create_private_file(path: &Path) -> Result<fs::File, LanaError> {
     options.open(path).map_err(|_| LanaError::Io)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct TemporaryCredentialFile(PathBuf);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl TemporaryCredentialFile {
     fn create(credential: &str) -> Result<Self, LanaError> {
         let nanos = std::time::SystemTime::now()
@@ -67,10 +78,12 @@ impl TemporaryCredentialFile {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for TemporaryCredentialFile {
     fn drop(&mut self) { let _ = fs::remove_file(&self.0); }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn config_key(path: &Path) -> Result<LessSafeKey, LanaError> {
     private_file(path)?;
     let key = fs::read(path).map_err(|_| LanaError::Io)?;
@@ -79,6 +92,17 @@ fn config_key(path: &Path) -> Result<LessSafeKey, LanaError> {
 }
 
 impl ExecutionConfig {
+    #[cfg(target_arch = "wasm32")]
+    pub fn write(_: &Path, _: &Path, _: &str, _: &str, _: &str, _: Option<&str>) -> Result<(), LanaError> {
+        Err(LanaError::UnsupportedOperation)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn load(_: &Path, _: &Path) -> Result<Self, LanaError> {
+        Err(LanaError::UnsupportedOperation)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn write(metadata: &Path, key_path: &Path, id: &str, origin: &str, credential_key_id: &str, ca_file: Option<&str>) -> Result<(), LanaError> {
         let capability = ExecutionCapability::new(Arc::<str>::from(id), Arc::<str>::from(origin))?;
         if metadata == key_path || credential_key_id.is_empty() || credential_key_id.chars().any(char::is_control) || ca_file.is_some_and(|path| path.chars().any(char::is_control)) { return Err(LanaError::Schema); }
@@ -113,6 +137,7 @@ impl ExecutionConfig {
         result
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load(metadata: &Path, key_path: &Path) -> Result<Self, LanaError> {
         private_file(metadata)?;
         let mut input = fs::read(metadata).map_err(|_| LanaError::Io)?;
@@ -166,14 +191,31 @@ fn valid_path(path: &str) -> bool {
         && !path.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, ':' | '?' | '#' | '\\'))
 }
 
+pub(crate) fn validate_record_envelope(map: &Map, kind: &str) -> Result<(), LanaError> {
+    if !matches!(map.get("record_schema"), Some(Value { kind: ValueKind::Number(1.0), .. }))
+        || !matches!(map.get("kind"), Some(Value { kind: ValueKind::String(value), .. }) if value.as_ref() == kind)
+        || !matches!(map.get("id"), Some(Value { kind: ValueKind::String(_) | ValueKind::Null, .. }))
+        || !["transport_status", "domain_status", "exactness"].iter().all(|key| {
+            matches!(map.get(key), Some(Value { kind: ValueKind::String(value), .. }) if !value.is_empty())
+        })
+        || !["payload", "error", "evidence", "assumptions", "metadata"].iter().all(|key| map.get(key).is_some())
+    { return Err(LanaError::Schema); }
+    Ok(())
+}
+
 pub(crate) fn validate_plan(plan: &Value) -> Result<(Arc<str>, String), LanaError> {
     plan.check_resolved(256 * 1024 * 1024)?;
     let ValueKind::Map(map) = &plan.kind else { return Err(LanaError::Schema); };
-    let (kind, path, payload) = {
+    let (path, payload) = {
         let map = map.lock().unwrap();
-        (map.get("kind").cloned(), map.get("path").cloned(), map.get("payload").cloned())
+        validate_record_envelope(&map, "webhook")?;
+        if !matches!(map.get("id"), Some(Value { kind: ValueKind::Null, .. }))
+            || !matches!(map.get("transport_status"), Some(Value { kind: ValueKind::String(value), .. }) if value.as_ref() == "planned")
+            || !matches!(map.get("domain_status"), Some(Value { kind: ValueKind::String(value), .. }) if value.as_ref() == "ready")
+            || !matches!(map.get("error"), Some(Value { kind: ValueKind::Null, .. }))
+        { return Err(LanaError::Schema); }
+        (map.get("path").cloned(), map.get("payload").cloned())
     };
-    if !matches!(kind, Some(Value { kind: ValueKind::String(ref kind), .. }) if kind.as_ref() == "webhook") { return Err(LanaError::Schema); }
     let Some(Value { kind: ValueKind::String(path), .. }) = path else { return Err(LanaError::Schema); };
     if !valid_path(&path) { return Err(LanaError::Capability); }
     let body = codec::encode_value(&payload.ok_or(LanaError::Schema)?)?;
@@ -208,6 +250,12 @@ pub trait WebhookTransport {
 pub struct CurlTransport { pub credential: Option<Arc<str>>, pub ca_file: Option<Arc<str>> }
 
 impl WebhookTransport for CurlTransport {
+    #[cfg(target_arch = "wasm32")]
+    fn post_json(&self, _: &str, _: &str, _: &str) -> Result<u16, LanaError> {
+        Err(LanaError::UnsupportedOperation)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn post_json(&self, origin: &str, path: &str, body: &str) -> Result<u16, LanaError> {
         if !valid_origin(origin) || !valid_path(path) { return Err(LanaError::Capability); }
         let mut command = Command::new("curl");
@@ -263,7 +311,18 @@ fn receipt_value(status: ReceiptStatus, authorization: &Authorization, capabilit
 
 pub fn read_receipt(store: &Store, capability: &ExecutionCapability, digest: &str) -> Result<Value, LanaError> {
     let saved = store_get(store, &receipt_key(capability, digest))?;
-    crate::data::json_parse(&saved.as_string())
+    let receipt = crate::data::json_parse(&saved.as_string())?;
+    let ValueKind::Map(map) = &receipt.kind else { return Err(LanaError::Schema) };
+    let map = map.lock().unwrap();
+    validate_record_envelope(&map, "execution_receipt")?;
+    if !matches!(map.get("id"), Some(Value { kind: ValueKind::String(value), .. }) if value.as_ref() == receipt_key(capability, digest))
+        || !matches!(map.get("capability_id"), Some(Value { kind: ValueKind::String(value), .. }) if value.as_ref() == capability.id())
+        || !matches!(map.get("plan_digest"), Some(Value { kind: ValueKind::String(value), .. }) if value.as_ref() == digest)
+        || !matches!(map.get("status"), Some(Value { kind: ValueKind::String(value), .. }) if ["Pending", "Succeeded", "Failed", "Unknown"].contains(&value.as_ref()))
+        || !matches!(map.get("authorization_id"), Some(Value { kind: ValueKind::Number(value), .. }) if value.is_finite() && *value >= 0.0 && value.fract() == 0.0)
+    { return Err(LanaError::Schema); }
+    drop(map);
+    Ok(receipt)
 }
 
 /// Performs at most one transport attempt for a committed plan. Duplicate execution is rejected before transport;
@@ -335,10 +394,18 @@ mod tests {
 
     fn plan() -> Value {
         let heap = lana_vm::heap::Heap::new(1024 * 1024);
-        let mut map = Map::new(&heap, 3).unwrap();
+        let mut map = Map::new(&heap, 12).unwrap();
+        map.set(Arc::from("record_schema"), Value::number(1.0), false).unwrap();
+        map.set(Arc::from("id"), Value::null(), false).unwrap();
         map.set(Arc::from("kind"), Value::string(Arc::from("webhook")), false).unwrap();
+        map.set(Arc::from("transport_status"), Value::string(Arc::from("planned")), false).unwrap();
+        map.set(Arc::from("domain_status"), Value::string(Arc::from("ready")), false).unwrap();
         map.set(Arc::from("path"), Value::string(Arc::from("/events")), false).unwrap();
         map.set(Arc::from("payload"), Value::string(Arc::from("payload")), false).unwrap();
+        for key in ["error", "evidence", "assumptions", "metadata"] {
+            map.set(Arc::from(key), Value::null(), false).unwrap();
+        }
+        map.set(Arc::from("exactness"), Value::string(Arc::from("exact")), false).unwrap();
         Value::map(Arc::new(Mutex::new(map)))
     }
 
@@ -407,6 +474,10 @@ mod tests {
         let auth = Authorization { decision_id: 1, capability_id: Arc::from(capability.id()), plan_digest: plan_digest(&plan).unwrap(), authorized: true };
         assert_eq!(execute(&mut store, &capability, &auth, &plan, "/different", &Never), Err(LanaError::Capability));
         assert_eq!(execute(&mut store, &capability, &auth, &Value::null(), "/events", &Never), Err(LanaError::Schema));
+        let ValueKind::Map(map) = &plan.kind else { unreachable!() };
+        map.lock().unwrap().set(Arc::from("record_schema"), Value::number(2.0), false).unwrap();
+        assert_eq!(execute(&mut store, &capability, &auth, &plan, "/events", &Never), Err(LanaError::Schema));
+        map.lock().unwrap().set(Arc::from("record_schema"), Value::number(1.0), false).unwrap();
         assert_eq!(crate::store::store_current_revision(&store).unwrap().revision_id, 0);
         store_put(&mut store, "unrelated", &Value::number(1.0)).unwrap();
         assert_eq!(execute(&mut store, &capability, &auth, &plan, "/events", &Never), Err(LanaError::InvalidState));
@@ -416,6 +487,15 @@ mod tests {
         assert_eq!(execute(&mut store, &capability, &auth, &plan, "/events", &Response(Ok(302))).unwrap(), ReceiptStatus::Failed);
         let receipt = store_get(&store, &receipt_key(&capability, &auth.plan_digest)).unwrap();
         assert!(crate::data::json_parse(&receipt.as_string()).is_ok());
+    }
+
+    #[test]
+    fn read_receipt_rejects_malformed_record() {
+        let mut store = store();
+        let capability = ExecutionCapability::new("receipt", "https://example.test").unwrap();
+        store_put(&mut store, &receipt_key(&capability, "digest"), &Value::string(Arc::from("{\"record_schema\":2}"))).unwrap();
+        store_commit(&mut store).unwrap();
+        assert!(matches!(read_receipt(&store, &capability, "digest"), Err(LanaError::Schema)));
     }
 
     #[test]

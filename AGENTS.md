@@ -9,12 +9,11 @@ session with:
 ## First program
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel
-build/lana new hello-lana
+python3 tools/build.py build
+target/lana/bin/lana new hello-lana
 cd hello-lana
-../build/lana run .
-../build/lana test .
+../target/lana/bin/lana run
+../target/lana/bin/lana test
 ```
 
 `lana new` creates a small module in `src/belief.lana`, imports it from
@@ -50,31 +49,29 @@ applicable authority first when intentionally changing the language.
 ## Daily commands
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-build/lana run examples/general.lana
-build/lana check examples/belief.lana
+python3 tools/build.py build
+python3 tests/run.py --no-build
+target/lana/bin/lana run examples/general.lana
 git diff --check
 ```
 
 Project workflow:
 
 ```bash
-build/lana new my-program
-build/lana build my-program
-build/lana check my-program
-build/lana test my-program
-build/lana run my-program
+target/lana/bin/lana new my-program
+cd my-program
+../target/lana/bin/lana build
+../target/lana/bin/lana test
+../target/lana/bin/lana run
 ```
 
 Low-level bytecode workflow:
 
 ```bash
-build/lana asm examples/belief.lasm -o build/belief.labc
-build/lana verify build/belief.labc
-build/lana dis build/belief.labc
-build/lana run build/belief.labc --trace
+target/lana/bin/lana asm examples/belief.lasm -o target/belief.labc
+target/lana/bin/lana verify target/belief.labc
+target/lana/bin/lana dis target/belief.labc
+target/lana/bin/lana run target/belief.labc --trace
 ```
 
 ## Release gates
@@ -85,10 +82,9 @@ Record command output; do not substitute earlier results.
 ### 1. Build and self-hosting
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-build/lana version
+python3 tools/build.py build
+python3 tests/run.py --no-build
+target/lana/bin/lana version
 cargo test --locked --workspace --no-fail-fast
 git diff --check
 ```
@@ -109,11 +105,10 @@ or sanitizer report. Preserve crashing inputs as regressions.
 ### 3. Universal clean install
 
 ```bash
-cmake -S . -B build-universal -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64'
-cmake --build build-universal --parallel
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+python3 tools/build.py universal
 prefix="$(mktemp -d /tmp/lana-install.XXXXXX)"
-cmake --install build-universal --prefix "$prefix"
+python3 tools/build.py install --from target/universal --prefix "$prefix"
 lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
 arch -arm64 "$prefix/bin/lana" version
 arch -x86_64 "$prefix/bin/lana" version
@@ -133,9 +128,8 @@ python3 -m venv /tmp/lana-integrations-venv
 /tmp/lana-integrations-venv/bin/python -m pytest -q integrations/python/tests
 /tmp/lana-integrations-venv/bin/python -m unittest discover -s tools/lana-hf/tests -v
 
-cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release
-cmake --build build-integrations --parallel
-ctest --test-dir build-integrations --output-on-failure
+python3 tools/build.py build
+python3 tests/run.py --no-build
 ```
 
 Required result: the Python bridge accepts Lana 4.0 through the Rust CLI and
@@ -167,7 +161,7 @@ load condition as an exact threshold.
 - Preserve unrelated dirty work and inspect a file before writing it.
 - Lana uses lowercase `snake_case`, semicolons, and small explicit functions.
 - Add language fixtures in
-  `tests/regression/` and register them in `cmake/CTestTargets.cmake`.
+  `tests/regression/` and register them in `tests/cases.json`.
 - Never weaken compiler limits: 256 MiB and 50,000,000 instructions. Exhaustion
   is an error and must not expose partial bytecode.
 - Benchmark result snapshots are machine-local evidence, not conformance.

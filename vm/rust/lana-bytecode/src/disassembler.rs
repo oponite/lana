@@ -89,6 +89,12 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!("{offset:04} {:<20} ", ins.opcode.name()));
     match ins.opcode {
+        OpCode::ValueNew | OpCode::ObjectNew | OpCode::OoGet | OpCode::OoSet
+        | OpCode::OoCall | OpCode::OoStaticCall | OpCode::OoAsInterface => {
+            let argument = if ins.b == u32::MAX { "-".into() } else { format!("R{}", ins.b) };
+            let index = if ins.imm == u32::MAX { "-".into() } else { ins.imm.to_string() };
+            out.push_str(&format!("R{} {} descriptor=K{} {}", ins.a, argument, ins.c, index));
+        }
         OpCode::StateNew => {
             out.push_str(&format!(
                 "R{} p=K{}({}) d_re=K{}({}) d_im=K{}({})",

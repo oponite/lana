@@ -1,0 +1,15 @@
+import "std/core" as info;
+
+fn noisy_chances(input) {
+    if (input[0] == 0) { return [[0, 0.25], [1, 0.75]]; }
+    return [[0, 1], [1, 0]];
+}
+
+let root = joint correlated (r) with support: [[0, 0.5], [1, 0.5]];
+let noisy = info.kernel([[0, 1]], [0, 1], noisy_chances);
+let graph = info.network(root, [{name: "y", parents: ["r"], kernel: noisy}]);
+let result = info.infer(graph, ["y"], {r: 0});
+let entropy = info.entropy(result, ["y"]);
+assert(entropy > 0.8, "nontrivial kernel lower bound");
+assert(entropy < 0.82, "nontrivial kernel upper bound");
+print("CORE_NETWORK_NOISY_PASS");

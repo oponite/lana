@@ -1,0 +1,11 @@
+import "std/core" as info;
+
+let copy = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.5], [1, 1, 1, 0.5]];
+let result = info.broja(copy, "t", "x", "y");
+assert(result.status == "converged", "copy certificate");
+assert(result.shared == 1, "copy shared");
+assert(result.synergy == 0, "copy synergy");
+assert(result.unique_x == 0, "copy unique x");
+assert(result.unique_y == 0, "copy unique y");
+print("CORE_BROJA_COPY_PASS");

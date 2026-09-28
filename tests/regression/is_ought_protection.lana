@@ -1,0 +1,369 @@
+import "std/core" as info;
+
+// Application-level experimental standards, not Lana moral primitives.
+fn contains(values, value) {
+    let i = 0;
+    while (i < array_length(values)) {
+        if (values[i] == value) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn keys(value, names) {
+    assert(type_of(value) == "map", "expected map");
+    assert(array_length(map_keys(value)) == array_length(names), "unexpected fields");
+    let i = 0;
+    while (i < array_length(names)) {
+        assert(map_has(value, names[i]), "missing field");
+        i = i + 1;
+    }
+    return true;
+}
+
+fn boolean(value) { assert(type_of(value) == "bool", "expected Boolean"); return true; }
+fn number_between(value, low, high) {
+    assert(type_of(value) == "number", "expected number");
+    assert(value >= low, "number below range");
+    assert(value <= high, "number above range");
+    return true;
+}
+fn grade(value) {
+    number_between(value, 0, 3);
+    assert(contains([0, 1, 2, 3], value), "invalid grade"); return true;
+}
+fn consent(bits) {
+    assert(type_of(bits) == "array", "consent must be array");
+    assert(array_length(bits) == 5, "five consent facts required");
+    let i = 0;
+    while (i < 5) { boolean(bits[i]); i = i + 1; }
+    // capacity, information, freedom, agreement in scope, withdrawal
+    if (!bits[0]) { return false; }
+    if (!bits[1]) { return false; }
+    if (!bits[2]) { return false; }
+    if (!bits[3]) { return false; }
+    return !bits[4];
+}
+
+fn validate_action(a, people) {
+    keys(a, ["id", "feasible", "protects", "success", "time", "duration", "burden",
+        "impacts", "consents", "unavailable", "refused", "uses_uninvolved"]);
+    assert(type_of(a.id) == "string", "action ID must be string");
+    assert(a.id != "", "empty action ID");
+    boolean(a.feasible); boolean(a.protects); boolean(a.uses_uninvolved);
+    number_between(a.success, 0, 100); number_between(a.time, 0, 100);
+    number_between(a.duration, 0, 100); grade(a.burden);
+    let fields = [a.impacts, a.consents, a.unavailable, a.refused];
+    let f = 0;
+    while (f < 4) {
+        assert(type_of(fields[f]) == "array", "person fields must be arrays");
+        assert(array_length(fields[f]) == array_length(people), "person count mismatch");
+        f = f + 1;
+    }
+    let i = 0;
+    while (i < array_length(people)) {
+        grade(a.impacts[i]); consent(a.consents[i]);
+        boolean(a.unavailable[i]); boolean(a.refused[i]);
+        if (a.refused[i]) { assert(!consent(a.consents[i]), "refusal contradicts consent"); }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn validate_case(c) {
+    keys(c, ["id", "world", "policy"]);
+    assert(type_of(c.id) == "string", "case ID must be string");
+    let w = c.world;
+    let p = c.policy;
+    keys(p, ["id", "duty", "severe", "threat_min", "success_min", "burden_max"]);
+    assert(type_of(p.id) == "string", "policy ID must be string");
+    boolean(p.duty); boolean(p.severe);
+    assert(contains([50, 90], p.threat_min), "invalid threat threshold");
+    assert(contains([50, 90], p.success_min), "invalid success threshold");
+    assert(contains([0, 1], p.burden_max), "invalid burden threshold");
+    keys(w, ["active", "threat_grade", "threat_probability", "deadline", "people", "actions", "require", "forbid", "context"]);
+    boolean(w.active); grade(w.threat_grade);
+    number_between(w.threat_probability, 0, 100); number_between(w.deadline, 0, 100);
+    assert(type_of(w.people) == "array", "people must be array");
+    assert(array_length(w.people) > 0, "empty people");
+    assert(array_length(w.people) <= 4, "too many people");
+    let ids = [];
+    let i = 0;
+    while (i < array_length(w.people)) {
+        let person = w.people[i];
+        keys(person, ["id", "role"]);
+        assert(type_of(person.id) == "string", "person ID must be string");
+        assert(person.id != "", "empty person ID");
+        assert(!contains(ids, person.id), "duplicate person ID");
+        array_push(ids, person.id);
+        assert(contains(["source", "protected", "uninvolved"], person.role), "invalid role");
+        i = i + 1;
+    }
+    assert(type_of(w.actions) == "array", "actions must be array");
+    assert(array_length(w.actions) > 0, "empty actions");
+    assert(array_length(w.actions) <= 4, "too many actions");
+    ids = []; i = 0;
+    while (i < array_length(w.actions)) {
+        let a = w.actions[i];
+        validate_action(a, w.people);
+        assert(!contains(ids, a.id), "duplicate action ID");
+        array_push(ids, a.id); i = i + 1;
+    }
+    let constraints = [w.require, w.forbid]; i = 0;
+    while (i < 2) {
+        assert(type_of(constraints[i]) == "array", "constraints must be arrays");
+        let j = 0;
+        while (j < array_length(constraints[i])) {
+            assert(contains(ids, constraints[i][j]), "unknown action reference");
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn danger(w, p) {
+    if (!w.active) { return false; }
+    if (w.threat_grade == 0) { return false; }
+    return w.threat_probability >= p.threat_min;
+}
+
+fn adequate(a, w, p) {
+    if (!a.feasible) { return false; }
+    if (!a.protects) { return false; }
+    if (a.time > w.deadline) { return false; }
+    return a.success >= p.success_min;
+}
+
+fn proportionate(impact, w, p) {
+    let ceiling = w.threat_grade;
+    if (!p.severe) { if (ceiling == 3) { ceiling = 2; } }
+    if (impact > ceiling) { return false; }
+    if (impact == 3) {
+        if (w.threat_grade != 3) { return false; }
+        if (w.threat_probability < 90) { return false; }
+    }
+    return true;
+}
+
+fn eligible(a, w, p) {
+    if (!a.feasible) { return false; }
+    if (a.uses_uninvolved) { return false; }
+    let i = 0;
+    while (i < array_length(w.people)) {
+        if (a.impacts[i] > 0) {
+            if (!consent(a.consents[i])) {
+                if (!danger(w, p)) { return false; }
+                if (!adequate(a, w, p)) { return false; }
+                if (a.duration > w.deadline) { return false; }
+                if (!proportionate(a.impacts[i], w, p)) { return false; }
+                if (w.people[i].role == "uninvolved") { return false; }
+                if (w.people[i].role == "protected") {
+                    if (a.refused[i]) { return false; }
+                    if (!a.unavailable[i]) { return false; }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn less_intrusive(b, a) {
+    if (b.duration > a.duration) { return false; }
+    if (b.burden > a.burden) { return false; }
+    let smaller = b.duration < a.duration;
+    if (b.burden < a.burden) { smaller = true; }
+    let i = 0;
+    while (i < array_length(a.impacts)) {
+        if (b.impacts[i] > a.impacts[i]) { return false; }
+        if (b.impacts[i] < a.impacts[i]) { smaller = true; }
+        i = i + 1;
+    }
+    return smaller;
+}
+
+fn necessary(a, w, p) {
+    if (!danger(w, p)) { return false; }
+    if (!adequate(a, w, p)) { return false; }
+    let i = 0;
+    while (i < array_length(w.actions)) {
+        let b = w.actions[i];
+        if (eligible(b, w, p)) {
+            if (adequate(b, w, p)) {
+                if (less_intrusive(b, a)) { return false; }
+            }
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn permitted(a, w, p) {
+    if (!eligible(a, w, p)) { return false; }
+    let i = 0;
+    while (i < array_length(w.people)) {
+        if (a.impacts[i] > 0) {
+            if (!consent(a.consents[i])) {
+                if (!necessary(a, w, p)) { return false; }
+            }
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn duty(w, p) {
+    if (!p.duty) { return false; }
+    if (!danger(w, p)) { return false; }
+    if (w.threat_grade < 2) { return false; }
+    let i = 0;
+    while (i < array_length(w.actions)) {
+        let a = w.actions[i];
+        if (a.burden <= p.burden_max) {
+            if (permitted(a, w, p)) {
+                if (adequate(a, w, p)) { return true; }
+            }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn evaluate(c) {
+    validate_case(c);
+    let w = c.world; let p = c.policy;
+    let obligation = duty(w, p);
+    let accepted = [];
+    let i = 0;
+    while (i < array_length(w.actions)) {
+        let a = w.actions[i];
+        let ok = permitted(a, w, p);
+        if (contains(w.forbid, a.id)) { ok = false; }
+        let j = 0;
+        while (j < array_length(w.require)) {
+            if (w.require[j] != a.id) { ok = false; }
+            j = j + 1;
+        }
+        if (obligation) { if (!adequate(a, w, p)) { ok = false; } }
+        if (ok) { array_push(accepted, a.id); }
+        i = i + 1;
+    }
+    if (array_length(accepted) == 0) {
+        return {id: c.id, validity: "conflict", accepted: [], statuses: {}, must_help: null};
+    }
+    let statuses = {}; let must_help = true; i = 0;
+    while (i < array_length(w.actions)) {
+        let a = w.actions[i]; let status = "forbidden";
+        if (contains(accepted, a.id)) {
+            status = "optional";
+            if (array_length(accepted) == 1) { status = "required"; }
+            if (!adequate(a, w, p)) { must_help = false; }
+        }
+        map_set(statuses, a.id, status); i = i + 1;
+    }
+    return {id: c.id, validity: "valid", accepted: accepted, statuses: statuses, must_help: must_help};
+}
+
+fn inspect_status(value, input) {
+    let annotated = assume(value, "explicit_protection_standard_see_input");
+    print(json_stringify({snapshot: inspect_information(value),
+        may: inspect_information(value != "forbidden"), must: inspect_information(value == "required"),
+        annotation: inspect_information(annotated), dependency_completeness: "not_certified"}));
+    if (input.resolve) { print(json_stringify({resolved: resolve(value)})); }
+    return null;
+}
+
+fn refine_status(value, input, values) {
+    if (input.select >= 0) {
+        let original_count = inspect_information(value).remaining_alternatives;
+        let refined = condition(value, values[input.select]);
+        assert(inspect_information(value).remaining_alternatives == original_count, "condition mutated original");
+        return inspect_status(refined, input);
+    }
+    return inspect_status(value, input);
+}
+
+fn information_probe(input) {
+    keys(input, ["cases", "form", "action", "resolve", "weights", "select"]);
+    boolean(input.resolve);
+    assert(type_of(input.cases) == "array", "cases must be array");
+    assert(array_length(input.cases) <= 32, "too many interpretations");
+    assert(contains(["definite", "possibility", "paths", "joint", "distribution"], input.form), "unknown information form");
+    assert(type_of(input.weights) == "array", "weights must be array");
+    let selections = [-1]; let k = 0;
+    while (k < array_length(input.cases)) { array_push(selections, k); k = k + 1; }
+    assert(contains(selections, input.select), "invalid selection");
+    if (input.form == "paths") { assert(input.select == -1, "paths selection unsupported"); }
+    let values = []; let i = 0;
+    while (i < array_length(input.cases)) {
+        let result = evaluate(input.cases[i]);
+        assert(result.validity == "valid", "conflicting model in information law");
+        assert(map_has(result.statuses, input.action), "unknown query action");
+        array_push(values, result.statuses[input.action]); i = i + 1;
+    }
+    assert(array_length(values) > 0, "empty information law");
+    if (input.form == "definite") {
+        assert(array_length(values) == 1, "definite requires one interpretation");
+        return inspect_status(values[0], input);
+    }
+    if (input.form == "possibility") { return refine_status(possibility(values), input, values); }
+    if (input.form == "paths") {
+        assert(array_length(values) == 2, "paths require two interpretations");
+        let left = values[0]; let right = values[1];
+        let selector = possibility([true, false]); let value = left;
+        if (selector) { value = left; } else { value = right; }
+        if (left != right) {
+            assert(resolve((value == left) == (value != right)), "path support escaped");
+        }
+        return inspect_status(value, input);
+    }
+    assert(array_length(input.weights) == array_length(values), "weight count mismatch");
+    let rows = []; let sum = 0; i = 0;
+    while (i < array_length(values)) {
+        number_between(input.weights[i], 0, 1);
+        assert(input.weights[i] > 0, "weights must be positive");
+        sum = sum + input.weights[i];
+        array_push(rows, [i, values[i], values[i] != "forbidden", values[i] == "required", input.weights[i]]); i = i + 1;
+    }
+    assert(sum >= 0.999999999999, "weights must sum to one");
+    assert(sum <= 1.000000000001, "weights must sum to one");
+    let relationship = joint correlated (interpretation, status, may, must) with support: rows;
+    if (input.form == "joint") {
+        if (input.select >= 0) { relationship = condition(relationship, {interpretation: input.select}); }
+        let projected = project(relationship, "status");
+        print(json_stringify({snapshot: inspect_information(projected),
+            may: inspect_information(project(relationship, "may")),
+            must: inspect_information(project(relationship, "must")), dependency_completeness: "not_certified"}));
+        if (input.resolve) { print(json_stringify({resolved: resolve(projected)})); }
+        return null;
+    }
+    assert(input.form == "distribution", "unknown information form");
+    rows = []; let labels = ["required", "optional", "forbidden"]; let j = 0;
+    while (j < 3) {
+        sum = 0; i = 0;
+        while (i < array_length(values)) {
+            if (values[i] == labels[j]) { sum = sum + input.weights[i]; }
+            i = i + 1;
+        }
+        if (sum > 0) { array_push(rows, [labels[j], sum]); }
+        j = j + 1;
+    }
+    return refine_status(info.distribution(rows), input, values);
+}
+
+let arguments = args();
+assert(array_length(arguments) == 2, "usage: MODE JSON");
+let parsed = json_parse(arguments[1]);
+assert(result_is_ok(parsed), "invalid JSON");
+let input = resolve(result_value(parsed));
+if (arguments[0] == "batch") {
+    assert(type_of(input) == "array", "batch must be array");
+    assert(array_length(input) > 0, "empty batch");
+    assert(array_length(input) <= 32, "batch too large");
+    let i = 0;
+    while (i < array_length(input)) { print(json_stringify(evaluate(input[i]))); i = i + 1; }
+} else {
+    assert(arguments[0] == "information", "unknown mode");
+    information_probe(input);
+}

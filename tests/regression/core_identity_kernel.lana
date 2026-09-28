@@ -1,0 +1,7 @@
+import "std/core" as info;
+
+let identity = info.identity_kernel([0, 1]);
+assert(type_of(identity) == "kernel", "identity did not create a kernel");
+let composed = info.compose_kernels(identity, identity);
+assert(type_of(composed) == "kernel", "composition did not create a kernel");
+print("CORE_IDENTITY_KERNEL_PASS");

@@ -1,5 +1,14 @@
 # Rust-only 4.0 performance gate
 
+Run `python3 tools/benchmark.py --help` for the current paired harness. It takes
+explicit baseline root/CLI/native-library paths, uses one compiler artifact for
+both CLIs, alternates paired calls, records all samples and SHA-256 identities,
+and exits nonzero when any warm median exceeds 1.05 times the baseline. The Python
+paths use their respective native bridge and Rust worker; fallback is an error.
+The old C11 and current Rust echo wrappers must return the same checked input.
+
+The tables below are historical evidence, not qualification of the current tree.
+
 The pre-migration snapshot below is machine-local evidence, not conformance.
 It was measured on 2026-09-24 from worktree HEAD
 `6aacbde2f67f2dd5adfa42da22943f33b0457732` with other local changes

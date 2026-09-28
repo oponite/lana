@@ -1,0 +1,5 @@
+// std/evaluation — pure, read-only walk-forward scoring.
+
+fn walk_forward(examples, trainer, options) {
+    return evaluation_walk_forward(examples, trainer, options);
+}

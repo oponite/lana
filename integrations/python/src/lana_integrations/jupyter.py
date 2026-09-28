@@ -14,7 +14,6 @@ from .bridge import BridgeRunner
 
 def _line_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="%%lana", add_help=False, exit_on_error=False)
-    parser.add_argument("--check", action="store_true")
     parser.add_argument("--input")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--memory-limit-mib", type=int)
@@ -66,11 +65,7 @@ def load_ipython_extension(shell: Any) -> None:
             try:
                 with open(descriptor, "w", encoding="utf-8", closefd=True) as stream:
                     stream.write(cell)
-                if arguments.check:
-                    envelope = runner.check(
-                        source_path, timeout_seconds=arguments.timeout
-                    )
-                elif arguments.input is not None:
+                if arguments.input is not None:
                     input_value = json.loads(
                         Path(arguments.input).read_text(encoding="utf-8")
                     )

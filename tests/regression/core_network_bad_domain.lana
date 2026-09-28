@@ -1,0 +1,5 @@
+import "std/core" as info;
+
+let root = joint correlated (r) with support: [[0, 0.5], [1, 0.5]];
+let wrong = info.identity_kernel([0, 2]);
+info.network(root, [{name: "a", parents: ["r"], kernel: wrong}]);

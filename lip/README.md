@@ -35,3 +35,9 @@ do not alter the contracts above.
 
 Copy [`TEMPLATE.md`](TEMPLATE.md). Every LIP carries: title, status, author,
 date, motivation, specification, rationale, compatibility, and test coverage.
+
+## Archived proposals
+
+Older proposals and finalized LIPs are retained in [archive/](archive/README.md).
+Archiving preserves their recorded status; it does not mark a deferred proposal
+as implemented or establish current conformance.

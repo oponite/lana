@@ -1,4 +1,5 @@
 [package]
+build = "../../compiler_build.rs"
 name = "lana-wasm"
 version.workspace = true
 edition.workspace = true
@@ -13,3 +14,6 @@ lana-bytecode = { workspace = true }
 lana-vm = { workspace = true }
 lana-runtime = { workspace = true }
 wasm-bindgen = "=0.2.100"
+
+[build-dependencies]
+lana-bytecode = { workspace = true }

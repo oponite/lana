@@ -206,3 +206,44 @@ A syntax feature SHOULD pass all five checks:
 4. **Safe** — omitted syntax cannot silently change important semantics.
 5. **Consistent** — the syntax follows patterns already established elsewhere
    in Lana.
+
+## Pending additive object grammar
+
+The canonical module-top-level declarations are:
+
+```text
+value Name [implements I, ...] { value_member* }
+class Name [copies Parent] [implements I, ...] { class_member* }
+interface Name { interface_method* }
+```
+
+An interface lists only `public fn name(self, typed_params...) -> Type
+[effects(effect_name, ...)];` promises. It has no fields, static methods,
+body, defaults, generic parameters, or inherited interfaces. A value
+field is `public|private name: Type;` with no default or `mutable`.
+A class field is `[replace] public|private [mutable] name: Type
+[= pure_expression];`. A member method is `[replace] public|private
+[static] fn name(parameters...) -> Type { body }`. An instance method
+starts its parameter list with `self`; a static method omits it.
+`init` is one class instance method, written `[replace]
+public|private fn init(self, typed_params...) { body }` without a
+result type. Other methods require typed non-`self` parameters and
+a result type, including `-> null` for no useful value.
+
+The modifier order above is the only accepted order. `replace` is legal
+only for a copied class member that exists in the parent blueprint.
+`copies` precedes `implements`. Declarations are forbidden inside a
+function, method, or other declaration. `value`, `class`,
+`interface`, `copies`, `implements`, `replace`, `public`,
+`private`, `mutable`, `static`, `new`, and `Self` are contextual:
+outside these grammatical positions, existing identifiers retain
+their meaning. The parser must report the expected modifier or member
+with a source span when a required visibility or result type is absent.
+
+Construction and calls have one canonical spelling:
+`Name(args...)` for an accessible value positional constructor,
+`new Name(args...)` for a class, `Name.static_method(args...)`
+for a static method, and `receiver.method(args...)` for an instance
+method. `snapshot(info)` is the explicit Information freeze operation.
+No implicit snapshot, resolution, sampling, parent conversion, or
+constructor argument-to-field assignment is introduced.

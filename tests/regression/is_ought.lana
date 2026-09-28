@@ -1,0 +1,186 @@
+import "std/core" as info;
+import "std/decision" as decision;
+
+// Study vocabulary, not a built-in interpretation of moral truth.
+fn valid_status(value) {
+    if (value == "required") { return true; }
+    if (value == "optional") { return true; }
+    return value == "forbidden";
+}
+
+fn valid_rule(rule) {
+    if (rule == "first") { return true; }
+    if (rule == "second") { return true; }
+    return rule == "forbid";
+}
+
+fn valid_scenario(scenario) {
+    if (scenario == "sharing") { return true; }
+    if (scenario == "promise") { return true; }
+    return scenario == "harm";
+}
+
+// Explicit normative controls. The Python oracle uses independent literal tables.
+fn verdict(scenario, a, b, rule) {
+    if (rule == "forbid") { return "forbidden"; }
+    if (scenario == "sharing") {
+        if (!b) {
+            if (rule == "first") { return "required"; }
+            if (a) { return "required"; }
+        }
+    }
+    if (scenario == "promise") {
+        if (rule == "first") {
+            if (a) {
+                if (!b) { return "required"; }
+            }
+        }
+    }
+    if (scenario == "harm") {
+        if (a) {
+            if (rule == "first") { return "required"; }
+            if (!b) { return "required"; }
+        }
+    }
+    return "optional";
+}
+
+fn report(value, input, assumptions) {
+    let facts = evidence({scenario: input.scenario, a: input.a, b: input.b,
+        agents: input.agents}, "stipulated_study_facts");
+    // These are declared annotations, not an automatic proof of all dependencies.
+    let annotated = evidence(value, "computed_study_result_not_moral_evidence");
+    if (array_length(assumptions) > 0) {
+        annotated = assume(annotated, "declared_study_rules_see_context");
+    }
+    let snapshot = inspect_information(value);
+    let context = decision.decision_context([], [], [derivation(facts).id],
+        [derivation(annotated).id], assumptions, 0, snapshot);
+    print(json_stringify({snapshot: snapshot, annotation_snapshot: inspect_information(annotated), facts: inspect_information(facts),
+        context: context, automatic_dependency_completeness: "not_certified"}));
+    if (input.resolve) {
+        print(json_stringify({resolved: resolve(value)}));
+    }
+    return null;
+}
+
+fn report_models(input) {
+    assert(array_length(input.tables) > 0, "empty admissible model set");
+    let world = 0;
+    if (input.a) { world = world + 2; }
+    if (input.b) { world = world + 1; }
+    let values = [];
+    let index = 0;
+    while (index < array_length(input.tables)) {
+        let row = input.tables[index];
+        assert(array_length(row) == 4, "model must cover four worlds");
+        let column = 0;
+        while (column < 4) {
+            assert(valid_status(row[column]), "invalid obligation status");
+            column = column + 1;
+        }
+        array_push(values, row[world]);
+        index = index + 1;
+    }
+    return report(possibility(values), input, input.model_assumptions);
+}
+
+fn report_joint(input) {
+    // The authored rows already encode the two sharing rules; they are inputs.
+    let relation = joint correlated (spare, rule, duty) with support: [
+        [false, 0, "required", 0.25], [false, 1, "optional", 0.25],
+        [true, 0, "required", 0.25], [true, 1, "required", 0.25]
+    ];
+    assert(input.scenario == "sharing", "joint domain is sharing");
+    assert(!input.b, "joint domain has Bob holding none");
+    let refined = condition(relation, {spare: input.a});
+    let projected = project(refined, "duty");
+    return report(projected, input, ["authored joint law encodes the sharing rules", "equal weights are supplied"]);
+}
+
+fn report_representation(input) {
+    let statement = claim(true, "Alice ought to share");
+    if (input.label == "Alice ought not share") {
+        statement = claim(true, "Alice ought not share");
+    }
+    if (input.label == "Alice has ninety cookies") {
+        statement = claim(true, "Alice has ninety cookies");
+    }
+    print(json_stringify({proposition: claim_proposition(statement),
+        supplied_value: claim_value(statement), claim: inspect_information(statement),
+        descriptive_uncertainty: inspect_information(possibility([1, 2])),
+        scope: "construction_not_validation"}));
+    return null;
+}
+
+fn run(mode, input) {
+    assert(valid_scenario(input.scenario), "unknown scenario");
+    assert(type_of(input.a) == "bool", "facts must be Boolean");
+    assert(type_of(input.b) == "bool", "facts must be Boolean");
+    assert(type_of(input.not_a) == "bool", "facts must be Boolean");
+    assert(input.a != input.not_a, "inconsistent facts");
+    if (mode == "models") { return report_models(input); }
+    if (mode == "joint") { return report_joint(input); }
+    if (mode == "representation") { return report_representation(input); }
+    assert(valid_rule(input.left), "unknown rule");
+    assert(valid_rule(input.right), "unknown rule");
+    let left = verdict(input.scenario, input.a, input.b, input.left);
+    let right = verdict(input.scenario, input.a, input.b, input.right);
+    let assumptions = [string_concat(input.scenario, ":", input.left), string_concat(input.scenario, ":", input.right)];
+
+    if (mode == "rule") {
+        return report(left, input, [string_concat(input.scenario, ":", input.left)]);
+    }
+    if (mode == "possibility") {
+        let values = [left, right];
+        if (input.add_forbid) { array_push(values, "forbidden"); array_push(assumptions, "explicit prohibition"); }
+        return report(possibility(values), input, assumptions);
+    }
+    if (mode == "paths") {
+        let selector = possibility([true, false]);
+        let result = "optional";
+        if (selector) { result = left; } else { result = right; }
+        if (left != right) {
+            // With distinct candidates, this is true exactly on their union.
+            let membership = (result == left) == (result != right);
+            assert(resolve(membership), "path result outside declared outcomes");
+        }
+        return report(result, input, assumptions);
+    }
+    let weighted_mode = mode == "distribution";
+    if (mode == "sample") { weighted_mode = true; }
+    if (mode == "sample_direct") { weighted_mode = true; }
+    if (weighted_mode) {
+        assert(type_of(input["weight"]) == "number", "weight must be numeric");
+        assert(input["weight"] > 0, "weight must be positive");
+        assert(input["weight"] < 1, "both rule weights must be positive");
+        // Distribution support must be distinct: combine equal outcomes explicitly.
+        let rows = [[left, input["weight"]], [right, 1 - input["weight"]]];
+        if (left == right) { rows = [[left, 1]]; }
+        let weighted = info.distribution(rows);
+        if (mode == "sample_direct") {
+            // Capability probe: distinguish compiler lowering from moral reasoning.
+            let picked_direct = sample(weighted);
+            print(json_stringify({selected: sample_value(picked_direct),
+                metadata: sample_metadata(picked_direct), scope: "sample_not_entailment"}));
+            return null;
+        }
+        if (mode == "sample") {
+            // Explicit refinement keeps both outcomes and selects Core sampling.
+            let picked = sample(condition(weighted, possibility([left, right])));
+            print(json_stringify({selected: sample_value(picked), metadata: sample_metadata(picked),
+                original: inspect_information(weighted), scope: "sample_not_entailment"}));
+            return null;
+        }
+        array_push(assumptions, "supplied probabilities, not moral authority");
+        return report(weighted, input, assumptions);
+    }
+    assert(false, "unknown study mode");
+    return null;
+}
+
+let arguments = args();
+assert(array_length(arguments) == 2, "usage: -- MODE JSON_INPUT");
+let decoded = json_parse(arguments[1]);
+assert(result_is_ok(decoded), "invalid JSON input");
+run(arguments[0], resolve(result_value(decoded)));

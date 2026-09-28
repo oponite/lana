@@ -1,0 +1,25 @@
+// std/rules — bounded search; predictions never authorize effects.
+
+fn learn(task, train, holdout, options) {
+    return rules_learn(task, train, holdout, options);
+}
+
+fn predict(rule, features) {
+    return rules_predict(rule, features);
+}
+
+fn save(store, task_id, expected_revision, report) {
+    return rules_save(store, task_id, expected_revision, report);
+}
+
+fn add_counterexample(store, task_id, expected_revision, example, new_holdout) {
+    return rules_add_counterexample(store, task_id, expected_revision, example, new_holdout);
+}
+
+fn inspect(store, task_id, revision) {
+    return rules_inspect(store, task_id, revision);
+}
+
+fn rollback(store, task_id, expected_revision, prior_version) {
+    return rules_rollback(store, task_id, expected_revision, prior_version);
+}

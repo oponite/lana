@@ -1,0 +1,5 @@
+import "std/core" as info;
+
+let source = info.forget_weights(info.distribution([[1, 0.5], [2, 0.5]]));
+let invalid = info.assign_weights(source, [[1, 0.5], [1, 0.5]]);
+print(invalid);

@@ -1,0 +1,17 @@
+import "std/core" as info;
+
+let root = joint correlated (r) with support: [[0, 0.5], [1, 0.5]];
+let same = info.identity_kernel([0, 1]);
+let graph = info.network(root, [
+    {name: "y", parents: ["x"], kernel: same},
+    {name: "x", parents: ["r"], kernel: same}
+]);
+assert(type_of(graph) == "network", "network type");
+let marginal = info.infer(graph, ["y"], {});
+assert(info.entropy(marginal, ["y"]) == 1, "unconditional network law");
+let conditioned = info.infer(graph, ["y"], {r: 0});
+assert(info.entropy(conditioned, ["y"]) == 0, "conditioned network law");
+let fixed = info.infer(graph, ["r"], {r: 0});
+assert(info.entropy(fixed, ["r"]) == 0, "query included in evidence");
+
+print("CORE_NETWORK_PASS");

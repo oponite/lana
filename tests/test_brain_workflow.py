@@ -26,6 +26,11 @@ with tempfile.TemporaryDirectory() as directory:
     assert brain.read_bytes() == before
     run("brain", "train", "brain.lbrn", "2", "0.1", "0", "1")
     logits = run("brain", "evaluate", "brain.lbrn", "0", "1")["logits"]
+    blocked = work / "blocked.lbrn"
+    blocked.mkdir()
+    failed = run("brain", "save", "brain.lbrn", "blocked.lbrn", ok=False)
+    assert json.loads(failed.stderr.splitlines()[-1])["error"] == "LANA_ERR_IO", failed.stderr
+    assert blocked.is_dir()
     tokenizer = work / "tokenizer.json"
     config = json.loads((root / "examples/brain/tokenizer.json").read_text())
     unusual = 'a"b\\c\n猫'
@@ -43,6 +48,22 @@ with tempfile.TemporaryDirectory() as directory:
     config["normalizer"] = {"type": "Lowercase"}
     tokenizer.write_text(json.dumps(config))
     run("brain", "chat", "restored.lbrn", str(tokenizer), "hello", ok=False)
+    assert (work / "restored.lbrn").read_bytes() == before
+    assert run("brain", "remember", "restored.lbrn", "dog_name", "Max")["fact_revision"] == 1
+    assert run("brain", "recall", "restored.lbrn", "dog_name")["value"] == "Max"
+    remembered = (work / "restored.lbrn").read_bytes()
+    assert not run("brain", "remember", "restored.lbrn", "dog_name", "Max")["changed"]
+    run("brain", "remember", "restored.lbrn", "dog_name", "Sam", ok=False)
+    assert (work / "restored.lbrn").read_bytes() == remembered
+    answer = run("brain", "chat", "restored.lbrn", str(tokenizer), "What is my dog's name?", "--fact", "dog_name")
+    assert (answer["response"], answer["resolution"], answer["assumptions"], answer["unsupported"]) == ("Max", "exact", [], False)
+    assert run("brain", "recall", "restored.lbrn", "dog_name")["value"] == "Max"
+    assert run("brain", "inspect", "restored.lbrn")["fact_revision"] == 1
+    config["normalizer"] = None
+    tokenizer.write_text(json.dumps(config))
+    assert run("brain", "chat", "restored.lbrn", str(tokenizer), "hello")["memory_revision"] == 4
+    before = (work / "restored.lbrn").read_bytes()
+    run("brain", "chat", "restored.lbrn", str(tokenizer), "Unknown?", "--fact", "unknown", ok=False)
     assert (work / "restored.lbrn").read_bytes() == before
     assert not list(work.glob("*.tmp"))
 print("BRAIN_WORKFLOW_PASS")

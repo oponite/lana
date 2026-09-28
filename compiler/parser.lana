@@ -3,22 +3,22 @@ import "./syntax.lana" as syntax;
 
 fn parser_new(source) {
     let tokens = lexer.lex(source);
-    return [tokens, 0, tokens[0]];
+    return [tokens, 0, tokens[0], false, [], array_length(tokens)];
 }
 fn current(parser) { return parser[2]; }
-fn current_text(parser) { return current(parser)[1]; }
-fn current_line(parser) { return current(parser)[2]; }
-fn current_column(parser) { return current(parser)[3]; }
+fn current_text(parser) { return parser[2][1]; }
+fn current_line(parser) { return parser[2][2]; }
+fn current_column(parser) { return parser[2][3]; }
 fn matches(parser, text) {
-    let value = current(parser);
+    let value = parser[2];
     if (value[0] == "string") { return false; }
     return value[1] == text;
 }
 
 fn take(parser) {
-    let value = current(parser);
-    parser[1] = parser[1] + 1;
-    if (parser[1] < array_length(parser[0])) { parser[2] = parser[0][parser[1]]; }
+    let value = parser[2];
+    let next = parser[1] + 1; parser[1] = next;
+    if (next < parser[5]) { parser[2] = parser[0][next]; }
     return value;
 }
 
@@ -233,16 +233,16 @@ fn parse_keyword_primary(parser, text, line, column) {
 fn parse_pattern(parser) {
     if (matches(parser, "_")) { take(parser); return syntax.pattern_wildcard(); }
     if (matches(parser, "unknown")) { take(parser); return syntax.pattern_unknown(); }
-    let name = take(parser)[1]; let bindings = array_new(0);
+    let name = take(parser)[1]; let bindings = array_new(0); let positions = [];
     if (matches(parser, "(")) {
         take(parser);
         if (!matches(parser, ")")) {
-            array_push(bindings, take(parser)[1]);
-            while (matches(parser, ",")) { take(parser); array_push(bindings, take(parser)[1]); }
+            let binding = take(parser); array_push(bindings, binding[1]); if (parser[3]) { array_push(positions, [binding[2], binding[3]]); }
+            while (matches(parser, ",")) { take(parser); let binding = take(parser); array_push(bindings, binding[1]); if (parser[3]) { array_push(positions, [binding[2], binding[3]]); } }
         }
         expect_token(parser, ")");
     }
-    return syntax.pattern_variant(name, bindings);
+    let pattern = syntax.pattern_variant(name, bindings); if (parser[3]) { array_push(pattern, positions); } return pattern;
 }
 
 fn parse_match(parser, line, column) {
@@ -283,6 +283,9 @@ fn parse_type(parser) {
     }
     if (text == "Shape") { return ["shape"]; }
     if (text == "Dynamic") { return ["dynamic"]; }
+    while (matches(parser, ".")) { take(parser); text = string_concat(text, ".", take(parser)[1]); }
+    if (parser[3]) { if (text != "Self") { array_push(parser[4], [text, token[2], token[3], text]); } }
+    if (text == "Information") { expect_token(parser, "<"); text = string_concat(text, "<", object_type_name(parser), ">"); expect_token(parser, ">"); }
     return ["named", text];
 }
 
@@ -291,7 +294,7 @@ fn parse_variant(parser) {
     if (matches(parser, "(")) {
         take(parser);
         if (!matches(parser, ")")) {
-            let field_name = take(parser)[1]; let field_type = null;
+            let field_token = take(parser); let field_name = field_token[1]; let field_type = null;
             if (matches(parser, ":")) { take(parser); field_type = parse_type(parser); }
             array_push(fields, syntax.variant_field(field_name, field_type));
             while (matches(parser, ",")) {
@@ -325,9 +328,9 @@ fn parse_basic_primary(parser, value) {
         if (matches(parser, "]")) { expect_token(parser, "]"); return syntax.array_node(array_new(0), line, column); }
         let first = parse_expression(parser);
         if (matches(parser, "for")) {
-            take(parser); let binding = take(parser)[1]; expect_token(parser, "in"); let iterable = parse_expression(parser);
+            take(parser); let binding_token = take(parser); let binding = binding_token[1]; expect_token(parser, "in"); let iterable = parse_expression(parser);
             let filter = null; if (matches(parser, "if")) { take(parser); filter = parse_expression(parser); }
-            expect_token(parser, "]"); return syntax.comprehension_node("list", first, null, binding, null, iterable, filter, line, column);
+            expect_token(parser, "]"); return syntax.comprehension_node("list", first, null, binding, null, iterable, filter, binding_token[2], binding_token[3]);
         }
         let items = array_new(0);
         array_push(items, first);
@@ -338,17 +341,17 @@ fn parse_basic_primary(parser, value) {
         if (matches(parser, "}")) { expect_token(parser, "}"); return syntax.map_node(array_new(0), line, column); }
         let first = parse_expression(parser);
         if (matches(parser, "for")) {
-            take(parser); let binding = take(parser)[1]; expect_token(parser, "in"); let iterable = parse_expression(parser);
+            take(parser); let binding_token = take(parser); let binding = binding_token[1]; expect_token(parser, "in"); let iterable = parse_expression(parser);
             let filter = null; if (matches(parser, "if")) { take(parser); filter = parse_expression(parser); }
-            expect_token(parser, "}"); return syntax.comprehension_node("set", first, null, binding, null, iterable, filter, line, column);
+            expect_token(parser, "}"); return syntax.comprehension_node("set", first, null, binding, null, iterable, filter, binding_token[2], binding_token[3]);
         }
         if (matches(parser, ":")) {
             take(parser); let map_value = parse_expression(parser);
             if (matches(parser, "for")) {
-                take(parser); let key_binding = take(parser)[1]; expect_token(parser, ","); let value_binding = take(parser)[1];
+                take(parser); let binding_token = take(parser); let key_binding = binding_token[1]; expect_token(parser, ","); let value_binding = take(parser)[1];
                 expect_token(parser, "in"); let iterable = parse_expression(parser);
                 let filter = null; if (matches(parser, "if")) { take(parser); filter = parse_expression(parser); }
-                expect_token(parser, "}"); return syntax.comprehension_node("map", first, map_value, key_binding, value_binding, iterable, filter, line, column);
+                expect_token(parser, "}"); return syntax.comprehension_node("map", first, map_value, key_binding, value_binding, iterable, filter, binding_token[2], binding_token[3]);
             }
             let entries = array_new(0);
             // A string-literal key parses to a literal node [20, "string", value, ...];
@@ -388,6 +391,10 @@ fn parse_index_positions(parser) {
 
 fn parse_primary(parser) {
     let value = take(parser); let text = value[1]; let line = value[2]; let column = value[3]; let node = null;
+    if (text == "new") { if (current(parser)[0] == "identifier") {
+        let name_token = current(parser); let name = object_type_name(parser); node = object_new_node(name, parse_arguments(parser), name_token[2], name_token[3]);
+    } }
+    if (node == null) {
     if (value[0] == "number") { node = syntax.literal_node("number", text, line, column); }
     else { if (value[0] == "string") { node = syntax.literal_node("string", text, line, column); }
     else { if (text == "true") { node = syntax.literal_node("bool", true, line, column); }
@@ -398,17 +405,18 @@ fn parse_primary(parser) {
     else { node = parse_keyword_primary(parser, text, line, column); if (node == null) { node = parse_basic_primary(parser, value); } }
     } } }
     } } }
+    }
     let postfix = true;
     while (postfix) {
         if (matches(parser, "[")) {
             take(parser); let positions = parse_index_positions(parser); expect_token(parser, "]"); node = syntax.index_node(node, positions, line, column);
         } else {
             if (matches(parser, ".")) {
-                take(parser); let field = take(parser)[1];
+                take(parser); let field_token = take(parser); let field = field_token[1];
                 if (matches(parser, "(")) {
-                    assert(node[0] == 21, "invalid qualified function call");
-                    node = syntax.call_node(string_concat(node[1], ".", field), parse_arguments(parser), line, column);
-                } else { node = syntax.field_node(node, field, line, column); }
+                    if (node[0] == 21) { node = syntax.call_node(string_concat(node[1], ".", field), parse_arguments(parser), line, column); }
+                    else { node = [46, node, field, parse_arguments(parser), field_token[2], field_token[3]]; }
+                } else { node = syntax.field_node(node, field, field_token[2], field_token[3]); }
             } else { postfix = false; }
         }
     }
@@ -468,13 +476,19 @@ fn parse_function(parser) {
         while (matches(parser, ",")) { take(parser); array_push(type_params, take(parser)[1]); }
         expect_token(parser, ">");
     }
-    let parameters = array_new(0);
+    let parameters = array_new(0); let parameter_types = array_new(0); let typed_parameters = false; let positions = map_new();
     expect_token(parser, "(");
-    if (!matches(parser, ")")) {
-        array_push(parameters, take(parser)[1]);
-        while (matches(parser, ",")) { take(parser); array_push(parameters, take(parser)[1]); }
+    while (!matches(parser, ")")) {
+        let parameter = take(parser); array_push(parameters, parameter[1]); if (parser[3]) { positions[parameter[1]] = [parameter[2], parameter[3]]; } let annotation = "Dynamic";
+        if (matches(parser, ":")) { take(parser); annotation = object_type_name(parser); typed_parameters = true; }
+        array_push(parameter_types, annotation);
+        if (!matches(parser, ")")) { expect_token(parser, ","); }
     }
-    expect_token(parser, ")"); return syntax.function_node(name, type_params, parameters, parse_block(parser), name_token[2], name_token[3], is_async);
+    expect_token(parser, ")"); let result_type = null;
+    if (matches(parser, "->")) { take(parser); result_type = object_type_name(parser); }
+    let node = syntax.function_node(name, type_params, parameters, parse_block(parser), name_token[2], name_token[3], is_async);
+    if (result_type != null) { typed_parameters = true; }
+    if (typed_parameters) { array_push(node, parameter_types); array_push(node, result_type); } if (parser[3]) { array_push(node, {"parameter_positions":positions}); } return node;
 }
 
 fn parse_state_statement(parser, line, column) {
@@ -510,31 +524,123 @@ fn parse_statement(parser) {
     if (matches(parser, "let")) { take(parser); let name_token = take(parser); let name = name_token[1]; let annotation = null; if (matches(parser, ":")) { take(parser); annotation = parse_type(parser); } expect_token(parser, "="); let value = parse_expression(parser); expect_token(parser, ";"); return syntax.let_node(name, annotation, value, name_token[2], name_token[3]); }
     if (matches(parser, "if")) { return parse_if_statement(parser, line, column); }
     if (matches(parser, "while")) { take(parser); expect_token(parser, "("); let predicate = parse_expression(parser); expect_token(parser, ")"); return syntax.while_node(predicate, parse_block(parser), line, column); }
-    if (matches(parser, "for")) { take(parser); let binding = take(parser)[1]; expect_token(parser, "in"); let iterable = parse_expression(parser); return syntax.for_node(binding, iterable, parse_block(parser), line, column); }
+    if (matches(parser, "for")) { take(parser); let binding_token = take(parser); let binding = binding_token[1]; expect_token(parser, "in"); let iterable = parse_expression(parser); return syntax.for_node(binding, iterable, parse_block(parser), binding_token[2], binding_token[3]); }
     if (matches(parser, "transform")) { return parse_transform_statement(parser, line, column); }
     if (matches(parser, "taskgroup")) { take(parser); return syntax.taskgroup_node(parse_block(parser), line, column); }
     if (matches(parser, "cancel")) { take(parser); expect_token(parser, "("); let task = parse_expression(parser); expect_token(parser, ")"); expect_token(parser, ";"); return syntax.cancel_node(task, line, column); }
     if (matches(parser, "yield")) { take(parser); let value = parse_expression(parser); expect_token(parser, ";"); return syntax.yield_node(value, line, column); }
-    if (matches(parser, "return")) { take(parser); let value = parse_expression(parser); expect_token(parser, ";"); return syntax.return_node(value, line, column); }
+    if (matches(parser, "return")) { take(parser); let value = syntax.literal_node("null", null, line, column); if (!matches(parser, ";")) { value = parse_expression(parser); } expect_token(parser, ";"); return syntax.return_node(value, line, column); }
     if (matches(parser, "print")) { take(parser); expect_token(parser, "("); let value = parse_expression(parser); expect_token(parser, ")"); expect_token(parser, ";"); return syntax.print_node(value, line, column); }
     if (matches(parser, "match")) { take(parser); return syntax.expression_node(parse_match(parser, line, column), line, column); }
+    if (object_declaration_start(parser)) { parse_error(current(parser), "object declarations must be at module top level"); }
     let target = parse_expression(parser);
     if (matches(parser, "=")) { take(parser); let value = parse_expression(parser); expect_token(parser, ";"); return syntax.assign_node(target, value, line, column); }
     expect_token(parser, ";"); return syntax.expression_node(target, line, column);
 }
 
-fn parse(source) {
-    let parser = parser_new(source); let functions = array_new(0); let statements = array_new(0); let imports = array_new(0); let types = array_new(0);
+fn parse(source) { return parse_for_symbols(source, false); }
+fn parse_for_symbols(source, tracking) {
+    let parser = parser_new(source); parser[3] = tracking; let functions = array_new(0); let statements = array_new(0); let imports = array_new(0); let types = array_new(0); let objects = array_new(0);
     while (matches(parser, "import")) {
         let start = take(parser); let path = take(parser); assert(path[0] == "string", "import path must be a quoted string");
         expect_token(parser, "as"); let alias = take(parser)[1]; expect_token(parser, ";"); array_push(imports, [path[1], alias, start[2]]);
     }
     while (!matches(parser, "<eof>")) {
         assert(!matches(parser, "import"), "imports must precede functions and statements");
-        if (matches(parser, "fn")) { array_push(functions, parse_function(parser)); }
+        if (object_declaration_start(parser)) { array_push(objects, parse_object_declaration(parser)); }
+        else { if (matches(parser, "fn")) { array_push(functions, parse_function(parser)); }
         else { if (matches(parser, "async")) { array_push(functions, parse_function(parser)); }
         else { if (matches(parser, "type")) { array_push(types, parse_type_declaration(parser, current_line(parser), current_column(parser))); }
-        else { array_push(statements, parse_statement(parser)); } } }
+        else { array_push(statements, parse_statement(parser)); } } } }
     }
-    return syntax.program(functions, statements, imports, types);
+    let program = syntax.program(functions, statements, imports, types); array_push(program, objects); if (tracking) { array_push(program, parser[4]); } return program;
 }
+
+// Object declarations retain source locations and unresolved bodies until type checking.
+fn object_type_name(parser) {
+    let token = take(parser);
+    if (token[0] != "identifier") { if (token[1] != "null") { parse_error(token, "expected a type"); } }
+    let name = token[1];
+    while (matches(parser, ".")) { take(parser); name = string_concat(name, ".", take(parser)[1]); }
+    if (parser[3]) { if (name != "Self") { array_push(parser[4], [name, token[2], token[3], name]); } }
+    if (matches(parser, "<")) {
+        if (name != "Information") { parse_error(token, "generic object types and methods are unsupported"); }
+        take(parser); name = string_concat(name, "<", object_type_name(parser), ">"); expect_token(parser, ">");
+    }
+    return name;
+}
+
+fn object_declaration_start(parser) {
+    let word = current_text(parser);
+    if (word != "value") { if (word != "class") { if (word != "interface") { return false; } } }
+    return parser[0][parser[1] + 1][0] == "identifier";
+}
+
+fn parse_object_declaration(parser) {
+    let start = take(parser); let name = take(parser);
+    let kind = start[1]; let parent = null; let interfaces = array_new(0);
+    if (matches(parser, "copies")) {
+        if (kind != "class") { parse_error(current(parser), "only a class can copy a blueprint"); }
+        take(parser); parent = object_type_name(parser);
+    }
+    if (matches(parser, "implements")) {
+        if (kind == "interface") { parse_error(current(parser), "interfaces cannot inherit"); }
+        take(parser); array_push(interfaces, object_type_name(parser));
+        while (matches(parser, ",")) { take(parser); array_push(interfaces, object_type_name(parser)); }
+    }
+    expect_token(parser, "{"); let fields = array_new(0); let methods = array_new(0);
+    while (!matches(parser, "}")) {
+        let token = current(parser); let replacement = false;
+        if (matches(parser, "replace")) { take(parser); replacement = true; }
+        let visibility = take(parser)[1];
+        if (visibility != "public") { if (visibility != "private") { parse_error(token, "member requires public or private"); } }
+        let mutable = false; let static_method = false;
+        if (matches(parser, "mutable")) { take(parser); mutable = true; }
+        if (matches(parser, "static")) { take(parser); static_method = true; }
+        if (matches(parser, "fn")) {
+            if (mutable) { parse_error(token, "mutable applies only to class fields"); }
+            take(parser); let member_token = take(parser); let member_name = member_token[1]; expect_token(parser, "(");
+            let parameters = array_new(0); let parameter_types = array_new(0); let positions = map_new();
+            if (!static_method) { let self_token = current(parser); expect_token(parser, "self"); array_push(parameters, "self"); if (parser[3]) { positions["self"] = [self_token[2], self_token[3]]; } if (!matches(parser, ")")) { expect_token(parser, ","); } }
+            while (!matches(parser, ")")) {
+                let parameter = take(parser);
+                if (parameter[1] == "self") { parse_error(parameter, "self is only the first instance parameter"); }
+                array_push(parameters, parameter[1]); if (parser[3]) { positions[parameter[1]] = [parameter[2], parameter[3]]; } expect_token(parser, ":"); array_push(parameter_types, object_type_name(parser));
+                if (!matches(parser, ")")) { expect_token(parser, ","); }
+            }
+            expect_token(parser, ")"); let result_type = null; let init = member_name == "init";
+            if (init) { if (kind != "class") { parse_error(token, "only classes declare init"); } if (static_method) { parse_error(token, "init cannot be static"); } }
+            else { expect_token(parser, "->"); result_type = object_type_name(parser); }
+            let permissions = array_new(0); let body = array_new(0);
+            if (kind == "interface") {
+                if (visibility != "public") { parse_error(token, "interface methods must be public"); }
+                if (static_method) { parse_error(token, "interface methods cannot be static"); }
+                if (matches(parser, "effects")) {
+                    take(parser); expect_token(parser, "(");
+                    while (!matches(parser, ")")) { array_push(permissions, take(parser)[1]); if (!matches(parser, ")")) { expect_token(parser, ","); } }
+                    expect_token(parser, ")");
+                }
+                expect_token(parser, ";");
+            } else { body = parse_block(parser); }
+            array_push(methods, {"name":member_name,"visibility":visibility,"static":static_method,"parameter_types":parameter_types,
+                "result_type":result_type,"is_init":init,"parameter_positions":positions,"parameters":parameters,"body":body,"effects":permissions,
+                "replace":replacement,"line":member_token[2],"column":member_token[3]});
+        } else {
+            if (kind == "interface") { parse_error(token, "interfaces contain method promises only"); }
+            if (static_method) { parse_error(token, "static applies only to methods"); }
+            if (mutable) { if (kind != "class") { parse_error(token, "value fields cannot be mutable"); } }
+            let field_token = take(parser); let field_name = field_token[1]; expect_token(parser, ":"); let field_type = object_type_name(parser); let default = null;
+            if (matches(parser, "=")) { take(parser); if (kind != "class") { parse_error(token, "value fields cannot have defaults"); } default = parse_expression(parser); }
+            expect_token(parser, ";");
+            array_push(fields, {"name":field_name,"type":field_type,"visibility":visibility,"mutable":mutable,
+                "default":default,"replace":replacement,"line":field_token[2],"column":field_token[3]});
+        }
+    }
+    expect_token(parser, "}");
+    return {"name":name[1],"kind":kind,"copies":parent,"implements":interfaces,"fields":fields,"methods":methods,"line":name[2],"column":name[3]};
+}
+
+fn object_new_node(name, arguments, line, column) { return [47, name, arguments, line, column]; }
+
+// Preserve the lexer source spans for compiler tooling.
+fn source_tokens(source) { return lexer.lex(source); }
