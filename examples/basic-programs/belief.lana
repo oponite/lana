@@ -1,0 +1,10 @@
+// Combine belief and evidence, invert, measure probability
+
+state belief = state(p: 0.50, d_re: 0.30, d_im: 0.10);
+state evidence = state(p: 0.90, d: 0.65);
+
+let combined = append(belief, evidence);
+transform combined with invert();
+
+let result = measure combined as probability;
+print(result);

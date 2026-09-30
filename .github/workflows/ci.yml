@@ -40,9 +40,10 @@ jobs:
       - name: Test Python bridge and evidence contracts
         run: |
           python3 -m venv "$RUNNER_TEMP/lana-integrations-venv"
-          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test,mcp,jupyter]' tokenizers safetensors numpy
+          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test,mcp,jupyter]'
+          export LANA_EXECUTABLE="$PWD/target/lana/bin/lana"
+          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -c 'import mcp, IPython'
           "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pytest -q integrations/python/tests
-          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m unittest discover -s tools/lana-hf/tests -v
 
   rust:
     name: Rust tests

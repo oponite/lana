@@ -1,9 +1,6 @@
-//! SHA-256, mirroring `runtime/c/sha256.c` and `runtime/include/sha256.h`.
-//!
-//! The digest bytes are identical to the C11 reference so the JSON provenance
-//! text identity (LIP-023 §4) matches byte-for-byte between the C and Rust VMs.
+//! SHA-256 for the VM and runtime.
 
-/// The digest size in bytes, matching `LANA_SHA256_DIGEST_SIZE`.
+/// The digest size in bytes.
 pub const SHA256_DIGEST_SIZE: usize = 32;
 
 const ROUND_CONSTANTS: [u32; 64] = [
@@ -22,17 +19,84 @@ const ROUND_CONSTANTS: [u32; 64] = [
 fn rotate_right(value: u32, count: u32) -> u32 {
     (value >> count) | (value << (32 - count))
 }
-/// One-shot SHA-256, mirroring `lana_sha256`.
-pub fn sha256(data: &[u8]) -> [u8; SHA256_DIGEST_SIZE] {
-    let mut state: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let mut length: u64 = 0;
-    let mut block = [0u8; 64];
-    let mut block_length = 0usize;
 
-    let transform = |state: &mut [u32; 8], block: &[u8; 64]| {
+/// A streaming SHA-256 context.
+#[derive(Clone)]
+pub struct Sha256 {
+    state: [u32; 8],
+    length: u64,
+    block: [u8; 64],
+    block_length: usize,
+}
+
+impl Default for Sha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sha256 {
+    /// Initialize a context.
+    pub fn new() -> Self {
+        Self {
+            state: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
+                0x1f83d9ab, 0x5be0cd19,
+            ],
+            length: 0,
+            block: [0u8; 64],
+            block_length: 0,
+        }
+    }
+
+    /// Feed bytes into the digest.
+    pub fn update(&mut self, mut data: &[u8]) {
+        while !data.is_empty() {
+            let available = 64 - self.block_length;
+            let copied = data.len().min(available);
+            self.block[self.block_length..self.block_length + copied]
+                .copy_from_slice(&data[..copied]);
+            self.block_length += copied;
+            self.length += copied as u64;
+            data = &data[copied..];
+            if self.block_length == 64 {
+                let block = self.block;
+                self.transform(&block);
+                self.block_length = 0;
+            }
+        }
+    }
+
+    /// Finalize and write the 32-byte digest to the output buffer.
+    pub fn finalize(&mut self, out: &mut [u8; SHA256_DIGEST_SIZE]) {
+        let bits = self.length * 8;
+        self.block[self.block_length] = 0x80;
+        self.block_length += 1;
+        if self.block_length > 56 {
+            for byte in &mut self.block[self.block_length..] {
+                *byte = 0;
+            }
+            let block = self.block;
+            self.transform(&block);
+            self.block_length = 0;
+        }
+        for byte in &mut self.block[self.block_length..56] {
+            *byte = 0;
+        }
+        for index in 0..8 {
+            self.block[63 - index] = (bits >> (index * 8)) as u8;
+        }
+        let block = self.block;
+        self.transform(&block);
+        for index in 0..8 {
+            out[index * 4] = (self.state[index] >> 24) as u8;
+            out[index * 4 + 1] = (self.state[index] >> 16) as u8;
+            out[index * 4 + 2] = (self.state[index] >> 8) as u8;
+            out[index * 4 + 3] = self.state[index] as u8;
+        }
+    }
+
+    fn transform(&mut self, block: &[u8; 64]) {
         let mut words = [0u32; 64];
         for index in 0..16 {
             let offset = index * 4;
@@ -53,14 +117,14 @@ pub fn sha256(data: &[u8]) -> [u8; SHA256_DIGEST_SIZE] {
                 .wrapping_add(words[index - 7])
                 .wrapping_add(s1);
         }
-        let mut a = state[0];
-        let mut b = state[1];
-        let mut c = state[2];
-        let mut d = state[3];
-        let mut e = state[4];
-        let mut f = state[5];
-        let mut g = state[6];
-        let mut h = state[7];
+        let mut a = self.state[0];
+        let mut b = self.state[1];
+        let mut c = self.state[2];
+        let mut d = self.state[3];
+        let mut e = self.state[4];
+        let mut f = self.state[5];
+        let mut g = self.state[6];
+        let mut h = self.state[7];
         for index in 0..64 {
             let s1 = rotate_right(e, 6) ^ rotate_right(e, 11) ^ rotate_right(e, 25);
             let choose = (e & f) ^ (!e & g);
@@ -81,60 +145,27 @@ pub fn sha256(data: &[u8]) -> [u8; SHA256_DIGEST_SIZE] {
             b = a;
             a = temporary1.wrapping_add(temporary2);
         }
-        state[0] = state[0].wrapping_add(a);
-        state[1] = state[1].wrapping_add(b);
-        state[2] = state[2].wrapping_add(c);
-        state[3] = state[3].wrapping_add(d);
-        state[4] = state[4].wrapping_add(e);
-        state[5] = state[5].wrapping_add(f);
-        state[6] = state[6].wrapping_add(g);
-        state[7] = state[7].wrapping_add(h);
-    };
+        self.state[0] = self.state[0].wrapping_add(a);
+        self.state[1] = self.state[1].wrapping_add(b);
+        self.state[2] = self.state[2].wrapping_add(c);
+        self.state[3] = self.state[3].wrapping_add(d);
+        self.state[4] = self.state[4].wrapping_add(e);
+        self.state[5] = self.state[5].wrapping_add(f);
+        self.state[6] = self.state[6].wrapping_add(g);
+        self.state[7] = self.state[7].wrapping_add(h);
+    }
+}
 
-    let mut data = data;
-    while !data.is_empty() {
-        let available = 64 - block_length;
-        let copied = data.len().min(available);
-        block[block_length..block_length + copied].copy_from_slice(&data[..copied]);
-        block_length += copied;
-        length += copied as u64;
-        data = &data[copied..];
-        if block_length == 64 {
-            transform(&mut state, &block);
-            block_length = 0;
-        }
-    }
-
-    let bits = length * 8;
-    block[block_length] = 0x80;
-    block_length += 1;
-    if block_length > 56 {
-        for byte in &mut block[block_length..] {
-            *byte = 0;
-        }
-        transform(&mut state, &block);
-        block_length = 0;
-    }
-    for byte in &mut block[block_length..56] {
-        *byte = 0;
-    }
-    for index in 0..8 {
-        block[63 - index] = (bits >> (index * 8)) as u8;
-    }
-    transform(&mut state, &block);
-
+/// Hash a complete byte slice.
+pub fn sha256(data: &[u8]) -> [u8; SHA256_DIGEST_SIZE] {
+    let mut context = Sha256::new();
+    context.update(data);
     let mut out = [0u8; SHA256_DIGEST_SIZE];
-    for index in 0..8 {
-        out[index * 4] = (state[index] >> 24) as u8;
-        out[index * 4 + 1] = (state[index] >> 16) as u8;
-        out[index * 4 + 2] = (state[index] >> 8) as u8;
-        out[index * 4 + 3] = state[index] as u8;
-    }
+    context.finalize(&mut out);
     out
 }
 
-/// Lowercase hex encoding of a digest, matching `hex_digest` in
-/// `runtime/c/policy.c`.
+/// Lowercase hex encoding of a digest.
 pub fn hex_digest(digest: &[u8; SHA256_DIGEST_SIZE]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(SHA256_DIGEST_SIZE * 2);
@@ -153,19 +184,35 @@ mod tests {
     fn empty_string_matches_fips_vector() {
         // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
         let digest = sha256(b"");
-        assert_eq!(
-            hex_digest(&digest),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
+        let expected = [
+            0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+            0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+            0x78, 0x52, 0xb8, 0x55,
+        ];
+        assert_eq!(digest, expected);
     }
 
     #[test]
     fn abc_matches_fips_vector() {
         // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
         let digest = sha256(b"abc");
-        assert_eq!(
-            hex_digest(&digest),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
+        let expected = [
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad,
+        ];
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn streaming_matches_one_shot() {
+        let data = b"the quick brown fox jumps over the lazy dog";
+        let mut context = Sha256::new();
+        for chunk in data.chunks(3) {
+            context.update(chunk);
+        }
+        let mut out = [0u8; 32];
+        context.finalize(&mut out);
+        assert_eq!(out, sha256(data));
     }
 }

@@ -40,12 +40,9 @@ def test_unavailable_when_no_runtime(tmp_path: Path) -> None:
     assert result.error["code"] == "LANA_UNAVAILABLE"
 
 
-def test_rust_worker_repeated_calls(tmp_path: Path) -> None:
+def test_rust_worker_repeated_calls(tmp_path: Path, built_lana: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = Path(__file__).resolve().parents[3]
-    executable = next((path for path in (root / "target/lana/bin/lana", root / "target/release/lana")
-                       if path.is_file() and "Lana 4.0" in subprocess.check_output([path, "version"], text=True)), None)
-    if executable is None:
-        pytest.skip("requires the Rust-only build")
+    executable = built_lana
     program = root / "integrations" / "lana" / "echo_bridge.lana"
     bytecode = tmp_path / "echo.labc"
     subprocess.run([executable, "compile", program, "-o", bytecode], check=True)
@@ -60,6 +57,8 @@ def test_rust_worker_repeated_calls(tmp_path: Path) -> None:
                 assert result.status == "ok", result.error
                 assert result.value == value
                 assert result.backend == "worker"
+        monkeypatch.chdir(tmp_path)
+        assert lana.run_labc(Path("echo.labc"), {"relative": True}).value == {"relative": True}
         bad = tmp_path / "bad.labc"
         bad.write_bytes(b"bad bytecode")
         failed = lana.run_labc(bad, {})

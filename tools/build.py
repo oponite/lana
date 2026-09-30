@@ -58,7 +58,20 @@ def install_files(executable, compiler, prefix, stdlib=ROOT / "stdlib", license_
             staged.replace(prefix / "bin" / name)
         finally:
             staged.unlink(missing_ok=True)
-    shutil.copytree(stdlib, prefix / "share/lana/stdlib", dirs_exist_ok=True)
+    stdlib_dir = prefix / "share/lana/stdlib"
+    stdlib_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=stdlib_dir.parent) as staged_dir:
+        staged = Path(staged_dir) / "stdlib"
+        shutil.copytree(stdlib, staged)
+        backup = Path(staged_dir) / "previous"
+        if stdlib_dir.exists():
+            stdlib_dir.replace(backup)
+        try:
+            staged.replace(stdlib_dir)
+        except OSError:
+            if backup.exists():
+                backup.replace(stdlib_dir)
+            raise
     (prefix / "share/doc/lana").mkdir(parents=True, exist_ok=True)
     shutil.copy2(license_file, prefix / "share/doc/lana/LICENSE")
     return prefix
@@ -84,7 +97,7 @@ def universal(output):
     version = (ROOT / "VERSION").read_text().strip()
     with tempfile.TemporaryDirectory(prefix="lana-universal-check-") as work:
         example = Path(work) / "belief.lana"
-        shutil.copy2(ROOT / "examples/belief.lana", example)
+        shutil.copy2(ROOT / "examples/basic-programs/belief.lana", example)
         env = dict(os.environ)
         for key in ["LANA_COMPILER_LABC", "LANA_STDLIB_DIR"]:
             env.pop(key, None)

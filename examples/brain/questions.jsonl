@@ -1,4 +1,0 @@
-{"id":"name","question":"What is your name?","expected_resolution":"exact","expected_answer":"Lana","expected_evidence_ids":["fact:name"],"expected_reason":null}
-{"id":"weather","question":"Was it sunny?","expected_resolution":"exact","expected_answer":{"tag":"bool","value":true},"expected_evidence_ids":["brain/memory/2"],"expected_reason":null,"forecast":{"id":"sunny-next","target":"weather","created_at":10,"horizon":20,"labels":["sunny","cloudy"],"probabilities":[0.75,0.25],"evidence_refs":["weather"],"observed_label":"sunny","observed_at":21,"expected_brier":0.125}}
-{"id":"missing","question":"Where do you live?","expected_resolution":"unsupported","expected_answer":null,"expected_evidence_ids":[],"expected_reason":"no_alias"}
-{"id":"collision","question":"Which record?","expected_resolution":"ambiguous","expected_answer":null,"expected_evidence_ids":["fact:name","root:weather"],"expected_reason":"multiple_targets"}

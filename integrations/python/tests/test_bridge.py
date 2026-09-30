@@ -83,4 +83,12 @@ def test_accepts_compatible_labc_versions(tmp_path: Path, version: str, labc: in
         f"#!/bin/sh\necho 'Lana {version} (LABC v{labc}, fake)'\n", encoding="utf-8"
     )
     executable.chmod(0o755)
-    assert BridgeRunner(executable).version == version
+    runner = BridgeRunner(executable)
+    assert runner.version == version
+    assert runner.labc_version == labc
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_rejects_nonfinite_json(fake_lana: Path, program: Path, value: float) -> None:
+    with pytest.raises(ValueError):
+        BridgeRunner(fake_lana).run(program, {"value": value})

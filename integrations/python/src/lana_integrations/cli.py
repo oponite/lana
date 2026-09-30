@@ -13,7 +13,7 @@ from .bridge import BridgeRunner, LanaCompatibilityError, _error_envelope
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lana-bridge")
-    parser.add_argument("--lana", help="path to the Lana 3.0 executable")
+    parser.add_argument("--lana", help="path to the Lana 3.x or 4.x executable")
     parser.add_argument("--timeout", type=float, default=30.0)
     subparsers = parser.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("run", help="run a JSON bridge program")

@@ -68,7 +68,6 @@ stores, command arguments, and host configuration:
 ```bash
 python3 tests/run.py --no-build --filter 'native_future_messages|lana_execution_live'
 python3 tests/run.py --no-build --filter native_dataset_uncertain_history
-python3 tests/run.py --no-build --filter lana_brain_
 python3 tests/run.py --no-build --filter 'lana_object_|native_object_'
 python3 tests/run.py --no-build --filter 'lana_packages|lana_package_release'
 cargo test --locked -p lana-vm v5_core_operation_matrix
@@ -76,9 +75,7 @@ cargo test --locked -p lana-vm measure
 cargo test --locked -p lana-runtime
 ```
 
-The Brain checks cover fitting, typed-memory restart, semantic retrieval,
-evidence selection, and workshop reports. Dataset checks cover restart, failed
-updates, and historical reads. The execution check creates a trusted local
+Dataset checks cover restart, failed updates, and historical reads. The execution check creates a trusted local
 HTTPS server and checks authorization and receipt failures.
 
 Project and tooling checks cover generation, `fmt --check` without writes,
@@ -120,13 +117,13 @@ directory. Test-only binaries never replace the normal installation.
 Release CI checks archive digests and runs both installed macOS slices after
 extraction. It also rebuilds source archives in a clean directory. Signing and
 notarization remain deferred. Release acceptance requires the gates in
-[AGENTS.md](AGENTS.md) and the [release checklist](docs/release-checklist.md).
+[AGENTS.md](AGENTS.md) and the [release checklist](docs/dev/RELEASE_CHECKLIST.md).
 Branch protection uses the check names in
 [.github/BRANCH_PROTECTION.md](.github/BRANCH_PROTECTION.md).
 
 ## Change process
 
-1. Language, bytecode, or VM changes require an accepted LIP (`lip/`).
+1. Language, bytecode, or VM changes require an accepted LIP (`docs/lip/`).
 2. Bug fixes, documentation, and tooling do not.
 3. Every source, bytecode, compiler, or VM change requires focused regression
    coverage.
@@ -143,4 +140,4 @@ Prefer existing patterns before adding dependencies.
 
 - [Governance](GOVERNANCE.md)
 - [Versioning](VERSIONING.md)
-- [LIP process](lip/README.md)
+- [LIP process](docs/lip/README.md)

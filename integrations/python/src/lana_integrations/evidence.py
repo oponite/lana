@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from typing import Any
 
 
@@ -25,8 +26,8 @@ def _require_string(record: Mapping[str, Any], name: str) -> None:
 
 def _require_nonnegative_number(record: Mapping[str, Any], name: str) -> None:
     value = record.get(name)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-        raise EvidenceValidationError(f"evidence {name} must be a nonnegative number")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or (isinstance(value, float) and not math.isfinite(value)):
+        raise EvidenceValidationError(f"evidence {name} must be a finite nonnegative number")
 
 
 def validate_evidence(value: Mapping[str, Any]) -> dict[str, Any]:

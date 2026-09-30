@@ -1,4 +1,4 @@
-//! Exact finite Information snapshots shared by Brain memory and dataset evidence.
+//! Exact finite Information snapshots for dataset evidence.
 use std::sync::{Arc, Mutex};
 use lana_bytecode::LanaError;
 use lana_vm::{Vm, Value, ValueKind, State, StateValue};

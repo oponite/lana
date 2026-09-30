@@ -10,6 +10,8 @@ import threading
 import weakref
 from typing import Any
 
+from .bridge import _validate_timeout, _validate_vm_options
+
 
 def _read_replies(stream, replies: queue.Queue[str]) -> None:
     for line in stream:
@@ -30,6 +32,7 @@ def _stop(process: subprocess.Popen[str]) -> None:
 
 class WorkerRunner:
     def __init__(self, executable: str, timeout_seconds: float) -> None:
+        self._timeout = _validate_timeout(timeout_seconds)
         self._process = subprocess.Popen(
             [executable, "bridge-worker"],
             stdin=subprocess.PIPE,
@@ -40,7 +43,6 @@ class WorkerRunner:
             bufsize=1,
         )
         assert self._process.stdin is not None and self._process.stdout is not None
-        self._timeout = timeout_seconds
         self._lock = threading.Lock()
         self._replies: queue.Queue[str] = queue.Queue()
         threading.Thread(
@@ -50,10 +52,16 @@ class WorkerRunner:
         ).start()
         self._finalizer = weakref.finalize(self, _stop, self._process)
 
-    def run(self, operation: str, path: str | Path, input_value: Any) -> dict[str, Any]:
+    def run(
+        self, operation: str, path: str | Path, input_value: Any,
+        *, timeout_seconds: float | None = None, **options: int | None,
+    ) -> dict[str, Any]:
+        timeout = self._timeout if timeout_seconds is None else _validate_timeout(timeout_seconds)
+        controls = _validate_vm_options(**options)
         request = json.dumps(
-            {"schema": 1, "op": operation, "path": str(Path(path).resolve()), "input": input_value},
+            {"schema": 1, "op": operation, "path": str(Path(path).absolute()), "input": input_value, **controls},
             ensure_ascii=False,
+            allow_nan=False,
             separators=(",", ":"),
         )
         with self._lock:
@@ -63,7 +71,7 @@ class WorkerRunner:
                 assert self._process.stdin is not None
                 self._process.stdin.write(request + "\n")
                 self._process.stdin.flush()
-                line = self._replies.get(timeout=self._timeout)
+                line = self._replies.get(timeout=timeout)
             except (BrokenPipeError, OSError, queue.Empty) as error:
                 self.close()
                 raise RuntimeError("Lana worker failed or timed out") from error

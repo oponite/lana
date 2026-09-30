@@ -6,9 +6,54 @@ use std::process::ExitCode;
 
 use lana_bytecode::LanaError;
 
-use crate::{compile_source_file, find_compiler, json_quote, lsp_member, lsp_number, lsp_string, temp_path, CliError, LANA_VERSION};
+use serde::Deserialize;
+
+use crate::{compile_source_file, find_compiler, json_quote, temp_path, CliError, LANA_VERSION};
 
 const MAX_MESSAGE: u64 = 64 * 1024 * 1024;
+
+#[derive(Default, Deserialize)]
+struct Controls {
+    seed: Option<u64>,
+    memory_limit_mib: Option<usize>,
+    instruction_limit: Option<u64>,
+    workers: Option<usize>,
+    max_tasks: Option<usize>,
+}
+
+impl Controls {
+    fn parse(request: &serde_json::Value) -> Result<Self, String> {
+        let controls = Self::deserialize(request).map_err(|error| error.to_string())?;
+        for name in ["seed", "memory_limit_mib", "instruction_limit", "workers", "max_tasks"] {
+            if let Some(value) = request.get(name) {
+                if value.as_u64().filter(|&n| n > 0).is_none() {
+                    return Err(format!("{name} must be a positive integer"));
+                }
+            }
+        }
+        if controls.memory_limit_mib.is_some_and(|mib| mib.checked_mul(1024 * 1024).is_none()) {
+            return Err("memory_limit_mib overflows the native byte limit".into());
+        }
+        Ok(controls)
+    }
+
+    fn apply(&self, vm: &mut lana_vm::Vm) -> Result<(), LanaError> {
+        if let Some(seed) = self.seed { vm.seed(seed); }
+        if let Some(workers) = self.workers {
+            let status = vm.set_worker_count(workers);
+            if status != LanaError::Ok { return Err(status); }
+        }
+        if let Some(tasks) = self.max_tasks {
+            let status = vm.set_task_limit(tasks);
+            if status != LanaError::Ok { return Err(status); }
+        }
+        if let Some(mib) = self.memory_limit_mib {
+            vm.set_memory_limit(mib.checked_mul(1024 * 1024).ok_or(LanaError::Limit)?)?;
+        }
+        if let Some(limit) = self.instruction_limit { vm.set_instruction_limit(limit); }
+        Ok(())
+    }
+}
 
 fn failure(phase: &str, code: &str, message: &str, stdout: &str) -> String {
     format!(
@@ -35,30 +80,34 @@ impl Drop for Scratch {
 }
 
 fn run_request(line: &str) -> String {
-    let request = match lana_runtime::json_parse(line) {
+    let request: serde_json::Value = match serde_json::from_str(line) {
         Ok(request) => request,
         Err(_) => return failure("protocol", "LANA_ERR_PARSE", "invalid request JSON", ""),
     };
-    if lsp_number(&request, "schema") != Some(1) {
+    if request.get("schema").and_then(|value| value.as_u64()) != Some(1) {
         return failure("protocol", "LANA_ERR_SCHEMA", "expected schema 1", "");
     }
-    let Some(operation) = lsp_string(&request, "op") else {
+    let controls = match Controls::parse(&request) {
+        Ok(controls) => controls,
+        Err(message) => return failure("protocol", "LANA_ERR_SCHEMA", &message, ""),
+    };
+    let Some(operation) = request.get("op").and_then(|value| value.as_str()) else {
         return failure("protocol", "LANA_ERR_SCHEMA", "missing operation", "");
     };
     if operation != "run" && operation != "run_labc" {
         return failure("protocol", "LANA_ERR_UNSUPPORTED_OPERATION", "unknown operation", "");
     }
-    let Some(path) = lsp_string(&request, "path") else {
+    let Some(path) = request.get("path").and_then(|value| value.as_str()) else {
         return failure("protocol", "LANA_ERR_SCHEMA", "missing path", "");
     };
-    let Some(input) = lsp_member(&request, "input") else {
+    let Some(input) = request.get("input") else {
         return failure("protocol", "LANA_ERR_SCHEMA", "missing input", "");
     };
-    let input = match lana_runtime::json_stringify(&input) {
+    let input = match lana_runtime::json_parse(&input.to_string()).and_then(|value| lana_runtime::json_stringify(&value)) {
         Ok(input) => input,
         Err(error) => return failure("protocol", error.name(), "unsupported input JSON", ""),
     };
-    let source = Path::new(&path);
+    let source = Path::new(path);
     if !source.is_file() {
         return failure("load", "LANA_ERR_IO", "program file not found", "");
     }
@@ -81,12 +130,12 @@ fn run_request(line: &str) -> String {
     if operation == "run" && std::env::set_current_dir(path.parent().unwrap_or(Path::new("."))).is_err() {
         return failure("run", "LANA_ERR_IO", "cannot enter program directory", "");
     }
-    let result = run_program(&operation, &path, compiler.as_deref(), &bytecode_path, &request_path, &response_path);
+    let result = run_program(operation, &path, compiler.as_deref(), &bytecode_path, &request_path, &response_path, &controls);
     let _ = std::env::set_current_dir(original_dir);
     result
 }
 
-fn run_program(operation: &str, path: &Path, compiler: Option<&Path>, bytecode: &Path, request: &Path, response: &Path) -> String {
+fn run_program(operation: &str, path: &Path, compiler: Option<&Path>, bytecode: &Path, request: &Path, response: &Path, controls: &Controls) -> String {
     let effective = if operation == "run" {
         let Some(compiler) = compiler else {
             return failure("compile", "LANA_ERR_IO", "compiler bytecode not found", "");
@@ -112,6 +161,9 @@ fn run_program(operation: &str, path: &Path, compiler: Option<&Path>, bytecode: 
         Err(info) => return failure("load", info.code.name(), &info.message, ""),
     };
     let mut vm = lana_vm::Vm::new(&chunk);
+    if let Err(error) = controls.apply(&mut vm) {
+        return failure("run", error.name(), "cannot apply VM controls", "");
+    }
     vm.capture_output();
     vm.set_program_args(&[request.to_string_lossy().into_owned(), response.to_string_lossy().into_owned()]);
     let mut host = lana_runtime::host_calls::StoreHost::new();
@@ -164,5 +216,28 @@ pub fn serve() -> ExitCode {
         if writeln!(output, "{response}").is_err() || output.flush().is_err() {
             return ExitCode::from(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controls_preserve_integer_precision_and_reject_invalid_limits() {
+        let request = serde_json::json!({"seed": u64::MAX, "instruction_limit": u64::MAX});
+        let controls = Controls::parse(&request).unwrap();
+        assert_eq!(controls.seed, Some(u64::MAX));
+        assert_eq!(controls.instruction_limit, Some(u64::MAX));
+        assert!(Controls::parse(&serde_json::json!({})).is_ok());
+        for name in ["seed", "instruction_limit", "workers", "max_tasks", "memory_limit_mib"] {
+            for value in [serde_json::Value::Null, serde_json::json!(true), serde_json::json!(0),
+                          serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("1")] {
+                let mut request = serde_json::json!({});
+                request[name] = value;
+                assert!(Controls::parse(&request).is_err());
+            }
+        }
+        assert!(Controls::parse(&serde_json::json!({"memory_limit_mib": usize::MAX})).is_err());
     }
 }

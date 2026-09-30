@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .bridge import BridgeRunner, LanaCompatibilityError
+from .bridge import BridgeRunner, LanaCompatibilityError, _validate_timeout, _validate_vm_options
 from .worker import WorkerRunner
 
 # A program signals an unresolved result (an Information or Sample value that
@@ -57,7 +57,7 @@ class Lana:
     ) -> None:
         self._bridge: BridgeRunner | None = None
         self._worker: WorkerRunner | None = None
-        self._timeout_seconds = timeout_seconds
+        self._timeout_seconds = _validate_timeout(timeout_seconds)
         self._unavailable_reason: str | None = None
         try:
             self._bridge = BridgeRunner(executable, timeout_seconds=timeout_seconds)
@@ -74,29 +74,49 @@ class Lana:
             return "worker" if self._bridge.version.startswith("4.") else "subprocess"
         return "unavailable"
 
-    def run(self, program: str | os.PathLike[str], input_value: Any) -> LanaResult:
+    def run(
+        self, program: str | os.PathLike[str], input_value: Any, *,
+        seed: int | None = None, memory_limit_mib: int | None = None,
+        instruction_limit: int | None = None, workers: int | None = None,
+        max_tasks: int | None = None, timeout_seconds: float | None = None,
+    ) -> LanaResult:
         """Run a source program with structured input."""
+        options = self._options(seed, memory_limit_mib, instruction_limit, workers, max_tasks, timeout_seconds)
         if self._bridge is None:
             return _unavailable_result(self._unavailable_reason or "no Lana runtime")
         if self._bridge.version.startswith("4."):
-            return self._run_worker("run", program, input_value)
-        envelope = self._bridge.run(program, input_value)
+            return self._run_worker("run", program, input_value, **options)
+        envelope = self._bridge.run(program, input_value, **options)
         return self._from_envelope(envelope, "subprocess")
 
     def run_labc(
-        self, labc_path: str | os.PathLike[str], input_value: Any
+        self, labc_path: str | os.PathLike[str], input_value: Any, *,
+        seed: int | None = None, memory_limit_mib: int | None = None,
+        instruction_limit: int | None = None, workers: int | None = None,
+        max_tasks: int | None = None, timeout_seconds: float | None = None,
     ) -> LanaResult:
         """Run precompiled bytecode through the Rust worker."""
+        options = self._options(seed, memory_limit_mib, instruction_limit, workers, max_tasks, timeout_seconds)
         if self._bridge is None or not self._bridge.version.startswith("4."):
             return _unavailable_result("Lana 4.0 worker is not available")
-        return self._run_worker("run_labc", labc_path, input_value)
+        return self._run_worker("run_labc", labc_path, input_value, **options)
 
-    def _run_worker(self, operation: str, path: str | os.PathLike[str], input_value: Any) -> LanaResult:
+    @staticmethod
+    def _options(seed, memory_limit_mib, instruction_limit, workers, max_tasks, timeout_seconds):
+        options = _validate_vm_options(
+            seed=seed, memory_limit_mib=memory_limit_mib,
+            instruction_limit=instruction_limit, workers=workers, max_tasks=max_tasks,
+        )
+        if timeout_seconds is not None:
+            options["timeout_seconds"] = _validate_timeout(timeout_seconds)
+        return options
+
+    def _run_worker(self, operation: str, path: str | os.PathLike[str], input_value: Any, **options) -> LanaResult:
         assert self._bridge is not None
         try:
             if self._worker is None:
                 self._worker = WorkerRunner(self._bridge.executable, self._timeout_seconds)
-            envelope = self._worker.run(operation, Path(path), input_value)
+            envelope = self._worker.run(operation, Path(path), input_value, **options)
         except (RuntimeError, OSError, TypeError, ValueError) as error:
             return LanaResult("failed", error={"code": "LANA_WORKER_FAILED", "message": str(error)}, backend="worker")
         return self._from_envelope(envelope, "worker")

@@ -235,7 +235,6 @@ dependencies = [
  "lana-bytecode",
  "lana-runtime",
  "lana-vm",
- "libc",
  "serde",
  "serde_json",
  "tar",

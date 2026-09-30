@@ -34,7 +34,6 @@ struct Mutation {
 /// A committed revision, mirroring `StoreRevision`.
 struct Revision {
     id: u64,
-    previous: u64,
     mutations: Vec<Mutation>,
     digest: [u8; 32],
 }
@@ -411,7 +410,6 @@ fn replay(store: &mut Store) -> Result<(), LanaError> {
         let revision_mutations = mutations.clone();
         store.revisions.push(Revision {
             id: revision,
-            previous,
             mutations: revision_mutations.clone(),
             digest,
         });
@@ -538,7 +536,6 @@ pub fn store_commit(store: &mut Store) -> Result<StoreRevisionInfo, LanaError> {
     let mutations = store.staged.clone();
     store.revisions.push(Revision {
         id: revision,
-        previous: store.current_rev,
         mutations: mutations.clone(),
         digest,
     });

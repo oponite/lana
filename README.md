@@ -1,43 +1,37 @@
 # Lana
 
-[A programming language for uncertainty computation.](https://oponite.github.io/data-articles/website/can-uncertainty-be-programmable.html)
+[An ecosystem for informational computing.](https://oponite.github.io/data-articles/website/can-uncertainty-be-programmable.html)
 
-## Install and Run
+## Install
+
+You need Git, Rust/Cargo, Python 3.11 or newer, and a native linker to build Lana. The installed `lana` command does not require Python.
+
+1. Download and install Lana:
 
 ```bash
-python3 tools/build.py build
-python3 tools/build.py install --from target/lana --prefix "$HOME/.local"
-"$HOME/.local/bin/lana" run examples/belief.lana
+git clone https://github.com/oponite/lana.git
+cd lana
+python3 tools/build.py install --prefix "$HOME/.local"
 ```
 
-The installed `lana` command uses the Rust VM and self-hosted Lana compiler
-bytecode. Python 3 is required for the build/install/test scripts; it is not
-required to run the installed CLI. Published LABC v1-v2 behavior is checked against
-frozen fixtures. The Rust runtime executes LABC v1-v5 and v6 immutable values
-and task-local classes with checked construction, mutation, and graph transfer.
-Source `value`, `class`, and `interface` declarations compile to v6, including
-checked methods, private factories, and same-module `copies`/`replace`. The build no longer has
-Lana-owned C sources; it can still use system libraries such as SQLite and
-macOS Metal.
-
-For VM development:
+2. Add Lana to your shell's `PATH`, then check the installation:
 
 ```bash
-python3 tools/build.py build
-python3 tests/run.py --no-build
-cargo test --locked --workspace --no-fail-fast
+export PATH="$HOME/.local/bin:$PATH"
+lana version
+```
+
+3. Create and run your first program:
+
+```bash
+lana new hello-lana
+cd hello-lana
+lana run
+lana test
 ```
 
 See [Contributing](CONTRIBUTING.md) for build, install, test, universal macOS,
 and packaging instructions.
-
-Low-level tooling assembles, verifies, disassembles, traces, and executes LABC:
-
-```bash
-target/lana/bin/lana asm examples/belief.lasm -o target/belief.labc
-target/lana/bin/lana dis target/belief.labc
-target/lana/bin/lana run target/belief.labc --trace
-```
 
 ## Integrations
 
@@ -51,19 +45,8 @@ The Lana language, compiler, bytecode, and VM are under active development.
 Changes preserve the documented authority order, compatibility expectations,
 correctness, security, and data integrity.
 
-Language, bytecode, VM, and mathematical-contract changes require an accepted [LIP] (lip/README.md) before implementation; other work follows [GOVERNANCE.md] (GOVERNANCE.md).
-
-
-Run source examples from the repository root:
-
-```bash
-LANA_STDLIB_DIR="$PWD/stdlib" target/lana/bin/lana run examples/belief.lana
-```
-
-Replace the source path with a linked example. Some examples require a store,
-host configuration, or command arguments, as noted in their section.
-An installed CLI finds its standard library automatically.
+Language, bytecode, VM, and mathematical-contract changes require an accepted [LIP](docs/lip/README.md) before implementation; other work follows [GOVERNANCE.md](GOVERNANCE.md).
 
 Use `lana new`, `build`, `run`, and `test` for ordinary projects.
-[Contributing](../CONTRIBUTING.md) describes builds and developer checks.
-The [support matrix](support-matrix.md) describes platforms and bytecode compatibility.
+[Contributing](CONTRIBUTING.md) describes builds and developer checks.
+The [support matrix](docs/PRODUCT_SUPPORT.md) describes platforms and bytecode compatibility.

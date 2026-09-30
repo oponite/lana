@@ -1,4 +1,4 @@
-"""Root-scoped stdio MCP server for Lana 3.0 runtimes."""
+"""Root-scoped stdio MCP server for Lana 3.x and 4.x runtimes."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def build_server(
             "ok": True,
             "result": {
                 "lana_version": runner.version,
-                "labc_version": 2,
+                "labc_version": runner.labc_version,
                 "executable": runner.executable,
             },
         }

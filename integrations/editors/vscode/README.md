@@ -1,6 +1,8 @@
 # Lana Language Support for VS Code
 
 This source-install extension launches `lana lsp` for `.lana` files.
+It accepts Lana 3.x or 4.x reporting LABC v2–v6.
+Language features depend on the selected executable.
 
 ```bash
 cd integrations/editors/vscode

@@ -46,9 +46,8 @@ jobs:
       - name: Optional integrations
         run: |
           python3 -m venv "$RUNNER_TEMP/lana-integrations-venv"
-          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test]' tokenizers safetensors numpy
+          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pip install -e 'integrations/python[test]'
           "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m pytest -q integrations/python/tests
-          "$RUNNER_TEMP/lana-integrations-venv/bin/python" -m unittest discover -s tools/lana-hf/tests -v
 
   macos:
     name: Release gates (macOS universal)
@@ -67,10 +66,7 @@ jobs:
         run: |
           prefix="$RUNNER_TEMP/lana-install"
           python3 tools/build.py universal --output "$prefix"
-          lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
-          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          "$prefix/bin/lana" run examples/belief.lana
+          python3 tests/verify_install.py --prefix "$prefix" --architecture arm64 --architecture x86_64
           python3 tools/build.py package --from "$prefix" --output "$RUNNER_TEMP/lana-${EXPECTED_VERSION}-macos-universal.tar.gz"
           (
             cd "$RUNNER_TEMP"
@@ -107,11 +103,7 @@ jobs:
           prefix="$RUNNER_TEMP/lana-verified-install"
           mkdir "$prefix"
           tar -C "$prefix" -xzf "$artifact_dir/$archive"
-          lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
-          arch -arm64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          arch -x86_64 "$prefix/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          cp examples/belief.lana "$prefix/belief.lana"
-          "$prefix/bin/lana" run "$prefix/belief.lana"
+          python3 tests/verify_install.py --prefix "$prefix" --architecture arm64 --architecture x86_64
 
   publish:
     name: Publish GitHub Release
@@ -177,7 +169,7 @@ jobs:
           tar -C "$source_root" -xzf "$RUNNER_TEMP/lana-release-files/lana-${EXPECTED_VERSION}-source.tar.gz"
           python3 "$source_root/lana-${EXPECTED_VERSION}/tools/build.py" install --prefix "$source_root/install"
           "$source_root/install/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
-          "$source_root/install/bin/lana" run "$source_root/lana-${EXPECTED_VERSION}/examples/belief.lana"
+          "$source_root/install/bin/lana" run "$source_root/lana-${EXPECTED_VERSION}/examples/basic-programs/belief.lana"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

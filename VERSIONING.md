@@ -17,11 +17,11 @@ Rust-owned Core surface in LABC v5. Lana 4.0 retires the C reference backend.
 ## LABC version (integer)
 
 The bytecode format version, independent of the language version. It is bumped
-only when the encoding changes. The Rust loader accepts LABC v1-v5. Frozen
+only when the encoding changes. The Rust loader accepts LABC v1-v6. Frozen
 v1-v2 goldens preserve legacy coverage. The `LABC` magic is unchanged. The
 compiler emits the lowest version that supports
-the source form: v2-v4 for established forms and v5 for Core distribution and
-map refinement forms.
+the source form: v2-v4 for established forms, v5 for Core distribution and
+map refinement, and v6 for object declarations.
 
 ## Runtime version
 

@@ -17,6 +17,10 @@ compiler = Path(sys.argv[2]).resolve()
 with tempfile.TemporaryDirectory(prefix="lana-binary-package-") as directory:
     work = Path(directory)
     prefix = install_files(cli, compiler, work / "prefix")
+    stale = prefix / "share/lana/stdlib/obsolete.lana"
+    stale.write_text("obsolete", encoding="utf-8")
+    install_files(cli, compiler, prefix)
+    assert not stale.exists(), "reinstall retained a removed standard-library module"
     output = work / "lana.tar.gz"
     result = subprocess.run(["sh", ROOT / "package.sh", prefix, output], text=True, capture_output=True, check=True)
     report = json.loads(result.stdout)

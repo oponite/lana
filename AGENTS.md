@@ -24,12 +24,12 @@ state construction, module imports, measurement, and assertions.
 
 Resolve disagreements in this order:
 
-1. `papers/semantics.md` — mathematical meaning.
-2. `spec/SPEC.md` — source syntax and programmer-visible behavior.
-3. `spec/BYTECODE.md` — the one LABC v2 encoding.
-4. `spec/VM.md` — runtime architecture and resource behavior.
+1. `docs/papers/semantics.md` — mathematical meaning.
+2. `docs/spec/SPEC.md` — source syntax and programmer-visible behavior.
+3. `docs/spec/BYTECODE.md` — versioned LABC encoding and compatibility.
+4. `docs/spec/VM.md` — runtime architecture and resource behavior.
 
-New or changed source syntax must additionally satisfy `spec/SYNTAX.md` — the
+New or changed source syntax must additionally satisfy `docs/spec/SYNTAX.md` — the
 syntax design principles (SYNTAX-1..12 + Acceptance Principle).
 
 Do not invent semantics from an implementation detail. Change the highest
@@ -51,7 +51,7 @@ applicable authority first when intentionally changing the language.
 ```bash
 python3 tools/build.py build
 python3 tests/run.py --no-build
-target/lana/bin/lana run examples/general.lana
+target/lana/bin/lana run examples/basic-programs/general.lana
 git diff --check
 ```
 
@@ -68,7 +68,7 @@ cd my-program
 Low-level bytecode workflow:
 
 ```bash
-target/lana/bin/lana asm examples/belief.lasm -o target/belief.labc
+target/lana/bin/lana asm examples/basic-programs/belief.lasm -o target/belief.labc
 target/lana/bin/lana verify target/belief.labc
 target/lana/bin/lana dis target/belief.labc
 target/lana/bin/lana run target/belief.labc --trace
@@ -112,7 +112,7 @@ python3 tools/build.py install --from target/universal --prefix "$prefix"
 lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
 arch -arm64 "$prefix/bin/lana" version
 arch -x86_64 "$prefix/bin/lana" version
-"$prefix/bin/lana" run examples/belief.lana
+"$prefix/bin/lana" run examples/basic-programs/belief.lana
 ```
 
 Required result: both slices execute, the installed CLI finds its adjacent
@@ -124,9 +124,8 @@ made by the source release.
 
 ```bash
 python3 -m venv /tmp/lana-integrations-venv
-/tmp/lana-integrations-venv/bin/python -m pip install -e 'integrations/python[test]' tokenizers safetensors numpy
+/tmp/lana-integrations-venv/bin/python -m pip install -e 'integrations/python[test]'
 /tmp/lana-integrations-venv/bin/python -m pytest -q integrations/python/tests
-/tmp/lana-integrations-venv/bin/python -m unittest discover -s tools/lana-hf/tests -v
 
 python3 tools/build.py build
 python3 tests/run.py --no-build
@@ -142,7 +141,7 @@ a clean directory, and runs the example before publication. Homebrew Core
 submission is an external publication step; the release workflow publishes a
 checksum-backed formula artifact. Signing and notarization remain deferred.
 
-The compiler emits LABC v2 by default; the Rust loader accepts v1-v5, and
+The compiler emits LABC v2 by default; the Rust loader accepts v1-v6, and
 published v1-v2 bytecode is checked against frozen fixtures.
 Pre-release bytecode and textual assembly are not accepted or converted; rebuild
 them from source.
@@ -150,7 +149,7 @@ them from source.
 ### 5. Performance
 
 Compare Release builds on the same machine with the workloads and method in
-`plans/rust-only-performance.md`. The 4.0 warm median must be no more than 5%
+`docs/dev/RELEASE_CHECKLIST.md`. The 4.0 warm median must be no more than 5%
 above the paired 3.0.2 median for repeated Python bytecode calls, repeated
 Python source calls, Rust VM execution, and Rust compilation. Report Python
 first-call time separately. Do not treat a historical snapshot from a different

@@ -23,7 +23,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="lana-clean-install-") as directory:
         directory = Path(directory)
         source = directory / "belief.lana"
-        shutil.copyfile(ROOT / "examples/belief.lana", source)
+        shutil.copyfile(ROOT / "examples/basic-programs/belief.lana", source)
         for binary in ("lana",):
             if args.architecture:
                 subprocess.run(["lipo", str(prefix / "bin" / binary), "-verify_arch", *args.architecture],

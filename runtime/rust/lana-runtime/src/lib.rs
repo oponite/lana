@@ -8,10 +8,6 @@
 pub mod adapters;
 #[doc(hidden)]
 pub mod atomic_file;
-pub mod brain;
-pub mod brain_memory;
-pub mod brain_index;
-pub mod brain_selector;
 pub mod information_codec;
 pub mod rules;
 pub mod trees;

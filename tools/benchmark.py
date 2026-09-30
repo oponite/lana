@@ -1,4 +1,4 @@
-"""Paired Release gate from plans/rust-only-performance.md (30 calls, discard 5)."""
+"""Paired Release gate from docs/dev/RELEASE_CHECKLIST.md (30 calls, discard 5)."""
 import argparse
 from contextlib import contextmanager
 import hashlib
