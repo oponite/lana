@@ -1,0 +1,36 @@
+import "std/rules" as rules;
+
+fn holdout_rows() {
+    let rows = array_new(0);
+    let index = 0;
+    while (index < 20) {
+        let x = index - floor(index / 3) * 3 + 1;
+        array_push(rows, {id: string_concat("h", number_to_string(index)),
+            features: {x: x}, target: x < 3});
+        index = index + 1;
+    }
+    return rows;
+}
+
+let task = {id: "two-cases",
+    feature_schema: [{name: "x", kind: "number", nullable: false, categories: []}],
+    target_labels: [false, true], allowed: ["eq", "or"], known_facts: {}};
+let train = [
+    {id: "a", features: {x: 1}, target: true},
+    {id: "b", features: {x: 2}, target: true},
+    {id: "c", features: {x: 3}, target: false}
+];
+let report = rules.learn(task, train, holdout_rows(), {});
+assert(report.status == "validated", "disjunction passes untouched validation");
+assert(array_length(report.model_or_rule.clauses) == 2, "two clauses cover two disjoint values");
+assert(rules.predict(report.model_or_rule, {x: 2}).value == true, "second clause predicts");
+assert(rules.predict(report.model_or_rule, {x: 3}).value == false, "nonmatching value is false");
+let conflicted = [
+    {id: "one", features: {x: 1}, target: true},
+    {id: "two", features: {x: 1}, target: false}
+];
+let imperfect = rules.learn(task, conflicted, [], {});
+assert(imperfect.training_report.search_status == "exhausted", "bounded language exhausted, not universal impossibility");
+assert(array_length(imperfect.mistakes) == 1, "imperfect candidate retains its mistake");
+assert(imperfect.status == "insufficient_evidence", "empty holdout cannot validate");
+print("RULES_LEARN_OR_PASS");

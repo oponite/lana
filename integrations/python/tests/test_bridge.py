@@ -29,14 +29,21 @@ def test_protocol_failures(fake_lana: Path, tmp_path: Path, name: str, code: str
     assert envelope["error"]["code"] == code
 
 
-def test_check_and_runtime_failure(fake_lana: Path, tmp_path: Path) -> None:
-    bad = tmp_path / "bad.lana"
+def test_runtime_failure(fake_lana: Path, tmp_path: Path) -> None:
     fail = tmp_path / "fail.lana"
-    bad.write_text("", encoding="utf-8")
     fail.write_text("", encoding="utf-8")
-    runner = BridgeRunner(fake_lana)
-    assert runner.check(bad)["error"]["code"] == "LANA_CHECK_FAILED"
-    assert runner.run(fail, {})["error"]["code"] == "LANA_RUN_FAILED"
+    assert BridgeRunner(fake_lana).run(fail, {})["error"]["code"] == "LANA_RUN_FAILED"
+
+
+def test_check_entry_points_are_removed() -> None:
+    from lana_integrations.cli import main
+    from lana_integrations.lana import Lana
+
+    assert not hasattr(BridgeRunner, "check")
+    assert not hasattr(Lana, "check")
+    with pytest.raises(SystemExit) as error:
+        main(["check", "program.lana"])
+    assert error.value.code == 2
 
 
 def test_timeout(fake_lana: Path, tmp_path: Path) -> None:
@@ -68,11 +75,20 @@ def test_rejects_incompatible_version(tmp_path: Path) -> None:
         BridgeRunner(executable)
 
 
-@pytest.mark.parametrize("version", ["3.0.0", "3.1.0", "3.2.0"])
-def test_accepts_compatible_labc_versions(tmp_path: Path, version: str) -> None:
+@pytest.mark.parametrize("version", ["3.0.0", "3.1.0", "3.2.0", "4.0.0"])
+@pytest.mark.parametrize("labc", [2, 3, 4, 5, 6])
+def test_accepts_compatible_labc_versions(tmp_path: Path, version: str, labc: int) -> None:
     executable = tmp_path / "lana"
     executable.write_text(
-        f"#!/bin/sh\necho 'Lana {version} (LABC v5, fake)'\n", encoding="utf-8"
+        f"#!/bin/sh\necho 'Lana {version} (LABC v{labc}, fake)'\n", encoding="utf-8"
     )
     executable.chmod(0o755)
-    assert BridgeRunner(executable).version == version
+    runner = BridgeRunner(executable)
+    assert runner.version == version
+    assert runner.labc_version == labc
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_rejects_nonfinite_json(fake_lana: Path, program: Path, value: float) -> None:
+    with pytest.raises(ValueError):
+        BridgeRunner(fake_lana).run(program, {"value": value})

@@ -1,13 +1,15 @@
-"""Stable JSON-file subprocess boundary for Lana 3.0 programs."""
+"""Stable JSON-file subprocess boundary for Lana 3.x and 4.x programs."""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import struct
 import tempfile
 import time
 from typing import Any, Mapping, Sequence
@@ -17,11 +19,42 @@ from .evidence import validate_evidence
 
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 30.0
-_VERSION_PATTERN = re.compile(r"^Lana (3\.\d+\.\d+) \(LABC v[2-5],")
+_VERSION_PATTERN = re.compile(r"^Lana ([34]\.\d+\.\d+) \(LABC v([2-6]),")
+_USIZE_MAX = (1 << (8 * struct.calcsize("P"))) - 1
+
+
+def _validate_timeout(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("timeout_seconds must be finite and positive")
+    try:
+        timeout = float(value)
+    except OverflowError as error:
+        raise ValueError("timeout_seconds must be finite and positive") from error
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout_seconds must be finite and positive")
+    return timeout
+
+
+def _validate_vm_options(**values: int | None) -> dict[str, int]:
+    limits = {
+        "seed": (1 << 64) - 1,
+        "instruction_limit": (1 << 64) - 1,
+        "memory_limit_mib": _USIZE_MAX // (1024 * 1024),
+        "workers": _USIZE_MAX,
+        "max_tasks": _USIZE_MAX,
+    }
+    options = {}
+    for name, value in values.items():
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= limits[name]:
+            raise ValueError(f"{name} must be a positive integer no greater than {limits[name]}")
+        options[name] = value
+    return options
 
 
 class LanaCompatibilityError(RuntimeError):
-    """Raised when the selected executable is not supported Lana 3.0."""
+    """Raised when the selected executable is not a supported Lana runtime."""
 
 
 def _error_envelope(
@@ -69,10 +102,8 @@ class BridgeRunner:
                 resolved = str(candidate.resolve())
         if resolved is None:
             raise FileNotFoundError(f"Lana executable not found: {requested}")
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive")
         self.executable = str(Path(resolved).resolve())
-        self.timeout_seconds = float(timeout_seconds)
+        self.timeout_seconds = _validate_timeout(timeout_seconds)
         self.version = self._check_compatibility()
 
     def _check_compatibility(self) -> str:
@@ -91,8 +122,9 @@ class BridgeRunner:
         if completed.returncode != 0 or match is None:
             detail = output or completed.stderr.strip() or "no version output"
             raise LanaCompatibilityError(
-                f"expected Lana 3.0 with supported LABC; got: {detail}"
+                f"expected Lana 3.x or 4.x with supported LABC; got: {detail}"
             )
+        self.labc_version = int(match.group(2))
         return match.group(1)
 
     @staticmethod
@@ -111,20 +143,13 @@ class BridgeRunner:
         workers: int | None,
         max_tasks: int | None,
     ) -> list[str]:
-        values = {
-            "seed": seed,
-            "memory-limit-mib": memory_limit_mib,
-            "instruction-limit": instruction_limit,
-            "workers": workers,
-            "max-tasks": max_tasks,
-        }
+        values = _validate_vm_options(
+            seed=seed, memory_limit_mib=memory_limit_mib,
+            instruction_limit=instruction_limit, workers=workers, max_tasks=max_tasks,
+        )
         arguments: list[str] = []
         for name, value in values.items():
-            if value is None:
-                continue
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-            arguments.extend([f"--{name}", str(value)])
+            arguments.extend([f"--{name.replace('_', '-')}", str(value)])
         return arguments
 
     def _execute(
@@ -134,9 +159,7 @@ class BridgeRunner:
         cwd: Path,
         timeout_seconds: float | None,
     ) -> tuple[subprocess.CompletedProcess[str] | None, float, dict[str, Any] | None]:
-        timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
-        if timeout <= 0:
-            raise ValueError("timeout_seconds must be positive")
+        timeout = self.timeout_seconds if timeout_seconds is None else _validate_timeout(timeout_seconds)
         started = time.monotonic()
         try:
             completed = subprocess.run(
@@ -160,41 +183,6 @@ class BridgeRunner:
                 execution={"elapsed_seconds": elapsed, "lana_version": self.version},
             )
         return completed, time.monotonic() - started, None
-
-    def check(
-        self,
-        program: str | os.PathLike[str],
-        *,
-        timeout_seconds: float | None = None,
-    ) -> dict[str, Any]:
-        path = self._program_path(program)
-        completed, elapsed, timeout_error = self._execute(
-            [self.executable, "check", str(path)],
-            cwd=path.parent,
-            timeout_seconds=timeout_seconds,
-        )
-        if timeout_error is not None:
-            return timeout_error
-        assert completed is not None
-        execution = {"elapsed_seconds": elapsed, "lana_version": self.version}
-        if completed.returncode != 0:
-            return _error_envelope(
-                "check",
-                "Lana rejected the program",
-                code="LANA_CHECK_FAILED",
-                exit_code=completed.returncode,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-                execution=execution,
-            )
-        return {
-            "schema": SCHEMA_VERSION,
-            "ok": True,
-            "result": {"checked": str(path)},
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-            "execution": execution,
-        }
 
     def run_plain(
         self,
@@ -268,7 +256,7 @@ class BridgeRunner:
             request_path = temporary_path / "request.json"
             response_path = temporary_path / "response.json"
             request_path.write_text(
-                json.dumps(input_value, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(input_value, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
                 encoding="utf-8",
             )
             command = [

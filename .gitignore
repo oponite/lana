@@ -29,3 +29,7 @@ ghost_*/
 .claude/settings.local.json
 .claude/worktrees/
 .experiments/
+
+# Retain historical Lana proposals in version control.
+!docs/lip/archive/
+!docs/lip/archive/**

@@ -1,0 +1,21 @@
+import "std/evaluation" as evaluation;
+
+fn fit_rows(training, validation, seed) {
+    return {calculation_version: "v1", payload: seed};
+}
+
+fn predict_row(model, features) {
+    return {value: features.x};
+}
+
+let rows = array_new(0);
+let index = 0;
+while (index < 130) {
+    array_push(rows, {id: string_concat("r", number_to_string(index)),
+        observed_at: index, target_at: index,
+        features: {x: {value: index, available_at: index}}, target: index});
+    index = index + 1;
+}
+evaluation.walk_forward(rows, {fit: fit_rows, predict: predict_row,
+    kind: "regression", labels: [], calculation_version: "v1"},
+    {initial_train: 21, test_size: 1, step_size: 1, gap: 0, seed: 0});

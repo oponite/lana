@@ -331,10 +331,15 @@ fn parse_number_strict(data: &[u8], offset: usize) -> Result<(f64, usize), LanaE
 
 /// Parse a complete JSON document, mirroring `lana_json_parse`.
 pub fn json_parse(text: &str) -> Result<Value, LanaError> {
-    let data = text.as_bytes();
     let heap = lana_vm::heap::Heap::new(256 * 1024 * 1024);
+    json_parse_with_heap(text, &heap)
+}
+
+/// Parse JSON while charging the caller's heap for the resulting value.
+pub fn json_parse_with_heap(text: &str, heap: &lana_vm::heap::Heap) -> Result<Value, LanaError> {
+    let data = text.as_bytes();
     let mut parser = JsonParser { data, offset: 0 };
-    let value = json_value(&mut parser, 0, &heap)?;
+    let value = json_value(&mut parser, 0, heap)?;
     parser.space();
     if parser.offset != data.len() {
         return Err(LanaError::Parse);

@@ -1,0 +1,3 @@
+let rows = dataset([{key: 1, value: 2}]);
+let groups = group_by(rows, "key");
+materialize(aggregate(groups, ["count", "value"]));

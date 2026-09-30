@@ -1,0 +1,40 @@
+import "std/evaluation" as evaluation;
+
+fn fit_rows(training, validation, seed) {
+    return {calculation_version: "regression-v1", payload: {seed: seed,
+        training_count: array_length(training), validation_count: array_length(validation),
+        first_feature: training[0].features.x}};
+}
+
+fn predict_row(model, features) {
+    return {value: features.x};
+}
+
+let rows = array_new(0);
+let index = 0;
+while (index < 50) {
+    array_push(rows, {id: string_concat("r", number_to_string(index)),
+        observed_at: index, target_at: index,
+        features: {x: {value: index, available_at: index}}, target: index});
+    index = index + 1;
+}
+let options = {initial_train: 41, test_size: 3, step_size: 2, gap: 0, seed: 7};
+let report = evaluation.walk_forward(rows, {fit: fit_rows, predict: predict_row,
+    kind: "regression", labels: [], calculation_version: "regression-v1"}, options);
+assert(report.status == "complete", "complete report");
+assert(array_length(report.folds) == 4, "four folds");
+assert(array_length(report.repeated_test_ids) == 3, "overlap named");
+assert(report.folds[0].metrics.mae == 0, "exact regression");
+assert(report.incomplete_tail_count == 1, "incomplete final slice");
+assert(report.folds[0].seed == "7", "first fold seed");
+assert(report.folds[1].seed == "8", "fresh fold seed");
+let replay = evaluation.walk_forward(rows, {fit: fit_rows, predict: predict_row,
+    kind: "regression", labels: [], calculation_version: "regression-v1"}, options);
+assert(json_stringify(report) == json_stringify(replay), "deterministic replay");
+let gap_report = evaluation.walk_forward(rows, {fit: fit_rows, predict: predict_row,
+    kind: "regression", labels: [], calculation_version: "regression-v1"},
+    {initial_train: 41, test_size: 3, step_size: 3, gap: 2, seed: 7});
+assert(gap_report.folds[0].test_start == 43, "gap shifts test start");
+assert(gap_report.folds[0].validation_ids[19] == "r40", "gap excludes only gap rows");
+print(report.folds[0].model_digest);
+print("EVALUATION_WALK_FORWARD_PASS");

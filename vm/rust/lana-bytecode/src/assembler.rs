@@ -1,8 +1,4 @@
-//! LABC assembler, mirroring `lana_assemble_file` in `vm/c/assembler.c`.
-//!
-//! Accepts the same textual assembly format as the C11 assembler and produces
-//! the same chunk, so that `.lasm` sources assemble identically under both
-//! implementations.
+//! LABC assembler for the textual format in `spec/BYTECODE.md`.
 
 use crate::chunk::{Chunk, Function, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
@@ -35,7 +31,7 @@ const LANA_HISTORY_LATEST: u32 = 0;
 const LANA_HISTORY_DURATION: u32 = 1;
 
 /// Host-call names in id order, mirroring the table in `vm/c/assembler.c`.
-const HOST_CALL_NAMES: &[&str] = &[
+pub const HOST_CALL_NAMES: &[&str] = &[
     "args", "read_text", "write_text", "now", "random", "assert",
     "map_new", "map_has", "map_get", "map_set", "map_keys", "index_get", "index_set", "json_parse", "json_stringify",
     "csv_read", "csv_write", "string_length", "string_byte_at",
@@ -86,6 +82,14 @@ const HOST_CALL_NAMES: &[&str] = &[
     "cholesky_solve", "random_uniform", "random_normal",
     "tensor_device", "tensor_to_device", "tensor_to_cpu",
     "execution_capability", "execution_authorize", "execution_execute",
+    "future_message",
+    "core_entropy", "core_conditional_entropy", "core_mutual_information",
+    "core_broja", "core_kernel", "core_identity_kernel", "core_compose_kernels", "core_network", "core_infer", "core_forget_weights", "core_assign_weights",
+    "dataset_source", "dataset_query", "dataset_apply", "dataset_snapshot",
+    "dataset_evidence", "dataset_exclusions", "rules_learn", "rules_predict",
+    "rules_save", "rules_add_counterexample", "rules_inspect", "rules_rollback",
+    "trees_fit", "trees_predict", "trees_explain", "trees_save", "trees_load",
+    "evaluation_walk_forward", "dataset_sqlite", "document_extract", "snapshot",
 ];
 
 struct Label {
@@ -288,7 +292,9 @@ fn add_hex_string(chunk: &mut Chunk, encoded: &str) -> Result<u32, LanaError> {
     let index = chunk.constants.len() as u32;
     chunk
         .constants
-        .push(Value::String(String::from_utf8_lossy(&decoded).into_owned()));
+        .push(Value::String(if chunk.version == 6 {
+            String::from_utf8(decoded).map_err(|_| LanaError::Format)?
+        } else { String::from_utf8_lossy(&decoded).into_owned() }));
     Ok(index)
 }
 
@@ -1457,6 +1463,26 @@ fn emit_line(
             ins.c = a;
             ins.imm = number as u32;
         }
+        "VALUE_NEW" | "OBJECT_NEW" | "OO_GET" | "OO_SET" | "OO_CALL" | "OO_STATIC_CALL" | "OO_AS_INTERFACE" => {
+            expect(5)?;
+            ins.opcode = match tokens[0] {
+                "VALUE_NEW" => OpCode::ValueNew, "OBJECT_NEW" => OpCode::ObjectNew,
+                "OO_GET" => OpCode::OoGet, "OO_SET" => OpCode::OoSet,
+                "OO_CALL" => OpCode::OoCall, "OO_STATIC_CALL" => OpCode::OoStaticCall,
+                _ => OpCode::OoAsInterface,
+            };
+            ins.a = reg(tokens[1])?;
+            ins.b = if tokens[2] == "-" { u32::MAX } else { reg(tokens[2])? };
+            ins.c = add_hex_string(chunk, tokens[3])?;
+            if let Some(index) = chunk.constants[..ins.c as usize].iter().position(|value| value == &chunk.constants[ins.c as usize]) {
+                chunk.constants.pop();
+                ins.c = index as u32;
+            }
+            ins.imm = if tokens[4] == "-" { u32::MAX } else {
+                tokens[4].parse::<u32>().map_err(|_| LanaErrorInfo::new(LanaError::Format, ip,
+                    ins.opcode as u8, line, "invalid object instruction index/count"))?
+            };
+        }
         "RETURN" | "PRINT" => {
             expect(2)?;
             let a = reg(tokens[1])?;
@@ -1600,7 +1626,7 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
                     )
                 })?;
                 if version != LABC_VERSION && version != LABC_VERSION_1 && version != LABC_VERSION_3
-                    && version != LABC_VERSION_4 && version != LABC_VERSION_5
+                    && version != LABC_VERSION_4 && version != LABC_VERSION_5 && version != 6
                 {
                     return Err(LanaErrorInfo::new(
                         LanaError::IncompatibleFormat,
@@ -1609,6 +1635,10 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
                         line,
                         "unsupported version",
                     ));
+                }
+                if version == 6 && (!chunk.code.is_empty() || !chunk.constants.is_empty()) {
+                    return Err(LanaErrorInfo::new(LanaError::Format, chunk.code.len(), 0, line,
+                        ".version 6 must precede instructions and constants"));
                 }
                 chunk.version = version;
                 continue;

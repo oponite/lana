@@ -1,0 +1,23 @@
+class Link {
+    public mutable link: Dynamic = null;
+    public count: number = 7;
+    public fn read(self) -> number { return self.count; }
+}
+
+fn discard_cycle() {
+    let garbage = new Link();
+    garbage.link = [garbage, garbage];
+}
+
+let kept = new Link();
+kept.link = [kept, kept];
+let alias = kept;
+let index = 0;
+while (index < 1000) {
+    discard_cycle();
+    index = index + 1;
+}
+assert(alias == kept, "collection changed identity");
+assert(alias.link[0] == kept, "collection lost a cyclic alias");
+assert(kept.read() == 7, "collection lost a live field");
+print("OBJECT_COLLECTION_PASS");

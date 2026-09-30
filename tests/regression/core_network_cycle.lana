@@ -1,0 +1,8 @@
+import "std/core" as info;
+
+let root = joint correlated (r) with support: [[0, 0.5], [1, 0.5]];
+let same = info.identity_kernel([0, 1]);
+info.network(root, [
+    {name: "a", parents: ["b"], kernel: same},
+    {name: "b", parents: ["a"], kernel: same}
+]);

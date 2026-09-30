@@ -1,0 +1,32 @@
+import "std/trees" as trees;
+
+fn task() {
+    return {id: "switch", feature_schema: [{name: "x", kind: "number", nullable: false, categories: []}],
+        problem: "classification", labels: [false, true]};
+}
+
+fn holdout() {
+    let rows = array_new(0);
+    let index = 0;
+    while (index < 20) {
+        let positive = index - floor(index / 2) * 2 == 1;
+        let x = 1;
+        if (positive) { x = 3; }
+        array_push(rows, {id: string_concat("h", number_to_string(index)), features: {x: x}, target: positive});
+        index = index + 1;
+    }
+    return rows;
+}
+
+let train = [{id: "safe", features: {x: 1}, target: false},
+    {id: "fail", features: {x: 3}, target: true}];
+let single = trees.fit(task(), train, holdout(), {family: "tree", max_depth: 2, min_leaf: 1});
+assert(single.status == "validated", "held-out tree validates");
+assert(single.validation_report.metrics.correct == 20, "tree holdout correct");
+assert(single.model_or_rule.trees[0].nodes[0].constant == 2, "midpoint split");
+assert(trees.predict(single.model_or_rule, {x: 3}).label == true, "tree prediction");
+assert(array_length(trees.explain(single.model_or_rule, {x: 3}).contributions[0].path) == 1,
+    "one explained split");
+let replay = trees.fit(task(), train, holdout(), {family: "tree", max_depth: 2, min_leaf: 1});
+assert(json_stringify(single.model_or_rule) == json_stringify(replay.model_or_rule), "deterministic replay");
+print("TREES_FIT_PASS");

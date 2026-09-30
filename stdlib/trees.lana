@@ -1,0 +1,21 @@
+// std/trees — bounded CART models and uncalibrated predictions.
+
+fn fit(task, train, holdout, options) {
+    return trees_fit(task, train, holdout, options);
+}
+
+fn predict(model, features) {
+    return trees_predict(model, features);
+}
+
+fn explain(model, features) {
+    return trees_explain(model, features);
+}
+
+fn save(store, task_id, expected_revision, model) {
+    return trees_save(store, task_id, expected_revision, model);
+}
+
+fn load(store, task_id, revision) {
+    return trees_load(store, task_id, revision);
+}

@@ -1,0 +1,40 @@
+import "std/core" as info;
+
+let x_rates = [[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]];
+let y_rates = [[0.4, 0.3, 0.2, 0.1], [0.1, 0.2, 0.3, 0.4]];
+let rows = [];
+let t = 0;
+while (t < 2) {
+    let x = 0;
+    while (x < 4) {
+        let y = 0;
+        while (y < 4) {
+            array_push(rows, [t, x, y, 0.5 * x_rates[t][x] * y_rates[t][y]]);
+            y = y + 1;
+        }
+        x = x + 1;
+    }
+    t = t + 1;
+}
+let law = joint correlated (t, x, y) with support: rows;
+let result = info.broja(law, "t", "x", "y");
+let swapped = info.broja(law, "t", "y", "x");
+let single = info.mutual_information(law, ["t"], ["x"]);
+let total = info.mutual_information(law, ["t"], ["x", "y"]);
+let bound = result.error_bound_bits + 0.0000000001;
+
+// A feasible coupling can set y = 3 - x, so the optimum is the single-source MI.
+assert(result.status == "converged", "4x4 transport certificate");
+assert(result.error_bound_bits <= 0.000001, "4x4 objective bound");
+assert(result.shared > single - bound, "shared lower bound");
+assert(result.shared < single + bound, "shared upper bound");
+assert(result.unique_x <= bound, "zero unique x");
+assert(result.unique_y <= bound, "zero unique y");
+assert(result.synergy > total - single - bound, "synergy lower bound");
+assert(result.synergy < total - single + bound, "synergy upper bound");
+assert(swapped.status == "converged", "swapped source certificate");
+assert(swapped.shared > result.shared - 0.000001, "swapped shared lower bound");
+assert(swapped.shared < result.shared + 0.000001, "swapped shared upper bound");
+assert(swapped.synergy > result.synergy - 0.000001, "swapped synergy lower bound");
+assert(swapped.synergy < result.synergy + 0.000001, "swapped synergy upper bound");
+print("CORE_BROJA_FOUR_BY_FOUR_PASS");

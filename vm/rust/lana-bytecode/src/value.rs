@@ -40,6 +40,10 @@ pub enum ValueType {
     Posterior,
     Future,
     Dataset,
+    Kernel,
+    Network,
+    ObjectValue,
+    ClassObject,
 }
 
 impl TryFrom<u8> for ValueType {

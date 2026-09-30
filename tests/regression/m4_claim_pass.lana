@@ -1,3 +1,6 @@
 let asserted = claim(true, "sensor is active");
+let record = inspect_information(asserted);
+assert(record.record_schema == 1, "claim record schema");
+assert(record.claim.proposition == "sensor is active", "claim proposition record");
 print(claim_proposition(asserted));
 print(claim_value(asserted));

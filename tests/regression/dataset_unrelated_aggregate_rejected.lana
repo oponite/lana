@@ -1,0 +1,6 @@
+import "std/core" as info;
+
+let first = info.distribution([[1, 0.25], [2, 0.75]]);
+let second = info.distribution([[1, 0.25], [2, 0.75]]);
+let rows = dataset([{key: 1, value: first}, {key: 1, value: second}]);
+materialize(aggregate(group_by(rows, "key"), ["sum", "value"]));

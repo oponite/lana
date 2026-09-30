@@ -1,0 +1,13 @@
+import "std/core" as info;
+
+let and_law = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.25], [0, 0, 1, 0.25], [0, 1, 0, 0.25], [1, 1, 1, 0.25]];
+let result = info.broja(and_law, "t", "x", "y");
+assert(result.status == "converged", "AND certificate");
+assert(result.synergy > 0.499, "AND synergy lower bound");
+assert(result.synergy < 0.501, "AND synergy upper bound");
+assert(result.error_bound_bits <= 0.000001, "AND error bound");
+let parts = result.shared + result.unique_x + result.unique_y + result.synergy;
+assert(parts > result.total - 0.000001, "AND components lower bound");
+assert(parts < result.total + 0.000001, "AND components upper bound");
+print("CORE_BROJA_AND_PASS");

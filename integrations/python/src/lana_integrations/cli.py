@@ -13,11 +13,9 @@ from .bridge import BridgeRunner, LanaCompatibilityError, _error_envelope
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lana-bridge")
-    parser.add_argument("--lana", help="path to the Lana 3.0 executable")
+    parser.add_argument("--lana", help="path to the Lana 3.x or 4.x executable")
     parser.add_argument("--timeout", type=float, default=30.0)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    check = subparsers.add_parser("check", help="check a Lana source program")
-    check.add_argument("program")
     run = subparsers.add_parser("run", help="run a JSON bridge program")
     run.add_argument("program")
     run.add_argument("--input", default="-", help="JSON file, or - for stdin")
@@ -38,19 +36,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         runner = BridgeRunner(arguments.lana, timeout_seconds=arguments.timeout)
-        if arguments.command == "check":
-            envelope = runner.check(arguments.program)
-        else:
-            input_value = _read_input(arguments.input)
-            envelope = runner.run(
-                arguments.program,
-                input_value,
-                seed=arguments.seed,
-                memory_limit_mib=arguments.memory_limit_mib,
-                instruction_limit=arguments.instruction_limit,
-                workers=arguments.workers,
-                max_tasks=arguments.max_tasks,
-            )
+        input_value = _read_input(arguments.input)
+        envelope = runner.run(
+            arguments.program,
+            input_value,
+            seed=arguments.seed,
+            memory_limit_mib=arguments.memory_limit_mib,
+            instruction_limit=arguments.instruction_limit,
+            workers=arguments.workers,
+            max_tasks=arguments.max_tasks,
+        )
     except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as error:
         envelope = _error_envelope(
             "input", str(error), code="LANA_BRIDGE_INPUT_ERROR"

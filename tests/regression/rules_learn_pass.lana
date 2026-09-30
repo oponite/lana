@@ -1,0 +1,69 @@
+import "std/rules" as rules;
+
+fn task_data() {
+    return {id: "cooling-failure",
+        feature_schema: [
+            {name: "temperature", kind: "number", nullable: false, categories: []},
+            {name: "cooling", kind: "boolean", nullable: false, categories: []}
+        ],
+        target_labels: [false, true], allowed: ["gt", "eq", "and"], known_facts: {}};
+}
+
+fn train_data() {
+    return [
+        {id: "a", features: {temperature: 70, cooling: false}, target: false},
+        {id: "b", features: {temperature: 90, cooling: false}, target: true},
+        {id: "c", features: {temperature: 90, cooling: true}, target: false},
+        {id: "d", features: {temperature: 82, cooling: false}, target: true},
+        {id: "e", features: {temperature: 75, cooling: true}, target: false},
+        {id: "f", features: {temperature: 82, cooling: true}, target: false}
+    ];
+}
+
+fn holdout_data() {
+    let holdout = array_new(0);
+    let index = 0;
+    while (index < 20) {
+        let variant = index - floor(index / 4) * 4;
+        let temperature = 70;
+        let cooling = false;
+        let target = false;
+        if (variant == 1) { temperature = 90; target = true; }
+        if (variant == 2) { temperature = 90; cooling = true; }
+        if (variant == 3) { temperature = 82; target = true; }
+        array_push(holdout, {id: string_concat("h", number_to_string(index)),
+            features: {temperature: temperature, cooling: cooling}, target: target});
+        index = index + 1;
+    }
+    return holdout;
+}
+
+fn check_predictions(model) {
+    let hot = rules.predict(model, {temperature: 90, cooling: false});
+    assert(hot.value == true, "learned rule predicts the failure case");
+    assert(array_length(hot.matched_clauses) == 1, "prediction explains its matching clause");
+    let cooled = rules.predict(model, {temperature: 90, cooling: true});
+    assert(cooled.value == false, "cooling changes the prediction");
+    let missing = rules.predict(model, {temperature: null, cooling: false});
+    assert(missing.unsupported == true, "a needed missing feature is unsupported");
+}
+
+let task = task_data();
+let train = train_data();
+let holdout = holdout_data();
+let report = rules.learn(task, train, holdout, {});
+assert(report.status == "validated", "held-out rule is validated");
+assert(report.training_report.search_status == "exact_found", "bounded search found an exact training rule");
+assert(array_length(report.model_or_rule.clauses) == 1, "one conjunction is enough");
+assert(array_length(report.model_or_rule.clauses[0]) == 2, "rule combines temperature and cooling");
+assert(report.validation_report.metrics.correct == 20, "untouched examples are predicted");
+check_predictions(report.model_or_rule);
+let replay = rules.learn(task, train, holdout, {});
+assert(json_stringify(report) == json_stringify(replay), "same inputs replay byte-identically");
+let capped = rules.learn(task, train, holdout, {max_candidates: 1, max_predicate_visits: 100});
+assert(capped.status == "limit_exhausted", "search cap is explicit");
+assert(capped.model_or_rule == null, "capped search publishes no rule");
+let visits = rules.learn(task, train, holdout, {max_candidates: 100, max_predicate_visits: 1});
+assert(visits.status == "limit_exhausted", "predicate-work cap is explicit");
+assert(visits.model_or_rule == null, "predicate cap publishes no rule");
+print("RULES_LEARN_PASS");

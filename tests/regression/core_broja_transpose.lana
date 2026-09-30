@@ -1,0 +1,9 @@
+import "std/core" as info;
+
+let law = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.2], [0, 1, 1, 0.2], [0, 0, 2, 0.1],
+     [1, 1, 0, 0.1], [1, 0, 1, 0.2], [1, 1, 2, 0.2]];
+let result = info.broja(law, "t", "x", "y");
+assert(result.status == "converged", "binary/ternary certificate");
+assert(result.error_bound_bits <= 0.000001, "binary/ternary error bound");
+print("CORE_BROJA_TRANSPOSE_PASS");

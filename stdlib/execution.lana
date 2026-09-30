@@ -58,7 +58,11 @@ fn webhook_path(path) {
 fn plan_webhook(path, payload) {
     assert(webhook_path(path), "webhook path must be an origin-relative path without URL components");
     assert(json_payload(payload), "webhook payload must be definite JSON-compatible data");
-    return {kind: "webhook", path: path, payload: payload};
+    return {
+        record_schema: 1, id: null, kind: "webhook", transport_status: "planned",
+        domain_status: "ready", payload: payload, error: null, evidence: null,
+        assumptions: null, exactness: "exact", metadata: null, path: path
+    };
 }
 
 /// The host issues this opaque capability from its configured HTTPS origin.
@@ -71,7 +75,7 @@ fn authorize(capability, decision, plan) {
     return execution_authorize(capability, decision, plan);
 }
 
-/// Send the one allowed webhook attempt and return Pending's terminal status.
+/// Send the one allowed webhook attempt and return its versioned receipt.
 fn execute(capability, authorization, plan) {
     return execution_execute(capability, authorization, plan);
 }

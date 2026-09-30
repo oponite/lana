@@ -1,9 +1,6 @@
-//! Lana error codes, mirroring `vm/include/error.h`.
-//!
-//! The numeric values are stable and MUST match the C11 `LanaError` enum so
-//! that differential conformance can compare error codes byte-for-byte.
+//! Stable Lana error codes.
 
-/// Lana error codes. The discriminants match `LanaError` in `vm/include/error.h`.
+/// Lana error codes with stable numeric discriminants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum LanaError {

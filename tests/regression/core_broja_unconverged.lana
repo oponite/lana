@@ -1,0 +1,17 @@
+import "std/core" as info;
+
+let law = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.11328671328671329], [0, 1, 1, 0.11048951048951049],
+     [0, 1, 3, 0.033566433566433566], [0, 2, 2, 0.018181818181818181],
+     [0, 3, 1, 0.081118881118881117], [0, 3, 3, 0.054545454545454543],
+     [1, 0, 0, 0.081118881118881117], [1, 0, 3, 0.11748251748251748],
+     [1, 1, 0, 0.13286713286713286], [1, 1, 1, 0.11048951048951049],
+     [1, 2, 2, 0.11748251748251748], [1, 3, 3, 0.02937062937062937]];
+let result = info.broja(law, "t", "x", "y");
+assert(result.status == "unconverged", "uncertified law status");
+assert(result.error_bound_bits > 0.000001, "uncertified objective bound");
+assert(result.marginal_residual <= 0.000000001, "feasible reported marginal");
+assert(result.mass_residual <= 0.000000001, "feasible reported mass");
+assert(!map_has(result, "shared"), "no uncertified component");
+assert(!map_has(result, "total"), "no uncertified total");
+print("CORE_BROJA_UNCONVERGED_PASS");

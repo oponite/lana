@@ -8,12 +8,21 @@
 pub mod adapters;
 #[doc(hidden)]
 pub mod atomic_file;
-pub mod brain;
+pub mod information_codec;
+pub mod rules;
+pub mod trees;
+pub mod dataset_identity;
+pub mod dataset_snapshot;
+mod dataset_source_codec;
+pub mod document_extract;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dataset_sqlite;
 pub mod claims;
 pub mod codec;
 pub mod data;
 pub mod effects;
 pub mod execution;
+pub mod future_messages;
 pub mod host_calls;
 pub mod ledger;
 pub mod policy;

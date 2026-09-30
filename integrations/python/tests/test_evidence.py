@@ -68,3 +68,12 @@ def test_preserves_optional_lifecycle_metadata() -> None:
     validated = validate_evidence(record)
     assert validated["reliability"] == record["reliability"]
     assert validated["calibration"] == record["calibration"]
+
+
+@pytest.mark.parametrize("field", ["observed_at", "effective_at", "revision", "confidence"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_rejects_nonfinite_evidence(field: str, value: float) -> None:
+    record = evidence()
+    record[field] = value
+    with pytest.raises(EvidenceValidationError, match=field):
+        validate_evidence(record)

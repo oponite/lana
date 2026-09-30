@@ -1,4 +1,4 @@
-"""Root-scoped stdio MCP server for Lana 3.0 runtimes."""
+"""Root-scoped stdio MCP server for Lana 3.x and 4.x runtimes."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def build_server(
     server = MCPServer(
         "lana",
         instructions=(
-            "Check and run Lana 3.0 programs beneath configured roots. "
+            "Report the Lana version and optionally run programs beneath configured roots. "
             "Execution is local and may perform file effects."
         ),
     )
@@ -45,16 +45,10 @@ def build_server(
             "ok": True,
             "result": {
                 "lana_version": runner.version,
-                "labc_version": 2,
+                "labc_version": runner.labc_version,
                 "executable": runner.executable,
             },
         }
-
-    @server.tool(annotations=read_only)
-    def lana_check(program: str) -> dict[str, Any]:
-        """Check a Lana source program beneath an allowed root without running it."""
-        resolved = policy.resolve_program(program)
-        return runner.check(resolved)
 
     if allow_run:
 

@@ -1,19 +1,14 @@
-//! Differential fuzz targets for the Lana Rust runtime boundary.
+//! Fuzz targets for the Lana Rust runtime boundary.
 //!
 //! This crate exposes the Rust `lana-bytecode` loader + verifier through a
-//! plain `check` / `outcome` API reused by cargo-fuzz, the `fuzz-driver`
-//! (single-input driver), and `fuzz-diff` (differential driver) binaries.
-//!
-//! The differential driver shells out to the C11 `lanavm verify` subcommand and
-//! compares accept/reject plus the stable `LANA_ERR_*` error code on identical
-//! inputs. See `tests/differential/run_fuzz_diff.sh` for the end-to-end wiring.
+//! plain `check` / `outcome` API reused by cargo-fuzz and `fuzz-driver`.
 
 use lana_bytecode::{loader, verifier, LanaError, LanaErrorInfo};
 
 /// Run the Rust loader and, on success, the verifier over `data`.
 ///
 /// Never panics: every failure path is a `Result`. Returns the first error the
-/// C11 loader/verifier would produce for the same bytes, or `Ok(())`.
+/// loader/verifier produces, or `Ok(())`.
 pub fn check(data: &[u8]) -> Result<(), LanaErrorInfo> {
     let chunk = loader::load(data)?;
     verifier::verify(&chunk)

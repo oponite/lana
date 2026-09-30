@@ -1,3 +1,4 @@
+// Legacy C11 benchmark fixture. Use bridge.lana and echo_bridge.lana for current programs.
 fn read_request() {
     let argv = args();
     assert(array_length(argv) == 2, "bridge expects request and response paths");

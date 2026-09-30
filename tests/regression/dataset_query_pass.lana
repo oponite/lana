@@ -1,0 +1,19 @@
+fn plan(source) { return materialize(source); }
+let path = args()[0];
+store_open(path);
+dataset_source("s");
+let before = store_current_revision();
+dataset_query("q", ["s"], "plan", "v1");
+assert(store_current_revision() == before + 1, "query and initial snapshot commit together");
+dataset_query("q", ["s"], "plan", "v1");
+assert(store_current_revision() == before + 1, "matching query bind does not write");
+let updated = dataset_apply("s", before + 1, "add-a", [{"op": "add", "id": "a", "row": {"v": 7}}]);
+assert(updated == before + 2, "source and dependent query commit together");
+assert(string_length(store_get("dataset/snapshot/71/3")) > 0, "dependent snapshot saved");
+let snapshot = dataset_snapshot("q", null);
+assert(array_length(snapshot.rows) == 1, "current snapshot has the added row");
+assert(array_length(dataset_snapshot("q", before + 1).rows) == 0, "historical snapshot keeps old rows");
+let evidence = dataset_evidence(snapshot, snapshot.row_ids[0]);
+assert(evidence.source_rows[0].row_id == "a", "row evidence keeps source ID");
+assert(array_length(dataset_exclusions(snapshot)) == 0, "no rows excluded");
+print("DATASET_QUERY_PASS");

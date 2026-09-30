@@ -4,31 +4,28 @@ Lana has three independent version axes.
 
 ## Language version (semver)
 
-`MAJOR.MINOR.PATCH`, applied to the language and its source contract.
+`MAJOR.MINOR.PATCH`, applied to the language and supported integration contract.
 
-- **MAJOR** — a breaking change to source syntax or programmer-visible
-  behavior.
+- **MAJOR** — a breaking change to source syntax, programmer-visible behavior,
+  or supported integration surfaces.
 - **MINOR** — a new, backward-compatible feature.
 - **PATCH** — a bug fix with no contract change.
 
-The 1.x line targets LABC v1. Lana 2.0 introduced LABC v2. Lana 3.0 adds the
-Rust-owned Core surface in LABC v5; its Rust loader accepts v1-v5, while the
-frozen C reference backend accepts v1-v2.
+The 1.x line targets LABC v1. Lana 2.0 introduced LABC v2. Lana 3.0 added the
+Rust-owned Core surface in LABC v5. Lana 4.0 retires the C reference backend.
 
 ## LABC version (integer)
 
 The bytecode format version, independent of the language version. It is bumped
-only when the encoding changes. The Rust loader accepts LABC v1-v5; the C
-reference loader accepts v1-v2. The
-`LABC` magic is unchanged. The compiler emits the lowest version that supports
-the source form: v2-v4 for established forms and v5 for Core distribution and
-map refinement forms.
+only when the encoding changes. The Rust loader accepts LABC v1-v6. Frozen
+v1-v2 goldens preserve legacy coverage. The `LABC` magic is unchanged. The
+compiler emits the lowest version that supports
+the source form: v2-v4 for established forms, v5 for Core distribution and
+map refinement, and v6 for object declarations.
 
 ## Runtime version
 
-The canonical runtime is the Rust implementation. The C11 VM is a frozen
-reference implementation retained for conformance comparison; it is not
-independently versioned.
+The canonical runtime is the Rust implementation. Lana 4.0 retires the C VM.
 
 ## Compatibility
 

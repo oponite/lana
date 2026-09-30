@@ -8,9 +8,11 @@
 pub mod assembler;
 pub mod chunk;
 pub mod disassembler;
+pub mod encoder;
 pub mod error;
 pub mod loader;
 pub mod opcode;
+pub mod objects;
 pub mod value;
 pub mod verifier;
 
@@ -39,6 +41,12 @@ mod tests {
         chunk.code.push(Instruction::new(OpCode::LoadConst, 0, 0, 0, 0, 1));
         chunk.code.push(Instruction::new(OpCode::Halt, 0, 0, 0, 0, 2));
         chunk
+    }
+
+    #[test]
+    fn encoded_chunk_round_trips_through_loader() {
+        let chunk = sample_chunk();
+        assert_eq!(loader::load(&encoder::encode(&chunk)).unwrap(), chunk);
     }
 
     #[test]
@@ -84,6 +92,33 @@ mod tests {
         let mut chunk = Chunk::new(opcode::LABC_VERSION, 0);
         chunk.code.push(Instruction::new(OpCode::HostCall, 0, 0, 0, u32::MAX, 1));
         assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Register);
+    }
+
+    #[test]
+    fn verifier_accepts_finite_host_ids() {
+        let mut chunk = sample_chunk();
+        for id in 192..=201 {
+            chunk.code[0] = Instruction::new(OpCode::HostCall, 0, id, 0, 0, 1);
+            assert!(verifier::verify(&chunk).is_ok(), "host id {id}");
+        }
+        for id in 202..=205 {
+            chunk.code[0] = Instruction::new(OpCode::HostCall, 0, id, 0, 0, 1);
+            assert!(verifier::verify(&chunk).is_ok());
+        }
+        for id in [206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217] {
+            chunk.code[0] = Instruction::new(OpCode::HostCall, 0, id, 0, 0, 1);
+            assert!(verifier::verify(&chunk).is_ok());
+        }
+        chunk.code[0] = Instruction::new(OpCode::HostCall, 0, 219, 0, 0, 1);
+        assert!(verifier::verify(&chunk).is_ok());
+        chunk.code[0] = Instruction::new(OpCode::HostCall, 0, 218, 0, 0, 1);
+        assert!(verifier::verify(&chunk).is_ok());
+        chunk.code[0] = Instruction::new(OpCode::HostCall, 0, 220, 0, 0, 1);
+        assert!(verifier::verify(&chunk).is_ok());
+        for id in [221] {
+            chunk.code[0] = Instruction::new(OpCode::HostCall, 0, id, 0, 0, 1);
+            assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Format);
+        }
     }
 
     #[test]

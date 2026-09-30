@@ -1,0 +1,12 @@
+import "std/core" as info;
+
+let ternary = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.2], [0, 1, 1, 0.2], [0, 2, 0, 0.1],
+     [1, 0, 1, 0.1], [1, 1, 0, 0.2], [1, 2, 1, 0.2]];
+let result = info.broja(ternary, "t", "x", "y");
+assert(result.status == "converged", "ternary/binary certificate");
+assert(result.error_bound_bits <= 0.000001, "ternary/binary error bound");
+let parts = result.shared + result.unique_x + result.unique_y + result.synergy;
+assert(parts > result.total - 0.000001, "ternary/binary components lower bound");
+assert(parts < result.total + 0.000001, "ternary/binary components upper bound");
+print("CORE_BROJA_TERNARY_PASS");

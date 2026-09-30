@@ -1,0 +1,97 @@
+import "std/rules" as rules;
+
+fn learning_task() {
+    return {id: "switch", feature_schema: [{name: "x", kind: "number", nullable: false, categories: []}],
+        target_labels: [false, true], allowed: ["gt"], known_facts: {}};
+}
+
+fn training_rows() {
+    return [
+        {id: "safe", features: {x: 1}, target: false},
+        {id: "fail", features: {x: 3}, target: true}
+    ];
+}
+
+fn holdout_rows(base) {
+    let rows = array_new(0);
+    let index = 0;
+    while (index < 20) {
+        let x = 1;
+        let target = false;
+        if (index - floor(index / 2) * 2 == 1) { x = 3; target = true; }
+        array_push(rows, {id: string_concat("h", number_to_string(base + index)), features: {x: x}, target: target});
+        index = index + 1;
+    }
+    return rows;
+}
+
+let path = args()[0];
+let mode = args()[1];
+let store = store_open(path);
+if (mode == "save") {
+    let report = rules.learn(learning_task(), training_rows(), holdout_rows(0), {});
+    assert(report.status == "validated", "the first rule validates");
+    let before = store_current_revision();
+    assert(rules.save(store, "switch", before, report) == "1", "first version saved");
+    assert(store_current_revision() == before + 1, "one revision published");
+    let saved = rules.inspect(store, "switch", null);
+    assert(saved.active_version == "1", "validated first version activates");
+    assert(saved.versions[0].report.metrics.correct == 20, "held-out trace persisted");
+    print("RULES_STORE_SAVED");
+} else {
+    if (mode == "read") {
+        let saved = rules.inspect(store, "switch", null);
+        assert(saved.active_version == "1", "active version reloads in a fresh process");
+        assert(saved.versions[0].model.clauses[0][0].feature == "x", "rule AST reloads");
+        assert(saved.versions[0].model.clauses[0][0].constant.tag == "number", "threshold has tagged encoding");
+        assert(saved.versions[0].train[0].features.x.tag == "number", "feature has tagged encoding");
+        assert(saved.versions[0].report.metrics.accuracy == "3ff0000000000000", "accuracy has binary64 bits");
+        let prediction = rules.predict(saved, {x: 3});
+        assert(prediction.value == true, "active rule predicts");
+        assert(prediction.active_version == "1", "prediction names active version");
+        print("RULES_STORE_READ");
+    } else {
+        if (mode == "correct") {
+            let before = store_current_revision();
+            let example = {id: "counter-1", features: {x: 2}, target: false};
+            assert(rules.add_counterexample(store, "switch", before, example, holdout_rows(20)) == "2", "correction saved");
+            assert(rules.add_counterexample(store, "switch", before, example, holdout_rows(20)) == "2", "exact retry idempotent");
+            assert(store_current_revision() == before + 1, "retry did not commit");
+            let saved = rules.inspect(store, "switch", null);
+            assert(saved.active_version == "2", "validated correction activates");
+            assert(array_length(saved.versions) == 2, "previous version retained");
+            assert(rules.predict(saved, {x: 2}).value == false, "corrected rule predicts");
+            print("RULES_STORE_CORRECTED");
+        } else {
+            if (mode == "inactive") {
+                let before = store_current_revision();
+                let example = {id: "counter-2", features: {x: 3}, target: false};
+                assert(rules.add_counterexample(store, "switch", before, example, holdout_rows(40)) == "3", "imperfect candidate saved");
+                let saved = rules.inspect(store, "switch", null);
+                assert(saved.active_version == "2", "imperfect candidate stays inactive");
+                assert(saved.versions[2].report.status == "candidate", "candidate status retained");
+                print("RULES_STORE_INACTIVE");
+            } else {
+                if (mode == "rollback") {
+                    let before = store_current_revision();
+                    assert(rules.rollback(store, "switch", before, "1") == "1", "validated prior version restored");
+                    let saved = rules.inspect(store, "switch", null);
+                    assert(saved.active_version == "1", "rollback changed active pointer");
+                    assert(array_length(saved.versions) == 3, "rollback preserved history");
+                    print("RULES_STORE_ROLLED_BACK");
+                } else {
+                    if (mode == "changed_retry") {
+                        rules.add_counterexample(store, "switch", 1,
+                            {id: "counter-1", features: {x: 2}, target: true}, holdout_rows(20));
+                    } else {
+                    if (mode == "tamper") {
+            let report = rules.learn(learning_task(), training_rows(), holdout_rows(0), {});
+            map_set(report.validation_report.metrics, "correct", 0);
+            rules.save(store, "switch", store_current_revision(), report);
+                    }
+                    }
+                }
+            }
+        }
+    }
+}

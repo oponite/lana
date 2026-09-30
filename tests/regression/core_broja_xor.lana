@@ -1,0 +1,12 @@
+import "std/core" as info;
+
+let xor = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.25], [1, 0, 1, 0.25], [1, 1, 0, 0.25], [0, 1, 1, 0.25]];
+let result = info.broja(xor, "t", "x", "y");
+assert(result.status == "converged", "XOR certificate");
+assert(result.synergy == 1, "XOR synergy");
+assert(result.shared == 0, "XOR shared");
+assert(result.unique_x == 0, "XOR unique x");
+assert(result.unique_y == 0, "XOR unique y");
+assert(result.error_bound_bits <= 0.000001, "XOR error bound");
+print("CORE_BROJA_XOR_PASS");

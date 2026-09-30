@@ -1,0 +1,8 @@
+// std/future_messages — durable, application-checked local inbox.
+
+fn create(record) { return future_message("create", record); }
+fn inspect(id) { return future_message("inspect", id); }
+fn check(context) { return future_message("check", context); }
+fn receive(after_id, limit) { return future_message("receive", after_id, limit); }
+fn acknowledge(id) { return future_message("acknowledge", id); }
+fn cancel(id) { return future_message("cancel", id); }

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -15,21 +15,6 @@ def test_run_round_trip_via_subprocess(fake_lana: Path, program: Path) -> None:
     assert result.status == "ok"
     assert result.value == {"message": "hello"}
     assert result.backend == "subprocess"
-
-
-def test_check_via_subprocess(fake_lana: Path, program: Path) -> None:
-    result = Lana(executable=fake_lana).check(program)
-    assert result.status == "ok"
-    assert result.backend == "subprocess"
-
-
-def test_check_failure_is_distinct(fake_lana: Path, tmp_path: Path) -> None:
-    bad = tmp_path / "bad.lana"
-    bad.write_text("", encoding="utf-8")
-    result = Lana(executable=fake_lana).check(bad)
-    assert result.status == "failed"
-    assert result.error is not None
-    assert result.value is None
 
 
 def test_run_failure_is_distinct(fake_lana: Path, tmp_path: Path) -> None:
@@ -55,12 +40,28 @@ def test_unavailable_when_no_runtime(tmp_path: Path) -> None:
     assert result.error["code"] == "LANA_UNAVAILABLE"
 
 
-def test_native_round_trip_when_library_present(tmp_path: Path) -> None:
-    library = os.environ.get("LANA_BRIDGE_TEST_LIBRARY")
-    bytecode = os.environ.get("LANA_BRIDGE_TEST_BYTECODE")
-    if not library or not bytecode:
-        pytest.skip("native bridge test artifacts were not provided")
-    result = Lana(library=library).run_labc(bytecode, {"ctypes": True})
-    assert result.status == "ok"
-    assert result.value == {"ctypes": True}
-    assert result.backend == "native"
+def test_rust_worker_repeated_calls(tmp_path: Path, built_lana: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = Path(__file__).resolve().parents[3]
+    executable = built_lana
+    program = root / "integrations" / "lana" / "echo_bridge.lana"
+    bytecode = tmp_path / "echo.labc"
+    subprocess.run([executable, "compile", program, "-o", bytecode], check=True)
+    record = {"record_schema": 1, "id": "relationship_claim/9007199254740993/1",
+              "kind": "relationship_claim", "payload": {"claim_id": "9007199254740993"},
+              "payload_digest": "ab" * 32, "signature": "cd" * 64}
+    with Lana(executable=executable) as lana:
+        assert lana.backend == "worker"
+        for value in ({"first": 1}, {"second": False}, record):
+            for operation, path in ((lana.run, program), (lana.run_labc, bytecode)):
+                result = operation(path, value)
+                assert result.status == "ok", result.error
+                assert result.value == value
+                assert result.backend == "worker"
+        monkeypatch.chdir(tmp_path)
+        assert lana.run_labc(Path("echo.labc"), {"relative": True}).value == {"relative": True}
+        bad = tmp_path / "bad.labc"
+        bad.write_bytes(b"bad bytecode")
+        failed = lana.run_labc(bad, {})
+        assert failed.status == "failed"
+        assert failed.error is not None
+        assert failed.error["code"].startswith("LANA_ERR_")

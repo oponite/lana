@@ -22,6 +22,7 @@ use lana_vm::Vm;
 
 /// The self-hosted compiler, copied into `OUT_DIR` by `build.rs`.
 const COMPILER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/lana-compiler.labc"));
+include!(concat!(env!("OUT_DIR"), "/stdlib.rs"));
 
 /// Virtual paths the compiler reads/writes within the in-memory filesystem.
 const SOURCE_PATH: &str = "/src/main.lana";
@@ -63,6 +64,7 @@ fn compile_source(source: &str) -> Result<Chunk, String> {
         .map_err(|info| format!("{{\"line\":0,\"message\":\"cannot load compiler: {}\"}}", json_escape(&info.message)))?;
     let mut vm = Vm::new(&compiler_chunk);
     vm.set_virtual_file(SOURCE_PATH, source.to_string());
+    for (path, source) in STDLIB { vm.set_virtual_file(path, source.to_string()); }
     vm.set_program_args(&[SOURCE_PATH.to_string(), ASM_PATH.to_string()]);
     if vm.run() != LanaError::Ok {
         return Err(error_json(&vm));
@@ -96,12 +98,16 @@ pub fn run(source: &str, input: &str) -> String {
         vm.set_program_args(&[input.to_string()]);
     }
     let mut store_host = lana_runtime::host_calls::StoreHost::new();
-    vm.set_host_call_extension(Box::new(move |host_id, args, out| {
-        store_host.dispatch(host_id, args, out)
+    store_host.set_chunk_bytes(lana_bytecode::encoder::encode(&chunk));
+    vm.set_host_call_extension(Box::new(move |vm, host_id, args, out| {
+        store_host.dispatch(vm, host_id, args, out)
     }));
     if vm.run() != LanaError::Ok {
         return format!("{{\"ok\":false,\"error\":{}}}", error_json(&vm));
     }
-    let result = vm.result().print();
+    let result = match vm.result() {
+        Ok(result) => result.print(),
+        Err(error) => return format!("{{\"ok\":false,\"error\":{}}}", error.name()),
+    };
     format!("{{\"ok\":true,\"result\":\"{}\"}}", json_escape(&result))
 }

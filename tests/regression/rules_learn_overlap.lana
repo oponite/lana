@@ -1,0 +1,7 @@
+import "std/rules" as rules;
+
+let task = {id: "overlap", feature_schema: [{name: "x", kind: "number", nullable: false, categories: []}],
+    target_labels: [false, true], allowed: ["gt"], known_facts: {}};
+rules.learn(task,
+    [{id: "same", features: {x: 1}, target: false}],
+    [{id: "same", features: {x: 2}, target: true}], {});

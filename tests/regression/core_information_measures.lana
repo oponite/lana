@@ -1,0 +1,22 @@
+import "std/core" as info;
+
+let copy = joint correlated (x, y) with support: [[0, 0, 0.5], [1, 1, 0.5]];
+assert(info.entropy(copy, ["x"]) == 1, "fair bit entropy");
+assert(info.conditional_entropy(copy, ["x"], ["y"]) == 0, "copy conditional entropy");
+assert(info.mutual_information(copy, ["x"], ["y"]) == 1, "copy mutual information");
+assert(info.mutual_information(copy, ["x"], ["x"]) == 1, "overlapping groups");
+let measured_value = info.mutual_information(copy, ["x"], ["y"]);
+let provenance = derivation(measured_value);
+assert(provenance.operation == "mutual_information", "measure provenance");
+assert(provenance.details.summary == "names=x;y; input_revision=0", "measure names and revision");
+
+let fair = info.distribution([[0, 0.5], [1, 0.5]]);
+let product = joint independent {x: fair, y: fair};
+assert(info.entropy(product, ["x", "y"]) == 2, "independent entropy");
+assert(info.mutual_information(product, ["x"], ["y"]) == 0, "independent mutual information");
+
+let xor = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.25], [1, 0, 1, 0.25], [1, 1, 0, 0.25], [0, 1, 1, 0.25]];
+assert(info.mutual_information(xor, ["t"], ["x"]) == 0, "XOR single source");
+assert(info.mutual_information(xor, ["t"], ["x", "y"]) == 1, "XOR pair");
+print("CORE_INFORMATION_MEASURES_PASS");

@@ -1,0 +1,13 @@
+import "std/evaluation" as evaluation;
+
+fn fit_rows(training, validation, seed) {
+    print("effect");
+    return {calculation_version: "v1", payload: seed};
+}
+
+fn predict_row(model, features) {
+    return {value: 0};
+}
+
+evaluation.walk_forward([], {fit: fit_rows, predict: predict_row,
+    kind: "regression", labels: [], calculation_version: "v1"}, {});

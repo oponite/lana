@@ -1,0 +1,17 @@
+value Export {
+    public count: number;
+}
+class Counter {
+    private mutable count: number;
+    public fn init(self, count: number) { self.count = count; }
+    public fn export(self) -> Export { return Export(self.count); }
+    public fn set(self, count: number) -> null { self.count = count; }
+}
+let counter = new Counter(7);
+let exported = counter.export();
+counter.set(9);
+let decoded = resolve(result_value(json_parse(json_stringify(exported))));
+let restored = new Counter(decoded["fields"]["count"]);
+assert(restored.export().count == 7, "snapshot changed");
+assert(counter != restored, "restored identity");
+print("OBJECT_SNAPSHOT_PASS");

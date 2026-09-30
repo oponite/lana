@@ -1,9 +1,6 @@
-//! LABC opcodes, mirroring `OpCode` in `vm/include/bytecode.h`.
-//!
-//! The discriminants are stable and MUST match the C11 enum so that chunks
-//! verify identically under both implementations.
+//! LABC opcodes. Discriminants follow the published table in `spec/BYTECODE.md`.
 
-/// LABC opcodes. The discriminants match `OpCode` in `vm/include/bytecode.h`.
+/// LABC opcodes with stable numeric discriminants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum OpCode {
@@ -112,12 +109,18 @@ pub enum OpCode {
     JointConditionMap,
     /// LABC v5: record a map-based refinement event.
     ObserveMap,
+    ValueNew,
+    ObjectNew,
+    OoGet,
+    OoSet,
+    OoCall,
+    OoStaticCall,
+    OoAsInterface,
     Count,
 }
 
 impl OpCode {
-    /// The stable C11 mnemonic for this opcode, matching `lana_opcode_name`
-    /// in `vm/c/bytecode.c`, e.g. `MIX`.
+    /// The stable textual mnemonic for this opcode, e.g. `MIX`.
     pub fn name(self) -> &'static str {
         use OpCode::*;
         match self {
@@ -204,6 +207,13 @@ impl OpCode {
             JointConditionMap => "JOINT_CONDITION_MAP",
             ObserveMap => "OBSERVE_MAP",
             LoadFunction => "LOAD_FUNCTION",
+            ValueNew => "VALUE_NEW",
+            ObjectNew => "OBJECT_NEW",
+            OoGet => "OO_GET",
+            OoSet => "OO_SET",
+            OoCall => "OO_CALL",
+            OoStaticCall => "OO_STATIC_CALL",
+            OoAsInterface => "OO_AS_INTERFACE",
             Count => "COUNT",
         }
     }
@@ -230,5 +240,6 @@ pub const LABC_VERSION_4: u32 = 4;
 /// LABC v5 reserves the balanced Core information surface. It keeps the
 /// existing binary layout and adds no implicit compatibility conversion.
 pub const LABC_VERSION_5: u32 = 5;
+pub const LABC_VERSION_6: u32 = 6;
 pub const LANA_MAX_REGISTERS: u32 = 256;
 pub const LANA_MAX_CALL_FRAMES: u32 = 64;

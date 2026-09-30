@@ -1,0 +1,42 @@
+import "std/core" as info;
+fn sum_plan(source) { return materialize(aggregate(group_by(source, "key"), ["sum", "value"])); }
+fn mean_plan(source) { return materialize(aggregate(group_by(source, "key"), ["mean", "value"])); }
+let path = args()[0];
+let mode = args()[1];
+store_open(path);
+dataset_source("s");
+dataset_query("sum", ["s"], "sum_plan", "v1");
+dataset_query("mean", ["s"], "mean_plan", "v1");
+let weighted = snapshot(info.distribution([[1, 0.25], [2, 0.75]]));
+let add = [{op: "add", id: "a", row: {key: 1, value: weighted}}, {op: "add", id: "b", row: {key: 1, value: weighted}}];
+let check_initial = mode == "init";
+if (mode == "retry") { check_initial = true; }
+if (check_initial) {
+    assert(dataset_apply("s", 3, "add", add) == 4, "identical retry across restart");
+    assert(dataset_snapshot("sum", null).rows[0].entries[1][1].rows[0][0].bits == "4000000000000000", "sum first world is two");
+    assert(dataset_snapshot("sum", null).rows[0].entries[1][1].rows[1][0].bits == "4010000000000000", "sum second world is four");
+    assert(dataset_snapshot("mean", null).rows[0].entries[1][1].rows[0][0].bits == "3ff0000000000000", "mean first world is one");
+}
+if (mode == "extend") {
+    dataset_apply("s", 3, "add", add);
+    assert(dataset_apply("s", 4, "add-c", [{op: "add", id: "c", row: {key: 1, value: weighted}}]) == 5, "retry restores relationship for next batch");
+    assert(dataset_snapshot("sum", null).rows[0].entries[1][1].rows[0][0].bits == "4008000000000000", "sum three aligned cells");
+}
+if (mode == "independent") {
+    dataset_apply("s", store_current_revision(), "bad", [{op: "add", id: "independent", row: {key: 1, value: weighted}}]);
+}
+if (mode == "live") {
+    let live = info.distribution([[1, 0.25], [2, 0.75]]);
+    dataset_apply("s", store_current_revision(), "live", [{op: "add", id: "live", row: {key: 1, value: live}}]);
+}
+if (mode == "correct") {
+    assert(store_current_revision() == 5, "failed updates did not publish");
+    assert(dataset_apply("s", 5, "correct", [{op: "correct", id: "c", row: {key: 1, value: 10}}]) == 6, "correction");
+    assert(dataset_snapshot("sum", null).rows[0].entries[1][1].rows[0][0].bits == "4028000000000000", "sum after correction is twelve");
+}
+if (mode == "delete") {
+    assert(dataset_apply("s", 6, "delete", [{op: "delete", id: "c"}]) == 7, "deletion");
+    assert(dataset_snapshot("sum", null).rows[0].entries[1][1].rows[0][0].bits == "4000000000000000", "sum after deletion is two");
+    assert(dataset_snapshot("sum", 5).rows[0].entries[1][1].rows[0][0].bits == "4008000000000000", "historical sum preserved");
+}
+print("DATASET_UNCERTAIN_HISTORY_PASS");

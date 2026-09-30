@@ -1,0 +1,17 @@
+import "std/trees" as trees;
+
+let task = {id: "vote", feature_schema: [{name: "x", kind: "number", nullable: false, categories: []}],
+    problem: "classification", labels: [false, true]};
+let train = [{id: "a", features: {x: 1}, target: false},
+    {id: "b", features: {x: 2}, target: false},
+    {id: "c", features: {x: 3}, target: true},
+    {id: "d", features: {x: 4}, target: true}];
+let first = trees.fit(task, train, [], {family: "forest", seed: 7, ensemble_size: 5, min_leaf: 1});
+let second = trees.fit(task, train, [], {family: "forest", seed: 7, ensemble_size: 5, min_leaf: 1});
+assert(first.status == "insufficient_evidence", "empty holdout not validated");
+assert(array_length(first.model_or_rule.trees) == 5, "five bootstrapped trees");
+assert(json_stringify(first.model_or_rule) == json_stringify(second.model_or_rule), "seeded replay");
+let prediction = trees.predict(first.model_or_rule, {x: 4});
+assert(prediction.calibration == "uncalibrated", "votes are uncalibrated");
+assert(array_length(prediction.probabilities) == 2, "two label fractions");
+print("TREES_FOREST_PASS");

@@ -1,37 +1,37 @@
-from pathlib import Path
+"""Check the current paired gate's warmup exclusion, pairing, and failure threshold."""
 import importlib.util
-import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location('lana_benchmark', Path(__file__).resolve().parents[1] / 'tools/benchmark.py')
+benchmark = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(benchmark)
 
 
-ROOT = Path(__file__).parents[1]
-sys.path.insert(0, str(ROOT / "benchmark"))
+def test_paired_method():
+    calls = []
+
+    def timing(side):
+        def call():
+            calls.append(side)
+            return 1.0 if side == 'old' else 1.051
+        return call
+
+    report = benchmark.paired(timing('old'), timing('new'))
+    assert calls[:4] == ['old', 'new', 'new', 'old']
+    assert len(calls) == 60 and not report['pass']
+    assert report['baseline']['warmups'] == 5
+    result = benchmark.summarize([100.0] * 5 + [0.001] * 25)
+    assert result['first_ms'] == 100000 and result['warm_median_ms'] == 1
+    assert benchmark.paired(lambda: 1, lambda: 1.05)['pass']
+    for samples in ([], [0], [float('nan')] * 30, [float('inf')] * 30):
+        try:
+            benchmark.summarize(samples)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(samples)
 
 
-def load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_python_baselines_have_identical_dynamic_behavior() -> None:
-    runner = load("benchmark_runner_test", ROOT / "benchmark" / "run_benchmark.py")
-    steps = runner.load_steps("B", 24)
-
-    plain = runner.PLAIN.predict(steps, "B", "dynamic")
-    state_class = runner.STATE_CLASS.predict(steps, "B", "dynamic")
-
-    assert max(abs(left - right) for left, right in zip(plain, state_class)) < 1e-12
-
-
-def test_lana_benchmark_generation_uses_native_operations() -> None:
-    runner = load("benchmark_runner_generation_test", ROOT / "benchmark" / "run_benchmark.py")
-    assembly = runner.LANA_GENERATOR.generate(runner.load_steps("C", 2), "C")
-
-    assert "APPLY_MANY" in assembly
-    assert "TRANSFORM" in assembly
-    assert "HISTORY" in assembly
-    assert "MEASURE" in assembly
-    assert "JUMP_IF_FALSE" in assembly
+if __name__ == '__main__':
+    test_paired_method()
+    print('BENCHMARK_METHOD_PASS')

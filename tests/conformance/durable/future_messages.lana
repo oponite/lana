@@ -1,0 +1,55 @@
+import "std/future_messages" as messages;
+
+let path = getenv("LANA_FUTURE_STORE");
+let phase = getenv("LANA_FUTURE_PHASE");
+store_open(path);
+
+if (phase == "save") {
+    let project = {id: "project", payload: {note: "Resume project P"},
+        condition: {event: "project_opened", comparisons: [{field: "project_id", op: "eq", value: "P"}]},
+        provenance_refs: ["session:1"]};
+    let operation = {id: "operation", payload: "Check before repeating",
+        condition: {event: "operation_preparing", comparisons: [{field: "operation_name", op: "eq", value: "deploy"}]},
+        provenance_refs: ["run:1"]};
+    let contradiction = {id: "contradiction", payload: "Revisit assumption",
+        condition: {event: "assumption_contradicted", comparisons: [{field: "assumption_id", op: "eq", value: "A"}]},
+        provenance_refs: ["assumption:A"]};
+    let time = {id: "time", payload: "Overdue on next check",
+        condition: {not_before_utc: now() - 1}, provenance_refs: []};
+    messages.create(project);
+    messages.create(operation);
+    messages.create(contradiction);
+    messages.create(time);
+    let saved = messages.create(project);
+    assert(saved.record_schema == 1, "message record schema");
+    assert(saved.status == "pending", "duplicate create is idempotent");
+    assert(array_length(messages.check(null).released_ids) == 1, "time-only release");
+    assert(array_length(messages.receive("", 100)) == 1, "unmatched messages withheld");
+}
+
+if (phase == "check") {
+    assert(messages.inspect("project").status == "pending", "pending survives restart");
+    let project = {id: "open-1", event: "project_opened", values: {project_id: "P"}};
+    let operation = {id: "operation-1", event: "operation_preparing", values: {operation_name: "deploy"}};
+    let contradiction = {id: "evidence-1", event: "assumption_contradicted", values: {assumption_id: "A"}};
+    assert(array_length(messages.check(project).released_ids) == 1, "project event releases");
+    assert(array_length(messages.check(operation).released_ids) == 1, "operation event releases");
+    assert(array_length(messages.check(contradiction).released_ids) == 1, "contradiction event releases");
+    assert(array_length(messages.check(project).released_ids) == 0, "replay does not duplicate");
+    assert(messages.inspect("project").ready_receipt.context_id == "open-1", "receipt keeps context");
+    assert(array_length(messages.receive("", 100)) == 4, "all four ready after restart");
+}
+
+if (phase == "settle") {
+    messages.acknowledge("project");
+    messages.cancel("operation");
+    assert(messages.acknowledge("project").status == "acknowledged", "acknowledge idempotent");
+    assert(messages.cancel("operation").status == "cancelled", "cancel idempotent");
+}
+
+if (phase == "verify") {
+    assert(messages.inspect("project").status == "acknowledged", "acknowledgment survives restart");
+    assert(messages.inspect("operation").status == "cancelled", "cancellation survives restart");
+    assert(array_length(messages.receive("", 100)) == 2, "only ready messages remain");
+    assert(array_length(messages.check(null).released_ids) == 0, "time check does not re-release");
+}

@@ -1,0 +1,14 @@
+import "std/core" as info;
+
+let same = info.identity_kernel([0, 1]);
+let paired = joint correlated (r, z) with support: [[0, 0, 0.5], [1, 1, 0.5]];
+let copied = info.network(paired, [{name: "y", parents: ["r"], kernel: same}]);
+let related = info.infer(copied, ["y", "z"], {});
+assert(info.mutual_information(related, ["y"], ["z"]) == 1, "root relationship retained");
+
+let fair = info.distribution([[0, 0.5], [1, 0.5]]);
+let independent = joint independent {r: fair, z: fair};
+let independent_graph = info.network(independent, [{name: "y", parents: ["r"], kernel: same}]);
+let separate = info.infer(independent_graph, ["y", "z"], {});
+assert(info.mutual_information(separate, ["y"], ["z"]) == 0, "independent roots retained");
+print("CORE_NETWORK_ROOTS_PASS");

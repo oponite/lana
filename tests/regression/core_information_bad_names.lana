@@ -1,0 +1,3 @@
+import "std/core" as info;
+let joint_value = joint correlated (x, y) with support: [[0, 0, 0.5], [1, 1, 0.5]];
+print(info.entropy(joint_value, ["x", "x"]));

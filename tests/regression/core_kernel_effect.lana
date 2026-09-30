@@ -1,0 +1,8 @@
+import "std/core" as info;
+
+fn chances(input) {
+    print("SHOULD_NOT_PRINT");
+    return [[0, 1]];
+}
+
+info.kernel([[0]], [0], chances);

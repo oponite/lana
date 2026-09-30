@@ -1,0 +1,5 @@
+import "std/core" as info;
+
+let copy = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.5], [1, 1, 1, 0.5]];
+info.broja(copy, "t", "x", "x");

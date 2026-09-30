@@ -9,12 +9,11 @@ session with:
 ## First program
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel
-build/lana new hello-lana
+python3 tools/build.py build
+target/lana/bin/lana new hello-lana
 cd hello-lana
-../build/lana run .
-../build/lana test .
+../target/lana/bin/lana run
+../target/lana/bin/lana test
 ```
 
 `lana new` creates a small module in `src/belief.lana`, imports it from
@@ -25,12 +24,12 @@ state construction, module imports, measurement, and assertions.
 
 Resolve disagreements in this order:
 
-1. `papers/semantics.md` — mathematical meaning.
-2. `spec/SPEC.md` — source syntax and programmer-visible behavior.
-3. `spec/BYTECODE.md` — the one LABC v2 encoding.
-4. `spec/VM.md` — runtime architecture and resource behavior.
+1. `docs/papers/semantics.md` — mathematical meaning.
+2. `docs/spec/SPEC.md` — source syntax and programmer-visible behavior.
+3. `docs/spec/BYTECODE.md` — versioned LABC encoding and compatibility.
+4. `docs/spec/VM.md` — runtime architecture and resource behavior.
 
-New or changed source syntax must additionally satisfy `spec/SYNTAX.md` — the
+New or changed source syntax must additionally satisfy `docs/spec/SYNTAX.md` — the
 syntax design principles (SYNTAX-1..12 + Acceptance Principle).
 
 Do not invent semantics from an implementation detail. Change the highest
@@ -38,47 +37,41 @@ applicable authority first when intentionally changing the language.
 
 ## Repository map
 
-- `vm/`: canonical Rust `lana-vm` + `lana-bytecode` crates, plus the frozen C11
-  reference VM core (`vm/c/`, `vm/include/`).
-- `runtime/`: canonical Rust `lana-runtime` + `lana-ffi` crates, plus the C11
-  hardware boundary (`runtime/c/`, `runtime/include/`).
-- `tools/`: Rust `lana-cli` + `lana-fuzz` crates, plus the C11 CLI, LSP, and
-  project tooling (`tools/c/`, `tools/include/`).
+- `vm/`: canonical Rust `lana-vm` and `lana-bytecode` crates.
+- `runtime/`: canonical Rust `lana-runtime` crate.
+- `tools/`: Rust `lana-cli`, `lana-fuzz`, and `lana-wasm` crates.
 - `compiler/*.lana`: self-hosted compiler source.
 - `compiler/bootstrap/compiler.lasm`: checked, reproducible bootstrap artifact.
 - `examples/`: runnable Lana and LABC examples.
-- `tests/unit/`: runtime and public-API tests.
 - `tests/regression/`: source-language pass/fail fixtures.
-- `tests/conformance/`: differential conformance harness (C11 vs Rust).
+- `tests/conformance/`: published bytecode compatibility fixtures and behavior checks.
 
 ## Daily commands
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-build/lana run examples/general.lana
-build/lana check examples/belief.lana
+python3 tools/build.py build
+python3 tests/run.py --no-build
+target/lana/bin/lana run examples/basic-programs/general.lana
 git diff --check
 ```
 
 Project workflow:
 
 ```bash
-build/lana new my-program
-build/lana build my-program
-build/lana check my-program
-build/lana test my-program
-build/lana run my-program
+target/lana/bin/lana new my-program
+cd my-program
+../target/lana/bin/lana build
+../target/lana/bin/lana test
+../target/lana/bin/lana run
 ```
 
 Low-level bytecode workflow:
 
 ```bash
-build/lanavm asm examples/belief.lasm -o build/belief.labc
-build/lanavm verify build/belief.labc
-build/lanavm dis build/belief.labc
-build/lanavm run build/belief.labc --trace
+target/lana/bin/lana asm examples/basic-programs/belief.lasm -o target/belief.labc
+target/lana/bin/lana verify target/belief.labc
+target/lana/bin/lana dis target/belief.labc
+target/lana/bin/lana run target/belief.labc --trace
 ```
 
 ## Release gates
@@ -89,10 +82,9 @@ Record command output; do not substitute earlier results.
 ### 1. Build and self-hosting
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-build/lana version
+python3 tools/build.py build
+python3 tests/run.py --no-build
+target/lana/bin/lana version
 cargo test --locked --workspace --no-fail-fast
 git diff --check
 ```
@@ -101,59 +93,26 @@ Required result: all tests pass, including the twice-repeated byte-stable native
 compiler bootstrap, generated-project workflow, imports, LSP, and debugger.
 `lana version` must report the version in `VERSION` and LABC v2.
 
-### 2. Memory and concurrency safety
-
-```bash
-cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
-  -DLANA_ENABLE_SANITIZERS=ON
-cmake --build build-asan --parallel
-ctest --test-dir build-asan --output-on-failure
-
-cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug \
-  -DLANA_ENABLE_TSAN=ON
-cmake --build build-tsan --parallel
-ctest --test-dir build-tsan --output-on-failure
-```
-
-Required result: both complete suites pass with no sanitizer report.
-
-### 3. Malformed-bytecode resilience
-
-```bash
-cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" \
-  -DLANA_ENABLE_SANITIZERS=ON -DLANA_BUILD_FUZZERS=ON
-cmake --build build-fuzz --target lana_bytecode_fuzz --parallel
-build-fuzz/lana_bytecode_fuzz -max_total_time=600 -timeout=5
-```
-
-Required result: ten minutes complete without a crash, leak, timeout, failed
-assertion, or sanitizer report. Preserve any crashing input as a regression.
-On macOS, use a Clang installation that includes the libFuzzer runtime; current
-Xcode command-line tools may omit it.
-
-The canonical Rust loader has its own required ten-minute fuzz gate:
+### 2. Malformed-bytecode resilience
 
 ```bash
 RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_bytecode --fuzz-dir fuzz -- -max_total_time=600 -timeout=5
 ```
 
-Install nightly and cargo-fuzz if absent. Both the C reference and Rust target
-must pass; C sanitizer coverage does not instrument the Rust runtime.
+Required result: ten minutes without a crash, leak, timeout, failed assertion,
+or sanitizer report. Preserve crashing inputs as regressions.
 
-### 4. Universal clean install
+### 3. Universal clean install
 
 ```bash
-cmake -S . -B build-universal -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64'
-cmake --build build-universal --parallel
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+python3 tools/build.py universal
 prefix="$(mktemp -d /tmp/lana-install.XXXXXX)"
-cmake --install build-universal --prefix "$prefix"
+python3 tools/build.py install --from target/universal --prefix "$prefix"
 lipo "$prefix/bin/lana" -verify_arch arm64 x86_64
-lipo "$prefix/bin/lanavm" -verify_arch arm64 x86_64
 arch -arm64 "$prefix/bin/lana" version
 arch -x86_64 "$prefix/bin/lana" version
-"$prefix/bin/lana" run examples/belief.lana
+"$prefix/bin/lana" run examples/basic-programs/belief.lana
 ```
 
 Required result: both slices execute, the installed CLI finds its adjacent
@@ -161,22 +120,19 @@ Required result: both slices execute, the installed CLI finds its adjacent
 Code signing and package-manager publication are distribution steps, not claims
 made by the source release.
 
-### 5. Optional integrations and release artifacts
+### 4. Optional integrations and release artifacts
 
 ```bash
 python3 -m venv /tmp/lana-integrations-venv
-/tmp/lana-integrations-venv/bin/python -m pip install -e 'integrations/python[test]' tokenizers safetensors numpy
+/tmp/lana-integrations-venv/bin/python -m pip install -e 'integrations/python[test]'
 /tmp/lana-integrations-venv/bin/python -m pytest -q integrations/python/tests
-/tmp/lana-integrations-venv/bin/python -m unittest discover -s tools/lana-hf/tests -v
 
-cmake -S . -B build-integrations -DCMAKE_BUILD_TYPE=Release \
-  -DLANA_BUILD_INTEGRATIONS=ON
-cmake --build build-integrations --parallel
-ctest --test-dir build-integrations --output-on-failure
+python3 tools/build.py build
+python3 tests/run.py --no-build
 ```
 
-Required result: the Python bridge accepts Lana 2.0 with LABC v2, the native
-bridge reports ABI v1, and all integration tests pass.
+Required result: the Python bridge accepts Lana 4.0 through the Rust CLI and
+worker, and all integration tests pass.
 
 The release workflow downloads the macOS archive into a clean directory, checks
 its SHA-256 digest, extracts it, and runs both installed architecture slices
@@ -185,20 +141,26 @@ a clean directory, and runs the example before publication. Homebrew Core
 submission is an external publication step; the release workflow publishes a
 checksum-backed formula artifact. Signing and notarization remain deferred.
 
-The compiler emits LABC v2 by default; the Rust loader accepts v1-v5 and the
-frozen C reference accepts v1-v2.
+The compiler emits LABC v2 by default; the Rust loader accepts v1-v6, and
+published v1-v2 bytecode is checked against frozen fixtures.
 Pre-release bytecode and textual assembly are not accepted or converted; rebuild
 them from source.
+
+### 5. Performance
+
+Compare Release builds on the same machine with the workloads and method in
+`docs/dev/RELEASE_CHECKLIST.md`. The 4.0 warm median must be no more than 5%
+above the paired 3.0.2 median for repeated Python bytecode calls, repeated
+Python source calls, Rust VM execution, and Rust compilation. Report Python
+first-call time separately. Do not treat a historical snapshot from a different
+load condition as an exact threshold.
 
 ## Change rules
 
 - Preserve unrelated dirty work and inspect a file before writing it.
-- C is C11 with four-space indentation and `-Wall -Wextra -Wpedantic -Werror`.
-- C names use `snake_case`; public types use `Lana...`; public functions use
-  `lana_...`; constants use `LANA_...`.
 - Lana uses lowercase `snake_case`, semicolons, and small explicit functions.
-- Add C regressions in `tests/unit/`; add language fixtures in
-  `tests/regression/` and register them in `cmake/CTestTargets.cmake`.
+- Add language fixtures in
+  `tests/regression/` and register them in `tests/cases.json`.
 - Never weaken compiler limits: 256 MiB and 50,000,000 instructions. Exhaustion
   is an error and must not expose partial bytecode.
 - Benchmark result snapshots are machine-local evidence, not conformance.

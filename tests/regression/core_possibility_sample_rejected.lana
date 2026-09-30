@@ -1,0 +1,2 @@
+let picked = sample(possibility([1, 2]));
+print(sample_value(picked));

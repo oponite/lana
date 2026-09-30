@@ -1,0 +1,3 @@
+let source = information(possibility([1, 2]));
+let chosen = sample(source);
+print(sample_value(chosen));

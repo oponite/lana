@@ -11,15 +11,8 @@ from lana_integrations.bridge import BridgeRunner
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def built_lana() -> Path:
-    executable = ROOT / "build" / "lana-rust"
-    if not executable.is_file():
-        pytest.skip("requires a built Lana executable")
-    return executable
-
-
-def test_evidence_bridge_round_trip() -> None:
-    executable = built_lana()
+def test_evidence_bridge_round_trip(built_lana: Path) -> None:
+    executable = built_lana
     record = {
         "schema": 1,
         "status": "resolved",
@@ -47,8 +40,8 @@ def test_evidence_bridge_round_trip() -> None:
     assert rejected["ok"] is False
 
 
-def test_replay_bridge_round_trip() -> None:
-    executable = built_lana()
+def test_replay_bridge_round_trip(built_lana: Path) -> None:
+    executable = built_lana
     evidence = {
         "schema": 1,
         "status": "resolved",
@@ -116,7 +109,7 @@ def test_replay_bridge_round_trip() -> None:
     ],
 )
 def test_reference_applications(
-    kind: str, metric: str, value: object, status: str, expected_action: str
+    kind: str, metric: str, value: object, status: str, expected_action: str, built_lana: Path
 ) -> None:
     evidence = {
         "schema": 1,
@@ -140,7 +133,7 @@ def test_reference_applications(
         "evidence": evidence,
         "policy": {"minimum": 0.7, "current_time": 120, "max_age": 30, "minimum_confidence": 0.8},
     }
-    envelope = BridgeRunner(built_lana()).run(
+    envelope = BridgeRunner(built_lana).run(
         ROOT / "integrations" / "lana" / "reference_apps_bridge.lana", request
     )
     assert envelope["ok"] is True

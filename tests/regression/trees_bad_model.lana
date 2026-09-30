@@ -1,0 +1,9 @@
+import "std/trees" as trees;
+
+let task = {id: "bad", feature_schema: [{name: "x", kind: "number", nullable: false, categories: []}],
+    problem: "classification", labels: [false, true]};
+let train = [{id: "a", features: {x: 1}, target: false},
+    {id: "b", features: {x: 3}, target: true}];
+let report = trees.fit(task, train, [], {max_depth: 1, min_leaf: 1});
+map_set(report.model_or_rule.trees[0].nodes[0], "left", 999);
+trees.predict(report.model_or_rule, {x: 1});

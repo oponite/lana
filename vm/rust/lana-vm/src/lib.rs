@@ -1,13 +1,4 @@
-//! Lana VM core (phase 2 of the Rust runtime boundary).
-//!
-//! A register VM semantically identical to the C11 reference (`vm/c/vm.c`):
-//! same state math, same PCG32 stream, same error codes, same value printing.
-//! The memory model differs — native Rust ownership instead of a mark-sweep GC
-//! — but the 256 MiB limit is preserved by byte accounting.
-//!
-//! Increment 1 covers the scalar/array/control-flow/state/history opcodes.
-//! Increments 2-5 add state dists and the 2.0 ISA ops, information types,
-//! tasks, and host calls; increment 6 is the differential conformance harness.
+//! Lana VM core. Rust ownership and byte accounting enforce the 256 MiB limit.
 
 pub mod backend;
 pub mod derivation;
@@ -36,7 +27,7 @@ pub use value::{
 };
 pub use vm::{
     exact_support_name, resolution_reason_name, resource_kind_name, Frame, History, HistoryPolicy,
-    Vm, LANA_EXACT_SUPPORT_AVAILABLE, LANA_EXACT_SUPPORT_UNAVAILABLE, LANA_EXACT_SUPPORT_UNKNOWN,
+    Vm, RootedValue, LANA_EXACT_SUPPORT_AVAILABLE, LANA_EXACT_SUPPORT_UNAVAILABLE, LANA_EXACT_SUPPORT_UNKNOWN,
     LANA_RESOLUTION_REASON_CANCELLED, LANA_RESOLUTION_REASON_CONTRADICTION,
     LANA_RESOLUTION_REASON_INVALID_CONDITIONING, LANA_RESOLUTION_REASON_MULTIPLE_ALTERNATIVES,
     LANA_RESOLUTION_REASON_NONE, LANA_RESOLUTION_REASON_NO_ALTERNATIVES,
@@ -54,4 +45,12 @@ pub use vm::{
     LANA_HOST_TRACE_DISTANCE, LANA_HOST_IS_SEPARABLE, LANA_HOST_TO_STATE,
     LANA_HOST_STATE_TENSOR, LANA_HOST_APPEND, LANA_HOST_MEASURE, LANA_HOST_TRANSFORM,
     LANA_HOST_EXECUTION_CAPABILITY, LANA_HOST_EXECUTION_AUTHORIZE, LANA_HOST_EXECUTION_EXECUTE,
+    LANA_HOST_FUTURE_MESSAGE, LANA_HOST_DATASET_SOURCE, LANA_HOST_DATASET_QUERY, LANA_HOST_DATASET_APPLY,
+    LANA_HOST_DATASET_SNAPSHOT, LANA_HOST_DATASET_EVIDENCE, LANA_HOST_DATASET_EXCLUSIONS,
+    LANA_HOST_DOCUMENT_EXTRACT, LANA_HOST_DATASET_SQLITE, LANA_HOST_RULES_LEARN, LANA_HOST_RULES_PREDICT,
+    LANA_HOST_RULES_SAVE, LANA_HOST_RULES_ADD_COUNTEREXAMPLE, LANA_HOST_RULES_INSPECT,
+    LANA_HOST_RULES_ROLLBACK,
+    LANA_HOST_TREES_FIT, LANA_HOST_TREES_PREDICT, LANA_HOST_TREES_EXPLAIN,
+    LANA_HOST_TREES_SAVE, LANA_HOST_TREES_LOAD,
+    LANA_HOST_EVALUATION_WALK_FORWARD,
 };

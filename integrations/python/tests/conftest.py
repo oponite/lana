@@ -1,8 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 import pytest
+
+from lana_integrations.bridge import BridgeRunner
+
+
+@pytest.fixture(scope="session")
+def built_lana() -> Path:
+    root = Path(__file__).resolve().parents[3]
+    explicit = os.environ.get("LANA_EXECUTABLE")
+    if explicit is not None:
+        return Path(BridgeRunner(explicit).executable)
+    for path in (root / "target/lana/bin/lana", root / "target/release/lana"):
+        if path.is_file():
+            return Path(BridgeRunner(path).executable)
+    pytest.skip("requires a built Lana executable or LANA_EXECUTABLE")
 
 
 FAKE_LANA = r'''#!/usr/bin/env python3
@@ -16,11 +31,6 @@ if command == "version":
     print("Lana 3.0.0 (LABC v5, fake)")
     raise SystemExit(0)
 program = Path(sys.argv[2])
-if command == "check":
-    if program.name.startswith("bad"):
-        print("fake check failure", file=sys.stderr)
-        raise SystemExit(1)
-    raise SystemExit(0)
 if command != "run":
     raise SystemExit(2)
 if program.name.startswith("sleep"):

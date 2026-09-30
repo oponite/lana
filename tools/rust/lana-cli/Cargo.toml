@@ -1,4 +1,5 @@
 [package]
+build = "../../compiler_build.rs"
 name = "lana-cli"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +10,19 @@ description = "Command-line driver for the Rust Lana runtime (phase 2 of the Rus
 name = "lana"
 path = "src/main.rs"
 
+[features]
+package-test-origin = []
+publication-fault-injection = ["lana-runtime/publication-fault-injection"]
+
 [dependencies]
 lana-bytecode = { workspace = true }
 lana-vm = { workspace = true, features = ["net-tls"] }
-lana-runtime = { workspace = true }
+lana-runtime = { workspace = true, features = ["net-tls"] }
+serde_json = "1.0.151"
+serde = { version = "1.0.229", features = ["derive"] }
+flate2 = "1.1.10"
+tar = { version = "0.4.46", default-features = false }
+toml = "1.1.6"
+
+[build-dependencies]
+lana-bytecode = { workspace = true }

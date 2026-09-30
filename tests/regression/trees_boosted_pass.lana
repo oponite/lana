@@ -1,0 +1,24 @@
+import "std/trees" as trees;
+
+let feature_schema = [{name: "x", kind: "number", nullable: false, categories: []}];
+let classification = {id: "binary", feature_schema: feature_schema,
+    problem: "classification", labels: [false, true]};
+let train = [{id: "a", features: {x: 1}, target: false},
+    {id: "b", features: {x: 3}, target: true}];
+let boosted = trees.fit(classification, train, [],
+    {family: "boosted", ensemble_size: 12, max_depth: 1, min_leaf: 1});
+assert(boosted.status == "insufficient_evidence", "no held-out claim");
+assert(array_length(boosted.model_or_rule.trees) == 12, "twelve boosting rounds");
+assert(trees.predict(boosted.model_or_rule, {x: 1}).label == false, "negative label");
+assert(trees.predict(boosted.model_or_rule, {x: 3}).label == true, "positive label");
+
+let regression = {id: "regress", feature_schema: feature_schema, problem: "regression", labels: []};
+let regression_train = [{id: "r1", features: {x: 1}, target: 2},
+    {id: "r2", features: {x: 3}, target: 6}];
+let regression_model = trees.fit(regression, regression_train, [],
+    {family: "boosted", ensemble_size: 12, max_depth: 1, min_leaf: 1});
+let low = trees.predict(regression_model.model_or_rule, {x: 1}).value;
+let high = trees.predict(regression_model.model_or_rule, {x: 3}).value;
+assert(low < 4, "low regression prediction below mean");
+assert(high > 4, "high regression prediction above mean");
+print("TREES_BOOSTED_PASS");

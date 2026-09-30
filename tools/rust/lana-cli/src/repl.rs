@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use lana_bytecode::{Chunk, LanaError};
-use lana_vm::{Value, Vm};
+use lana_vm::{RootedValue, Vm};
 
 use crate::{CliError, compile_source_to_chunk, report_cli_error};
 
@@ -158,24 +158,25 @@ enum ReplError {
 }
 
 /// Compile and run a source text, returning the program's result value.
-fn compile_and_run(compiler: &Path, source: &str) -> Result<Value, ReplError> {
+fn compile_and_run(compiler: &Path, source: &str) -> Result<RootedValue, ReplError> {
     let chunk = compile_source_to_chunk(compiler, source).map_err(ReplError::Compile)?;
     run_chunk(&chunk).map_err(ReplError::Runtime)
 }
 
 /// Run a chunk on a fresh VM and return the result value.
-fn run_chunk(chunk: &Chunk) -> Result<Value, lana_vm::VmError> {
+fn run_chunk(chunk: &Chunk) -> Result<RootedValue, lana_vm::VmError> {
     let mut vm = Vm::new(chunk);
     vm.seed(REPL_SEED);
     let mut store_host = lana_runtime::host_calls::StoreHost::with_heap(vm.heap());
-    vm.set_host_call_extension(Box::new(move |host_id, args, out| {
-        store_host.dispatch(host_id, args, out)
+    store_host.set_chunk_bytes(lana_bytecode::encoder::encode(chunk));
+    vm.set_host_call_extension(Box::new(move |vm, host_id, args, out| {
+        store_host.dispatch(vm, host_id, args, out)
     }));
     let result = vm.run();
     if result != LanaError::Ok {
         return Err(vm.error().clone());
     }
-    Ok(vm.result().clone())
+    vm.result().map_err(|code| ReplError::Runtime(lana_vm::VmError { code, ..lana_vm::VmError::default() }))
 }
 
 /// Compile and execute one complete input, committing it to the session on

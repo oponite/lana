@@ -1,7 +1,5 @@
-//! Explicit GPU matmul (LIP-004 section 5), mirroring `vm/c/metal.m`. A single
-//! float32 sgemm on the system Metal device. The shader is embedded from
-//! `vm/metal/matmul.metal` (the same source the C VM compiles), so both VMs run
-//! the same kernel and produce identical results on a device.
+//! Explicit GPU matmul (LIP-004 section 5): one float32 sgemm on the system
+//! Metal device. The shader is embedded from `vm/metal/matmul.metal`.
 
 #[cfg(target_os = "macos")]
 mod imp {

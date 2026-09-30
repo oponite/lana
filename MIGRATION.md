@@ -1,17 +1,17 @@
-# Migrating to Lana 3.0.2
+# Migrating to Lana 4.0
 
-Valid 3.0.x programs retain their source syntax in 3.0.2. Unresolved dataset
-predicates/keys now fail explicitly; unsupported tokenizer processing and
-malformed webhook plans also fail instead of silently changing behavior.
+Lana 4.0 distributes one Rust `lana` executable and its adjacent
+`lana-compiler.labc`. The C `lanavm`, C headers, `liblanaruntime`, and native
+ABI-v1 bridge are retired. Rebuild pre-release bytecode from source. Published
+LABC v1-v5 remains loadable by the Rust CLI.
 
-- Use `lana` for source programs and LABC v3-v5. It is the canonical Rust CLI
-  and VM.
-- Keep native ABI-v1 consumers on `liblana_bridge` and precompiled LABC v2, or
-  move them to the JSON bridge. `lana-ffi` is not a drop-in ABI-v1 replacement.
-- Rebuild bytecode from source when moving between paths. Lana provides no
-  bytecode converter.
-- Keep C11 conformance consumers on `lanavm` with LABC v1-v2 only.
+C ABI callers should use the JSON bridge or the persistent Python `Lana`
+worker. Each worker request receives a fresh VM; a process timeout does not
+retry an effectful request. Python callers should close `Lana` when done.
+C-specific bridge wrappers should be replaced with the JSON response wrapper
+in `integrations/lana/bridge.lana`; old wrapper bytecode still runs, but its
+result shape is unchanged rather than translated by the retired C facade.
 
-C removal is not part of 3.0.2. It is a 4.0 migration only after ABI-v1 is
-replaced or retired, consumers have migrated, v1-v2 conformance is retained,
-and a release candidate passes without the C runtime.
+SQLite read-only and localhost HTTP_JSON data adapters run through the Rust
+runtime. Lana calls to native libraries remain available through the existing
+native-library mechanism. The standalone C evidence HTTP service is retired.

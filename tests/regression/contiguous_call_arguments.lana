@@ -1,0 +1,16 @@
+fn digits(a, b, c) { return a * 100 + b * 10 + c; }
+fn zero() { return 0; }
+fn identity(value) { return value; }
+fn bump(counter) { counter[0] = counter[0] + 1; return counter[0]; }
+
+assert(digits(1, 2, 3) == 123, "contiguous literal arguments");
+let first = 4; let second = 5; let third = 6;
+assert(digits(third, first, second) == 645, "reordered arguments");
+assert(digits(first, first, first) == 444, "repeated argument");
+assert(identity(first) == 4, "single existing register");
+assert(first == 4, "caller register preserved");
+assert(zero() == 0, "empty argument range");
+let counter = [0];
+assert(digits(bump(counter), bump(counter), bump(counter)) == 123, "argument evaluation order");
+assert(counter[0] == 3, "shared mutable argument identity");
+print("CONTIGUOUS_ARGUMENTS_PASS");

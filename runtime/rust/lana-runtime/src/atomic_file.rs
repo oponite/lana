@@ -1,4 +1,4 @@
-//! Atomic replacement shared by brain packages and compiler output.
+//! Atomic replacement for published files.
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
@@ -6,10 +6,50 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug)]
+struct UncertainWrite;
+
+impl std::fmt::Display for UncertainWrite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("file replaced; durability uncertain; inspect destination before retry")
+    }
+}
+
+impl std::error::Error for UncertainWrite {}
+
+pub fn durability_uncertain(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|cause| cause.is::<UncertainWrite>())
+}
+
 /// Validation/write/rename errors leave the old destination intact. A directory
 /// sync error after rename means the complete new file is visible but its crash
 /// durability is uncertain; callers must inspect it before retrying.
 pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_with_sync(path, bytes,
+        |file| { publication_failpoint("before_file_sync")?; file.sync_all() },
+        || publication_failpoint("before_rename"),
+        |directory| { publication_failpoint("after_rename")?; directory.sync_all() })
+}
+
+// Opt-in test binary only; ordinary builds cannot read this failpoint.
+fn publication_failpoint(stage: &str) -> io::Result<()> {
+    #[cfg(feature = "publication-fault-injection")]
+    if std::env::var("LANA_TEST_ATOMIC_STAGE").as_deref() == Ok(stage) {
+        return Err(io::Error::other("injected publication failure"));
+    }
+    let _ = stage;
+    Ok(())
+}
+
+fn write_with_sync(
+    path: &Path,
+    bytes: &[u8],
+    sync_file: impl FnOnce(&fs::File) -> io::Result<()>,
+    before_rename: impl FnOnce() -> io::Result<()>,
+    sync_parent: impl FnOnce(&fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = sync_parent;
     let name = path.file_name().ok_or_else(|| io::Error::other("missing file name"))?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     #[cfg(unix)]
@@ -26,11 +66,12 @@ pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = options.open(&temporary)?;
     let result = (|| {
         file.write_all(bytes)?;
-        file.sync_all()?;
+        sync_file(&file)?;
         drop(file);
+        before_rename()?;
         fs::rename(&temporary, path)?;
         #[cfg(unix)]
-        directory.sync_all().map_err(|_| io::Error::other("file replaced; durability uncertain; inspect destination before retry"))?;
+        sync_parent(&directory).map_err(|_| io::Error::other(UncertainWrite))?;
         Ok(())
     })();
     if result.is_err() { let _ = fs::remove_file(&temporary); }
@@ -50,5 +91,22 @@ fn replacement_failure_preserves_destination_and_cleans_owned_file() {
     assert!(write(&directory, b"invalid").is_err());
     assert!(directory.is_dir());
     assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_and_post_replacement_errors_have_distinct_outcomes() {
+    let root = std::env::temp_dir().join(format!("lana-atomic-outcomes-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("value");
+    write(&path, b"old").unwrap();
+    let before = write_with_sync(&path, b"new", |_| Err(io::Error::other("before")), || Ok(()), |_| Ok(())).unwrap_err();
+    assert!(!durability_uncertain(&before));
+    assert_eq!(fs::read(&path).unwrap(), b"old");
+    let after = write_with_sync(&path, b"new", |_| Ok(()), || Ok(()), |_| Err(io::Error::other("after"))).unwrap_err();
+    assert!(durability_uncertain(&after));
+    assert_eq!(fs::read(&path).unwrap(), b"new");
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
     fs::remove_dir_all(root).unwrap();
 }

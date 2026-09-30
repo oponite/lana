@@ -34,7 +34,6 @@ struct Mutation {
 /// A committed revision, mirroring `StoreRevision`.
 struct Revision {
     id: u64,
-    previous: u64,
     mutations: Vec<Mutation>,
     digest: [u8; 32],
 }
@@ -85,6 +84,10 @@ impl Store {
     pub(crate) fn ensure_clean(&self) -> Result<(), LanaError> {
         self.ensure_open()?;
         if self.staged.is_empty() { Ok(()) } else { Err(LanaError::InvalidState) }
+    }
+
+    pub(crate) fn discard_staged(&mut self) {
+        self.staged.clear();
     }
 
     fn ensure_open(&self) -> Result<(), LanaError> {
@@ -144,6 +147,13 @@ fn build_payload(mutations: &[Mutation]) -> Result<Vec<u8>, LanaError> {
     for mutation in mutations {
         let key = mutation.key.as_bytes();
         if key.len() > u32::MAX as usize {
+            return Err(LanaError::Limit);
+        }
+        let added = 5usize.checked_add(key.len())
+            .and_then(|size| size.checked_add(if mutation.deleted { 0 } else { 40 }))
+            .and_then(|size| size.checked_add(mutation.data.len()))
+            .ok_or(LanaError::Limit)?;
+        if payload.len().checked_add(added).is_none_or(|size| size > STORE_LIMIT) {
             return Err(LanaError::Limit);
         }
         payload.push(if mutation.deleted { b'D' } else { b'P' });
@@ -400,7 +410,6 @@ fn replay(store: &mut Store) -> Result<(), LanaError> {
         let revision_mutations = mutations.clone();
         store.revisions.push(Revision {
             id: revision,
-            previous,
             mutations: revision_mutations.clone(),
             digest,
         });
@@ -527,7 +536,6 @@ pub fn store_commit(store: &mut Store) -> Result<StoreRevisionInfo, LanaError> {
     let mutations = store.staged.clone();
     store.revisions.push(Revision {
         id: revision,
-        previous: store.current_rev,
         mutations: mutations.clone(),
         digest,
     });
@@ -647,6 +655,20 @@ pub fn store_scan(store: &Store, prefix: &str) -> Result<Vec<ScanRecord>, LanaEr
         if !key.starts_with(prefix) {
             break;
         }
+        records.push(ScanRecord { key: key.clone(), value: decode_bytes(data)? });
+    }
+    Ok(records)
+}
+
+/// Bounded scan for durable inbox pages. `after` is a key, not a record offset.
+pub(crate) fn store_scan_page(store: &Store, prefix: &str, after: &str, limit: usize) -> Result<Vec<ScanRecord>, LanaError> {
+    store.ensure_open()?;
+    let start = if after.is_empty() { prefix } else { after };
+    let mut records = Vec::new();
+    for (key, data) in store.index.range(start.to_string()..) {
+        if !key.starts_with(prefix) { break; }
+        if key.as_str() <= after { continue; }
+        if records.len() == limit { break; }
         records.push(ScanRecord { key: key.clone(), value: decode_bytes(data)? });
     }
     Ok(records)

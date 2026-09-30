@@ -1,0 +1,5 @@
+import "std/core" as info;
+
+fn chances(input) { return [[0, 0.2], [1, 0.7]]; }
+
+info.kernel([[0]], [0, 1], chances);

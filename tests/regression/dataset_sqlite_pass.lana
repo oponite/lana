@@ -1,0 +1,17 @@
+let path = args()[0];
+let sql = args()[1];
+let expected = args()[2];
+let schema = [{"name": "id", "kind": "string"}, {"name": "n", "kind": "number"}, {"name": "note", "kind": "nullable_string"}, {"name": "info", "kind": "information_json"}];
+let result = dataset_sqlite(path, sql, ["east"], schema);
+assert(array_length(result.rows) == 2, "one ordered read transaction returns two rows");
+assert(result.rows[0].id == "a", "first SQLite row is retained");
+assert(result.rows[1].id == "b", "second SQLite row is retained");
+assert(result.rows[0].note == null, "nullable SQL value is definite null");
+assert(result.rows[1].note == "ready", "non-null text is retained");
+assert(result.rows[0].info == "{\"tag\":\"definite\",\"value\":{\"tag\":\"string\",\"value\":\"yes\"}}", "tagged information is an exact snapshot");
+assert(result.source_revision == expected, "source revision covers typed ordered rows");
+assert(result.evidence[0].row_id == "a", "first evidence matches first row");
+assert(result.evidence[1].row_id == "b", "second evidence matches second row");
+assert(result.evidence[0].source_revision == expected, "evidence names same source revision");
+assert(array_length(result.evidence[0].column_types) == 4, "evidence retains declared types");
+print("DATASET_SQLITE_PASS");

@@ -1,0 +1,15 @@
+import "std/trees" as trees;
+
+let task = {id: "category", feature_schema: [
+    {name: "kind", kind: "category", nullable: true, categories: ["red", "blue"]}],
+    problem: "classification", labels: [false, true]};
+let train = [{id: "r", features: {kind: "red"}, target: true},
+    {id: "b", features: {kind: "blue"}, target: false},
+    {id: "m", features: {kind: null}, target: true}];
+let result = trees.fit(task, train, [], {max_depth: 2, min_leaf: 1});
+let root = result.model_or_rule.trees[0].nodes[0];
+assert(root.kind == "split", "category split");
+assert(root.operator == "eq", "category equality");
+assert(trees.predict(result.model_or_rule, {kind: null}).label == true, "missing direction retained");
+assert(trees.predict(result.model_or_rule, {kind: "blue"}).label == false, "category branch");
+print("TREES_MISSING_CATEGORY_PASS");
