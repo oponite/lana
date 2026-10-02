@@ -31,10 +31,14 @@ An instance moves from `LIVE` to `QUIESCENT` after initial evaluation and
 after each successful event, to `SUSPENDED` on pause, to `FAILED` on terminal
 VM failure, and to `DELETED` on delete. Paused observations are admitted in
 FIFO order only while their total encoded size stays within 64 MiB and the
-instance memory budget. Resume returns one outcome per processed event;
+instance memory budget, including queue storage and event response allowance.
+Resume returns one outcome per processed event;
 invalid evidence leaves no revision and processing continues. A terminal VM
 failure stops processing, but inspection remains available. Deletion releases
-bytecode, graph, and queued events. Handles are scoped to one host process.
+bytecode, graph, and queued events. Inspection failure after a committed
+observation is reported without hiding the committed revision. Failed-state
+inspection uses a same-revision cached result or a partial marker. Handles are
+opaque and scoped to one host process.
 
 Pure arithmetic, comparisons, and function bodies can lift over finite alternatives. `PATH_SPLIT` runs both sides of an unresolved Boolean. `PATH_JOIN` merges their guarded results. Nested splits are bounded. Unresolved loops, incompatible dependency joins, and merges of history-bearing registers are unsupported. A split branch cannot print, call a host, create a task, sample, or observe. This prevents duplicate or partial effects.
 

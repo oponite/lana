@@ -258,6 +258,10 @@ outside ordinary JSON. Invalid evidence returns an error and leaves the
 revision unchanged. A successful event updates the root and affected pure
 dependencies atomically, in deterministic graph order. Inspection and
 `measure` are reads; they do not trigger an event or execute an effect.
+An ordinary JSON value that uniquely matches a current support value selects
+that retained value, including arrays and maps. A map with keys `tag` or
+`possibility` is ordinary data when it matches support; an unmatched exact
+`{"possibility":[...]}` shape denotes a subset. Ambiguous matches fail.
 
 An instance is `LIVE` during initial evaluation or event processing,
 `QUIESCENT` when idle, `SUSPENDED` while accepting queued observations,
@@ -267,6 +271,8 @@ budget. Resume reports each queued event's result. Invalid evidence fails its
 own event and leaves later events eligible. A terminal VM failure stops the
 queue; inspection remains available until deletion. Unknown or deleted
 handles return `LANA_ERR_NOT_FOUND`.
+An observation that commits but cannot refresh inspection reports its committed
+revision and an `inspection_error`; a terminal inspection error sets `FAILED`.
 
 ## STATE
 

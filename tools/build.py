@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Cargo build, explicit installation, and universal macOS distribution."""
 import argparse
+import gzip
 import hashlib
 import tarfile
 import json
@@ -132,9 +133,15 @@ def package_prefix(source, output):
         subprocess.run([prefix / "bin/lana", "run", check], cwd=work, env=env,
                        capture_output=True, text=True, check=True, timeout=60)
         staged = work / "archive.tar.gz"
-        with tarfile.open(staged, "w:gz") as archive:
-            for path in sorted(prefix.iterdir()):
-                archive.add(path, arcname=path.name)
+        def normalize(info):
+            info.uid = info.gid = info.mtime = 0
+            info.uname = info.gname = ""
+            return info
+
+        with staged.open("wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w") as archive:
+                for path in sorted(prefix.iterdir()):
+                    archive.add(path, arcname=path.name, filter=normalize)
         with staged.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
             os.fsync(stream.fileno())

@@ -146,31 +146,7 @@ jobs:
           source_archive="$RUNNER_TEMP/lana-release-files/lana-${EXPECTED_VERSION}-source.tar.gz"
           source_sha256="$(sha256sum "$source_archive" | awk '{print $1}')"
           formula="$RUNNER_TEMP/lana-release-files/lana.rb"
-          cat > "$formula" <<EOF
-          class Lana < Formula
-            desc "Verified register-based language with explicit uncertainty"
-            homepage "https://github.com/oponite/lana"
-            url "https://github.com/oponite/lana/releases/download/v${EXPECTED_VERSION}/lana-${EXPECTED_VERSION}-source.tar.gz"
-            sha256 "${source_sha256}"
-            license "Apache-2.0"
-
-            depends_on "python@3.14" => :build
-            depends_on "rust" => :build
-
-            def install
-              system "python3", "tools/build.py", "install", "--prefix", prefix
-            end
-
-            test do
-              assert_match "Lana #{version} (LABC v2,", shell_output("#{bin}/lana version")
-              system bin/"lana", "new", "hello-lana"
-              Dir.chdir("hello-lana") do
-                system bin/"lana", "build"
-                system bin/"lana", "run"
-              end
-            end
-          end
-          EOF
+          python3 tools/release_tap.py generate "$formula" "$EXPECTED_VERSION" "$source_sha256"
           ruby -c "$formula"
           test -s "$formula"
       - name: Verify source archive in a clean directory
@@ -189,9 +165,11 @@ jobs:
             existing="$RUNNER_TEMP/lana-existing-release"
             mkdir "$existing"
             gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$existing"
-            for asset in "$RUNNER_TEMP/lana-release-files"/*; do
-              cmp "$asset" "$existing/$(basename "$asset")"
-            done
+            (cd "$existing" && sha256sum -c SHA256SUMS)
+            cmp "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-source.tar.gz" "$existing/lana-$EXPECTED_VERSION-source.tar.gz"
+            cmp "$RUNNER_TEMP/lana-release-files/lana.rb" "$existing/lana.rb"
+            cmp <(gzip -dc "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-macos-universal.tar.gz") \
+                <(gzip -dc "$existing/lana-$EXPECTED_VERSION-macos-universal.tar.gz")
             test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft,.isPrerelease] | join(",")')" = "false,false"
           else
             gh release create "$GITHUB_REF_NAME" \
@@ -227,25 +205,22 @@ jobs:
           test -s "$assets/lana.rb"
           test -s "$assets/lana-$version-source.tar.gz"
           test -s "$assets/lana-$version-macos-universal.tar.gz"
+          git archive --format=tar --prefix="lana-$version/" \
+            --output="$RUNNER_TEMP/expected-source.tar" "$GITHUB_SHA"
+          gzip -dc "$assets/lana-$version-source.tar.gz" | cmp "$RUNNER_TEMP/expected-source.tar" -
+          digest="$(shasum -a 256 "$assets/lana-$version-source.tar.gz" | cut -d ' ' -f 1)"
+          expected="$RUNNER_TEMP/expected-lana.rb"
+          python3 tools/release_tap.py generate "$expected" "$version" "$digest"
+          cmp "$expected" "$assets/lana.rb"
           echo "EXPECTED_VERSION=$version" >> "$GITHUB_ENV"
-      - name: Clone scoped tap and admit formula
-        env:
-          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+      - name: Clone tap and admit formula
         run: |
           set -euo pipefail
-          test -n "$TAP_DEPLOY_KEY"
-          ssh_dir="$RUNNER_TEMP/lana-tap-ssh"
-          install -d -m 700 "$ssh_dir"
-          printf '%s\n' "$TAP_DEPLOY_KEY" > "$ssh_dir/id_ed25519"
-          chmod 600 "$ssh_dir/id_ed25519"
-          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$ssh_dir/known_hosts"
-          export GIT_SSH_COMMAND="ssh -i $ssh_dir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes"
-          echo "GIT_SSH_COMMAND=$GIT_SSH_COMMAND" >> "$GITHUB_ENV"
           tap="$RUNNER_TEMP/homebrew-oponite"
-          git clone git@github.com:oponite/homebrew-oponite.git "$tap"
+          git clone https://github.com/oponite/homebrew-oponite.git "$tap"
           source="$RUNNER_TEMP/lana-release-assets/lana-$EXPECTED_VERSION-source.tar.gz"
           digest="$(shasum -a 256 "$source" | cut -d ' ' -f 1)"
-          python3 tools/release_tap.py "$RUNNER_TEMP/lana-release-assets/lana.rb" "$tap/Formula/lana.rb" "$EXPECTED_VERSION" "$digest"
+          python3 tools/release_tap.py admit "$RUNNER_TEMP/lana-release-assets/lana.rb" "$tap/Formula/lana.rb" "$EXPECTED_VERSION" "$digest"
       - name: Audit and source-install the exact formula
         run: |
           set -euo pipefail
@@ -257,12 +232,22 @@ jobs:
           brew test oponite/lana-release/lana
           "$(brew --prefix oponite/lana-release/lana)/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
       - name: Publish or verify matching tap formula
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           set -euo pipefail
           tap="$RUNNER_TEMP/homebrew-oponite"
           if ! git -C "$tap" diff --quiet -- Formula/lana.rb; then
+            test -n "$TAP_DEPLOY_KEY"
+            ssh_dir="$RUNNER_TEMP/lana-tap-ssh"
+            install -d -m 700 "$ssh_dir"
+            printf '%s\n' "$TAP_DEPLOY_KEY" > "$ssh_dir/id_ed25519"
+            chmod 600 "$ssh_dir/id_ed25519"
+            printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$ssh_dir/known_hosts"
+            export GIT_SSH_COMMAND="ssh -i $ssh_dir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes"
             git -C "$tap" config user.name 'lana-release-bot'
             git -C "$tap" config user.email 'lana-release-bot@users.noreply.github.com'
+            git -C "$tap" remote set-url --push origin git@github.com:oponite/homebrew-oponite.git
             git -C "$tap" add Formula/lana.rb
             git -C "$tap" commit -m "lana $EXPECTED_VERSION"
             git -C "$tap" push origin HEAD:main

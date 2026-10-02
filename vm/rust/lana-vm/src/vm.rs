@@ -1681,6 +1681,11 @@ impl<'a> Vm<'a> {
         Ok(value.reactive.as_ref().is_some_and(|node| node.lock().unwrap().kind == ReactiveKind::Root))
     }
 
+    pub fn live_current(&self, name: &str) -> Result<Value, LanaError> {
+        let value = &self.live_registered.get(name).ok_or(LanaError::NotFound)?.value;
+        Ok(self.reactive_value(value))
+    }
+
     pub fn live_observe(&mut self, name: &str, evidence: &Value) -> Result<Value, LanaError> {
         if !self.live_is_root(name)? { return Err(LanaError::Type); }
         let value = self.live_registered[name].value.clone();
@@ -1698,8 +1703,6 @@ impl<'a> Vm<'a> {
         let value = &self.live_registered.get(name).ok_or(LanaError::NotFound)?.value;
         Ok(value.reactive.as_ref().ok_or(LanaError::Type)?.lock().unwrap().revision)
     }
-
-    pub fn memory_remaining(&self) -> usize { self.memory_limit.saturating_sub(self.allocated_bytes()) }
 
     /// Per-opcode execution counts, for `--stats` output.
     pub fn opcode_counts(&self) -> &[u64] {

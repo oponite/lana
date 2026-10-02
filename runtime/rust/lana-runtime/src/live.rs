@@ -1,15 +1,21 @@
 //! Process-local persistent programs over the VM's transactional Information graph.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use lana_bytecode::{Chunk, LanaError};
+use lana_vm::heap::Reservation;
+use lana_vm::value::ValueKind;
 use lana_vm::{Value, Vm};
 use serde_json::{json, Value as Json};
 
 use crate::{data, host_calls::StoreHost, information_codec::Tagged};
 
 const MAX_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+const EVENT_REPLY_OVERHEAD: usize = 256;
+static NEXT_HOST_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub struct LiveFailure {
@@ -37,7 +43,7 @@ impl LiveState {
     }
 }
 
-struct QueuedObservation { name: String, evidence: Json, bytes: usize }
+struct QueuedObservation { name: String, evidence: String, bytes: usize, _reservation: Reservation }
 
 struct LiveInstance {
     vm: Vm<'static>,
@@ -48,21 +54,43 @@ struct LiveInstance {
 }
 
 impl LiveInstance {
-    fn refresh_inspections(&mut self) {
+    fn refresh_inspections(&mut self) -> Result<(), LiveFailure> {
         for name in self.vm.live_names() {
             if self.inspections.get(&name).and_then(|value| value.get("revision"))
-                .and_then(Json::as_u64) == self.vm.live_revision(&name).ok() { continue; }
-            let value = self.vm.live_inspect(&name).ok().and_then(|value| encode_value(&value).ok());
-            if let Some(value) = value { self.inspections.insert(name, value); }
-            else { self.inspections.remove(&name); }
+                .and_then(Json::as_u64) == self.vm.live_revision(&name).ok()
+                && self.inspections.get(&name).and_then(|value| value.get("partial")) != Some(&Json::Bool(true)) {
+                continue;
+            }
+            match self.vm.live_inspect(&name).map_err(LiveFailure::from)
+                .and_then(|value| encode_value(&value)) {
+                Ok(value) => { self.inspections.insert(name, value); }
+                Err(error) => {
+                    let revision = self.vm.live_revision(&name)?;
+                    self.inspections.insert(name, json!({"revision":revision,"reactive":true,"partial":true}));
+                    return Err(error);
+                }
+            }
         }
+        Ok(())
     }
 }
 
-#[derive(Default)]
 pub struct LiveHost {
+    host_id: String,
     next_handle: u64,
     instances: BTreeMap<String, LiveInstance>,
+}
+
+impl Default for LiveHost {
+    fn default() -> Self {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|time| time.as_nanos()).unwrap_or(0);
+        let sequence = NEXT_HOST_ID.fetch_add(1, Ordering::Relaxed);
+        Self {
+            host_id: format!("{:x}-{:x}-{:x}", std::process::id(), nanos, sequence),
+            next_handle: 0,
+            instances: BTreeMap::new(),
+        }
+    }
 }
 
 impl LiveHost {
@@ -97,12 +125,12 @@ impl LiveHost {
         let status = vm.run();
         if status != LanaError::Ok { return Err(LiveFailure::new(status, vm.error().message.clone())); }
         self.next_handle = self.next_handle.checked_add(1).ok_or(LanaError::Limit)?;
-        let handle = format!("lanaprog_{}", self.next_handle);
+        let handle = format!("lanaprog_{}_{}", self.host_id, self.next_handle);
         let mut instance = LiveInstance {
             vm, state: LiveState::Quiescent, queue: VecDeque::new(), queue_bytes: 0,
             inspections: BTreeMap::new(),
         };
-        instance.refresh_inspections();
+        instance.refresh_inspections()?;
         self.instances.insert(handle.clone(), instance);
         Ok(handle)
     }
@@ -122,13 +150,20 @@ impl LiveHost {
     pub fn inspect_live(&mut self, handle: &str, name: &str) -> Result<Json, LiveFailure> {
         let instance = self.instance_mut(handle)?;
         let inspection = if instance.state == LiveState::Failed {
-            if let Some(cached) = instance.inspections.get(name) { cached.clone() }
-            else {
-                let revision = instance.vm.live_revision(name)?;
-                json!({"revision":revision,"reactive":true,"partial":true})
-            }
+            let revision = instance.vm.live_revision(name)?;
+            instance.inspections.get(name)
+                .filter(|cached| cached.get("revision").and_then(Json::as_u64) == Some(revision))
+                .cloned()
+                .unwrap_or_else(|| json!({"revision":revision,"reactive":true,"partial":true}))
         } else {
-            let inspection = encode_value(&instance.vm.live_inspect(name)?)?;
+            let inspection = match instance.vm.live_inspect(name).map_err(LiveFailure::from)
+                .and_then(|value| encode_value(&value)) {
+                Ok(inspection) => inspection,
+                Err(error) => {
+                    if terminal(error.code) { instance.state = LiveState::Failed; }
+                    return Err(error);
+                }
+            };
             instance.inspections.insert(name.to_owned(), inspection.clone());
             inspection
         };
@@ -140,13 +175,17 @@ impl LiveHost {
         if instance.state == LiveState::Failed { return Err(LiveFailure::new(LanaError::Task, "live instance failed")); }
         if !instance.vm.live_is_root(name)? { return Err(LanaError::Type.into()); }
         if instance.state == LiveState::Suspended {
-            let bytes = serde_json::to_vec(&evidence).map_err(|_| LanaError::Schema)?.len()
-                .checked_add(name.len()).ok_or(LanaError::Limit)?;
+            let evidence = serde_json::to_string(&evidence).map_err(|_| LanaError::Schema)?;
+            let bytes = evidence.capacity().checked_add(name.len())
+                .and_then(|size| size.checked_add(2 * std::mem::size_of::<QueuedObservation>() + EVENT_REPLY_OVERHEAD))
+                .ok_or(LanaError::Limit)?;
             let total = instance.queue_bytes.checked_add(bytes).ok_or(LanaError::Limit)?;
-            if total > MAX_QUEUE_BYTES || total > instance.vm.memory_remaining() {
+            if total > MAX_QUEUE_BYTES {
                 return Err(LiveFailure::new(LanaError::Limit, "live observation queue limit exceeded"));
             }
-            instance.queue.push_back(QueuedObservation { name: name.to_owned(), evidence, bytes });
+            let reservation = instance.vm.heap().reserve(bytes)
+                .map_err(|_| LiveFailure::new(LanaError::Limit, "live observation queue limit exceeded"))?;
+            instance.queue.push_back(QueuedObservation { name: name.to_owned(), evidence, bytes, _reservation: reservation });
             instance.queue_bytes = total;
             return Ok(json!({"state":"SUSPENDED","queued":instance.queue.len()}));
         }
@@ -166,10 +205,15 @@ impl LiveHost {
         instance.state = LiveState::Quiescent;
         let mut events = Vec::new();
         while let Some(event) = instance.queue.pop_front() {
-            instance.queue_bytes -= event.bytes;
-            let outcome = match Self::apply(instance, &event.name, &event.evidence) {
-                Ok(value) => json!({"name":event.name,"ok":true,"result":value}),
-                Err(error) => json!({"name":event.name,"ok":false,"error":{"code":error.code.name(),"message":error.message}}),
+            let QueuedObservation { name, evidence, bytes, _reservation } = event;
+            instance.queue_bytes -= bytes;
+            drop(_reservation);
+            let result = serde_json::from_str(&evidence)
+                .map_err(|error| LiveFailure::new(LanaError::Schema, error.to_string()))
+                .and_then(|value| Self::apply(instance, &name, &value));
+            let outcome = match result {
+                Ok(value) => json!({"name":name,"ok":true,"result":value}),
+                Err(error) => json!({"name":name,"ok":false,"error":{"code":error.code.name(),"message":error.message}}),
             };
             events.push(outcome);
             if instance.state == LiveState::Failed { break; }
@@ -192,7 +236,7 @@ impl LiveHost {
 
     fn apply(instance: &mut LiveInstance, name: &str, evidence: &Json) -> Result<Json, LiveFailure> {
         if !instance.vm.live_is_root(name)? { return Err(LanaError::Type.into()); }
-        let evidence = match decode_evidence(&mut instance.vm, evidence) {
+        let evidence = match decode_evidence(&mut instance.vm, name, evidence) {
             Ok(value) => value,
             Err(error) => {
                 if terminal(error.code) { instance.state = LiveState::Failed; }
@@ -203,9 +247,13 @@ impl LiveHost {
         let result = instance.vm.live_observe(name, &evidence);
         match result {
             Ok(_) => {
-                instance.state = LiveState::Quiescent;
-                instance.refresh_inspections();
-                Ok(json!({"state":"QUIESCENT","name":name,"revision":instance.vm.live_revision(name)?}))
+                let revision = instance.vm.live_revision(name)?;
+                let inspection_error = instance.refresh_inspections().err();
+                instance.state = if inspection_error.as_ref().is_some_and(|error| terminal(error.code)) {
+                    LiveState::Failed
+                } else { LiveState::Quiescent };
+                Ok(json!({"state":instance.state.as_str(),"name":name,"revision":revision,
+                    "inspection_error":inspection_error.map(|error| json!({"code":error.code.name(),"message":error.message}))}))
             }
             Err(code) => {
                 if terminal(code) {
@@ -222,17 +270,43 @@ fn terminal(code: LanaError) -> bool {
         | LanaError::Cancelled | LanaError::Task | LanaError::Corruption)
 }
 
-fn decode_evidence(vm: &mut Vm, evidence: &Json) -> Result<Value, LiveFailure> {
-    if evidence.get("tag").is_some() {
-        let tagged: Tagged = serde_json::from_value(evidence.clone())
-            .map_err(|error| LiveFailure::new(LanaError::Schema, error.to_string()))?;
-        return Ok(tagged.to_live(vm)?);
+fn current_values(vm: &Vm, name: &str) -> Result<Vec<Value>, LiveFailure> {
+    let current = vm.live_current(name)?;
+    if let ValueKind::Possibility(possibility) = &current.kind {
+        Ok(possibility.values.clone())
+    } else { Ok(vec![current]) }
+}
+
+fn select_existing(values: &[Value], evidence: &Json) -> Result<Option<Value>, LiveFailure> {
+    let mut found = None;
+    for value in values {
+        if encode_value(value).ok().as_ref() == Some(evidence) {
+            if found.is_some() {
+                return Err(LiveFailure::new(LanaError::InvalidConditioning, "ambiguous JSON evidence"));
+            }
+            found = Some(value.clone());
+        }
     }
-    if let Some(values) = evidence.as_object().and_then(|object| object.get("possibility")) {
+    Ok(found)
+}
+
+fn decode_evidence(vm: &mut Vm, name: &str, evidence: &Json) -> Result<Value, LiveFailure> {
+    let current = current_values(vm, name)?;
+    if let Some(value) = select_existing(&current, evidence)? { return Ok(value); }
+    if let Some(values) = evidence.as_object().filter(|object| object.len() == 1)
+        .and_then(|object| object.get("possibility")) {
         let values = values.as_array().ok_or(LanaError::Schema)?;
-        let values = values.iter().map(|value| data::json_parse_with_heap(&value.to_string(), &vm.heap()))
+        let values = values.iter().map(|value| {
+            select_existing(&current, value)?.map(Ok).unwrap_or_else(||
+                data::json_parse_with_heap(&value.to_string(), &vm.heap()).map_err(LiveFailure::from))
+        })
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(Value::possibility(vm.possibility_build(&values)?));
+    }
+    if evidence.get("tag").is_some() {
+        if let Ok(tagged) = serde_json::from_value::<Tagged>(evidence.clone()) {
+            return Ok(tagged.to_live(vm)?);
+        }
     }
     Ok(data::json_parse_with_heap(&evidence.to_string(), &vm.heap())?)
 }
@@ -303,6 +377,12 @@ HALT
         let large = Json::String("x".repeat(2 * 1024 * 1024));
         assert_eq!(host.observe_live(&handle, "root", large).unwrap_err().code, LanaError::Limit);
         assert_eq!(host.resume_live(&handle).unwrap()["events"].as_array().unwrap().len(), 0);
+        let before_queue = host.instance(&handle).unwrap().vm.allocated_bytes();
+        host.pause_live(&handle).unwrap();
+        host.observe_live(&handle, "root", json!(7)).unwrap();
+        assert!(host.instance(&handle).unwrap().vm.allocated_bytes() > before_queue);
+        assert_eq!(host.resume_live(&handle).unwrap()["events"][0]["ok"], false);
+        assert_eq!(host.instance(&handle).unwrap().vm.allocated_bytes(), before_queue);
         let vm = &mut host.instance_mut(&handle).unwrap().vm;
         vm.set_memory_limit(vm.allocated_bytes() + 1).unwrap();
         assert_eq!(host.observe_live(&handle, "root", json!(2)).unwrap_err().code, LanaError::Oom);
@@ -310,5 +390,18 @@ HALT
         assert_eq!(host.inspect_live(&handle, "root").unwrap()["inspection"]["revision"], 0);
         host.delete_live(&handle).unwrap();
         assert_eq!(LiveHost::new().state(&handle).unwrap_err().code, LanaError::NotFound);
+    }
+
+    #[test]
+    fn inspection_failure_replaces_stale_cache() {
+        let mut host = LiveHost::new();
+        let handle = host.start_live_labc(&program()).unwrap();
+        let instance = host.instance_mut(&handle).unwrap();
+        instance.inspections.insert("root".into(), json!({"revision":99,"support":[]}));
+        let allocated = instance.vm.allocated_bytes();
+        instance.vm.set_memory_limit(allocated + 1).unwrap();
+        assert_eq!(instance.refresh_inspections().unwrap_err().code, LanaError::Oom);
+        assert_eq!(instance.inspections["root"]["revision"], 0);
+        assert_eq!(instance.inspections["root"]["partial"], true);
     }
 }

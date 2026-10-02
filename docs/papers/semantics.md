@@ -1610,3 +1610,7 @@ Pausing changes when evidence is processed, not its meaning. A finite FIFO
 queue records admitted events. Resuming applies them in order; a rejected event
 does not prevent a later event. Program instances and their histories exist
 only for their host process lifetime; deleting an instance ends its history.
+For host JSON evidence, an ordinary value matching exactly one currently
+supported alternative selects that retained alternative, including arrays and
+maps whose source identity is otherwise significant. The host never creates a
+new alternative from structurally equal JSON. Ambiguous matches fail.

@@ -42,17 +42,17 @@ See [`integrations/README.md`](integrations/README.md).
 ## Live programs
 
 Run `lana live examples/live.lana` to start a foreground session. The command
-prints a process-local handle such as `lanaprog_1`. A live source calls
+prints an opaque process-local handle. A live source calls
 `live_register("source", information(possibility([1, 2, 3])))` to retain a
 root, and can register pure derived values as well. Session commands are:
 
 ```text
-inspect lanaprog_1 source
-observe lanaprog_1 source {"possibility":[2,3]}
-pause lanaprog_1
-observe lanaprog_1 source 2
-resume lanaprog_1
-delete lanaprog_1
+inspect <handle> source
+observe <handle> source {"possibility":[2,3]}
+pause <handle>
+observe <handle> source 2
+resume <handle>
+delete <handle>
 quit
 ```
 
