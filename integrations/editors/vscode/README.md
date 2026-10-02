@@ -11,13 +11,13 @@ npm test
 npm run package
 ```
 
-Install `lana-language-support-4.0.0.vsix` using VS Code's **Extensions: Install
+Install `lana-language-support-4.1.0.vsix` using VS Code's **Extensions: Install
 from VSIX...** command, then open a `.lana` file. Syntax highlighting is included.
 Set `lana.server.path` to the absolute path of your built executable (for example,
 `/path/to/lana/target/lana/bin/lana`) when `lana` is not on PATH. Build that executable
 from the repository root with `python3 tools/build.py build`.
 
-The Lana 4.0 server diagnoses both saved files and unsaved buffers, and
+The Lana 4.1 server diagnoses both saved files and unsaved buffers, and
 provides hover, completion, go-to-definition, find-references, and rename via
 the in-process compiler service.
 

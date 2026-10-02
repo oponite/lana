@@ -10,7 +10,7 @@ To use a nonstandard executable path, load only the Lua module and configure it:
 require("lana").setup({ cmd = { "/absolute/path/to/lana", "lsp" } })
 ```
 
-The current Lana 4.0 server diagnoses saved files and unsaved buffers.
+The current Lana 4.1 server diagnoses saved files and unsaved buffers.
 It also provides hover, completion, definition, references, and rename.
 The plugin checks that the configured executable reports Lana 3.x or 4.x with
 LABC v2-v6 before starting the server.

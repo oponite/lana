@@ -1,10 +1,11 @@
-//! Persistent JSON bridge. Each request runs in a fresh VM.
+//! Persistent JSON bridge for one-shot runs and process-local live programs.
 
 use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use lana_bytecode::LanaError;
+use lana_runtime::live::{LiveFailure, LiveHost};
 
 use serde::Deserialize;
 
@@ -79,7 +80,60 @@ impl Drop for Scratch {
     }
 }
 
-fn run_request(line: &str) -> String {
+fn live_failure(error: LiveFailure) -> String {
+    failure("live", error.code.name(), &error.message, "")
+}
+
+fn live_request(request: &serde_json::Value, operation: &str, controls: &Controls, host: &mut LiveHost) -> String {
+    let mut stdout = String::new();
+    let required = |field: &str| request.get(field).and_then(serde_json::Value::as_str)
+        .ok_or_else(|| LiveFailure { code: LanaError::Schema, message: format!("missing {field}") });
+    let result = (|| -> Result<serde_json::Value, LiveFailure> {
+        match operation {
+            "start_live" | "start_live_labc" => {
+                let path = Path::new(required("path")?);
+                if !path.is_file() { return Err(LiveFailure { code: LanaError::Io, message: "program file not found".into() }); }
+                let path = path.canonicalize().map_err(|error| LiveFailure { code: LanaError::Io, message: error.to_string() })?;
+                let bytecode = temp_path("lana-live-bytecode");
+                let _scratch = Scratch(vec![bytecode.clone()]);
+                let effective = if operation == "start_live" {
+                    let compiler = find_compiler().ok_or_else(|| LiveFailure { code: LanaError::Io, message: "compiler bytecode not found".into() })?;
+                    compile_source_file(&compiler, &path.to_string_lossy(), &bytecode.to_string_lossy())
+                        .map_err(|error| match error {
+                            CliError::Run(error) | CliError::Compile { error, .. } => LiveFailure { code: error.code, message: error.message },
+                            CliError::Load { info, .. } | CliError::Assemble { info, .. } | CliError::Write { info, .. } => LiveFailure { code: info.code, message: info.message },
+                            CliError::Project => LiveFailure { code: LanaError::Io, message: "project build failed".into() },
+                        })?;
+                    &bytecode
+                } else { &path };
+                let bytes = std::fs::read(effective).map_err(|error| LiveFailure { code: LanaError::Io, message: error.to_string() })?;
+                let original_dir = std::env::current_dir().map_err(|error| LiveFailure { code: LanaError::Io, message: error.to_string() })?;
+                if operation == "start_live" {
+                    std::env::set_current_dir(path.parent().unwrap_or(Path::new(".")))
+                        .map_err(|error| LiveFailure { code: LanaError::Io, message: error.to_string() })?;
+                }
+                let result = host.start_live_labc_with(&bytes, |vm| controls.apply(vm));
+                let _ = std::env::set_current_dir(original_dir);
+                let handle = result?;
+                stdout = host.output(&handle)?;
+                Ok(serde_json::json!({"handle":handle,"state":"QUIESCENT","names":host.names(&handle)?}))
+            }
+            "observe_live" => host.observe_live(required("handle")?, required("name")?,
+                request.get("evidence").ok_or_else(|| LiveFailure { code: LanaError::Schema, message: "missing evidence".into() })?.clone()),
+            "inspect_live" => host.inspect_live(required("handle")?, required("name")?),
+            "pause_live" => host.pause_live(required("handle")?),
+            "resume_live" => host.resume_live(required("handle")?),
+            "delete_live" => host.delete_live(required("handle")?),
+            _ => unreachable!(),
+        }
+    })();
+    match result {
+        Ok(value) => success(&value.to_string(), &stdout),
+        Err(error) => live_failure(error),
+    }
+}
+
+fn run_request(line: &str, host: &mut LiveHost) -> String {
     let request: serde_json::Value = match serde_json::from_str(line) {
         Ok(request) => request,
         Err(_) => return failure("protocol", "LANA_ERR_PARSE", "invalid request JSON", ""),
@@ -94,6 +148,10 @@ fn run_request(line: &str) -> String {
     let Some(operation) = request.get("op").and_then(|value| value.as_str()) else {
         return failure("protocol", "LANA_ERR_SCHEMA", "missing operation", "");
     };
+    if matches!(operation, "start_live" | "start_live_labc" | "observe_live" | "inspect_live"
+        | "pause_live" | "resume_live" | "delete_live") {
+        return live_request(&request, operation, &controls, host);
+    }
     if operation != "run" && operation != "run_labc" {
         return failure("protocol", "LANA_ERR_UNSUPPORTED_OPERATION", "unknown operation", "");
     }
@@ -193,6 +251,7 @@ fn run_program(operation: &str, path: &Path, compiler: Option<&Path>, bytecode: 
 }
 
 pub fn serve() -> ExitCode {
+    let mut host = LiveHost::new();
     let stdin = std::io::stdin();
     let mut input = std::io::BufReader::new(stdin.lock());
     let stdout = std::io::stdout();
@@ -210,13 +269,79 @@ pub fn serve() -> ExitCode {
             return ExitCode::from(1);
         }
         let response = match std::str::from_utf8(&line) {
-            Ok(line) => run_request(line),
+            Ok(line) => run_request(line, &mut host),
             Err(_) => failure("protocol", "LANA_ERR_PARSE", "request is not UTF-8", ""),
         };
         if writeln!(output, "{response}").is_err() || output.flush().is_err() {
             return ExitCode::from(1);
         }
     }
+}
+
+fn take_word<'a>(input: &mut &'a str) -> Option<&'a str> {
+    *input = input.trim_start();
+    if input.is_empty() { return None; }
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    let (word, rest) = input.split_at(end);
+    *input = rest;
+    Some(word)
+}
+
+/// Foreground line session. Responses use the worker envelope so every command
+/// has the same error code and result shape as the Python host.
+pub fn live(path: &str) -> ExitCode {
+    let mut host = LiveHost::new();
+    let operation = if path.ends_with(".labc") { "start_live_labc" } else { "start_live" };
+    let request = serde_json::json!({"schema":1,"op":operation,"path":path});
+    let response = run_request(&request.to_string(), &mut host);
+    println!("{response}");
+    if serde_json::from_str::<serde_json::Value>(&response).ok()
+        .and_then(|value| value.get("ok").and_then(serde_json::Value::as_bool)) != Some(true) {
+        return ExitCode::from(1);
+    }
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match input.read_line(&mut line) { Ok(0) => break, Err(_) => return ExitCode::from(1), Ok(_) => {} }
+        let mut rest = line.trim();
+        let Some(command) = take_word(&mut rest) else { continue; };
+        if command == "quit" { break; }
+        let request = match command {
+            "load" => {
+                let path = rest.trim();
+                if path.is_empty() { None } else {
+                    Some(serde_json::json!({"schema":1,"op":if path.ends_with(".labc") { "start_live_labc" } else { "start_live" },"path":path}))
+                }
+            }
+            "observe" => {
+                let handle = take_word(&mut rest);
+                let name = take_word(&mut rest);
+                match (handle, name, serde_json::from_str::<serde_json::Value>(rest.trim())) {
+                    (Some(handle), Some(name), Ok(evidence)) =>
+                        Some(serde_json::json!({"schema":1,"op":"observe_live","handle":handle,"name":name,"evidence":evidence})),
+                    _ => None,
+                }
+            }
+            "inspect" => {
+                let handle = take_word(&mut rest);
+                let name = take_word(&mut rest);
+                match (handle, name) { (Some(handle), Some(name)) if rest.trim().is_empty() =>
+                    Some(serde_json::json!({"schema":1,"op":"inspect_live","handle":handle,"name":name})), _ => None }
+            }
+            "pause" | "resume" | "delete" => {
+                let handle = take_word(&mut rest);
+                match handle { Some(handle) if rest.trim().is_empty() =>
+                    Some(serde_json::json!({"schema":1,"op":format!("{command}_live"),"handle":handle})), _ => None }
+            }
+            _ => None,
+        };
+        let response = request.map(|request| run_request(&request.to_string(), &mut host))
+            .unwrap_or_else(|| failure("protocol", "LANA_ERR_SCHEMA", "invalid live command", ""));
+        println!("{response}");
+    }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

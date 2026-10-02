@@ -378,6 +378,7 @@ fn host_is_pure(name) {
 }
 
 fn host_effect(name) {
+    if (name == "live_register") { return effects("mutation"); }
     if (name == "print") { return effects("io"); }
     if (name == "read_text") { return effects("io"); }
     if (name == "write_text") { return effects("io"); }
@@ -818,6 +819,14 @@ fn require_argument_count(name, resolved, expected) {
 
 fn builtin_uncertainty_type(node, resolved) {
     let name = node[1];
+    if (name == "live_register") {
+        require_argument_count(name, resolved, 2);
+        if (node[2][0][0] != 20) { type_error(node, "live_register name must be a string literal"); }
+        if (node[2][0][1] != "string") { type_error(node, "live_register name must be a string literal"); }
+        if (node[2][0][2] == "") { type_error(node, "live_register name must not be empty"); }
+        if ((resolved[1][1])[0] != "information") { type_error(node, "live_register requires Information<T>"); }
+        return resolved[1][1];
+    }
     if (name == "information") {
         require_argument_count(name, resolved, 1); return type_information(information_value_type(resolved[0][1]));
     }
@@ -2242,7 +2251,11 @@ fn resolve_value_statement(node, environment) {
     }
     if (kind == 7) {
         let value = resolve_expression_with_environment(node[1], environment);
-        if ((value[1])[0] == "information") { type_error(node, "discarded unresolved Information value"); }
+        let registration = false;
+        if (node[1][0] == 24) { if (node[1][1] == "live_register") { registration = true; } }
+        if ((value[1])[0] == "information") {
+            if (!registration) { type_error(node, "discarded unresolved Information value"); }
+        }
         if ((value[1])[0] == "sample") { type_error(node, "discarded Sample value"); }
         return [7, type_ordinary("statement"), value[2], node];
     }
@@ -2897,7 +2910,7 @@ fn compiler_fast_hosts() {
 }
 
 fn compiler_reserved_calls() {
-    let names = "Branch,Conv,Dense,Dynamic,Layer,Model,OBJECT_NEW,OO_CALL,OO_SET,OO_STATIC_CALL,Relu,Residual,STATE,STATE_DIST,Self,Sequential,Tensor,adam,aggregate,append,append_complementary,append_full_redundancy,append_redundant,apply_to,argmax,args,array,array_length,array_new,array_push,assert,attenuate,bool,bootstrap,capability,cast,change,channel,char_length,cholesky_solve,claim,claim_proposition,claim_status,claim_value,condition,core_assign_weights,core_broja,core_compose_kernels,core_conditional_entropy,core_entropy,core_forget_weights,core_identity_kernel,core_infer,core_kernel,core_mutual_information,core_network,csv_read,csv_write,d,d_im,d_re,dataset,dataset_apply,dataset_evidence,dataset_exclusions,dataset_explain,dataset_filter,dataset_map,dataset_query,dataset_snapshot,dataset_source,dataset_sqlite,density_operator,derivation,device,directory_create,directory_list,document_extract,dtype,effect_status,execute_effect,execution_authorize,execution_capability,execution_execute,exp,expect,explain,eye,filter,floor,force,force_all,format,format_number,format_timestamp,future_all,future_message,future_race,gather,getenv,gpu_matmul,grad,grant,group_by,hash_update,history,http_get,http_post,index_get,index_set,infer,information,inspect_information,is_separable,join,join_all,json_parse,json_stringify,lazy,lazy_bound,ledger_append,ledger_query,limit,list,log,logsumexp,map,map_new,materialize,matmul,max,mcmc,mean,measure,measure_with,min,mix,ndim,next,now,null,number,number_to_string,observable,observe,ones,p,params,parse_timestamp,partial_trace,path_exists,planned_effect,policy_evaluate,policy_store_decision,povm,print,project,random,random_normal,random_seed,random_uniform,read_text,reduce,regex_compile,regex_match,regex_replace,regex_search,relu,rename,reshape,resolve,result_error,result_error_value,result_is_ok,result_ok,result_value,resume,revision,revoke,rules_add_counterexample,rules_inspect,rules_learn,rules_predict,rules_rollback,rules_save,run_async,sample,sample_metadata,sample_value,samples,select,set,set_add,set_contains,set_difference,set_intersect,set_new,set_union,sgd,shape,shared_at,shared_grant,shared_identity,shared_information,shared_observe,shared_revision,shared_revoke,shared_snapshot,shared_wait,sleep,smc,snapshot,socket_close,socket_connect,socket_recv,socket_send,softmax,sort,sqrt,state_tensor,steps,store_commit,store_current_revision,store_delete,store_get,store_open,store_put,store_scan,string,string_byte_at,string_codepoint_slice,string_concat,string_hex,string_join,string_length,string_slice,string_to_number,string_unescape,sum,support,surprisal,tensor,tensor_compare,tensor_complex,tensor_product,tensor_select,to_cpu,to_device,to_lower,to_state,to_upper,trace_distance,train,transform,transpose,trees_explain,trees_fit,trees_load,trees_predict,trees_save,type_of,update,validate,variance,velocity,vi,vjp,write_text,write_text_atomic,zeros,";
+    let names = "Branch,Conv,Dense,Dynamic,Layer,Model,OBJECT_NEW,OO_CALL,OO_SET,OO_STATIC_CALL,Relu,Residual,STATE,STATE_DIST,Self,Sequential,Tensor,adam,aggregate,append,append_complementary,append_full_redundancy,append_redundant,apply_to,argmax,args,array,array_length,array_new,array_push,assert,attenuate,bool,bootstrap,capability,cast,change,channel,char_length,cholesky_solve,claim,claim_proposition,claim_status,claim_value,condition,core_assign_weights,core_broja,core_compose_kernels,core_conditional_entropy,core_entropy,core_forget_weights,core_identity_kernel,core_infer,core_kernel,core_mutual_information,core_network,csv_read,csv_write,d,d_im,d_re,dataset,dataset_apply,dataset_evidence,dataset_exclusions,dataset_explain,dataset_filter,dataset_map,dataset_query,dataset_snapshot,dataset_source,dataset_sqlite,density_operator,derivation,device,directory_create,directory_list,document_extract,dtype,effect_status,execute_effect,execution_authorize,execution_capability,execution_execute,exp,expect,explain,eye,filter,floor,force,force_all,format,format_number,format_timestamp,future_all,future_message,future_race,gather,getenv,gpu_matmul,grad,grant,group_by,hash_update,history,http_get,http_post,index_get,index_set,infer,information,inspect_information,is_separable,join,join_all,json_parse,json_stringify,lazy,lazy_bound,ledger_append,ledger_query,limit,list,live_register,log,logsumexp,map,map_new,materialize,matmul,max,mcmc,mean,measure,measure_with,min,mix,ndim,next,now,null,number,number_to_string,observable,observe,ones,p,params,parse_timestamp,partial_trace,path_exists,planned_effect,policy_evaluate,policy_store_decision,povm,print,project,random,random_normal,random_seed,random_uniform,read_text,reduce,regex_compile,regex_match,regex_replace,regex_search,relu,rename,reshape,resolve,result_error,result_error_value,result_is_ok,result_ok,result_value,resume,revision,revoke,rules_add_counterexample,rules_inspect,rules_learn,rules_predict,rules_rollback,rules_save,run_async,sample,sample_metadata,sample_value,samples,select,set,set_add,set_contains,set_difference,set_intersect,set_new,set_union,sgd,shape,shared_at,shared_grant,shared_identity,shared_information,shared_observe,shared_revision,shared_revoke,shared_snapshot,shared_wait,sleep,smc,snapshot,socket_close,socket_connect,socket_recv,socket_send,softmax,sort,sqrt,state_tensor,steps,store_commit,store_current_revision,store_delete,store_get,store_open,store_put,store_scan,string,string_byte_at,string_codepoint_slice,string_concat,string_hex,string_join,string_length,string_slice,string_to_number,string_unescape,sum,support,surprisal,tensor,tensor_compare,tensor_complex,tensor_product,tensor_select,to_cpu,to_device,to_lower,to_state,to_upper,trace_distance,train,transform,transpose,trees_explain,trees_fit,trees_load,trees_predict,trees_save,type_of,update,validate,variance,velocity,vi,vjp,write_text,write_text_atomic,zeros,";
     let result = map_new(); let index = 0; let start = 0;
     while (index < string_length(names)) {
         if (string_byte_at(names, index) == 44) { result[string_slice(names, start, index)] = true; start = index + 1; }

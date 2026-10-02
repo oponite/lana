@@ -68,6 +68,30 @@ with Lana() as lana:
 `run_labc()` requires Lana 4.x. Source and bytecode programs both use the
 request/response file convention described in the next section.
 
+Lana 4.1 also retains an explicitly registered Information graph in the
+worker. The handle is valid only while the `Lana` object keeps that worker
+open:
+
+```python
+with Lana() as lana:
+    started = lana.start_live("examples/live.lana")
+    assert started.ok, started.error
+    handle = started.value["handle"]
+    result = lana.observe_live(handle, "source", {"possibility": [2, 3]})
+    assert result.ok, result.error
+    current = lana.inspect_live(handle, "doubled")
+    assert current.ok, current.error
+    lana.pause_live(handle)
+    lana.observe_live(handle, "source", 2)
+    events = lana.resume_live(handle)
+    assert events.ok, events.error
+    lana.delete_live(handle)
+```
+
+Use `start_live_labc()` for precompiled bytecode. A tagged finite value can be
+passed as evidence when ordinary JSON cannot express it. `LanaResult` carries
+the same status and error shape as one-shot methods.
+
 | Result status | Meaning |
 | --- | --- |
 | `ok` | The result is available in `value`. |
@@ -89,7 +113,7 @@ The command returns exit code 0 for success and 1 for a bridge error.
 It prints a schema-1 JSON envelope:
 
 ```json
-{"schema":1,"ok":true,"result":{"message":"hello"},"stdout":"","stderr":"","execution":{"elapsed_seconds":0.1,"lana_version":"4.0.0"}}
+{"schema":1,"ok":true,"result":{"message":"hello"},"stdout":"","stderr":"","execution":{"elapsed_seconds":0.1,"lana_version":"4.1.0"}}
 ```
 
 Execution metadata varies by backend. Errors have `ok: false`, a `phase`, and

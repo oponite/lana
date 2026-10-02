@@ -9,7 +9,7 @@
 //! Opcodes that construct increment-2+ types (state dists, joints, tasks,
 //! host calls) return `UnsupportedOperation` until their increment lands.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -663,6 +663,7 @@ pub const LANA_HOST_EVALUATION_WALK_FORWARD: u32 = 217;
 pub const LANA_HOST_DATASET_SQLITE: u32 = 218;
 pub const LANA_HOST_DOCUMENT_EXTRACT: u32 = 219;
 pub const LANA_HOST_INFORMATION_SNAPSHOT: u32 = 220;
+pub const LANA_HOST_LIVE_REGISTER: u32 = 221;
 
 // LIP-024 async/await. Present in both the C11 VM and the Rust VM at ids
 // 126-129 (matching the C11 assembler's host-call table and the
@@ -886,9 +887,22 @@ fn mix64(value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+#[derive(Clone)]
+enum ChunkStorage<'a> {
+    Borrowed(&'a Chunk),
+    Owned(Arc<Chunk>),
+}
+
+impl std::ops::Deref for ChunkStorage<'_> {
+    type Target = Chunk;
+    fn deref(&self) -> &Chunk {
+        match self { Self::Borrowed(chunk) => chunk, Self::Owned(chunk) => chunk }
+    }
+}
+
 /// The register VM. Owns the execution state for one chunk.
 pub struct Vm<'a> {
-    chunk: &'a Chunk,
+    chunk: ChunkStorage<'a>,
     ip: usize,
     running: bool,
     instruction_limit: u64,
@@ -931,6 +945,7 @@ pub struct Vm<'a> {
     frames: Vec<Frame>,
     max_registers: Vec<usize>,
     result: Value,
+    live_registered: BTreeMap<String, RootedValue>,
     error: VmError,
     pending_error_message: Option<String>,
     pending_io_outcome: Option<(bool, String)>,
@@ -1486,14 +1501,25 @@ fn ffi_call_impl(
     Ok(Value::number(result))
 }
 
+impl Vm<'static> {
+    /// Keep immutable bytecode alive for a host-owned live program.
+    pub fn new_owned(chunk: Arc<Chunk>) -> Self { Self::new_storage(ChunkStorage::Owned(chunk)) }
+}
+
 impl<'a> Vm<'a> {
     /// Create a VM for a chunk. The CLI defaults (256 MiB / 50M instructions,
     /// seed `0x4c414e41`) match `tools/c/cli.c` `load_command`.
     pub fn new(chunk: &'a Chunk) -> Self {
+        Self::new_storage(ChunkStorage::Borrowed(chunk))
+    }
+
+    fn new_storage(chunk: ChunkStorage<'a>) -> Self {
         let heap = Heap::new(256 * 1024 * 1024);
+        let entry = chunk.entry as usize;
+        let max_registers = compute_max_registers(&chunk);
         let mut vm = Self {
             chunk,
-            ip: chunk.entry as usize,
+            ip: entry,
             running: true,
             instruction_limit: 50_000_000,
             instruction_count: 0,
@@ -1533,8 +1559,9 @@ impl<'a> Vm<'a> {
             shared_references: Vec::new(),
             path_execution: Vec::new(),
             frames: vec![Frame::new(LANA_MAX_REGISTERS as usize)],
-            max_registers: compute_max_registers(chunk),
+            max_registers,
             result: Value::null(),
+            live_registered: BTreeMap::new(),
             error: VmError::default(),
             pending_error_message: None,
             pending_io_outcome: None,
@@ -1647,6 +1674,33 @@ impl<'a> Vm<'a> {
         Ok(self.reactive_value(root))
     }
 
+    pub fn live_names(&self) -> Vec<String> { self.live_registered.keys().cloned().collect() }
+
+    pub fn live_is_root(&self, name: &str) -> Result<bool, LanaError> {
+        let value = &self.live_registered.get(name).ok_or(LanaError::NotFound)?.value;
+        Ok(value.reactive.as_ref().is_some_and(|node| node.lock().unwrap().kind == ReactiveKind::Root))
+    }
+
+    pub fn live_observe(&mut self, name: &str, evidence: &Value) -> Result<Value, LanaError> {
+        if !self.live_is_root(name)? { return Err(LanaError::Type); }
+        let value = self.live_registered[name].value.clone();
+        self.information_observe(&value, evidence)
+    }
+
+    pub fn live_inspect(&mut self, name: &str) -> Result<Value, LanaError> {
+        let value = self.live_registered.get(name).ok_or(LanaError::NotFound)?.value.clone();
+        let mut out = Value::null();
+        let error = self.information_inspect(&value, &mut out);
+        if error == LanaError::Ok { Ok(out) } else { Err(error) }
+    }
+
+    pub fn live_revision(&self, name: &str) -> Result<u64, LanaError> {
+        let value = &self.live_registered.get(name).ok_or(LanaError::NotFound)?.value;
+        Ok(value.reactive.as_ref().ok_or(LanaError::Type)?.lock().unwrap().revision)
+    }
+
+    pub fn memory_remaining(&self) -> usize { self.memory_limit.saturating_sub(self.allocated_bytes()) }
+
     /// Per-opcode execution counts, for `--stats` output.
     pub fn opcode_counts(&self) -> &[u64] {
         &self.opcode_counts
@@ -1661,7 +1715,7 @@ impl<'a> Vm<'a> {
     /// `wait_task` executes queued tasks inline (its helper mechanism), keeping
     /// `FORK`/`WAIT` correct single-threaded.
     pub fn run(&mut self) -> LanaError {
-        if let Err(info) = lana_bytecode::verifier::verify(self.chunk) {
+        if let Err(info) = lana_bytecode::verifier::verify(&self.chunk) {
             return self.fail(info.code, info.ip, info.opcode, info.line, "execute", info.message);
         }
         if self.scheduler_owner {
@@ -1924,7 +1978,7 @@ impl<'a> Vm<'a> {
             id
         };
         let handle = Arc::new(Task::new(id, self.current_group_id));
-        let mut child = Vm::new(self.chunk);
+        let mut child = Vm::new_storage(self.chunk.clone());
         child.scheduler = Some(scheduler.clone());
         child.scheduler_owner = false;
         child.ip = function.entry as usize;
@@ -7142,6 +7196,7 @@ impl<'a> Vm<'a> {
                         | LANA_HOST_SHARED_OBSERVE
                         | LANA_HOST_INFORMATION_INSPECT
                         | LANA_HOST_INFORMATION_SNAPSHOT
+                        | LANA_HOST_LIVE_REGISTER
                 );
                 let materialize = matches!(
                     host_id,
@@ -11627,6 +11682,9 @@ impl<'a> Vm<'a> {
             }
         }
         reactive_collect_value(&mut list, &self.result);
+        for value in self.live_registered.values() {
+            reactive_collect_value(&mut list, &value.value);
+        }
         if !list.iter().any(|node| Arc::ptr_eq(node, root)) {
             reactive_list_add(&mut list, root);
         }
@@ -11788,6 +11846,20 @@ impl<'a> Vm<'a> {
             return LanaError::UnsupportedOperation;
         }
         match host_id {
+            LANA_HOST_LIVE_REGISTER => {
+                if self.chunk.version < lana_bytecode::opcode::LABC_VERSION_5 || !self.scheduler_owner {
+                    return LanaError::UnsupportedOperation;
+                }
+                if argc != 2 || !matches!(arguments[0].kind, ValueKind::String(_))
+                    || arguments[1].reactive.is_none() { return LanaError::Type; }
+                let name = arguments[0].as_string();
+                if name.is_empty() { return LanaError::Type; }
+                if self.live_registered.contains_key(name.as_ref()) { return LanaError::Conflict; }
+                let root = match self.retain_value(&arguments[1]) { Ok(root) => root, Err(error) => return error };
+                self.live_registered.insert(name.to_string(), root);
+                *out = arguments[1].clone();
+                LanaError::Ok
+            }
             LANA_HOST_INFORMATION_SNAPSHOT => {
                 if argc != 1 { return LanaError::Type; }
                 match self.information_snapshot(&arguments[0]) {

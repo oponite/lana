@@ -115,7 +115,9 @@ mod tests {
         assert!(verifier::verify(&chunk).is_ok());
         chunk.code[0] = Instruction::new(OpCode::HostCall, 0, 220, 0, 0, 1);
         assert!(verifier::verify(&chunk).is_ok());
-        for id in [221] {
+        chunk.code[0] = Instruction::new(OpCode::HostCall, 0, 221, 0, 0, 1);
+        assert!(verifier::verify(&chunk).is_ok());
+        for id in [222] {
             chunk.code[0] = Instruction::new(OpCode::HostCall, 0, id, 0, 0, 1);
             assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Format);
         }

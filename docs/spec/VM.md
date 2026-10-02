@@ -19,6 +19,23 @@ Finite Information, named Joints, projections, and kernels are VM-owned. Constru
 
 A live Information root owns finite support and a dependency identity. Pure operations retain their inputs and recompute affected results when the root changes. Observation stages the entire update, then publishes it under one new revision. If any result fails, the old revision remains. Different dependency identities do not imply independence. Serialization and task transfer capture current values instead of live links.
 
+A live host owns each instance's immutable bytecode and VM until deletion or
+host shutdown. The VM retains explicitly registered roots and derived nodes;
+top-level code runs only during initial load. Host observations use the same
+transactional reactive update as source `observe` and recompute only affected
+pure dependencies. Registration names are unique per instance. Host reads
+inspect a registered node's current value, revision, and provenance without
+mutating the graph.
+
+An instance moves from `LIVE` to `QUIESCENT` after initial evaluation and
+after each successful event, to `SUSPENDED` on pause, to `FAILED` on terminal
+VM failure, and to `DELETED` on delete. Paused observations are admitted in
+FIFO order only while their total encoded size stays within 64 MiB and the
+instance memory budget. Resume returns one outcome per processed event;
+invalid evidence leaves no revision and processing continues. A terminal VM
+failure stops processing, but inspection remains available. Deletion releases
+bytecode, graph, and queued events. Handles are scoped to one host process.
+
 Pure arithmetic, comparisons, and function bodies can lift over finite alternatives. `PATH_SPLIT` runs both sides of an unresolved Boolean. `PATH_JOIN` merges their guarded results. Nested splits are bounded. Unresolved loops, incompatible dependency joins, and merges of history-bearing registers are unsupported. A split branch cannot print, call a host, create a task, sample, or observe. This prevents duplicate or partial effects.
 
 Claims keep their proposition, exactness, tolerance, and source validity separate. Plans keep a stable local identity, payload, and receipts. Execution requires a definite payload. For each `(identity, revision)`, the configured executor runs at most once. Later reads return the saved result.

@@ -1,6 +1,14 @@
 # Changelog
 
-## 4.0.0 (candidate)
+## 4.1.0 (candidate)
+
+- Add process-local persistent live programs with explicit named Information
+  registration, transactional host observation, inspection, pause/resume, and
+  deletion through the Rust, CLI, and Python worker surfaces.
+- Publish each later release's verified source formula to the latest-version
+  `oponite/oponite` Homebrew tap after the GitHub Release is public.
+
+## 4.0.0
 
 - Distribute the Rust CLI and VM as the sole Lana engine; retire the C VM,
   C-facing APIs, and standalone C evidence server.

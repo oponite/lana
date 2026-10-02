@@ -1,0 +1,4 @@
+let source = live_register("source", information(possibility([1, 2, 3])));
+let doubled = live_register("doubled", source * 2);
+let other = live_register("other", information(possibility([10, 20])));
+print("LIVE_READY");

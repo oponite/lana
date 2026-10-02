@@ -1589,3 +1589,24 @@ binary combination is undefined until a joint or conditional relationship is
 declared; the runtime must not substitute $S_A \times S_B$. Exact operations
 retain exact status, samples retain sample status, and explicit approximations
 retain approximate status.
+
+### Persistent live programs
+
+`live_register(name, I)` names a process-local Information value without
+materializing it. Registration preserves the root or derived graph node and
+does not observe, resolve, sample, or advance a revision. Names are unique
+within one program instance. A host can observe a registered root and read the
+current value and provenance of any registered node. A derived node is not an
+observation target.
+
+A live program evaluates its top level exactly once. A later observation
+replaces the selected root's finite evidence and recomputes only affected pure
+descendants, using the ordinary transactional observation rule above. Neither
+the top level nor effectful leaves run again. A successful observation publishes
+one revision for the root and all affected descendants; an invalid observation
+publishes none. Reads, including `measure` and inspection, publish no revision.
+
+Pausing changes when evidence is processed, not its meaning. A finite FIFO
+queue records admitted events. Resuming applies them in order; a rejected event
+does not prevent a later event. Program instances and their histories exist
+only for their host process lifetime; deleting an instance ends its history.

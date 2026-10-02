@@ -1,0 +1,3 @@
+let root = information(1);
+let first = live_register("same", root);
+let second = live_register("same", root);

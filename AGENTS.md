@@ -131,15 +131,18 @@ python3 tools/build.py build
 python3 tests/run.py --no-build
 ```
 
-Required result: the Python bridge accepts Lana 4.0 through the Rust CLI and
-worker, and all integration tests pass.
+Required result: the Python bridge accepts Lana 4.1 through the Rust CLI and
+worker, including live sessions, and all integration tests pass.
 
 The release workflow downloads the macOS archive into a clean directory, checks
 its SHA-256 digest, extracts it, and runs both installed architecture slices
 against a copied example. It also checks the source archive digest, builds it in
-a clean directory, and runs the example before publication. Homebrew Core
-submission is an external publication step; the release workflow publishes a
-checksum-backed formula artifact. Signing and notarization remain deferred.
+a clean directory, and runs the example before publication. After the public
+GitHub Release exists, the workflow verifies the published checksums, audits
+and source-installs its formula on macOS, and updates the latest-version
+`oponite/oponite` tap with a tap-scoped write deploy key. A failed tap step
+fails the workflow and must be rerun; the two repositories do not publish
+atomically. Homebrew Core submission, signing, and notarization remain deferred.
 
 The compiler emits LABC v2 by default; the Rust loader accepts v1-v6, and
 published v1-v2 bytecode is checked against frozen fixtures.
@@ -149,11 +152,12 @@ them from source.
 ### 5. Performance
 
 Compare Release builds on the same machine with the workloads and method in
-`docs/dev/RELEASE_CHECKLIST.md`. The 4.0 warm median must be no more than 5%
+`docs/dev/RELEASE_CHECKLIST.md`. The 4.1 warm median must be no more than 5%
 above the paired 3.0.2 median for repeated Python bytecode calls, repeated
-Python source calls, Rust VM execution, and Rust compilation. Report Python
-first-call time separately. Do not treat a historical snapshot from a different
-load condition as an exact threshold.
+Python source calls, Rust VM execution, and Rust compilation. Also record a
+paired 4.0.0 comparison. Report Python first-call time separately. Do not
+treat a historical snapshot from a different load condition as an exact
+threshold.
 
 ## Change rules
 

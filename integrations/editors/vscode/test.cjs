@@ -40,7 +40,7 @@ async function checkActivation(version, expected) {
   await exports.deactivate();
 }
 (async () => {
-  await checkActivation('Lana 4.0.0 (LABC v2, Rust)', true);
+  await checkActivation('Lana 4.1.0 (LABC v2, Rust)', true);
   await checkActivation('Lana 3.0.2 (LABC v2, Rust)', true);
   await checkActivation('Lana 2.1.0 (LABC v2, Rust)', false);
   await checkActivation('unrelated executable', false);

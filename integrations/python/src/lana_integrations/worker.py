@@ -56,10 +56,16 @@ class WorkerRunner:
         self, operation: str, path: str | Path, input_value: Any,
         *, timeout_seconds: float | None = None, **options: int | None,
     ) -> dict[str, Any]:
-        timeout = self._timeout if timeout_seconds is None else _validate_timeout(timeout_seconds)
         controls = _validate_vm_options(**options)
+        return self.request(
+            operation, timeout_seconds=timeout_seconds,
+            path=str(Path(path).absolute()), input=input_value, **controls,
+        )
+
+    def request(self, operation: str, *, timeout_seconds: float | None = None, **fields: Any) -> dict[str, Any]:
+        timeout = self._timeout if timeout_seconds is None else _validate_timeout(timeout_seconds)
         request = json.dumps(
-            {"schema": 1, "op": operation, "path": str(Path(path).absolute()), "input": input_value, **controls},
+            {"schema": 1, "op": operation, **fields},
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),

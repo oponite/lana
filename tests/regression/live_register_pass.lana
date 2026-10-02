@@ -1,0 +1,9 @@
+let root = live_register("root", information(possibility([1, 2])));
+let derived = live_register("derived", root + 1);
+live_register("also_derived", derived);
+assert(inspect_information(root).revision == 0, "registration must not observe");
+assert(inspect_information(derived).reactive, "derived link was lost");
+let observed = observe(root, 2);
+assert(inspect_information(derived).revision == 1, "derived node did not update");
+assert(resolve(derived) == 3, "derived value is stale");
+print("LIVE_REGISTER_PASS");

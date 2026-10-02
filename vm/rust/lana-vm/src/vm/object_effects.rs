@@ -62,7 +62,8 @@ fn host_effect(id: u32) -> u32 {
         Some("map_set") | Some("index_set") | Some("array_push") | Some("store_put")
         | Some("store_delete") | Some("store_commit") | Some("policy_store_decision") | Some("ledger_append")
         | Some("future_message") | Some("dataset_source") | Some("dataset_query") | Some("dataset_apply")
-        | Some("rules_save") | Some("rules_add_counterexample") | Some("rules_rollback") | Some("trees_save") => 8,
+        | Some("rules_save") | Some("rules_add_counterexample") | Some("rules_rollback") | Some("trees_save")
+        | Some("live_register") => 8,
         _ => 32, // Unknown and extension hosts require explicit external-call permission.
     }
 }

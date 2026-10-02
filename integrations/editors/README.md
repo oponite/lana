@@ -5,7 +5,7 @@ connect to the language server in the Lana executable.
 Both adapters accept Lana 3.x or 4.x reporting LABC v2–v6.
 Features depend on the selected executable.
 
-The current Lana 4.0 server provides these features:
+The current Lana 4.1 server provides these features:
 
 - Diagnostics for saved files and unsaved buffers
 - Hover information and completion

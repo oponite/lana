@@ -3,7 +3,7 @@
 Lana uses the `LABC` binary format. `LABC` is the four-byte file magic.
 The next 32-bit little-endian field selects bytecode v1 through v6. The
 canonical Rust loader accepts these versions and rejects every other magic or
-version. Execution supports v1-v5 and the v6 object instructions described below. Lana 4.0 has one supported loader: the Rust loader.
+version. Execution supports v1-v5 and the v6 object instructions described below. Lana 4.1 has one supported loader: the Rust loader.
 
 This is a clean compatibility boundary. Lana does not convert pre-release
 artifacts. Recompile source with Lana.
@@ -88,6 +88,13 @@ use host IDs 217–219 respectively. They use the existing
 
 `snapshot` uses host ID 220. It captures immutable Information without
 resolving or observing it and does not require LABC v6.
+
+`live_register` uses host ID 221 with two arguments: a nonempty name and a
+live Information root or derived value. It returns that same value and retains
+its graph link in the VM's registration table. Registration needs no new
+opcode or LABC format version; source using it emits existing LABC v5 so host
+observations have the Core refinement contract. Existing host IDs keep their
+meanings.
 
 ## LABC v6 object encoding
 
