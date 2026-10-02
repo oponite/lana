@@ -176,7 +176,8 @@ impl LiveHost {
         if !instance.vm.live_is_root(name)? { return Err(LanaError::Type.into()); }
         if instance.state == LiveState::Suspended {
             let evidence = serde_json::to_string(&evidence).map_err(|_| LanaError::Schema)?;
-            let bytes = evidence.capacity().checked_add(name.len())
+            let encoded_name = serde_json::to_string(name).map_err(|_| LanaError::Schema)?;
+            let bytes = evidence.capacity().checked_add(encoded_name.len())
                 .and_then(|size| size.checked_add(2 * std::mem::size_of::<QueuedObservation>() + EVENT_REPLY_OVERHEAD))
                 .ok_or(LanaError::Limit)?;
             let total = instance.queue_bytes.checked_add(bytes).ok_or(LanaError::Limit)?;
@@ -403,5 +404,17 @@ HALT
         assert_eq!(instance.refresh_inspections().unwrap_err().code, LanaError::Oom);
         assert_eq!(instance.inspections["root"]["revision"], 0);
         assert_eq!(instance.inspections["root"]["partial"], true);
+    }
+
+    #[test]
+    fn queue_accounts_for_escaped_names() {
+        let name = "\u{0001}".repeat(256);
+        let source = PROGRAM.replace("726f6f74", &"01".repeat(256));
+        let bytes = lana_bytecode::encoder::encode(&lana_bytecode::assemble(&source).unwrap());
+        let mut host = LiveHost::new();
+        let handle = host.start_live_labc(&bytes).unwrap();
+        host.pause_live(&handle).unwrap();
+        host.observe_live(&handle, &name, json!(7)).unwrap();
+        assert!(host.instance(&handle).unwrap().queue_bytes > name.len() * 5);
     }
 }
