@@ -226,6 +226,8 @@ jobs:
           set -euo pipefail
           tap="$RUNNER_TEMP/homebrew-oponite"
           brew tap --custom-remote oponite/lana-release "$tap"
+          cp "$tap/Formula/lana.rb" "$(brew --repo oponite/lana-release)/Formula/lana.rb"
+          cmp "$tap/Formula/lana.rb" "$(brew --repo oponite/lana-release)/Formula/lana.rb"
           brew trust --formula oponite/lana-release/lana
           brew audit --strict --formula oponite/lana-release/lana
           brew install --build-from-source oponite/lana-release/lana
