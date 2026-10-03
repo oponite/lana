@@ -35,9 +35,30 @@ and packaging instructions.
 
 ## Integrations
 
-The optional integrations connect Lana 4.0 to JSON callers, MCP hosts,
+The optional integrations connect Lana 4.1 to JSON callers, MCP hosts,
 Jupyter, VS Code, and Neovim through the Rust CLI and persistent worker.
 See [`integrations/README.md`](integrations/README.md).
+
+## Live programs
+
+Run `lana live examples/live.lana` to start a foreground session. The command
+prints an opaque process-local handle. A live source calls
+`live_register("source", information(possibility([1, 2, 3])))` to retain a
+root, and can register pure derived values as well. Session commands are:
+
+```text
+inspect <handle> source
+observe <handle> source {"possibility":[2,3]}
+pause <handle>
+observe <handle> source 2
+resume <handle>
+delete <handle>
+quit
+```
+
+`load <path.lana|path.labc>` creates another handle. An observation updates
+the selected root and affected pure values without rerunning top-level code.
+Handles end with the host process. `lana run` remains one-shot.
 
 ## Development Policy
 

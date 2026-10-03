@@ -1,4 +1,4 @@
-# Lana 4.0 Source and Runtime Surface
+# Lana 4.1 Source and Runtime Surface
 
 ## Mathematical definition and language contract
 
@@ -233,6 +233,46 @@ Each successful root observation publishes affected pure nodes together and
 retains the previous revision as immutable history. Effect results are leaves
 of the dependency graph. A planned effect executes at most once per
 `(plan identity, committed revision)` and later reads reuse its receipt.
+
+### Persistent live code
+
+`live_register("name", information_value)` explicitly retains and names an
+Information root or derived value in the current live program. The name must
+be a nonempty string literal unique within the instance. The call returns the
+same live value. It is an effectful registration, allowed during initial
+evaluation, and does not itself observe or advance a revision. A host can
+observe only registered roots and inspect any registered value. A derived
+value cannot be used as an observation target. Programs without a live host
+may use the call, but registrations end when that one-shot VM exits.
+
+`lana live <source.lana|program.labc>` evaluates once and prints a process-local
+handle. Its foreground session accepts `load`, `observe`, `inspect`, `pause`,
+`resume`, `delete`, and `quit`, with each instance command naming its handle.
+`lana run` keeps its one-shot behavior. The Rust `LiveHost` and Python `Lana`
+live methods use the same runtime; handles cannot be transferred to another
+host process or used after shutdown.
+
+An observation supplies definite JSON evidence, an explicit unweighted
+Possibility subset, or the existing tagged finite-value encoding for values
+outside ordinary JSON. Invalid evidence returns an error and leaves the
+revision unchanged. A successful event updates the root and affected pure
+dependencies atomically, in deterministic graph order. Inspection and
+`measure` are reads; they do not trigger an event or execute an effect.
+An ordinary JSON value that uniquely matches a current support value selects
+that retained value, including arrays and maps. A map with keys `tag` or
+`possibility` is ordinary data when it matches support; an unmatched exact
+`{"possibility":[...]}` shape denotes a subset. Ambiguous matches fail.
+
+An instance is `LIVE` during initial evaluation or event processing,
+`QUIESCENT` when idle, `SUSPENDED` while accepting queued observations,
+`FAILED` after a terminal VM failure, and `DELETED` after deletion. Pausing
+queues observations FIFO under a 64 MiB queue cap and the instance memory
+budget. Resume reports each queued event's result. Invalid evidence fails its
+own event and leaves later events eligible. A terminal VM failure stops the
+queue; inspection remains available until deletion. Unknown or deleted
+handles return `LANA_ERR_NOT_FOUND`.
+An observation that commits but cannot refresh inspection reports its committed
+revision and an `inspection_error`; a terminal inspection error sets `FAILED`.
 
 ## STATE
 

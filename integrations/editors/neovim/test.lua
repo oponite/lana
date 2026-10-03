@@ -41,8 +41,8 @@ for _, major in ipairs({ 3, 4 }) do
 end
 for _, version in ipairs({
     "Lana 2.0.0 (LABC v2,", "Lana 5.0.0 (LABC v2,",
-    "Lana 4.0.0 (LABC v1,", "Lana 4.0.0 (LABC v7,",
-    "Lana 4.0.0 (LABC v20,", "Lana 4x0x0 (LABC v2,", "", "unrelated output",
+    "Lana 4.1.0 (LABC v1,", "Lana 4.1.0 (LABC v7,",
+    "Lana 4.1.0 (LABC v20,", "Lana 4x0x0 (LABC v2,", "", "unrelated output",
 }) do check(version, 0, false) end
-check("Lana 4.0.0 (LABC v2, Rust VM, native compiler)", 1, false)
+check("Lana 4.1.0 (LABC v2, Rust VM, native compiler)", 1, false)
 print("Neovim compatibility checks passed")

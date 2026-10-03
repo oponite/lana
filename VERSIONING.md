@@ -13,6 +13,8 @@ Lana has three independent version axes.
 
 The 1.x line targets LABC v1. Lana 2.0 introduced LABC v2. Lana 3.0 added the
 Rust-owned Core surface in LABC v5. Lana 4.0 retires the C reference backend.
+Lana 4.1 adds process-local persistent live code through existing LABC v5 and
+`HOST_CALL`; the encoding version does not change.
 
 ## LABC version (integer)
 

@@ -1,8 +1,8 @@
 {
   "name": "lana-language-support",
   "displayName": "Lana Language Support",
-  "description": "Language Server Protocol support for Lana 4.0",
-  "version": "4.0.0",
+  "description": "Language Server Protocol support for Lana 4.1",
+  "version": "4.1.0",
   "publisher": "lana-language",
   "license": "Apache-2.0",
   "engines": {
@@ -56,7 +56,7 @@
     "vscode-languageclient": "^10.1.0"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
+    "@types/node": "^24.1.0",
     "@types/vscode": "^1.91.0",
     "@vscode/vsce": "^3.9.2",
     "typescript": "^7.0.2"

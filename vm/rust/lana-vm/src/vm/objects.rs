@@ -6,8 +6,8 @@ use crate::value::ObjectValue;
 impl Vm<'_> {
     pub(super) fn prepare_object_values(&mut self) -> Result<(), LanaError> {
         if self.object_descriptors.is_some() { return Ok(()); }
-        lana_bytecode::verifier::verify(self.chunk).map_err(|e| e.code)?;
-        let descriptors = lana_bytecode::objects::descriptors(self.chunk).map_err(|e| e.code)?;
+        lana_bytecode::verifier::verify(&self.chunk).map_err(|e| e.code)?;
+        let descriptors = lana_bytecode::objects::descriptors(&self.chunk).map_err(|e| e.code)?;
         self.verify_pure_object_methods(&descriptors)?;
         for (descriptor, value) in &descriptors {
             for (index, method) in value.methods.iter().enumerate() {

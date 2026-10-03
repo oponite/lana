@@ -100,7 +100,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline-root', type=Path, required=True)
     parser.add_argument('--baseline-cli', type=Path, required=True)
-    parser.add_argument('--baseline-library', type=Path, required=True)
+    parser.add_argument('--baseline-library', type=Path, help='required for the 3.0.2 native bridge')
     parser.add_argument('--candidate-root', type=Path, default=ROOT)
     parser.add_argument('--candidate-cli', type=Path, default=ROOT / 'target/lana/bin/lana')
     parser.add_argument('--compiler', type=Path, default=ROOT / 'target/lana/bin/lana-compiler.labc')
@@ -110,10 +110,17 @@ def main():
     old_cli, new_cli, compiler = args.baseline_cli.resolve(), args.candidate_cli.resolve(), args.compiler.resolve()
     env = dict(os.environ, LANA_COMPILER_LABC=str(compiler), LANA_STDLIB_DIR=str(new_root / 'stdlib'))
     versions = [subprocess.check_output([cli, 'version'], text=True).strip() for cli in (old_cli, new_cli)]
-    assert versions[0].startswith('Lana 3.0.2 ') and versions[1].startswith('Lana 4.0.'), versions
-    configs = [{'root': str(old_root), 'cli': str(old_cli), 'library': str(args.baseline_library.resolve())},
-               {'root': str(new_root), 'cli': str(new_cli)}]
-    sources = [old_root / 'integrations/lana/echo_bridge_c11.lana', new_root / 'integrations/lana/echo_bridge.lana']
+    baseline_3 = versions[0].startswith('Lana 3.0.2 ')
+    baseline_4 = versions[0].startswith('Lana 4.0.0 ')
+    assert (baseline_3 or baseline_4) and versions[1].startswith('Lana 4.1.0 '), versions
+    if baseline_3 and args.baseline_library is None:
+        parser.error('--baseline-library is required for Lana 3.0.2')
+    old_config = {'root': str(old_root), 'cli': str(old_cli)}
+    if baseline_3:
+        old_config['library'] = str(args.baseline_library.resolve())
+    configs = [old_config, {'root': str(new_root), 'cli': str(new_cli)}]
+    old_source = 'echo_bridge_c11.lana' if baseline_3 else 'echo_bridge.lana'
+    sources = [old_root / 'integrations/lana' / old_source, new_root / 'integrations/lana/echo_bridge.lana']
     with tempfile.TemporaryDirectory(prefix='lana-paired-benchmark-') as directory:
         work = Path(directory)
         bytecodes = [work / 'old.labc', work / 'new.labc']

@@ -1,14 +1,11 @@
-name: Release Lana 4.0.0
+name: Release Lana
 
 on:
   push:
-    tags: ["v4.0.0"]
+    tags: ["v*"]
 
 permissions:
   contents: read
-
-env:
-  EXPECTED_VERSION: "4.0.0"
 
 jobs:
   linux:
@@ -19,10 +16,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Verify tag and version
         run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           version="$(tr -d '\n' < VERSION)"
-          test "$version" = "$EXPECTED_VERSION"
           test "$GITHUB_REF_NAME" = "v$version"
           test "${{ github.ref_protected }}" = "true"
+          echo "EXPECTED_VERSION=$version" >> "$GITHUB_ENV"
       - name: Cargo build and regression tests
         run: |
           python3 tools/build.py build
@@ -57,9 +55,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Verify tag and version
         run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           version="$(tr -d '\n' < VERSION)"
-          test "$version" = "$EXPECTED_VERSION"
           test "$GITHUB_REF_NAME" = "v$version"
+          test "${{ github.ref_protected }}" = "true"
+          echo "EXPECTED_VERSION=$version" >> "$GITHUB_ENV"
       - name: Install x86_64 Rust target
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build and install universal binaries
@@ -77,8 +77,8 @@ jobs:
         with:
           name: lana-macos-universal
           path: |
-            ${{ runner.temp }}/lana-4.0.0-macos-universal.tar.gz
-            ${{ runner.temp }}/lana-4.0.0-macos-universal.tar.gz.sha256
+            ${{ runner.temp }}/lana-*-macos-universal.tar.gz
+            ${{ runner.temp }}/lana-*-macos-universal.tar.gz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -88,6 +88,13 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify tag and version
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="$(tr -d '\n' < VERSION)"
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "${{ github.ref_protected }}" = "true"
+          echo "EXPECTED_VERSION=$version" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: lana-macos-universal
@@ -113,16 +120,20 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify tag and version
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="$(tr -d '\n' < VERSION)"
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "${{ github.ref_protected }}" = "true"
+          echo "EXPECTED_VERSION=$version" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: lana-macos-universal
           path: ${{ runner.temp }}/lana-release-files
       - name: Build source archive and checksums
         run: |
-          version="$(tr -d '\n' < VERSION)"
-          test "$version" = "$EXPECTED_VERSION"
-          test "$GITHUB_REF_NAME" = "v$version"
-          test "${{ github.ref_protected }}" = "true"
+          version="$EXPECTED_VERSION"
           git archive --format=tar.gz --prefix="lana-$version/" --output="$RUNNER_TEMP/lana-release-files/lana-$version-source.tar.gz" "$GITHUB_SHA"
           rm "$RUNNER_TEMP/lana-release-files/lana-$version-macos-universal.tar.gz.sha256"
           (
@@ -135,31 +146,7 @@ jobs:
           source_archive="$RUNNER_TEMP/lana-release-files/lana-${EXPECTED_VERSION}-source.tar.gz"
           source_sha256="$(sha256sum "$source_archive" | awk '{print $1}')"
           formula="$RUNNER_TEMP/lana-release-files/lana.rb"
-          cat > "$formula" <<EOF
-          class Lana < Formula
-            desc "Verified register-based language with explicit uncertainty"
-            homepage "https://github.com/oponite/lana"
-            url "https://github.com/oponite/lana/releases/download/v${EXPECTED_VERSION}/lana-${EXPECTED_VERSION}-source.tar.gz"
-            sha256 "${source_sha256}"
-            license "Apache-2.0"
-
-            depends_on "python@3.14" => :build
-            depends_on "rust" => :build
-
-            def install
-              system "python3", "tools/build.py", "install", "--prefix", prefix
-            end
-
-            test do
-              assert_match "Lana #{version} (LABC v2,", shell_output("#{bin}/lana version")
-              system bin/"lana", "new", "hello-lana"
-              Dir.chdir("hello-lana") do
-                system bin/"lana", "build"
-                system bin/"lana", "run"
-              end
-            end
-          end
-          EOF
+          python3 tools/release_tap.py generate "$formula" "$EXPECTED_VERSION" "$source_sha256"
           ruby -c "$formula"
           test -s "$formula"
       - name: Verify source archive in a clean directory
@@ -174,8 +161,94 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Lana $EXPECTED_VERSION" \
-            --generate-notes \
-            "$RUNNER_TEMP/lana-release-files"/*
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            existing="$RUNNER_TEMP/lana-existing-release"
+            mkdir "$existing"
+            gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$existing"
+            (cd "$existing" && sha256sum -c SHA256SUMS)
+            cmp "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-source.tar.gz" "$existing/lana-$EXPECTED_VERSION-source.tar.gz"
+            cmp "$RUNNER_TEMP/lana-release-files/lana.rb" "$existing/lana.rb"
+            cmp <(gzip -dc "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-macos-universal.tar.gz") \
+                <(gzip -dc "$existing/lana-$EXPECTED_VERSION-macos-universal.tar.gz")
+            test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft,.isPrerelease] | join(",")')" = "false,false"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Lana $EXPECTED_VERSION" \
+              --generate-notes \
+              "$RUNNER_TEMP/lana-release-files"/*
+          fi
+
+  tap:
+    name: Publish verified Homebrew tap formula
+    needs: publish
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify tag and public release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="$(tr -d '\n' < VERSION)"
+          test "$GITHUB_REF_NAME" = "v$version"
+          test "${{ github.ref_protected }}" = "true"
+          test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft,.isPrerelease] | join(",")')" = "false,false"
+          assets="$RUNNER_TEMP/lana-release-assets"
+          mkdir "$assets"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$assets"
+          (cd "$assets" && shasum -a 256 -c SHA256SUMS)
+          test -s "$assets/lana.rb"
+          test -s "$assets/lana-$version-source.tar.gz"
+          test -s "$assets/lana-$version-macos-universal.tar.gz"
+          git archive --format=tar --prefix="lana-$version/" \
+            --output="$RUNNER_TEMP/expected-source.tar" "$GITHUB_SHA"
+          gzip -dc "$assets/lana-$version-source.tar.gz" | cmp "$RUNNER_TEMP/expected-source.tar" -
+          digest="$(shasum -a 256 "$assets/lana-$version-source.tar.gz" | cut -d ' ' -f 1)"
+          expected="$RUNNER_TEMP/expected-lana.rb"
+          python3 tools/release_tap.py generate "$expected" "$version" "$digest"
+          cmp "$expected" "$assets/lana.rb"
+          echo "EXPECTED_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Clone tap and admit formula
+        run: |
+          set -euo pipefail
+          tap="$RUNNER_TEMP/homebrew-oponite"
+          git clone https://github.com/oponite/homebrew-oponite.git "$tap"
+          source="$RUNNER_TEMP/lana-release-assets/lana-$EXPECTED_VERSION-source.tar.gz"
+          digest="$(shasum -a 256 "$source" | cut -d ' ' -f 1)"
+          python3 tools/release_tap.py admit "$RUNNER_TEMP/lana-release-assets/lana.rb" "$tap/Formula/lana.rb" "$EXPECTED_VERSION" "$digest"
+      - name: Audit and source-install the exact formula
+        run: |
+          set -euo pipefail
+          tap="$RUNNER_TEMP/homebrew-oponite"
+          brew tap --custom-remote oponite/lana-release "$tap"
+          brew trust --formula oponite/lana-release/lana
+          brew audit --strict --formula oponite/lana-release/lana
+          brew install --build-from-source oponite/lana-release/lana
+          brew test oponite/lana-release/lana
+          "$(brew --prefix oponite/lana-release/lana)/bin/lana" version | grep -F "Lana ${EXPECTED_VERSION} (LABC v2,"
+      - name: Publish or verify matching tap formula
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          tap="$RUNNER_TEMP/homebrew-oponite"
+          if ! git -C "$tap" diff --quiet -- Formula/lana.rb; then
+            test -n "$TAP_DEPLOY_KEY"
+            ssh_dir="$RUNNER_TEMP/lana-tap-ssh"
+            install -d -m 700 "$ssh_dir"
+            printf '%s\n' "$TAP_DEPLOY_KEY" > "$ssh_dir/id_ed25519"
+            chmod 600 "$ssh_dir/id_ed25519"
+            printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$ssh_dir/known_hosts"
+            export GIT_SSH_COMMAND="ssh -i $ssh_dir/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes"
+            git -C "$tap" config user.name 'lana-release-bot'
+            git -C "$tap" config user.email 'lana-release-bot@users.noreply.github.com'
+            git -C "$tap" remote set-url --push origin git@github.com:oponite/homebrew-oponite.git
+            git -C "$tap" add Formula/lana.rb
+            git -C "$tap" commit -m "lana $EXPECTED_VERSION"
+            git -C "$tap" push origin HEAD:main
+          fi

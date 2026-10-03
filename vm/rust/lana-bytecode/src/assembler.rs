@@ -89,7 +89,7 @@ pub const HOST_CALL_NAMES: &[&str] = &[
     "dataset_evidence", "dataset_exclusions", "rules_learn", "rules_predict",
     "rules_save", "rules_add_counterexample", "rules_inspect", "rules_rollback",
     "trees_fit", "trees_predict", "trees_explain", "trees_save", "trees_load",
-    "evaluation_walk_forward", "dataset_sqlite", "document_extract", "snapshot",
+    "evaluation_walk_forward", "dataset_sqlite", "document_extract", "snapshot", "live_register",
 ];
 
 struct Label {

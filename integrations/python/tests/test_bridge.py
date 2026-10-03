@@ -75,7 +75,7 @@ def test_rejects_incompatible_version(tmp_path: Path) -> None:
         BridgeRunner(executable)
 
 
-@pytest.mark.parametrize("version", ["3.0.0", "3.1.0", "3.2.0", "4.0.0"])
+@pytest.mark.parametrize("version", ["3.0.0", "3.1.0", "3.2.0", "4.0.0", "4.1.0"])
 @pytest.mark.parametrize("labc", [2, 3, 4, 5, 6])
 def test_accepts_compatible_labc_versions(tmp_path: Path, version: str, labc: int) -> None:
     executable = tmp_path / "lana"

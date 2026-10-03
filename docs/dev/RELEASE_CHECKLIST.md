@@ -54,8 +54,8 @@ Evidence (commit, checks, and tag protection): ________
    discards five warmups, records samples and SHA-256 identities, and fails if
    any candidate warm median exceeds 1.05 times its paired 3.0.2 median.
    Check that the old C11 and current Rust echo wrappers return the same input.
-   Report Python first calls separately. Do not run fuzzing or builds during
-   measurements.
+   Also run a paired 4.0.0 comparison. Report Python first calls separately.
+   Do not run fuzzing or builds during measurements.
 
 Evidence for each gate: ________
 Remaining failures, required skips, or uncertain results: ________
@@ -72,6 +72,9 @@ substitute for the tag workflow.
 - [ ] The downloaded macOS archive passes SHA-256 verification; both slices report their version, and the copied example runs.
 - [ ] The source archive passes SHA-256 verification, builds and installs in a clean directory, and runs the example.
 - [ ] The release includes `SHA256SUMS` and a Homebrew formula with the source archive digest.
+- [ ] The tap job verifies published assets, audits and source-installs that exact
+      formula on macOS, and either updates `oponite/oponite` or verifies its
+      already matching version and checksum. A failed tap job is rerun.
 
 Tag SHA, workflow run, and artifact evidence: ________
 
@@ -80,6 +83,8 @@ Tag SHA, workflow run, and artifact evidence: ________
 - [ ] The GitHub Release exists for the recorded tag and candidate SHA.
 - [ ] The release is public, non-draft, non-prerelease, and has the expected archives, `SHA256SUMS`, and formula.
 - [ ] Download the published archives and verify them against the published checksums.
+- [ ] `oponite/oponite/Formula/lana.rb` matches the published formula and is the
+      latest Lana version; verify its source install, test, and `lana version`.
 
 Release URL and verification log: ________
 

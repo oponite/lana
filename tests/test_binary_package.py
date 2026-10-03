@@ -26,6 +26,9 @@ with tempfile.TemporaryDirectory(prefix="lana-binary-package-") as directory:
     report = json.loads(result.stdout)
     assert report["sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
     old = output.read_bytes()
+    again = work / "again.tar.gz"
+    subprocess.run(["sh", ROOT / "package.sh", prefix, again], capture_output=True, check=True)
+    assert again.read_bytes() == old, "same installed prefix produced different archive bytes"
     with tarfile.open(output) as archive:
         archive.extractall(work / "unpacked", filter="data")
     installed = work / "unpacked"

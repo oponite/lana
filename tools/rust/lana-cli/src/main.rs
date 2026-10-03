@@ -25,7 +25,7 @@ const LANA_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Full usage text for the single `lana` binary.
 fn usage(program: &str) {
     eprintln!(
-        "usage:\n  {program} compile program.lana -o program.labc\n  {program} new directory\n  {program} package pack DIRECTORY -o ARCHIVE | package add owner/repo@X.Y.Z\n  {program} lsp\n  {program} debug program.lana\n  {program} build|run|test|fmt|doc\n  {program} asm program.lasm -o program.labc\n  {program} run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} dis program.labc\n  {program} verify program.labc\n  {program} inspect program.lana [--format json|dot]\n  {program} execution-config init --metadata PATH --key PATH --capability-id ID --origin HTTPS_ORIGIN --credential-key-id ID [--ca-file PATH]"
+        "usage:\n  {program} compile program.lana -o program.labc\n  {program} new directory\n  {program} package pack DIRECTORY -o ARCHIVE | package add owner/repo@X.Y.Z\n  {program} lsp\n  {program} debug program.lana\n  {program} live <source.lana|program.labc>\n  {program} build|run|test|fmt|doc\n  {program} asm program.lasm -o program.labc\n  {program} run program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} run-bytecode program.labc [--trace] [--stats] [--seed N] [--workers N] [--max-tasks N] [--instruction-limit N]\n  {program} dis program.labc\n  {program} verify program.labc\n  {program} inspect program.lana [--format json|dot]\n  {program} execution-config init --metadata PATH --key PATH --capability-id ID --origin HTTPS_ORIGIN --credential-key-id ID [--ca-file PATH]"
     );
 }
 
@@ -1042,6 +1042,7 @@ fn main() -> ExitCode {
             Err(error) => { eprintln!("package: {error}"); ExitCode::from(1) }
         },
         "bridge-worker" if args.len() == 2 => bridge_worker::serve(),
+        "live" if args.len() == 3 => bridge_worker::live(&args[2]),
         "execution-config" => execution_config_command(&args[2..]),
         "version" => {
             println!("Lana {LANA_VERSION} (LABC v2, Rust VM, native compiler)");
