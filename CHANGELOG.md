@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.1.0 (candidate)
+## 4.1.0
 
 - Add process-local persistent live programs with explicit named Information
   registration, transactional host observation, inspection, pause/resume, and

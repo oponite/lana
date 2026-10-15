@@ -518,7 +518,7 @@ mod tests {
             }
         }
         let paths = Value::paths(Arc::new(PathSet { dependency_id: 42, alternatives: vec![
-            PathAlternative { guard: true, weight: 0.4, result: first.clone() },
+            PathAlternative { guard: true, weight: Some(0.4), result: first.clone() },
         ] }));
         let joint = Value::joint(Arc::new(JointState { names: vec![Arc::from("reading")],
             domains: vec![first.value_type()], values: vec![], rows: vec![JointRow {
@@ -533,7 +533,7 @@ mod tests {
                 ValueKind::PathSet(paths) => {
                     assert_eq!(paths.dependency_id, 42);
                     assert!(paths.alternatives[0].guard);
-                    assert_eq!(paths.alternatives[0].weight, 0.4);
+                    assert_eq!(paths.alternatives[0].weight, Some(0.4));
                 }
                 ValueKind::Joint(joint) => {
                     assert_eq!(joint.names[0].as_ref(), "reading");

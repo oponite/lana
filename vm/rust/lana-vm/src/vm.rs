@@ -1,4 +1,4 @@
-//! Register VM core, mirroring `lana_vm_run` in `vm/c/vm.c`.
+//! Register VM core, mirroring `lana_vm_run` in `6aacbde2f67f:vm/c/vm.c`.
 //!
 //! The Rust VM is semantically identical to the C11 VM: same state math, same
 //! PCG32 stream, same error codes, same value printing. The memory model
@@ -62,18 +62,21 @@ fn shared_derivation_text(text: &'static str) -> Arc<str> {
     }
 }
 
-/// Reinterpret a state tensor's byte buffer as `&[f64]`. State tensors are
-/// always complex (16 bytes/element = 2 f64s), so the buffer length is a
-/// multiple of 8.
-fn state_f64(t: &Tensor) -> &[f64] {
-    unsafe { std::slice::from_raw_parts(t.data.as_ptr() as *const f64, t.data.len() / 8) }
+fn state_matrix(t: &Tensor, batch: usize) -> [f64; 8] {
+    let mut values = [0.0; 8];
+    for index in 0..4 {
+        let source = tensor::logical_index(t, batch * 4 + index);
+        values[index * 2] = tensor_get_real(t, source);
+        values[index * 2 + 1] = tensor_get_imag(t, source);
+    }
+    values
 }
 
-/// Reinterpret a state tensor's byte buffer as `&mut [f64]`. Panics if the
-/// buffer is shared (a view); callers write only to freshly-created tensors.
-fn state_f64_mut(t: &mut Tensor) -> &mut [f64] {
-    let data = Arc::get_mut(&mut t.data).expect("state_f64_mut on a shared buffer");
-    unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut f64, data.len() / 8) }
+fn set_state_matrix(t: &mut Tensor, batch: usize, values: [f64; 8]) {
+    for index in 0..4 {
+        tensor_set_real(t, batch * 4 + index, values[index * 2]);
+        tensor_set_imag(t, batch * 4 + index, values[index * 2 + 1]);
+    }
 }
 
 /// LIP-027: parse an optional trailing dtype string argument (the last of
@@ -89,7 +92,7 @@ fn tensor_optional_dtype(arguments: &[Value], argc: usize) -> Option<TensorDtype
     TensorDtype::from_str(s)
 }
 
-/// History policy, matching `LanaHistoryPolicy` in `vm/include/vm.h`.
+/// History policy, matching `LanaHistoryPolicy` in `6aacbde2f67f:vm/include/vm.h`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(u32)]
 pub enum HistoryPolicy {
@@ -99,7 +102,7 @@ pub enum HistoryPolicy {
     Duration = 2,
 }
 
-/// A per-register history, mirroring `LanaHistory` in `vm/include/vm.h`.
+/// A per-register history, mirroring `LanaHistory` in `6aacbde2f67f:vm/include/vm.h`.
 ///
 /// The C11 VM stores versions in a growable array; the Rust VM uses a `Vec`.
 /// `clone_history` is a shallow copy (the `Arc`-backed state values are shared),
@@ -121,7 +124,7 @@ pub struct DatasetDecision {
     pub predicate_value: Option<bool>,
 }
 
-/// A call frame, mirroring `LanaFrame` in `vm/include/vm.h`.
+/// A call frame, mirroring `LanaFrame` in `6aacbde2f67f:vm/include/vm.h`.
 ///
 /// Registers and histories are sized to the function's `register_count` (not
 /// `LANA_MAX_REGISTERS`), matching the C11 VM which zeroes only
@@ -142,12 +145,14 @@ pub struct Frame {
 }
 
 impl Frame {
-    fn new(register_count: usize) -> Self {
-        let mut registers = Vec::with_capacity(register_count);
+    fn new(register_count: usize) -> Result<Self, LanaError> {
+        let mut registers = Vec::new();
+        registers.try_reserve_exact(register_count).map_err(|_| LanaError::Oom)?;
         registers.resize_with(register_count, Value::null);
-        let mut histories = Vec::with_capacity(register_count);
+        let mut histories = Vec::new();
+        histories.try_reserve_exact(register_count).map_err(|_| LanaError::Oom)?;
         histories.resize_with(register_count, History::default);
-        Self {
+        Ok(Self {
             registers,
             histories,
             return_ip: 0,
@@ -157,14 +162,14 @@ impl Frame {
             is_async: false,
             object_method: None,
             _allocation: None,
-        }
+        })
     }
 
     fn charged(register_count: usize, heap: &Heap) -> Result<Self, LanaError> {
         let bytes = register_count.checked_mul(std::mem::size_of::<Value>() + std::mem::size_of::<History>())
             .ok_or(LanaError::Oom)?;
         let allocation = Arc::new(heap.reserve(bytes)?);
-        let mut frame = Self::new(register_count);
+        let mut frame = Self::new(register_count)?;
         frame._allocation = Some(allocation);
         Ok(frame)
     }
@@ -172,12 +177,13 @@ impl Frame {
 
 /// The maximum register index (0-based) an instruction reads or writes.
 ///
-/// Operand semantics mirror `vm/c/assembler.c` and the verifier's
-/// contiguous-range checks in `vm/c/bytecode.c`. The function header's
+/// Operand semantics mirror `6aacbde2f67f:vm/c/assembler.c` and the verifier's
+/// contiguous-range checks in `6aacbde2f67f:vm/c/bytecode.c`. The function header's
 /// `register_count` is only a lower bound (the emitter resets its counter at
 /// each statement start), so frames must be sized from the true max index.
 fn instruction_max_register(ins: &Instruction) -> usize {
     use OpCode::*;
+    if matches!(ins.opcode, Nop | Halt | TaskgroupEnter | TaskgroupExit) { return 0; }
     // `LANA_NO_OPERAND` (u32::MAX) marks an unused operand; skip it.
     let reg = |operand: u32| -> Option<usize> {
         if operand == u32::MAX {
@@ -260,14 +266,14 @@ fn compute_max_registers(chunk: &Chunk) -> Vec<usize> {
         for ins in &chunk.code[entry..end] {
             max = max.max(instruction_max_register(ins));
         }
-        result[index] = if chunk.version == 6 {
+        result[index] = (if chunk.version == 6 {
             (max + 1).max(chunk.functions[index].register_count as usize)
-        } else { max + 1 };
+        } else { max + 1 }).min(LANA_MAX_REGISTERS as usize);
     }
     result
 }
 
-/// One pending path split, mirroring `struct LanaPathExecution` in `vm/c/vm.c`.
+/// One pending path split, mirroring `struct LanaPathExecution` in `6aacbde2f67f:vm/c/vm.c`.
 /// The Rust VM keeps the executions on a `Vec` stack; the C11 uses a linked
 /// list with `next` pointing at the previous execution.
 #[derive(Default)]
@@ -277,15 +283,15 @@ struct PathExecution {
     frame_count: usize,
     false_ip: usize,
     dependency_id: u64,
-    true_weight: f64,
-    false_weight: f64,
+    true_weight: Option<f64>,
+    false_weight: Option<f64>,
     previous_path_count: usize,
     running_false: bool,
     split: bool,
 }
 
 /// A memo mapping source container pointers to their clones, mirroring
-/// `LanaContainerCloneMemo` in `vm/c/vm.c`. Mutable containers preserve
+/// `LanaContainerCloneMemo` in `6aacbde2f67f:vm/c/vm.c`. Mutable containers preserve
 /// shared substructure. Joints also preserve aliasing because that identity
 /// represents a declared relationship in captured dataset cells.
 #[derive(Default)]
@@ -308,7 +314,7 @@ struct DeepCloneMemo {
 }
 
 /// Resolution reasons, matching `LanaResolutionReason` in
-/// `vm/include/error.h`.
+/// `6aacbde2f67f:vm/include/error.h`.
 pub const LANA_RESOLUTION_REASON_NONE: u32 = 0;
 pub const LANA_RESOLUTION_REASON_NO_ALTERNATIVES: u32 = 1;
 pub const LANA_RESOLUTION_REASON_MULTIPLE_ALTERNATIVES: u32 = 2;
@@ -319,7 +325,7 @@ pub const LANA_RESOLUTION_REASON_CANCELLED: u32 = 6;
 pub const LANA_RESOLUTION_REASON_RESOURCE_LIMIT: u32 = 7;
 
 /// The resolution-reason name, matching `lana_resolution_reason_name` in
-/// `vm/c/error.c`.
+/// `6aacbde2f67f:vm/c/error.c`.
 pub fn resolution_reason_name(reason: u32) -> &'static str {
     match reason {
         LANA_RESOLUTION_REASON_NONE => "none",
@@ -334,14 +340,14 @@ pub fn resolution_reason_name(reason: u32) -> &'static str {
     }
 }
 
-/// The pure operation kinds, matching `LanaPureKind` in `vm/c/vm.c`.
+/// The pure operation kinds, matching `LanaPureKind` in `6aacbde2f67f:vm/c/vm.c`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PureKind {
     Binary,
     Compare,
 }
 
-/// Measure modes, matching `LanaMeasureMode` in `vm/include/vm.h`.
+/// Measure modes, matching `LanaMeasureMode` in `6aacbde2f67f:vm/include/vm.h`.
 pub const LANA_MEASURE_PROBABILITY: u32 = 0;
 pub const LANA_MEASURE_DISTRIBUTION: u32 = 1;
 pub const LANA_MEASURE_SAMPLE: u32 = 2;
@@ -350,10 +356,10 @@ pub const LANA_MEASURE_SAMPLE: u32 = 2;
 pub const LANA_HISTORY_DURATION: u32 = 2;
 
 /// Observable id, matching `LANA_OBSERVABLE_PROBABILITY` in
-/// `vm/include/bytecode.h`.
+/// `6aacbde2f67f:vm/include/bytecode.h`.
 pub const LANA_OBSERVABLE_PROBABILITY: u32 = 0;
 
-/// Resource kinds, matching `LanaResourceKind` in `vm/include/error.h`.
+/// Resource kinds, matching `LanaResourceKind` in `6aacbde2f67f:vm/include/error.h`.
 pub const LANA_RESOURCE_MEMORY: u32 = 1;
 pub const LANA_RESOURCE_INSTRUCTIONS: u32 = 2;
 pub const LANA_RESOURCE_TASKS: u32 = 3;
@@ -361,12 +367,12 @@ pub const LANA_RESOURCE_PATHS: u32 = 4;
 pub const LANA_RESOURCE_SAMPLES: u32 = 5;
 pub const LANA_RESOURCE_TIME: u32 = 6;
 
-/// Exact-support kinds, matching `LanaExactSupport` in `vm/include/error.h`.
+/// Exact-support kinds, matching `LanaExactSupport` in `6aacbde2f67f:vm/include/error.h`.
 pub const LANA_EXACT_SUPPORT_UNKNOWN: u32 = 0;
 pub const LANA_EXACT_SUPPORT_AVAILABLE: u32 = 1;
 pub const LANA_EXACT_SUPPORT_UNAVAILABLE: u32 = 2;
 
-/// Resource-kind name, matching `lana_resource_kind_name` in `vm/c/error.c`.
+/// Resource-kind name, matching `lana_resource_kind_name` in `6aacbde2f67f:vm/c/error.c`.
 pub fn resource_kind_name(resource: u32) -> &'static str {
     match resource {
         LANA_RESOURCE_MEMORY => "memory",
@@ -379,7 +385,7 @@ pub fn resource_kind_name(resource: u32) -> &'static str {
     }
 }
 
-/// Exact-support name, matching `lana_exact_support_name` in `vm/c/error.c`.
+/// Exact-support name, matching `lana_exact_support_name` in `6aacbde2f67f:vm/c/error.c`.
 pub fn exact_support_name(support: u32) -> &'static str {
     match support {
         LANA_EXACT_SUPPORT_AVAILABLE => "available",
@@ -388,7 +394,7 @@ pub fn exact_support_name(support: u32) -> &'static str {
     }
 }
 
-/// Host-call ids, matching `LanaHostCallId` in `vm/include/bytecode.h`.
+/// Host-call ids, matching `LanaHostCallId` in `6aacbde2f67f:vm/include/bytecode.h`.
 pub const LANA_HOST_ARGS: u32 = 0;
 pub const LANA_HOST_READ_TEXT: u32 = 1;
 pub const LANA_HOST_WRITE_TEXT: u32 = 2;
@@ -667,7 +673,7 @@ pub const LANA_HOST_LIVE_REGISTER: u32 = 221;
 
 // LIP-024 async/await. Present in both the C11 VM and the Rust VM at ids
 // 126-129 (matching the C11 assembler's host-call table and the
-// `LanaHostCallId` enum in `vm/include/bytecode.h`), so a `.labc` assembled
+// `LanaHostCallId` enum in `6aacbde2f67f:vm/include/bytecode.h`), so a `.labc` assembled
 // by either backend runs identically under both.
 pub const LANA_HOST_RUN_ASYNC: u32 = 126;
 pub const LANA_HOST_FUTURE_ALL: u32 = 127;
@@ -721,7 +727,7 @@ fn write_text_atomic_with_sync(
     result
 }
 
-/// The default worker count, matching `lana_vm_init` in `vm/c/vm.c`:
+/// The default worker count, matching `lana_vm_init` in `6aacbde2f67f:vm/c/vm.c`:
 /// `min(processors, 8)`, falling back to 1 when the count is unknown. wasm has
 /// no threads, so the count is always 1 there.
 fn default_worker_count() -> usize {
@@ -775,7 +781,7 @@ struct QueuedTask<'a> {
     handle: Arc<Task>,
 }
 
-/// The shared scheduler state, mirroring `struct LanaScheduler` in `vm/c/vm.c`.
+/// The shared scheduler state, mirroring `struct LanaScheduler` in `6aacbde2f67f:vm/c/vm.c`.
 /// The queue holds child VMs; workers pop them and run them to completion.
 /// `all_tasks` mirrors the scheduler's `all_tasks` list so shutdown can cancel
 /// every live task before joining the workers.
@@ -809,7 +815,7 @@ impl<'a> Scheduler<'a> {
     }
 
     /// Signal the workers to stop and wait for them, mirroring
-    /// `scheduler_shutdown` in `vm/c/vm.c:2500-2511`: cancel every task so a
+    /// `scheduler_shutdown` in `6aacbde2f67f:vm/c/vm.c:2500-2511`: cancel every task so a
     /// worker running a child VM stops promptly, then wake the workers. The
     /// caller joins the worker threads.
     fn shutdown(&self) {
@@ -829,7 +835,7 @@ impl Drop for SchedulerShutdown<'_, '_> {
 }
 
 /// Run a queued task's child VM to completion and publish the result to the
-/// task handle, mirroring `run_task` in `vm/c/vm.c`.
+/// task handle, mirroring `run_task` in `6aacbde2f67f:vm/c/vm.c`.
 fn run_task(queued: QueuedTask<'_>) {
     let mut child = queued.child;
     let mut status = child.run();
@@ -857,7 +863,7 @@ fn run_task(queued: QueuedTask<'_>) {
     queued.handle.completed_cond.notify_all();
 }
 
-/// The worker loop, mirroring `scheduler_worker` in `vm/c/vm.c`. wasm has no
+/// The worker loop, mirroring `scheduler_worker` in `6aacbde2f67f:vm/c/vm.c`. wasm has no
 /// threads, so this is compiled out there.
 #[cfg(not(target_arch = "wasm32"))]
 fn worker_loop(scheduler: &Scheduler<'_>) {
@@ -878,7 +884,7 @@ fn worker_loop(scheduler: &Scheduler<'_>) {
     }
 }
 
-/// The splitmix64-style finalizer, mirroring `mix64` in `vm/c/vm.c`. Used to
+/// The splitmix64-style finalizer, mirroring `mix64` in `6aacbde2f67f:vm/c/vm.c`. Used to
 /// derive a child VM's lineage and seed from the parent's.
 fn mix64(value: u64) -> u64 {
     let mut value = value.wrapping_add(0x9e3779b97f4a7c15);
@@ -1297,7 +1303,7 @@ enum FfiError {
 }
 
 /// Validate that the argument values match the declared signature types.
-/// Mirrors `ffi_validate_args` in `vm/c/vm.c`.
+/// Mirrors `ffi_validate_args` in `6aacbde2f67f:vm/c/vm.c`.
 fn ffi_validate_args(sig: &FfiSignature, args: &[Value]) -> bool {
     if args.len() != sig.args.len() {
         return false;
@@ -1507,14 +1513,15 @@ impl Vm<'static> {
 }
 
 impl<'a> Vm<'a> {
-    /// Create a VM for a chunk. The CLI defaults (256 MiB / 50M instructions,
-    /// seed `0x4c414e41`) match `tools/c/cli.c` `load_command`.
+    /// Create a VM for a chunk with the CLI defaults: 256 MiB, 50M
+    /// instructions, and seed `0x4c414e41`.
     pub fn new(chunk: &'a Chunk) -> Self {
         Self::new_storage(ChunkStorage::Borrowed(chunk))
     }
 
     fn new_storage(chunk: ChunkStorage<'a>) -> Self {
         let heap = Heap::new(256 * 1024 * 1024);
+        let entry_frame = Frame::new(LANA_MAX_REGISTERS as usize).expect("entry frame allocation");
         let entry = chunk.entry as usize;
         let max_registers = compute_max_registers(&chunk);
         let mut vm = Self {
@@ -1558,7 +1565,7 @@ impl<'a> Vm<'a> {
             program_argv: Vec::new(),
             shared_references: Vec::new(),
             path_execution: Vec::new(),
-            frames: vec![Frame::new(LANA_MAX_REGISTERS as usize)],
+            frames: vec![entry_frame],
             max_registers,
             result: Value::null(),
             live_registered: BTreeMap::new(),
@@ -1849,7 +1856,9 @@ impl<'a> Vm<'a> {
             if self.frames.len() >= LANA_MAX_CALL_FRAMES as usize {
                 return LanaError::Limit;
             }
-            let mut callee = Frame::new(registers.len());
+            let mut callee = match Frame::charged(registers.len(), &self.heap) {
+                Ok(frame) => frame, Err(error) => return error,
+            };
             for index in 0..registers.len() {
                 callee.registers[index] = registers[index].clone();
             }
@@ -1955,7 +1964,7 @@ impl<'a> Vm<'a> {
         self.virtual_fs.as_ref().and_then(|fs| fs.get(path).cloned())
     }
 
-    /// Fork a task, mirroring `start_task` in `vm/c/vm.c`. The child VM is
+    /// Fork a task, mirroring `start_task` in `6aacbde2f67f:vm/c/vm.c`. The child VM is
     /// deep-cloned from the parent's argument registers and queued for a
     /// worker; the returned handle is stored in the parent's register.
     fn start_task(&mut self, function_index: u32, argc: u32, first_arg: u32) -> Result<Arc<Task>, LanaError> {
@@ -2038,7 +2047,7 @@ impl<'a> Vm<'a> {
         Ok(handle)
     }
 
-    /// Wait for a task to complete, mirroring `wait_task` in `vm/c/vm.c`.
+    /// Wait for a task to complete, mirroring `wait_task` in `6aacbde2f67f:vm/c/vm.c`.
     /// `timeout < 0` waits indefinitely, running queued tasks inline (the
     /// helper mechanism); a non-negative timeout waits on the condition
     /// variable and returns `Timeout` if it expires.
@@ -2113,12 +2122,12 @@ impl<'a> Vm<'a> {
         Ok(result)
     }
 
-    /// Cancel a task, mirroring `cancel_task` in `vm/c/vm.c`.
+    /// Cancel a task, mirroring `cancel_task` in `6aacbde2f67f:vm/c/vm.c`.
     fn cancel_task(&self, task: &Task) {
         task.cancelled.store(true, Ordering::Relaxed);
     }
 
-    /// Close a task group, mirroring `close_task_group` in `vm/c/vm.c`:
+    /// Close a task group, mirroring `close_task_group` in `6aacbde2f67f:vm/c/vm.c`:
     /// cancel every non-completed task in the group, then wait for every
     /// non-joined task, clearing a `Cancelled` result and recording the first
     /// other error.
@@ -2154,7 +2163,7 @@ impl<'a> Vm<'a> {
             self.constructing.clear();
             self.constructions.clear();
         }
-        // Mirror `vm_fail` in `vm/c/vm.c:362-366`: when an error is already
+        // Mirror `vm_fail` in `6aacbde2f67f:vm/c/vm.c:362-366`: when an error is already
         // recorded (e.g. a child task's error propagated by JOIN), preserve it
         // instead of overwriting with the failing instruction's own span.
         if self.error.code != LanaError::Ok && !self.error.message.is_empty() {
@@ -2241,7 +2250,7 @@ impl<'a> Vm<'a> {
     }
 
     /// The resolution detail for a failure, mirroring the `vm_fail` branches
-    /// in `vm/c/vm.c:378-417`. For an unresolved value the alternatives count
+    /// in `6aacbde2f67f:vm/c/vm.c:378-417`. For an unresolved value the alternatives count
     /// is read from the failing instruction's source register.
     fn resolution_reason_for(&self, code: LanaError, ip: usize, message: &str) -> (u32, usize) {
         match code {
@@ -2299,7 +2308,7 @@ impl<'a> Vm<'a> {
     }
 
     /// The function name recorded in `VmError.function`, mirroring `vm_fail`
-    /// in `vm/c/vm.c`: the entry frame has `function == UINT32_MAX`, so the
+    /// in `6aacbde2f67f:vm/c/vm.c`: the entry frame has `function == UINT32_MAX`, so the
     /// name is left empty and the CLI reports `<bytecode>`.
     fn error_function_name(&self) -> String {
         let Some(frame) = self.frames.last() else {
@@ -2312,7 +2321,7 @@ impl<'a> Vm<'a> {
     }
 
     /// The function name recorded in derivations, mirroring
-    /// `derivation_function_name` in `vm/c/vm.c`: `<main>` when the current
+    /// `derivation_function_name` in `6aacbde2f67f:vm/c/vm.c`: `<main>` when the current
     /// frame has no real function.
     fn current_function_name(&self) -> String {
         let Some(frame) = self.frames.last() else {
@@ -2510,7 +2519,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Run a two-argument function to completion, mirroring `run_function2` in
-    /// `vm/c/vm.c`. The result is written to `scratch_register` in the caller
+    /// `6aacbde2f67f:vm/c/vm.c`. The result is written to `scratch_register` in the caller
     /// frame and copied to `result`.
     fn run_function2(
         &mut self,
@@ -2544,11 +2553,9 @@ impl<'a> Vm<'a> {
         }
         let saved_frame_count = self.frames.len();
         let saved_ip = self.ip;
-        let mut callee = if self.chunk.version == 6 {
-            match Frame::charged(self.max_registers[function_index as usize], &self.heap) {
-                Ok(frame) => frame, Err(error) => return error,
-            }
-        } else { Frame::new(self.max_registers[function_index as usize]) };
+        let mut callee = match Frame::charged(self.max_registers[function_index as usize], &self.heap) {
+            Ok(frame) => frame, Err(error) => return error,
+        };
         callee.return_ip = self.ip;
         callee.return_register = scratch_register;
         callee.function = function_index;
@@ -2644,7 +2651,7 @@ impl<'a> Vm<'a> {
     pub fn clear_dataset_decisions(&mut self) { self.dataset_decisions.clear(); }
 
     /// Record a differentiable primitive onto `result`'s derivation, mirroring
-    /// `ad_record` in `vm/c/vm.c`. `ad_op` is 0=add 1=sub 2=mul 3=div 4=matmul
+    /// `ad_record` in `6aacbde2f67f:vm/c/vm.c`. `ad_op` is 0=add 1=sub 2=mul 3=div 4=matmul
     /// 5=sum 6=mean 10=reshape 11=transpose 12=exp 13=log 14=sqrt 15=relu
     /// 16=softmax 17=logsumexp 18=gather 19=cholesky_solve.
     fn ad_record(
@@ -2703,7 +2710,7 @@ impl<'a> Vm<'a> {
         LanaError::Ok
     }
 
-    /// Reverse-mode backward pass, mirroring `ad_backward` in `vm/c/vm.c`.
+    /// Reverse-mode backward pass, mirroring `ad_backward` in `6aacbde2f67f:vm/c/vm.c`.
     /// `seed` is the cotangent of `node`'s output, a contiguous base tensor.
     /// Accumulates into each node's `ad_grad` and recurses into the input
     /// derivations in left-then-right order.
@@ -3075,7 +3082,6 @@ impl<'a> Vm<'a> {
                 // append (LIP-007): mean-state distribution-valued APPEND.
                 let a = node.ad_a.as_ref().unwrap();
                 let b = node.ad_b.as_ref().unwrap();
-                let d = a.shape[a.ndim - 1];
                 let mut batch = 1;
                 for i in 0..a.ndim.saturating_sub(2) {
                     batch *= a.shape[i];
@@ -3090,12 +3096,10 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 {
-                    let ga_data = state_f64_mut(&mut ga);
-                    let gb_data = state_f64_mut(&mut gb);
                     for bi in 0..batch {
-                        let da = &state_f64(a)[bi * d * d * 2..];
-                        let db = &state_f64(b)[bi * d * d * 2..];
-                        let dg = &state_f64(seed)[(seed.offset + bi * d * d) * 2..];
+                        let da = state_matrix(a, bi);
+                        let db = state_matrix(b, bi);
+                        let dg = state_matrix(seed, bi);
                         let p_a = da[0];
                         let c_a_re = da[2];
                         let c_a_im = da[3];
@@ -3145,24 +3149,10 @@ impl<'a> Vm<'a> {
                             let g_sb = -(g_db_re * c_b_re + g_db_im * c_b_im) / (s_b * s_b);
                             g_pb += g_sb * (1.0 - 2.0 * p_b) / (2.0 * s_b);
                         }
-                        let ga_off = bi * d * d * 2;
-                        ga_data[ga_off] = g_pa;
-                        ga_data[ga_off + 1] = 0.0;
-                        ga_data[ga_off + 2] = g_ca_re;
-                        ga_data[ga_off + 3] = g_ca_im;
-                        ga_data[ga_off + 4] = g_ca_re;
-                        ga_data[ga_off + 5] = if g_ca_im == 0.0 { 0.0 } else { -g_ca_im };
-                        ga_data[ga_off + 6] = -g_pa;
-                        ga_data[ga_off + 7] = 0.0;
-                        let gb_off = bi * d * d * 2;
-                        gb_data[gb_off] = g_pb;
-                        gb_data[gb_off + 1] = 0.0;
-                        gb_data[gb_off + 2] = g_cb_re;
-                        gb_data[gb_off + 3] = g_cb_im;
-                        gb_data[gb_off + 4] = g_cb_re;
-                        gb_data[gb_off + 5] = if g_cb_im == 0.0 { 0.0 } else { -g_cb_im };
-                        gb_data[gb_off + 6] = -g_pb;
-                        gb_data[gb_off + 7] = 0.0;
+                        set_state_matrix(&mut ga, bi, [g_pa, 0.0, g_ca_re, g_ca_im, g_ca_re,
+                            if g_ca_im == 0.0 { 0.0 } else { -g_ca_im }, -g_pa, 0.0]);
+                        set_state_matrix(&mut gb, bi, [g_pb, 0.0, g_cb_re, g_cb_im, g_cb_re,
+                            if g_cb_im == 0.0 { 0.0 } else { -g_cb_im }, -g_pb, 0.0]);
                     }
                 }
                 if let Some(a_deriv) = &node.ad_a_deriv {
@@ -3195,7 +3185,6 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 {
-                    let gs_data = state_f64_mut(&mut gs);
                     for bi in 0..batch {
                         for r in 0..d {
                             for c in 0..d {
@@ -3207,8 +3196,8 @@ impl<'a> Vm<'a> {
                                     re += seed_val * e_re;
                                     im += seed_val * (-e_im);
                                 }
-                                gs_data[(bi * d * d + r * d + c) * 2] = re;
-                                gs_data[(bi * d * d + r * d + c) * 2 + 1] = im;
+                                tensor_set_real(&mut gs, bi * d * d + r * d + c, re);
+                                tensor_set_imag(&mut gs, bi * d * d + r * d + c, im);
                             }
                         }
                     }
@@ -3237,9 +3226,7 @@ impl<'a> Vm<'a> {
                     Err(error) => return error,
                 };
                 {
-                    let gs_data = state_f64_mut(&mut gs);
                     for bi in 0..batch {
-                        let dg = &state_f64(seed)[(seed.offset + bi * d * d) * 2..];
                         for m in 0..d {
                             for n in 0..d {
                                 let mut re = 0.0;
@@ -3248,8 +3235,9 @@ impl<'a> Vm<'a> {
                                     for i in 0..d {
                                         for j in 0..d {
                                             let (ki_re, ki_im) = linalg_get3(chan, kk, i, m);
-                                            let g_re = dg[(i * d + j) * 2];
-                                            let g_im = dg[(i * d + j) * 2 + 1];
+                                            let source = tensor::logical_index(seed, bi * d * d + i * d + j);
+                                            let g_re = tensor_get_real(seed, source);
+                                            let g_im = tensor_get_imag(seed, source);
                                             let (kj_re, kj_im) = linalg_get3(chan, kk, j, n);
                                             // conj(K[i][m]) * G[i][j] * K[j][n]
                                             let t_re = ki_re * g_re + ki_im * g_im;
@@ -3259,8 +3247,8 @@ impl<'a> Vm<'a> {
                                         }
                                     }
                                 }
-                                gs_data[(bi * d * d + m * d + n) * 2] = re;
-                                gs_data[(bi * d * d + m * d + n) * 2 + 1] = im;
+                                tensor_set_real(&mut gs, bi * d * d + m * d + n, re);
+                                tensor_set_imag(&mut gs, bi * d * d + m * d + n, im);
                             }
                         }
                     }
@@ -3278,7 +3266,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Validate `f`/`x`, create the input leaf, and run `f(x)` with recording
-    /// on, mirroring `ad_run` in `vm/c/vm.c`. On success `leaf_out` is the input
+    /// on, mirroring `ad_run` in `6aacbde2f67f:vm/c/vm.c`. On success `leaf_out` is the input
     /// leaf and `result_out` is `f`'s output.
     fn ad_run(
         &mut self,
@@ -3341,7 +3329,7 @@ impl<'a> Vm<'a> {
 
     /// Read the leaf's accumulated gradient, check finiteness, and return a
     /// fresh tensor carrying a provenance derivation that traces to the input
-    /// leaf, mirroring `ad_finish` in `vm/c/vm.c`.
+    /// leaf, mirroring `ad_finish` in `6aacbde2f67f:vm/c/vm.c`.
     fn ad_finish(&mut self, leaf: &Arc<Derivation>, operation: &str, out: &mut Value) -> LanaError {
         let grad = {
             let guard = leaf.ad_grad.lock().unwrap();
@@ -3407,7 +3395,7 @@ impl<'a> Vm<'a> {
     }
 
     /// `grad(f, x)`: gradient of a scalar-output pure function at `x`, mirroring
-    /// `ad_grad` in `vm/c/vm.c`.
+    /// `ad_grad` in `6aacbde2f67f:vm/c/vm.c`.
     fn ad_grad(
         &mut self,
         function_value: &Value,
@@ -3443,7 +3431,7 @@ impl<'a> Vm<'a> {
     }
 
     /// `vjp(f, x, v)`: vector-Jacobian product `v^T . J_f(x)`, mirroring
-    /// `ad_vjp` in `vm/c/vm.c`.
+    /// `ad_vjp` in `6aacbde2f67f:vm/c/vm.c`.
     fn ad_vjp(
         &mut self,
         function_value: &Value,
@@ -3501,7 +3489,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Copy a tensor (possibly a view) into a fresh contiguous base tensor,
-    /// mirroring `tensor_copy_contiguous` in `vm/c/vm.c`.
+    /// mirroring `tensor_copy_contiguous` in `6aacbde2f67f:vm/c/vm.c`.
     fn tensor_copy_contiguous(&mut self, t: &Tensor) -> Result<Arc<Tensor>, LanaError> {
         let alloc = self.heap.clone();
         let mut copy = tensor::tensor_new_dtype(&alloc, t.ndim, &t.shape, t.dtype)?;
@@ -3527,7 +3515,7 @@ impl<'a> Vm<'a> {
 
     /// Whether the VM holds a non-revoked READ capability over a shared
     /// information whose base snapshot is the string `name`, mirroring
-    /// `vm_has_named_capability` in `vm/c/vm.c`.
+    /// `vm_has_named_capability` in `6aacbde2f67f:vm/c/vm.c`.
     fn has_named_capability(&self, name: &str) -> bool {
         for shared in &self.shared_references {
             if let ValueKind::String(s) = &shared.base_snapshot.kind {
@@ -3544,7 +3532,7 @@ impl<'a> Vm<'a> {
         false
     }
 
-    /// `sgd(learning_rate, momentum)`, mirroring `host_sgd` in `vm/c/vm.c`.
+    /// `sgd(learning_rate, momentum)`, mirroring `host_sgd` in `6aacbde2f67f:vm/c/vm.c`.
     fn host_sgd(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
         let mut learning_rate = 0.01;
         let mut momentum = 0.9;
@@ -3586,7 +3574,7 @@ impl<'a> Vm<'a> {
     }
 
     /// `adam(learning_rate, beta1, beta2, epsilon)`, mirroring `host_adam` in
-    /// `vm/c/vm.c`.
+    /// `6aacbde2f67f:vm/c/vm.c`.
     fn host_adam(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
         let mut learning_rate = 0.001;
         let mut beta1 = 0.9;
@@ -3647,7 +3635,7 @@ impl<'a> Vm<'a> {
     }
 
     /// `train(model, data, loss, optimizer, initial_params, [epochs],
-    /// [batch_size])`, mirroring `host_train` in `vm/c/vm.c`.
+    /// [batch_size])`, mirroring `host_train` in `6aacbde2f67f:vm/c/vm.c`.
     fn host_train(
         &mut self,
         arguments: &[Value],
@@ -4065,7 +4053,7 @@ impl<'a> Vm<'a> {
     /// array of [x, target] pairs or a lazy dataset), extending the prior
     /// training result's step history. The prior result is unchanged; a new
     /// `VAL_TRAINING_RESULT` is returned. Shared by `update` (explicit) and the
-    /// reactive `observe` path. Mirrors `incremental_train` in `vm/c/vm.c`.
+    /// reactive `observe` path. Mirrors `incremental_train` in `6aacbde2f67f:vm/c/vm.c`.
     fn incremental_train(
         &mut self,
         prior: &TrainingResult,
@@ -4409,7 +4397,7 @@ impl<'a> Vm<'a> {
     }
 
     /// `update(model, new_data, steps) -> VAL_TRAINING_RESULT`, mirroring
-    /// `host_update` in `vm/c/vm.c`. The prior result is unchanged; the returned
+    /// `host_update` in `6aacbde2f67f:vm/c/vm.c`. The prior result is unchanged; the returned
     /// result extends its step history with `steps` incremental optimizer steps
     /// over `new_data`.
     fn host_update(
@@ -4463,7 +4451,7 @@ impl<'a> Vm<'a> {
 
     /// Recompute a `ReactiveKind::Train` node on `observe`: run one incremental
     /// optimizer step over the new observation (a [x, target] point). Mirrors
-    /// `reactive_train_recompute` in `vm/c/vm.c`.
+    /// `reactive_train_recompute` in `6aacbde2f67f:vm/c/vm.c`.
     fn reactive_train_recompute(
         &mut self,
         node: &Arc<Mutex<Reactive>>,
@@ -4495,7 +4483,7 @@ impl<'a> Vm<'a> {
     }
 
     /// `resume(run, i) -> VAL_TRAINING_RESULT`, mirroring `host_resume` in
-    /// `vm/c/vm.c`. The original run is unchanged; the returned run continues
+    /// `6aacbde2f67f:vm/c/vm.c`. The original run is unchanged; the returned run continues
     /// from step `i` with the parameters and optimizer state the original run
     /// had at that step, recomputing steps `i+1..` byte-identically to the
     /// original. The training loop is deterministic (no RNG consumption), so the
@@ -4928,7 +4916,7 @@ impl<'a> Vm<'a> {
     }
 
     /// A standard-normal draw via the Box-Muller transform, mirroring
-    /// `gaussian_sample` in `vm/c/vm.c`. Deterministic given the VM RNG.
+    /// `gaussian_sample` in `6aacbde2f67f:vm/c/vm.c`. Deterministic given the VM RNG.
     fn gaussian_sample(&mut self) -> f64 {
         loop {
             let x = self.uniform_signed();
@@ -4941,7 +4929,7 @@ impl<'a> Vm<'a> {
         }
     }
 
-    /// A uniform draw in [0, 1), mirroring `uniform01` in `vm/c/vm.c`.
+    /// A uniform draw in [0, 1), mirroring `uniform01` in `6aacbde2f67f:vm/c/vm.c`.
     fn uniform01(&mut self) -> f64 {
         self.rng.random() as f64 / 4294967296.0
     }
@@ -4989,7 +4977,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Append a step map `{ step, parameters, log_likelihood }` to `steps`,
-    /// mirroring `infer_record_step` in `vm/c/vm.c`. The `parameters` value
+    /// mirroring `infer_record_step` in `6aacbde2f67f:vm/c/vm.c`. The `parameters` value
     /// carries a derivation node tracing to the prior and the observed data.
     fn infer_record_step(
         &mut self,
@@ -5027,7 +5015,7 @@ impl<'a> Vm<'a> {
         Ok(())
     }
 
-    /// `mcmc(samples, burn_in)`, mirroring `host_mcmc` in `vm/c/vm.c`.
+    /// `mcmc(samples, burn_in)`, mirroring `host_mcmc` in `6aacbde2f67f:vm/c/vm.c`.
     fn host_mcmc(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
         let mut samples = 10000.0;
         let mut burn_in = 1000.0;
@@ -5076,7 +5064,7 @@ impl<'a> Vm<'a> {
         LanaError::Ok
     }
 
-    /// `vi(family, iterations)`, mirroring `host_vi` in `vm/c/vm.c`.
+    /// `vi(family, iterations)`, mirroring `host_vi` in `6aacbde2f67f:vm/c/vm.c`.
     fn host_vi(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
         let mut family: Arc<str> = Arc::from("gaussian");
         let mut iterations = 1000.0;
@@ -5118,7 +5106,7 @@ impl<'a> Vm<'a> {
         LanaError::Ok
     }
 
-    /// `smc(particles)`, mirroring `host_smc` in `vm/c/vm.c`.
+    /// `smc(particles)`, mirroring `host_smc` in `6aacbde2f67f:vm/c/vm.c`.
     fn host_smc(&mut self, arguments: &[Value], out: &mut Value) -> LanaError {
         let mut particles = 1000.0;
         if arguments.len() > 1 {
@@ -5150,7 +5138,7 @@ impl<'a> Vm<'a> {
         LanaError::Ok
     }
 
-    /// Metropolis-Hastings random walk, mirroring `infer_mcmc` in `vm/c/vm.c`.
+    /// Metropolis-Hastings random walk, mirroring `infer_mcmc` in `6aacbde2f67f:vm/c/vm.c`.
     fn infer_mcmc(
         &mut self,
         model_fn: u32,
@@ -5243,7 +5231,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Mean-field Gaussian variational inference via the reparameterization
-    /// trick and LIP-011 autodiff, mirroring `infer_vi` in `vm/c/vm.c`.
+    /// trick and LIP-011 autodiff, mirroring `infer_vi` in `6aacbde2f67f:vm/c/vm.c`.
     fn infer_vi(
         &mut self,
         model_fn: u32,
@@ -5375,7 +5363,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Sequential Monte Carlo (particle filter) over a single observation,
-    /// mirroring `infer_smc` in `vm/c/vm.c`.
+    /// mirroring `infer_smc` in `6aacbde2f67f:vm/c/vm.c`.
     fn infer_smc(
         &mut self,
         model_fn: u32,
@@ -5503,7 +5491,7 @@ impl<'a> Vm<'a> {
     }
 
     /// `infer(prior, model, data, algorithm)`, mirroring `host_infer` in
-    /// `vm/c/vm.c`.
+    /// `6aacbde2f67f:vm/c/vm.c`.
     fn host_infer(
         &mut self,
         arguments: &[Value],
@@ -5586,7 +5574,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Build a `Result` tagged pair `[ok, value]`, mirroring `make_result` in
-    /// `vm/c/vm.c`.
+    /// `6aacbde2f67f:vm/c/vm.c`.
     fn make_result(&self, ok: bool, value: Value) -> Result<Value, LanaError> {
         self.array_value(vec![Value::boolean(ok), value])
     }
@@ -6125,11 +6113,9 @@ impl<'a> Vm<'a> {
                         if let Err(error) = self.check_complete_objects(&value) { return error; }
                     }
                 }
-                let mut callee = if self.chunk.version == 6 {
-                    match Frame::charged(self.max_registers[ins.b as usize], &self.heap) {
-                        Ok(frame) => frame, Err(error) => return error,
-                    }
-                } else { Frame::new(self.max_registers[ins.b as usize]) };
+                let mut callee = match Frame::charged(self.max_registers[ins.b as usize], &self.heap) {
+                    Ok(frame) => frame, Err(error) => return error,
+                };
                 callee.return_ip = self.ip;
                 callee.return_register = ins.a;
                 callee.function = ins.b;
@@ -6176,7 +6162,9 @@ impl<'a> Vm<'a> {
                 if self.frames.len() >= LANA_MAX_CALL_FRAMES as usize {
                     return LanaError::Limit;
                 }
-                let mut callee = Frame::new(self.max_registers[function as usize]);
+                let mut callee = match Frame::charged(self.max_registers[function as usize], &self.heap) {
+                    Ok(frame) => frame, Err(error) => return error,
+                };
                 callee.return_ip = self.ip;
                 callee.return_register = ins.a;
                 callee.function = function;
@@ -6260,7 +6248,9 @@ impl<'a> Vm<'a> {
                 if self.frames.len() >= LANA_MAX_CALL_FRAMES as usize {
                     return LanaError::Limit;
                 }
-                let mut callee = Frame::new(self.max_registers[function as usize]);
+                let mut callee = match Frame::charged(self.max_registers[function as usize], &self.heap) {
+                    Ok(frame) => frame, Err(error) => return error,
+                };
                 for index in 0..registers.len() {
                     callee.registers[index] = registers[index].clone();
                 }
@@ -8637,7 +8627,7 @@ impl<'a> Vm<'a> {
         Ok(self.frames.clone())
     }
 
-    /// Split execution on a condition, mirroring `path_split` in `vm/c/vm.c`.
+    /// Split execution on a condition, mirroring `path_split` in `6aacbde2f67f:vm/c/vm.c`.
     fn path_split(&mut self, condition: &Value, false_ip: usize) -> LanaError {
         if matches!(condition.kind, ValueKind::Bool(_)) {
             if !condition.as_bool() {
@@ -8651,22 +8641,23 @@ impl<'a> Vm<'a> {
         };
         let mut has_true = false;
         let mut has_false = false;
-        let mut true_weight = 0.0;
-        let mut false_weight = 0.0;
+        let legacy_weights = self.chunk.version < lana_bytecode::opcode::LABC_VERSION_5;
+        let mut true_weight = (possibility.weights.is_some() || legacy_weights).then_some(0.0);
+        let mut false_weight = (possibility.weights.is_some() || legacy_weights).then_some(0.0);
         for (index, value) in possibility.values.iter().enumerate() {
-            let weight = match &possibility.weights {
-                Some(weights) => weights[index],
-                None => 1.0 / possibility.values.len() as f64,
-            };
+            let weight = possibility.weights.as_ref().map_or(
+                if legacy_weights { 1.0 / possibility.values.len() as f64 } else { 0.0 },
+                |weights| weights[index],
+            );
             if !matches!(value.kind, ValueKind::Bool(_)) {
                 return LanaError::Type;
             }
             if value.as_bool() {
                 has_true = true;
-                true_weight += weight;
+                if let Some(total) = &mut true_weight { *total += weight; }
             } else {
                 has_false = true;
-                false_weight += weight;
+                if let Some(total) = &mut false_weight { *total += weight; }
             }
         }
         if !has_true {
@@ -8702,7 +8693,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Join the two branches of a path split, mirroring `path_join` in
-    /// `vm/c/vm.c`.
+    /// `6aacbde2f67f:vm/c/vm.c`.
     fn path_join(&mut self, line: u32) -> LanaError {
         let Some(execution) = self.path_execution.last() else {
             return LanaError::Ok;
@@ -9386,12 +9377,17 @@ impl<'a> Vm<'a> {
             let hty = self.core_entropy(joint, &[target, y])?;
             let hxy = self.core_entropy(joint, &[x, y])?;
             let htxy = self.core_entropy(joint, &[target, x, y])?;
-            let a = (ht + hx - htx).max(0.0);
-            let b = (ht + hy - hty).max(0.0);
-            let c = (ht + hxy - htxy).max(0.0);
-            if !a.is_finite() || !b.is_finite() || !c.is_finite() { return Err(LanaError::InvalidParameters); }
+            let a = ht + hx - htx;
+            let b = ht + hy - hty;
+            let c = ht + hxy - htxy;
+            if !a.is_finite() || !b.is_finite() || !c.is_finite()
+                || a < -1e-10 || b < -1e-10 || c < -1e-10 {
+                return Err(LanaError::InvalidParameters);
+            }
+            let (a, b, c) = (a.max(0.0), b.max(0.0), c.max(0.0));
             let lower = a.max(b);
             if c < lower - 1e-10 { return Err(LanaError::InvalidParameters); }
+            let c = c.max(lower);
             let mut upper = c;
             let mut marginal_residual = 0.0_f64;
             let mut mass = 0.0_f64;
@@ -9473,7 +9469,7 @@ impl<'a> Vm<'a> {
                         self.broja_general(&pt, &ptx, nx, &pty, ny)?
                     };
                     if let Some((candidate, gap, residual, candidate_mass)) = optimized {
-                        if candidate < upper && residual <= 1e-9 && candidate_mass <= 1e-9 {
+                        if candidate <= upper && residual <= 1e-9 && candidate_mass <= 1e-9 {
                             if candidate < lower - 1e-10 { return Err(LanaError::InvalidParameters); }
                             upper = candidate;
                             marginal_residual = residual;
@@ -9498,14 +9494,15 @@ impl<'a> Vm<'a> {
             map.set(Arc::from("x"), Value::string(joint.names[x].clone()), true)?;
             map.set(Arc::from("y"), Value::string(joint.names[y].clone()), true)?;
             if converged {
-                map.set(Arc::from("shared"), Value::number((a + b - upper).max(0.0)), true)?;
-                map.set(Arc::from("unique_x"), Value::number((upper - b).max(0.0)), true)?;
-                map.set(Arc::from("unique_y"), Value::number((upper - a).max(0.0)), true)?;
-                map.set(Arc::from("synergy"), Value::number((c - upper).max(0.0)), true)?;
+                let m = upper.clamp(lower, (a + b).min(c));
+                map.set(Arc::from("shared"), Value::number(a + b - m), true)?;
+                map.set(Arc::from("unique_x"), Value::number(m - b), true)?;
+                map.set(Arc::from("unique_y"), Value::number(m - a), true)?;
+                map.set(Arc::from("synergy"), Value::number(c - m), true)?;
                 map.set(Arc::from("total"), Value::number(c), true)?;
             } else {
                 map.set(Arc::from("reason"), Value::string(Arc::from("objective_gap")), true)?;
-                map.set(Arc::from("marginal_residual"), Value::number(0.0), true)?;
+                map.set(Arc::from("marginal_residual"), Value::number(marginal_residual), true)?;
                 map.set(Arc::from("mass_residual"), Value::number(mass_residual), true)?;
             }
             let details = format!("target={}; x={}; y={}; input_revision={revision}",
@@ -10173,7 +10170,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Build a finite law from an array of rows, mirroring
-    /// `joint_build_finite_array` in `vm/c/vm.c`.
+    /// `joint_build_finite_array` in `6aacbde2f67f:vm/c/vm.c`.
     pub fn joint_build_finite_array(
         &mut self,
         rows_value: &Value,
@@ -10664,6 +10661,9 @@ impl<'a> Vm<'a> {
                 self.deep_clone_value(&possibility.values[selected], &mut memo)
             }
             ValueKind::PathSet(paths) => {
+                if paths.alternatives.iter().any(|alternative| alternative.weight.is_none()) {
+                    return Err(LanaError::UnsupportedOperation);
+                }
                 if self.consume_sampling_budget() != LanaError::Ok {
                     return Err(LanaError::BudgetExhausted);
                 }
@@ -10671,7 +10671,7 @@ impl<'a> Vm<'a> {
                 let mut cumulative = 0.0;
                 let mut selected = paths.alternatives.len() - 1;
                 for (index, alternative) in paths.alternatives.iter().enumerate() {
-                    cumulative += alternative.weight;
+                    cumulative += alternative.weight.unwrap();
                     if draw < cumulative {
                         selected = index;
                         break;
@@ -10850,7 +10850,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Lift a binary operation over paths/possibilities, mirroring `lift_binary`
-    /// in `vm/c/vm.c`.
+    /// in `6aacbde2f67f:vm/c/vm.c`.
     fn lift_binary(&mut self, left: &Value, right: &Value, kind: PureKind, operation: u32, out: &mut Value) -> LanaError {
         let error = self.lift_binary_raw(
             &self.reactive_value(left),
@@ -11063,7 +11063,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Lift a unary operation over paths/possibilities, mirroring `lift_unary`
-    /// in `vm/c/vm.c`.
+    /// in `6aacbde2f67f:vm/c/vm.c`.
     fn lift_unary(&mut self, source: &Value, operation: u32, out: &mut Value) -> LanaError {
         let current = self.reactive_value(source);
         let error = self.lift_unary_raw(&current, operation, out);
@@ -11136,7 +11136,7 @@ impl<'a> Vm<'a> {
 
 impl<'a> Vm<'a> {
     /// Resolve a value's reactive to its current contents, mirroring
-    /// `reactive_value` in `vm/c/vm.c`. Returns a clone because the `Mutex`
+    /// `reactive_value` in `6aacbde2f67f:vm/c/vm.c`. Returns a clone because the `Mutex`
     /// guard cannot outlive the borrow.
     fn reactive_value(&self, value: &Value) -> Value {
         if let Some(reactive) = &value.reactive {
@@ -11148,14 +11148,14 @@ impl<'a> Vm<'a> {
     }
 
     /// Whether a value is unresolved, mirroring `value_is_unresolved` in
-    /// `vm/c/vm.c`. Resolves the reactive first, then recurses into arrays and
+    /// `6aacbde2f67f:vm/c/vm.c`. Resolves the reactive first, then recurses into arrays and
     /// maps.
     fn check_resolved(&self, value: &Value) -> Result<(), LanaError> {
         value.check_resolved(self.memory_limit.saturating_sub(self.allocated_bytes()))
     }
 
     /// Deep-clone a value with its reactive/claim/planned-effect metadata
-    /// stripped, mirroring `clone_without_runtime_metadata` in `vm/c/vm.c`. The
+    /// stripped, mirroring `clone_without_runtime_metadata` in `6aacbde2f67f:vm/c/vm.c`. The
     /// derivation is preserved.
     fn clone_without_runtime_metadata(&mut self, source: &Value) -> Result<Value, LanaError> {
         self.clone_without_runtime_metadata_memo(source, &mut DeepCloneMemo::default())
@@ -11170,7 +11170,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Recursively materialize arrays and maps, mirroring `materialize_value`
-    /// in `vm/c/vm.c`. Used by the write/stringify host calls so a reactive
+    /// in `6aacbde2f67f:vm/c/vm.c`. Used by the write/stringify host calls so a reactive
     /// value's current contents are emitted.
     fn materialize_value(&mut self, source: &Value) -> Result<Value, LanaError> {
         self.materialize_value_memo(source, &mut DeepCloneMemo::default())
@@ -11232,7 +11232,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Deep-clone a reactive node and its inputs, mirroring
-    /// `clone_live_reactive_node` in `vm/c/vm.c`. The shared-information layer
+    /// `clone_live_reactive_node` in `6aacbde2f67f:vm/c/vm.c`. The shared-information layer
     /// needs an isolated reactive graph per version so observing one snapshot
     /// does not mutate another.
     fn deep_clone_reactive(
@@ -11322,7 +11322,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Deep-clone a value and its reactive graph, mirroring
-    /// `lana_vm_clone_live_value` in `vm/c/vm.c`. Used by the shared-information
+    /// `lana_vm_clone_live_value` in `6aacbde2f67f:vm/c/vm.c`. Used by the shared-information
     /// layer so each version owns an isolated reactive graph.
     fn deep_clone_live_value(
         &mut self,
@@ -11671,7 +11671,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Recompute a reactive graph after an observation, mirroring
-    /// `reactive_recompute_transaction` in `vm/c/vm.c`.
+    /// `reactive_recompute_transaction` in `6aacbde2f67f:vm/c/vm.c`.
     fn reactive_recompute_transaction(
         &mut self,
         root: &Arc<Mutex<Reactive>>,
@@ -11828,7 +11828,7 @@ impl<'a> Vm<'a> {
         Ok(Value::set(Arc::new(Mutex::new(result))))
     }
 
-    /// Execute a host call, mirroring `execute_host_call` in `vm/c/vm.c`.
+    /// Execute a host call, mirroring `execute_host_call` in `6aacbde2f67f:vm/c/vm.c`.
     fn execute_host_call(
         &mut self,
         host_id: u32,
@@ -14926,7 +14926,7 @@ impl<'a> Vm<'a> {
 
     /// Materialize a lazy source into a `Vec<Value>` of rows by invoking the
     /// generator function for each index in `[0, bound)`, mirroring
-    /// `dataset_materialize_source` in `vm/c/vm.c`.
+    /// `dataset_materialize_source` in `6aacbde2f67f:vm/c/vm.c`.
     fn dataset_materialize_source(&mut self, lazy: &Value, scratch: u32) -> Result<Vec<Value>, LanaError> {
         /* LIP-015 §3: an in-memory array source is returned as-is. */
         if let ValueKind::Array(array) = &lazy.kind {
@@ -15119,7 +15119,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Materialize a dataset plan to a `Vec<Value>` of rows, mirroring
-    /// `dataset_materialize` in `vm/c/vm.c`.
+    /// `dataset_materialize` in `6aacbde2f67f:vm/c/vm.c`.
     fn dataset_materialize(&mut self, dataset: &Dataset, scratch: u32) -> Result<Vec<Value>, LanaError> {
         match dataset.op {
             DatasetOp::Source => {
@@ -15452,7 +15452,7 @@ impl<'a> Vm<'a> {
     }
 
     /// Build an inspectable plan value for `explain(ds)`, mirroring
-    /// `dataset_explain` in `vm/c/vm.c`.
+    /// `dataset_explain` in `6aacbde2f67f:vm/c/vm.c`.
     fn dataset_explain(&self, dataset: &Dataset) -> Result<Value, LanaError> {
         let op_names = ["source", "filter", "map", "select", "limit", "sort",
                         "group_by", "aggregate", "join"];
@@ -17065,7 +17065,7 @@ fn utf8_encode(cp: u32) -> Vec<u8> {
 }
 
 /// A Thompson NFA regular-expression engine (LIP-021 §2), mirroring the C11
-/// engine in `vm/c/vm.c`. Byte-oriented and linear-time (no backtracking).
+/// engine in `6aacbde2f67f:vm/c/vm.c`. Byte-oriented and linear-time (no backtracking).
 struct RegexCompiler<'a> {
     pattern: &'a [u8],
     pos: usize,
@@ -17392,7 +17392,7 @@ fn regex_search(re: &Regex, text: &[u8], from: usize) -> Option<(usize, usize)> 
 }
 
 /// Render a 64-bit hash as 16 lowercase hex characters, matching the tail of
-/// `host_hash_update` in `vm/c/vm.c`.
+/// `host_hash_update` in `6aacbde2f67f:vm/c/vm.c`.
 fn hex16(hash: u64) -> String {
     let mut result = String::with_capacity(16);
     for index in 0..16 {
@@ -17604,7 +17604,7 @@ fn csv_scalar(value: &Value, field: &mut String) -> bool {
 }
 
 /// Collect reactive nodes reachable from a value, mirroring
-/// `reactive_collect_value` in `vm/c/vm.c`.
+/// `reactive_collect_value` in `6aacbde2f67f:vm/c/vm.c`.
 fn reactive_collect_value(list: &mut Vec<Arc<Mutex<Reactive>>>, value: &Value) {
     let mut pending = vec![value.clone()];
     let mut seen = std::collections::HashSet::new();
@@ -17618,7 +17618,7 @@ fn reactive_collect_value(list: &mut Vec<Arc<Mutex<Reactive>>>, value: &Value) {
 }
 
 /// Add a reactive node and its inputs to a list in topological order, mirroring
-/// `reactive_list_add` in `vm/c/vm.c`.
+/// `reactive_list_add` in `6aacbde2f67f:vm/c/vm.c`.
 fn reactive_list_add(list: &mut Vec<Arc<Mutex<Reactive>>>, node: &Arc<Mutex<Reactive>>) {
     if list.iter().any(|existing| Arc::ptr_eq(existing, node)) {
         return;
@@ -17637,7 +17637,7 @@ fn reactive_list_add(list: &mut Vec<Arc<Mutex<Reactive>>>, node: &Arc<Mutex<Reac
 }
 
 /// Resolve a reactive input to its staged or current value, mirroring
-/// `reactive_staged_input` in `vm/c/vm.c`.
+/// `reactive_staged_input` in `6aacbde2f67f:vm/c/vm.c`.
 fn reactive_staged_input(
     list: &[Arc<Mutex<Reactive>>],
     staged: &[Option<Value>],
@@ -17668,14 +17668,14 @@ fn capability_allows_locked(
 }
 
 /// Whether a value is a non-negative integer, mirroring `nonnegative_integer`
-/// in `vm/c/vm.c`.
+/// in `6aacbde2f67f:vm/c/vm.c`.
 fn nonnegative_integer(value: &Value) -> bool {
     matches!(value.kind, ValueKind::Number(n)
         if n.is_finite() && n >= 0.0 && n.floor() == n && n <= 9007199254740991.0)
 }
 
 /// The permission bit for a permission name, mirroring `shared_permission` in
-/// `vm/c/vm.c`.
+/// `6aacbde2f67f:vm/c/vm.c`.
 fn shared_permission(value: &Value) -> u32 {
     match &value.kind {
         ValueKind::String(string) => match &**string {
@@ -17689,7 +17689,7 @@ fn shared_permission(value: &Value) -> u32 {
 }
 
 /// The permission bit for a `grant` permission name, mirroring
-/// `grant_permission` in `vm/c/vm.c`.
+/// `grant_permission` in `6aacbde2f67f:vm/c/vm.c`.
 fn grant_permission(value: &Value) -> u32 {
     match &value.kind {
         ValueKind::String(string) => match &**string {
@@ -17710,7 +17710,7 @@ fn effective_time_valid(effective_time: f64) -> bool {
 }
 
 /// Value equality for joint/possibility/path construction, mirroring
-/// `joint_value_equal` in `vm/c/vm.c`. Containers compare by pointer identity;
+/// `joint_value_equal` in `6aacbde2f67f:vm/c/vm.c`. Containers compare by pointer identity;
 /// the payload types compare by value.
 fn joint_value_equal(left: &Value, right: &Value) -> bool {
     if std::mem::discriminant(&left.kind) != std::mem::discriminant(&right.kind) {
@@ -17766,7 +17766,7 @@ fn joint_value_equal(left: &Value, right: &Value) -> bool {
     }
 }
 
-/// Set membership equality, mirroring `set_value_equal` in `vm/c/vm.c`: scalars
+/// Set membership equality, mirroring `set_value_equal` in `6aacbde2f67f:vm/c/vm.c`: scalars
 /// compare by value, containers by pointer identity. Byte-identical with the
 /// C11 VM.
 fn set_value_equal(left: &Value, right: &Value) -> bool {
@@ -17860,7 +17860,7 @@ fn set_value_equal(left: &Value, right: &Value) -> bool {
 }
 
 /// Whether a value can appear as a set member, mirroring `value_is_set_member`
-/// in `vm/c/vm.c`: STATE, STATE_DIST, and Information are rejected.
+/// in `6aacbde2f67f:vm/c/vm.c`: STATE, STATE_DIST, and Information are rejected.
 fn value_is_set_member(value: &Value) -> bool {
     if value.reactive.is_some() {
         return false;
@@ -17876,7 +17876,7 @@ fn value_is_set_member(value: &Value) -> bool {
 }
 
 /// Whether a value can appear as a joint marginal or possibility element,
-/// mirroring `joint_value_is_definite` in `vm/c/vm.c`.
+/// mirroring `joint_value_is_definite` in `6aacbde2f67f:vm/c/vm.c`.
 fn joint_value_is_definite(value: &Value) -> bool {
     !matches!(
         value.kind,
@@ -17885,13 +17885,13 @@ fn joint_value_is_definite(value: &Value) -> bool {
     )
 }
 
-/// Find a joint variable by name, mirroring `joint_find` in `vm/c/vm.c`.
+/// Find a joint variable by name, mirroring `joint_find` in `6aacbde2f67f:vm/c/vm.c`.
 fn joint_find(joint: &JointState, name: &str) -> Option<usize> {
     joint.names.iter().position(|candidate| &**candidate == name)
 }
 
 /// Parse a joint descriptor (`independent:a,b` / `correlated:a,b` /
-/// `conditional:a,b`), mirroring `parse_joint_names` in `vm/c/vm.c`. Consecutive
+/// `conditional:a,b`), mirroring `parse_joint_names` in `6aacbde2f67f:vm/c/vm.c`. Consecutive
 /// delimiters collapse; a whitespace-only token is a format error.
 fn parse_joint_names(text: &str, expected: usize) -> Result<(JointKind, Vec<Arc<str>>), LanaError> {
     if text.is_empty() {
@@ -18008,7 +18008,7 @@ fn pure_scalar_binary(left: &Value, right: &Value, kind: PureKind, operation: u3
 // (NQubitState, Povm, Channel, Observable) are thin wrappers over a complex
 // tensor: a density operator is a d×d matrix, a POVM or channel is a
 // [k, d, d] stack of operators, and an observable is a d×d Hermitian matrix.
-// The arithmetic below is scalar double loops, mirroring `vm/c/vm.c`.
+// The arithmetic below is scalar double loops, mirroring `6aacbde2f67f:vm/c/vm.c`.
 // ---------------------------------------------------------------------------
 
 /// Read the (i, j) entry of a 2-D tensor as a complex number. A real tensor
@@ -18690,18 +18690,18 @@ fn linalg_validate_density_data(
 
 /// Recursively fill a complex tensor's interleaved `[re, im]` buffer from a
 /// nested array of real numbers (imaginary parts are zero).
-fn tensor_fill_state(v: &Value, data: &mut [f64], offset: &mut usize) -> Result<(), LanaError> {
+fn tensor_fill_state(v: &Value, tensor: &mut Tensor, offset: &mut usize) -> Result<(), LanaError> {
     match &v.kind {
         ValueKind::Number(n) => {
-            data[2 * *offset] = *n;
-            data[2 * *offset + 1] = 0.0;
+            tensor_set_real(tensor, *offset, *n);
+            tensor_set_imag(tensor, *offset, 0.0);
             *offset += 1;
             Ok(())
         }
         ValueKind::Array(array) => {
             let array = array.lock().unwrap();
             for item in &array.items {
-                tensor_fill_state(item, data, offset)?;
+                tensor_fill_state(item, tensor, offset)?;
             }
             Ok(())
         }
@@ -18738,17 +18738,19 @@ fn linalg_state_tensor(
     }
     let mut t = tensor::tensor_new(alloc, ndim, &shape, true)?;
     t.is_state = true;
-    {
-        let data = state_f64_mut(&mut t);
-        let mut offset = 0usize;
-        tensor_fill_state(arg, data, &mut offset)?;
-    }
+    let mut offset = 0usize;
+    tensor_fill_state(arg, &mut t, &mut offset)?;
     let mut batch = 1;
     for i in 0..ndim.saturating_sub(2) {
         batch *= shape[i];
     }
+    let mut matrix = crate::heap::Buffer::filled(alloc, d * d * 2, 0.0)?;
     for i in 0..batch {
-        linalg_validate_density_data(alloc, &state_f64(&t)[i * d * d * 2..], d)?;
+        for j in 0..d * d {
+            matrix[j * 2] = tensor_get_real(&t, i * d * d + j);
+            matrix[j * 2 + 1] = tensor_get_imag(&t, i * d * d + j);
+        }
+        linalg_validate_density_data(alloc, &matrix, d)?;
     }
     Ok(Value::tensor(Arc::new(t)))
 }
@@ -18782,10 +18784,9 @@ fn linalg_state_append(
         batch *= a.shape[i];
     }
     {
-        let dr = state_f64_mut(&mut res);
         for i in 0..batch {
-            let da = &state_f64(&a)[i * d * d * 2..];
-            let db = &state_f64(&b)[i * d * d * 2..];
+            let da = state_matrix(a, i);
+            let db = state_matrix(b, i);
             let p_a = da[0];
             let c_a_re = da[2];
             let c_a_im = da[3];
@@ -18805,15 +18806,8 @@ fn linalg_state_append(
             let c_c_re = d_c_re * s_c;
             let c_c_im = d_c_im * s_c;
             // ρ_C = [[p_C, c_C], [c_C*, 1-p_C]].
-            let off = i * d * d * 2;
-            dr[off] = p_c;
-            dr[off + 1] = 0.0;
-            dr[off + 2] = c_c_re;
-            dr[off + 3] = c_c_im;
-            dr[off + 4] = c_c_re;
-            dr[off + 5] = if c_c_im == 0.0 { 0.0 } else { -c_c_im };
-            dr[off + 6] = 1.0 - p_c;
-            dr[off + 7] = 0.0;
+            set_state_matrix(&mut res, i, [p_c, 0.0, c_c_re, c_c_im, c_c_re,
+                if c_c_im == 0.0 { 0.0 } else { -c_c_im }, 1.0 - p_c, 0.0]);
         }
     }
     Ok(Value::tensor(Arc::new(res)))
@@ -18842,20 +18836,19 @@ fn linalg_state_measure(
     out_shape.push(k);
     let mut res = tensor::tensor_new(alloc, out_ndim, &out_shape, false)?;
     {
-        let dr = state_f64_mut(&mut res);
         for i in 0..batch {
-            let ds = &state_f64(&s)[i * d * d * 2..];
             for m in 0..k {
                 let mut re = 0.0;
                 for r in 0..d {
                     for c in 0..d {
-                        let rho_re = ds[(r * d + c) * 2];
-                        let rho_im = ds[(r * d + c) * 2 + 1];
+                        let source = tensor::logical_index(s, i * d * d + r * d + c);
+                        let rho_re = tensor_get_real(s, source);
+                        let rho_im = tensor_get_imag(s, source);
                         let (e_re, e_im) = linalg_get3(povm, m, c, r);
                         re += rho_re * e_re - rho_im * e_im;
                     }
                 }
-                dr[i * k + m] = re;
+                tensor_set_real(&mut res, i * k + m, re);
             }
         }
     }
@@ -18880,9 +18873,7 @@ fn linalg_state_transform(
     let mut res = tensor::tensor_new(alloc, s.ndim, &s.shape, true)?;
     res.is_state = true;
     {
-        let dr = state_f64_mut(&mut res);
         for i in 0..batch {
-            let ds = &state_f64(&s)[i * d * d * 2..];
             for r in 0..d {
                 for c in 0..d {
                     let mut re = 0.0;
@@ -18891,8 +18882,9 @@ fn linalg_state_transform(
                         for m in 0..d {
                             for n in 0..d {
                                 let (k_re, k_im) = linalg_get3(chan, kk, r, m);
-                                let rho_re = ds[(m * d + n) * 2];
-                                let rho_im = ds[(m * d + n) * 2 + 1];
+                                let source = tensor::logical_index(s, i * d * d + m * d + n);
+                                let rho_re = tensor_get_real(s, source);
+                                let rho_im = tensor_get_imag(s, source);
                                 let (kd_re, kd_im) = linalg_get3(chan, kk, c, n);
                                 // K[r][m] * ρ[m][n] * conj(K[c][n])
                                 let t_re = k_re * rho_re - k_im * rho_im;
@@ -18902,8 +18894,8 @@ fn linalg_state_transform(
                             }
                         }
                     }
-                    dr[(r * d + c) * 2] = re;
-                    dr[(r * d + c) * 2 + 1] = im;
+                    tensor_set_real(&mut res, i * d * d + r * d + c, re);
+                    tensor_set_imag(&mut res, i * d * d + r * d + c, im);
                 }
             }
         }
@@ -19271,14 +19263,14 @@ mod tests {
         fields.set(Arc::from("x"), vm.array_value(vec![Value::number(7.0)]).unwrap(), false).unwrap();
         let fields = Value::map(Arc::new(Mutex::new(fields)));
         let paths = Value::paths(Arc::new(PathSet { dependency_id: 17, alternatives: vec![
-            PathAlternative { guard:true, weight:0.75, result:fields.clone() },
-            PathAlternative { guard:false, weight:0.25, result:Value::number(2.0) },
+            PathAlternative { guard:true, weight:Some(0.75), result:fields.clone() },
+            PathAlternative { guard:false, weight:Some(0.25), result:Value::number(2.0) },
         ] }));
         let snapshot = vm.information_snapshot(&paths).unwrap();
         let ValueKind::PathSet(captured) = snapshot.kind else { panic!("paths"); };
         assert_eq!(captured.dependency_id, 17);
         assert!(captured.alternatives[0].guard);
-        assert_eq!(captured.alternatives[1].weight, 0.25);
+        assert_eq!(captured.alternatives[1].weight, Some(0.25));
         let ValueKind::Map(map) = &captured.alternatives[0].result.kind else { panic!("map"); };
         let array = map.lock().unwrap().get("x").unwrap().clone();
         assert_eq!(map.lock().unwrap().set(Arc::from("x"), Value::null(), false), Err(LanaError::UnsupportedOperation));
@@ -20295,6 +20287,25 @@ mod tests {
     }
 
     #[test]
+    fn ignored_opcode_operand_cannot_size_an_unbudgeted_frame() {
+        let mut chunk = assembler::assemble(
+            ".function main 0 2\nCALL helper R0 0 R1\nRETURN R1\n.function helper 0 1\nNOP\nLOAD_CONST R0 7\nRETURN R0\n",
+        ).unwrap();
+        chunk.code.iter_mut().find(|ins| ins.opcode == OpCode::Nop).unwrap().a = 100_000;
+        assert!(lana_bytecode::verifier::verify(&chunk).is_ok());
+        assert_eq!(compute_max_registers(&chunk)[1], 1);
+
+        let mut vm = Vm::new(&chunk);
+        assert_eq!(vm.run(), LanaError::Ok);
+        assert_eq!(vm.result().unwrap().print(), "7");
+
+        let mut limited = Vm::new(&chunk);
+        limited.set_memory_limit(limited.allocated_bytes() + 1).unwrap();
+        assert_eq!(limited.run(), LanaError::Oom);
+        assert!(limited.allocated_bytes() <= limited.memory_limit);
+    }
+
+    #[test]
     fn lazy_force_invokes_generator() {
         let (error, result) = run_chunk(
             ".function main 0 8\nLOAD_CONST R1 5\nLAZY R2 gen R1\nLOAD_CONST R3 3\nFORCE R4 R2 R3\nRETURN R4\n.function gen 1 3\nLOAD_CONST R1 2\nBINARY R0 mul R1 R2\nRETURN R2\n",
@@ -21172,12 +21183,12 @@ mod tests {
             ("possibility", "LOAD_CONST R0 1\nLOAD_CONST R1 2\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R10\n", false, false, false),
             ("distribution", "LOAD_CONST R0 1\nLOAD_CONST R1 0.5\nARRAY_NEW R2 R0 2\nLOAD_CONST R3 2\nLOAD_CONST R4 0.5\nARRAY_NEW R5 R3 2\nMOVE R6 R2\nMOVE R7 R5\nARRAY_NEW R8 R6 2\nDISTRIBUTION_BUILD R8 R10\n", false, true, false),
             ("joint", "LOAD_CONST R0 1\nJOINT_BUILD R10 R0 1 independent:x\n", true, true, true),
-            ("paths", "LOAD_CONST R0 true\nLOAD_CONST R1 false\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nPATH_SPLIT R3 other\nLOAD_CONST R4 1\nJUMP joined\nother:\nLOAD_CONST R4 2\njoined:\nPATH_JOIN\nMOVE R10 R4\n", false, true, false),
+            ("paths", "LOAD_CONST R0 true\nLOAD_CONST R1 false\nARRAY_NEW R2 R0 2\nPOSSIBILITY_BUILD R2 R3\nPATH_SPLIT R3 other\nLOAD_CONST R4 1\nJUMP joined\nother:\nLOAD_CONST R4 2\njoined:\nPATH_JOIN\nMOVE R10 R4\n", false, false, false),
         ];
         for (name, prefix, joint, sample, resolve) in forms {
             for (operation, instruction, expected) in [
                 ("project", "JOINT_PROJECT R10 R11 x\n", if joint { LanaError::Ok } else { LanaError::Type }),
-                ("sample", "INFO_SAMPLE R10 R11\n", if sample { LanaError::Ok } else if name == "possibility" { LanaError::UnsupportedOperation } else { LanaError::Type }),
+                ("sample", "INFO_SAMPLE R10 R11\n", if sample { LanaError::Ok } else if name == "possibility" || name == "paths" { LanaError::UnsupportedOperation } else { LanaError::Type }),
                 ("resolve", "RESOLVE R10 R11\n", if resolve { LanaError::Ok } else { LanaError::UnresolvedValue }),
                 ("inspect", "HOST_CALL information_inspect R10 1 R11\n", LanaError::Ok),
             ] {
@@ -21682,6 +21693,13 @@ mod tests {
         );
         assert_eq!(error, LanaError::Ok);
         assert_eq!(result, "[[[[1, 0], [0, 0]], [[0, 0], [-1, 0]]]]");
+    }
+
+    #[test]
+    fn append_gradient_of_state_view_matches_its_values() {
+        let (error, result) = run_chunk(include_str!("../../../../tests/regression/state_view_gradient.lasm"));
+        assert_eq!(error, LanaError::Ok);
+        assert_eq!(result, "[[[0.4, 0], [0, 0]], [[0, 0], [-0.4, 0]]]");
     }
 
     #[test]

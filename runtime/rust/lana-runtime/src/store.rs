@@ -837,11 +837,11 @@ mod tests {
     fn put_get_round_trip() {
         let path = temp_store("roundtrip");
         let mut store = store_open(&StoreOptions { schema_version: 1, path: path.clone(), timeout_ms: 0 }).unwrap();
-        let value = Value::number(3.14);
+        let value = Value::number(3.25);
         store_put(&mut store, "k", &value).unwrap();
         store_commit(&mut store).unwrap();
         let got = store_get(&store, "k").unwrap();
-        assert_eq!(got.as_number(), 3.14);
+        assert_eq!(got.as_number(), 3.25);
         let _ = std::fs::remove_dir_all(&path);
     }
 

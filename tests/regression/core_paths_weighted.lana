@@ -1,0 +1,8 @@
+import "std/core" as info;
+
+let guard = info.distribution([[true, 0.25], [false, 0.75]]);
+let result = 0;
+if (guard) { result = 10; } else { result = 20; }
+let selected = sample_value(sample(result));
+assert(selected != 0, "weighted path sample");
+print("CORE_PATHS_WEIGHTED_PASS");

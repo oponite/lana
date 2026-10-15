@@ -4,6 +4,7 @@ dist/
 Testing/Temporary/
 .ollama/
 .claude/
+.astrocode/snapshots/
 .DS_Store
 .venv/
 .venv-*/

@@ -40,8 +40,9 @@ Evidence (commit, checks, and tag protection): ________
    `git diff --check`. Require twice-repeated byte-stable bootstrap, frozen
    compatibility, generated projects/imports, LSP, debugger, installation,
    packaging and isolated publication-failure checks.
-2. Run the Rust malformed-bytecode fuzz target for 600 seconds with the matching
-   nightly compiler and a five-second input timeout. Preserve any failing input.
+2. Run both Rust bytecode fuzz targets (`lana_bytecode` and `lana_execution`)
+   for 600 seconds each with the matching nightly compiler and a five-second
+   input timeout. Preserve any failing input.
 3. Build and install the universal macOS prefix. Verify arm64/x86_64 headers and
    actually execute both slices. Extract the checksum-verified archive outside
    the checkout and run source using its adjacent compiler and installed stdlib.

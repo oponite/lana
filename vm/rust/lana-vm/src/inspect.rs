@@ -1,7 +1,7 @@
 //! LIP-002: lazy state-dist inspection.
 //!
 //! A read-only serializer over the existing `STATE_DIST` DAG, mirroring
-//! `lana_vm_state_dist_inspect` in `vm/c/vm.c`. It reports the structural
+//! `lana_vm_state_dist_inspect` in `6aacbde2f67f:vm/c/vm.c`. It reports the structural
 //! summary (node count, maximum depth, APPEND/TRANSFORM/Dirac counts,
 //! exact-measurement support, sampling requirements) and emits the DAG as JSON
 //! or Graphviz DOT. The output is byte-identical to the C11 reference so the
@@ -15,7 +15,7 @@ use lana_bytecode::LanaError;
 use crate::state::{self, State};
 use crate::value::{DistOperand, StateDist, StateDistKind};
 
-/// The serialization format, matching `LanaInspectFormat` in `vm/include/vm.h`.
+/// The serialization format, matching `LanaInspectFormat` in `6aacbde2f67f:vm/include/vm.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InspectFormat {
     Json,
@@ -239,7 +239,7 @@ fn emit_dot(graph: &InspectGraph) -> String {
 }
 
 /// Serialize a state distribution's DAG structure, mirroring
-/// `lana_vm_state_dist_inspect` in `vm/c/vm.c`.
+/// `lana_vm_state_dist_inspect` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn inspect(distribution: &Arc<StateDist>, format: InspectFormat) -> Result<String, LanaError> {
     let mut graph = InspectGraph::default();
     let root_id = inspect_visit(distribution, &mut graph)?;

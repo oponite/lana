@@ -97,9 +97,10 @@ compiler bootstrap, generated-project workflow, imports, LSP, and debugger.
 
 ```bash
 RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_bytecode --fuzz-dir fuzz -- -max_total_time=600 -timeout=5
+RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_execution --fuzz-dir fuzz -- -max_total_time=600 -timeout=5
 ```
 
-Required result: ten minutes without a crash, leak, timeout, failed assertion,
+Required result: ten minutes per target without a crash, leak, timeout, failed assertion,
 or sanitizer report. Preserve crashing inputs as regressions.
 
 ### 3. Universal clean install

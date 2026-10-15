@@ -22,6 +22,10 @@ representation and resources belong to `VM.md`; instruction names and versioned
 encoding belong to `BYTECODE.md`. A mathematical definition does not by itself
 make a source feature available.
 
+Decimal number literals accept an optional `e` or `E` exponent with an optional
+sign and required digits, such as `1e-5` and `2.5E+3`. An incomplete exponent
+is a lexical error.
+
 ## Provenance expressions
 
 `evidence(value, "source")` and `assume(value, "proposition")` return the same
@@ -424,13 +428,16 @@ Finite unresolved values and guarded execution are explicit:
 let guard = possibility([true, false]);
 let result = 0;
 if (guard) { result = 10; } else { result = 20; }
-let selected = sample(result);
-let refined = observe(correlated, "x", 1);
+let law = joint correlated (x, y) with support:
+    [[1, 10, 0.5], [2, 20, 0.5]];
+let refined = observe(law, {"x": 1});
 ```
 
 Pure arithmetic, comparison, and function execution map over alternatives while
 preserving a shared dependency identifier. An unresolved `if` executes both
 branches into guarded environments and joins changed values as a path set.
+Paths from an unweighted guard remain unweighted, and `sample` on them returns
+`LANA_ERR_UNSUPPORTED_OPERATION`. A weighted guard retains its branch weights.
 Unresolved loop guards are rejected. Printing, host calls, task creation, and
 observation inside an unresolved branch fail before producing an effect.
 `condition` does not record an event; successful `observe` does. Path count is

@@ -1,5 +1,5 @@
-//! Runtime value model, mirroring `Value` in `vm/include/value.h` and
-//! `vm/c/value.c`.
+//! Runtime value model, mirroring `Value` in `6aacbde2f67f:vm/include/value.h` and
+//! `6aacbde2f67f:vm/c/value.c`.
 //!
 //! The C11 VM uses a tagged union with heap pointers and a mark-sweep GC. The
 //! Rust VM uses an owned/shared representation: `Arc` for shared heap objects,
@@ -65,7 +65,7 @@ pub struct VmError {
     pub function: String,
     pub operation: String,
     /// The resolution reason, matching `LanaResolutionReason` in
-    /// `vm/include/error.h`. `None` when the failure carries no resolution
+    /// `6aacbde2f67f:vm/include/error.h`. `None` when the failure carries no resolution
     /// detail.
     pub resolution_reason: u32,
     /// The number of remaining alternatives for an unresolved-value failure,
@@ -106,7 +106,7 @@ impl Default for VmError {
     }
 }
 
-/// The joint-law kind, matching `LanaJointKind` in `vm/include/value.h`.
+/// The joint-law kind, matching `LanaJointKind` in `6aacbde2f67f:vm/include/value.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum JointKind {
@@ -130,7 +130,7 @@ pub struct JointRow {
 }
 
 /// A named product-space law or view, mirroring `struct LanaJointState` in
-/// `vm/include/value.h`. Independent marginals live in `values`; a finite
+/// `6aacbde2f67f:vm/include/value.h`. Independent marginals live in `values`; a finite
 /// correlated law lives in `rows` (with `values` empty).
 #[derive(Debug, Clone)]
 pub struct JointState {
@@ -312,12 +312,12 @@ pub struct PathSet {
 #[derive(Debug, Clone)]
 pub struct PathAlternative {
     pub guard: bool,
-    pub weight: f64,
+    pub weight: Option<f64>,
     pub result: Value,
 }
 
 /// An algebraic data type value, mirroring `struct LanaAdt` in
-/// `vm/include/value.h`. The reserved variant `0xFFFFFFFF` is the built-in
+/// `6aacbde2f67f:vm/include/value.h`. The reserved variant `0xFFFFFFFF` is the built-in
 /// `unknown` value available to every ADT.
 #[derive(Debug, Clone)]
 pub struct Adt {
@@ -326,7 +326,7 @@ pub struct Adt {
 }
 
 /// A suspended generator frame (LIP-022 §2), mirroring `struct LanaGenerator`
-/// in `vm/include/value.h`. `registers` is the snapshot of the generator's
+/// in `6aacbde2f67f:vm/include/value.h`. `registers` is the snapshot of the generator's
 /// frame registers; register 0 is reserved for the generator value itself and
 /// is never part of the saved state.
 #[derive(Debug, Clone)]
@@ -338,7 +338,7 @@ pub struct Generator {
 }
 
 /// A suspended async frame (LIP-024 §5), mirroring `struct LanaFuture` in
-/// `vm/include/value.h`. `registers` is the snapshot of the async frame's
+/// `6aacbde2f67f:vm/include/value.h`. `registers` is the snapshot of the async frame's
 /// registers; register 0 is reserved for the future value itself and is never
 /// part of the saved state. `ready` is false while the future is suspended on
 /// an `OP_AWAIT`; the event loop only schedules futures with `ready == true`.
@@ -356,7 +356,7 @@ pub struct Future {
 }
 
 /// An immutable set of ordinary values (LIP-022 §1), mirroring `struct LanaSet`
-/// in `vm/include/value.h`. Membership is linear over `items` (no hash
+/// in `6aacbde2f67f:vm/include/value.h`. Membership is linear over `items` (no hash
 /// function), matching the C11 VM. `STATE`, `STATE_DIST`, and `Information` are
 /// not set members.
 #[derive(Debug)]
@@ -377,7 +377,7 @@ impl Set {
 }
 
 /// A compiled regular expression (LIP-021 §2), mirroring `struct LanaRegex` in
-/// `vm/include/value.h`: a Thompson NFA program plus its character classes.
+/// `6aacbde2f67f:vm/include/value.h`: a Thompson NFA program plus its character classes.
 /// No `Value` references inside, so it is shared immutably through `Arc`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegexOp {
@@ -412,7 +412,7 @@ pub struct Regex {
 }
 
 /// LIP-006 optimizer descriptor, mirroring `struct LanaOptimizer` in
-/// `vm/include/value.h`. `name` is "sgd" or "adam". For SGD, `learning_rate`
+/// `6aacbde2f67f:vm/include/value.h`. `name` is "sgd" or "adam". For SGD, `learning_rate`
 /// and `momentum` are used and the Adam fields are zero; for Adam,
 /// `learning_rate`, `beta1`, `beta2`, and `epsilon` are used and `momentum` is
 /// zero.
@@ -427,7 +427,7 @@ pub struct Optimizer {
 }
 
 /// LIP-006 training result, mirroring `struct LanaTrainingResult` in
-/// `vm/include/value.h`: the trained parameters plus the per-step history.
+/// `6aacbde2f67f:vm/include/value.h`: the trained parameters plus the per-step history.
 /// LIP-010 adds the model/loss function indices and the optimizer descriptor so
 /// an incremental `update` (or a reactive recomputation) can resume the
 /// optimizer from the last step map. LIP-014 adds the resolved dataset and the
@@ -444,7 +444,7 @@ pub struct TrainingResult {
 }
 
 /// LIP-009 inference algorithm descriptor, mirroring
-/// `struct LanaInferenceAlgorithm` in `vm/include/value.h`. `name` is "mcmc",
+/// `struct LanaInferenceAlgorithm` in `6aacbde2f67f:vm/include/value.h`. `name` is "mcmc",
 /// "vi", or "smc". For MCMC, `samples` and `burn_in` are used; for VI, `family`
 /// ("gaussian"/"mean_field") and `iterations` are used; for SMC, `samples` is
 /// the particle count. Unused fields are zero (or `None` for `family`).
@@ -457,7 +457,7 @@ pub struct InferenceAlgorithm {
     pub iterations: f64,
 }
 
-/// LIP-009 posterior, mirroring `struct LanaPosterior` in `vm/include/value.h`:
+/// LIP-009 posterior, mirroring `struct LanaPosterior` in `6aacbde2f67f:vm/include/value.h`:
 /// a distribution over parameters produced by `infer`. `mean` is the point
 /// estimate, `variance` the per-element uncertainty, `samples` the sample
 /// matrix (None for VI), `steps` the per-step provenance, and `seed` the RNG
@@ -472,7 +472,7 @@ pub struct Posterior {
 }
 
 /// LIP-015 lazy relational-algebra plan node, mirroring `struct LanaDataset` in
-/// `vm/include/value.h`. `op` selects the operator; `source` is the upstream
+/// `6aacbde2f67f:vm/include/value.h`. `op` selects the operator; `source` is the upstream
 /// plan (a `Lazy` value for `Source`, otherwise another `Dataset`). `function`
 /// is the predicate/transform function index for `Filter`/`Map`. `columns` is
 /// the column-name array for `Select`; `key` is the column name for
@@ -491,7 +491,7 @@ pub struct Dataset {
     pub aggregate: Value,
 }
 
-/// The dataset operator, matching `LanaDatasetOp` in `vm/include/value.h`.
+/// The dataset operator, matching `LanaDatasetOp` in `6aacbde2f67f:vm/include/value.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatasetOp {
     Source,
@@ -505,7 +505,7 @@ pub enum DatasetOp {
     Join,
 }
 
-/// A first-class tensor, mirroring `struct LanaTensor` in `vm/include/tensor.h`.
+/// A first-class tensor.
 ///
 /// `data` is a row-major buffer of `f64` values; for a complex tensor the real
 /// and imaginary parts are interleaved `[re, im, re, im, …]`, so the buffer
@@ -593,7 +593,7 @@ impl Tensor {
 /// The reserved `unknown` variant tag, matching the C11 `0xFFFFFFFF`.
 pub const ADT_UNKNOWN_VARIANT: u32 = 0xFFFF_FFFF;
 
-/// A forked task handle, mirroring `struct LanaTask` in `vm/include/vm.h`.
+/// A forked task handle, mirroring `struct LanaTask` in `6aacbde2f67f:vm/include/vm.h`.
 /// The handle is shared between the parent VM and the worker that runs the
 /// child VM: the worker writes the completion state, the parent reads it on
 /// `JOIN`. The child VM itself lives in the scheduler's queue, not here.
@@ -647,7 +647,7 @@ impl Task {
 }
 
 /// The reactive-node kind, matching `LanaReactiveKind` in
-/// `vm/include/value.h`.
+/// `6aacbde2f67f:vm/include/value.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum ReactiveKind {
@@ -676,7 +676,7 @@ pub struct ReactiveVersion {
 }
 
 /// A reactive dependency node, matching `struct LanaReactive` in
-/// `vm/include/value.h`. Inputs reference pre-existing nodes, but captured
+/// `6aacbde2f67f:vm/include/value.h`. Inputs reference pre-existing nodes, but captured
 /// values and history can contain cyclic containers. The node is wrapped in a
 /// `Mutex` because `reactive_recompute_transaction` mutates `current`,
 /// `history`, and `revision` in place, and a value graph carrying a reactive
@@ -699,7 +699,7 @@ pub struct Reactive {
     pub is_training_data: bool,
 }
 
-/// A claim, matching `struct LanaClaim` in `vm/include/value.h`.
+/// A claim, matching `struct LanaClaim` in `6aacbde2f67f:vm/include/value.h`.
 #[derive(Debug, Clone)]
 pub struct Claim {
     pub value: Value,
@@ -1038,7 +1038,7 @@ impl Value {
         Self { kind: ValueKind::Dataset(dataset), derivation: None, reactive: None, claim: None, planned_effect: None }
     }
 
-    /// The stable type tag, matching `ValueType` in `vm/include/value.h`.
+    /// The stable type tag, matching `ValueType` in `6aacbde2f67f:vm/include/value.h`.
     pub fn value_type(&self) -> ValueType {
         match self.kind {
             ValueKind::Null => ValueType::Null,
@@ -1082,7 +1082,7 @@ impl Value {
         }
     }
 
-    /// The stable type name, matching `lana_value_type_name` in `vm/c/value.c`.
+    /// The stable type name, matching `lana_value_type_name` in `6aacbde2f67f:vm/c/value.c`.
     pub fn type_name(&self) -> &'static str {
         match self.kind {
             ValueKind::Null => "null",
@@ -1263,7 +1263,7 @@ impl Value {
         Ok(())
     }
 
-    /// Render the value exactly as `lana_value_print` in `vm/c/value.c`.
+    /// Render the value exactly as `lana_value_print` in `6aacbde2f67f:vm/c/value.c`.
     pub fn print(&self) -> String {
         self.try_print(usize::MAX).unwrap_or_else(|_| "<out-of-memory>".into())
     }
@@ -1508,7 +1508,7 @@ impl From<&lana_bytecode::Value> for Value {
     }
 }
 
-/// Recursively render a tensor, mirroring `tensor_print_rec` in `vm/c/value.c`.
+/// Recursively render a tensor, mirroring `tensor_print_rec` in `6aacbde2f67f:vm/c/value.c`.
 /// Nested `[...]` with `, ` separators; real elements use `%.12g`, complex
 /// elements render as `[re, im]` with `%.12g` each. A 0-d tensor prints its
 /// single scalar (or `[re, im]` pair) with no brackets.
