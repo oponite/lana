@@ -141,3 +141,12 @@ Prefer existing patterns before adding dependencies.
 - [Governance](GOVERNANCE.md)
 - [Versioning](VERSIONING.md)
 - [LIP process](docs/lip/README.md)
+
+## Release installers
+
+Render version-pinned installer assets with
+`python3 tools/build.py installers --output target/installers` and test them
+with `python3 tests/run.py --no-build --filter lana_installers`.
+Do not publish the templates directly. Native Linux x64/ARM64 builds bundle
+SQLite; Windows x64/ARM64 builds also use a static C runtime. See
+[installer behavior and recovery](docs/dev/INSTALLERS.md).

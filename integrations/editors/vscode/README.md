@@ -11,7 +11,7 @@ npm test
 npm run package
 ```
 
-Install `lana-language-support-4.1.0.vsix` using VS Code's **Extensions: Install
+Install `lana-language-support-4.1.1.vsix` using VS Code's **Extensions: Install
 from VSIX...** command, then open a `.lana` file. Syntax highlighting is included.
 Set `lana.server.path` to the absolute path of your built executable (for example,
 `/path/to/lana/target/lana/bin/lana`) when `lana` is not on PATH. Build that executable

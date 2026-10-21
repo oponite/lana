@@ -2,6 +2,7 @@
   {"name": "native_contiguous_call_arguments", "command": ["{cli}", "run", "{root}/tests/regression/contiguous_call_arguments.lana"], "contains": ["CONTIGUOUS_ARGUMENTS_PASS"]},
   {"name": "lana_benchmark_method", "command": ["{python}", "{root}/tests/test_benchmark.py"], "contains": ["BENCHMARK_METHOD_PASS"]},
   {"name": "lana_binary_package", "command": ["{python}", "{root}/tests/test_binary_package.py", "{cli}", "{compiler}"], "contains": ["BINARY_PACKAGE_PASS"]},
+  {"name": "lana_installers", "command": ["{python}", "{root}/tests/test_installers.py", "{cli}", "{compiler}"], "contains": ["INSTALLERS_PASS"], "timeout": 240},
   {"name": "lana_release_tap_guard", "command": ["{python}", "{root}/tests/test_release_tap.py"], "contains": ["RELEASE_TAP_PASS"]},
   {"name": "lana_publication_failpoints", "command": ["{python}", "{root}/tests/run_publication_failpoints.py", "{cli}", "{compiler}"], "contains": ["PUBLICATION_FAILPOINTS_PASS", "ISOLATED_FAILPOINTS_PASS"], "timeout": 600},
   {"name": "native_http_headers", "command": ["python3", "{root}/tests/test_http_live.py", "{cli}"]},

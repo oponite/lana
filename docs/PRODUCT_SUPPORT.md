@@ -1,4 +1,21 @@
-# Lana 4.1 support matrix
+# Lana 4.1.1 support matrix
+
+## Release installation
+
+| Platform | Release bundle | Native release check |
+| --- | --- | --- |
+| macOS Apple Silicon and Intel | Universal tar/gzip archive and shell installer | Both slices execute outside the checkout. |
+| Windows x64 | MSVC ZIP archive and PowerShell installer | Windows x64 build, compiler/project tests, and installation. |
+| Windows ARM64 | Native MSVC ZIP archive and PowerShell installer | Windows ARM64 build, compiler/project tests, and installation. |
+| Linux x64 and ARM64 (glibc 2.35+) | Native tar/gzip archives and shell installer | Ubuntu 22.04 x64/ARM64 build, compiler/project tests, and installation. |
+
+Installer availability starts with release 4.1.1. Linux and Windows support
+requires passing the native jobs for the exact candidate; adding a workflow
+alone does not establish qualification. Linux binaries do not support musl. These
+checks cover the CLI/compiler/project installation workflow, not every optional
+integration or GPU backend. Signing and notarization remain deferred.
+
+## Runtime interfaces
 
 | Interface | Status | Bytecode contract |
 | --- | --- | --- |

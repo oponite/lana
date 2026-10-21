@@ -68,9 +68,12 @@ substitute for the tag workflow.
 
 - [ ] The protected tag points to the candidate SHA. The workflow reports the same version as `VERSION`.
 - [ ] The Linux release job passes its build, regression, Rust workspace, fuzz, and integration checks.
+- [ ] Linux x64/ARM64 jobs qualify the packaged installer on Ubuntu 22.04 with
+      bundled SQLite and no missing shared-library dependencies.
 - [ ] The macOS release job builds and installs both architecture slices.
 - [ ] The downloaded macOS archive passes SHA-256 verification; both slices report their version, and the copied example runs.
 - [ ] The source archive passes SHA-256 verification, builds and installs in a clean directory, and runs the example.
+- [ ] Both rendered installers and all five platform archives are checksummed.
 - [ ] The release includes `SHA256SUMS` and a Homebrew formula with the source archive digest.
 - [ ] The tap job verifies published assets, audits and source-installs that exact
       formula on macOS, and either updates `oponite/oponite` or verifies its

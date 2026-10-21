@@ -4,34 +4,36 @@
 
 ## Install
 
-You need Git, Rust/Cargo, Python 3.11 or newer, and a native linker to build Lana. The installed `lana` command does not require Python.
+macOS (Apple Silicon and Intel) and Linux (x64 and ARM64, glibc 2.35+):
 
-1. Download and install Lana:
-
-```bash
-git clone https://github.com/oponite/lana.git
-cd lana
-python3 tools/build.py install --prefix "$HOME/.local"
+```sh
+curl -fsSL https://github.com/oponite/lana/releases/latest/download/install.sh | sh
 ```
 
-2. Add Lana to your shell's `PATH`, then check the installation:
+Windows (x64 and ARM64), in Windows PowerShell 5.1 or PowerShell 7:
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-lana version
+```powershell
+irm https://github.com/oponite/lana/releases/latest/download/install.ps1 | iex
 ```
 
-3. Create and run your first program:
+The installers download prebuilt Lana, its compiler, and standard library;
+check the archive checksum; and configure your PATH. No Rust, Python, or
+administrator access is needed. Open a new terminal, then run `lana version`.
+Rerun the same command to upgrade. Releases remain unsigned.
 
-```bash
+```sh
 lana new hello-lana
 cd hello-lana
 lana run
 lana test
 ```
 
-See [Contributing](CONTRIBUTING.md) for build, install, test, universal macOS,
-and packaging instructions.
+Optional Homebrew: `brew trust --formula oponite/oponite/lana`, then
+`brew install oponite/oponite/lana`.
+
+See [installer behavior and recovery](docs/dev/INSTALLERS.md), the
+[platform support matrix](docs/PRODUCT_SUPPORT.md), or
+[Contributing](CONTRIBUTING.md) to build Lana itself.
 
 ## Integrations
 

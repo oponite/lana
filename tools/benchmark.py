@@ -112,7 +112,7 @@ def main():
     versions = [subprocess.check_output([cli, 'version'], text=True).strip() for cli in (old_cli, new_cli)]
     baseline_3 = versions[0].startswith('Lana 3.0.2 ')
     baseline_4 = versions[0].startswith('Lana 4.0.0 ')
-    assert (baseline_3 or baseline_4) and versions[1].startswith('Lana 4.1.0 '), versions
+    assert (baseline_3 or baseline_4) and versions[1].startswith('Lana ' + (new_root / 'VERSION').read_text().strip() + ' '), versions
     if baseline_3 and args.baseline_library is None:
         parser.error('--baseline-library is required for Lana 3.0.2')
     old_config = {'root': str(old_root), 'cli': str(old_cli)}

@@ -1,6 +1,14 @@
 # Changelog
 
-## 4.1.0 (candidate)
+## 4.1.1
+
+- Add checksum-verified release installers for macOS, Linux x64/ARM64, and
+  Windows x64/ARM64, with safe upgrades and installation rollback.
+- Bundle SQLite on Linux and Windows and the Windows C runtime in release
+  binaries. Keep Homebrew as an optional installation method.
+- Keep source-build instructions in the contributor guide.
+
+## 4.1.0
 
 - Add process-local persistent live programs with explicit named Information
   registration, transactional host observation, inspection, pause/resume, and

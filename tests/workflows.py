@@ -10,7 +10,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from build import install_files
+from build import install_files, EXECUTABLE
 
 
 def run_process(command, *, timeout, **kwargs):
@@ -34,12 +34,12 @@ def bundle_compiler(destination):
     modules = ["lexer", "syntax", "parser", "resolver", "ir", "emitter", "main"]
     texts = []
     for module in modules:
-        text = (ROOT / "compiler" / (module + ".lana")).read_text()
+        text = (ROOT / "compiler" / (module + ".lana")).read_text(encoding='utf-8')
         text = re.sub(r'import[ \t]+"[^"]+"[ \t]+as[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*;[ \t]*\r?\n', '', text)
         for alias in modules[:-1]:
             text = re.sub(r'(^|[^A-Za-z0-9_])' + alias + r'\.', r'\1', text)
         texts.append(text + "\n")
-    destination.write_text(''.join(texts))
+    destination.write_text(''.join(texts), encoding='utf-8', newline='\n')
 
 
 def run(name, cli, compiler, work, env):
@@ -127,11 +127,11 @@ def run(name, cli, compiler, work, env):
         assert "BREAK line=4" in response and response.count("BREAK line=") == 2 and "frames=1" in response, response
     elif name == "install":
         prefix = install_files(cli, compiler, work / "install-prefix")
-        installed = prefix / "bin/lana"
+        installed = prefix / "bin" / EXECUTABLE
         child_env = dict(env, PATH=str(prefix / 'bin') + os.pathsep + env.get('PATH', ''))
         for key in ["LANA_COMPILER_LABC", "LANA_STDLIB_DIR"]:
             child_env.pop(key, None)
-        result = subprocess.run(['bash', str(ROOT / 'scripts/verify-install.sh')], cwd=work,
+        result = subprocess.run([sys.executable, str(ROOT / 'tests/verify_install.py'), '--prefix', str(prefix)], cwd=work,
                                 env=child_env, text=True, capture_output=True, timeout=60)
         assert result.returncode == 0, result.stdout + result.stderr
         # Imports must use the installed standard library, without the checkout as cwd.
