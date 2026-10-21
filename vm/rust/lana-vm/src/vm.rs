@@ -767,6 +767,36 @@ fn normalize_virtual_path(path: &str) -> String {
     result
 }
 
+fn compiler_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        // Compiler module IDs use slashes; retain UNC roots after canonicalization.
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return format!("//{}", unc.replace('\\', "/"));
+        }
+        text.strip_prefix(r"\\?\").unwrap_or(&text).replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    text.into_owned()
+}
+
+#[cfg(test)]
+mod compiler_path_tests {
+    use super::compiler_path;
+    use std::path::Path;
+
+    #[test]
+    fn module_paths_keep_native_roots() {
+        #[cfg(windows)] {
+            assert_eq!(compiler_path(Path::new(r"\\?\C:\a b\main.lana")), "C:/a b/main.lana");
+            assert_eq!(compiler_path(Path::new(r"\\?\UNC\server\share\main.lana")), "//server/share/main.lana");
+        }
+        #[cfg(not(windows))]
+        assert_eq!(compiler_path(Path::new(r"/tmp/a\b/main.lana")), r"/tmp/a\b/main.lana");
+    }
+}
+
 /// A queued task: the child VM plus the handle the worker writes the result
 /// to. Owned by the scheduler's queue; the worker takes it out and runs the
 /// child to completion.
@@ -15785,7 +15815,7 @@ impl<'a> Vm<'a> {
                 Ok(path) if path.starts_with(root.join("src")) && path.is_file() => path,
                 _ => return LanaError::Schema,
             };
-            return self.string_output(&path.to_string_lossy(), out);
+            return self.string_output(&compiler_path(&path), out);
         }
         // The virtual filesystem has no real directories, so `canonicalize`
         // (which needs the host filesystem) is replaced by a pure lexical
@@ -15809,24 +15839,27 @@ impl<'a> Vm<'a> {
                 Err(_) => return LanaError::Io,
             };
             if !self.package_path_allowed(&resolved) { return LanaError::UnsupportedValue; }
-            return self.string_output(&resolved.to_string_lossy(), out);
+            return self.string_output(&compiler_path(&resolved), out);
         }
-        let candidate = match base.rfind('/') {
-            Some(index) => format!("{}/{relative}", &base[..index]),
-            None => format!("./{relative}"),
-        };
+        let candidate = std::path::Path::new(base).parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| {
+                let path = std::path::Path::new(base);
+                if path.has_root() { path } else { std::path::Path::new(".") }
+            }).join(relative);
         let resolved = match std::fs::canonicalize(&candidate) {
             Ok(resolved) => resolved,
             Err(_) => return LanaError::Io,
         };
         if !self.package_path_allowed(&resolved) { return LanaError::UnsupportedValue; }
+        let native_base = std::fs::canonicalize(base).unwrap_or_else(|_| base.into());
         for root in self.package_paths.values() {
             let root = std::path::Path::new(root);
-            if std::path::Path::new(base).starts_with(root) && !resolved.starts_with(root) {
+            if native_base.starts_with(root) && !resolved.starts_with(root) {
                 return LanaError::Schema;
             }
         }
-        self.string_output(&resolved.to_string_lossy(), out)
+        self.string_output(&compiler_path(&resolved), out)
     }
 
     fn json_parse(&mut self, text: &str, out: &mut Value) -> LanaError {

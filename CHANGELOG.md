@@ -6,6 +6,7 @@
   Windows x64/ARM64, with safe upgrades and installation rollback.
 - Bundle SQLite on Linux and Windows and the Windows C runtime in release
   binaries. Keep Homebrew as an optional installation method.
+- Correct Windows compiler path normalization and compiler discovery through PATH.
 - Keep source-build instructions in the contributor guide.
 
 ## 4.1.0

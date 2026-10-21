@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -44,6 +45,14 @@ with tempfile.TemporaryDirectory(prefix="lana-binary-package-") as directory:
         env.pop(key, None)
     result = subprocess.run([installed / "bin" / EXECUTABLE, "run", check], cwd=work, env=env, text=True, capture_output=True, check=True)
     assert result.stdout.strip() == "42", result.stdout
+    bare = work / 'bare-cli'
+    bare.mkdir()
+    shutil.copy2(cli, bare / EXECUTABLE)
+    path_source = work / 'path-compiler.lana'
+    path_source.write_text('assert(2 + 2 == 4, "compiler found through PATH");\n')
+    path_env = dict(env, PATH=str(prefix / 'bin') + os.pathsep + env.get('PATH', ''))
+    subprocess.run([bare / EXECUTABLE, 'run', path_source], cwd=work, env=path_env,
+                   text=True, capture_output=True, check=True)
     for relative in ["bin/lana-compiler.labc", "share/lana/stdlib/core.lana", "share/doc/lana/LICENSE"]:
         asset = prefix / relative
         saved = asset.read_bytes()

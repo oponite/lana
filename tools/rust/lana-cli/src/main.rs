@@ -208,9 +208,9 @@ fn find_compiler() -> Option<PathBuf> {
             }
         }
     }
-    if let Ok(path) = std::env::var("PATH") {
-        for entry in path.split(':') {
-            let dir = if entry.is_empty() { Path::new(".") } else { Path::new(entry) };
+    if let Some(path) = std::env::var_os("PATH") {
+        for entry in std::env::split_paths(&path) {
+            let dir = if entry.as_os_str().is_empty() { Path::new(".") } else { entry.as_path() };
             let candidate = dir.join("lana-compiler.labc");
             if candidate.exists() {
                 return Some(candidate);
