@@ -699,6 +699,7 @@ fn write_text_atomic_with_sync(
 ) -> Result<(), (std::io::Error, bool)> {
     let name = path.file_name().ok_or_else(|| (std::io::Error::other("missing file name"), false))?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    #[cfg(not(windows))]
     let directory = std::fs::File::open(parent).map_err(|error| (error, false))?;
     let mut temporary_name = name.to_os_string();
     temporary_name.push(format!(".lana-{}-{}.tmp", std::process::id(), NEXT_ATOMIC_WRITE.fetch_add(1, Ordering::Relaxed)));
@@ -715,6 +716,9 @@ fn write_text_atomic_with_sync(
         sync_file(&file).map_err(|error| (error, false))?;
         drop(file);
         std::fs::rename(&temporary, path).map_err(|error| (error, false))?;
+        // Windows flushes replacement-file metadata instead of a directory handle.
+        #[cfg(windows)]
+        let directory = std::fs::OpenOptions::new().write(true).open(path).map_err(|error| (error, true))?;
         sync_parent(&directory).map_err(|error| (error, true))
     })();
     if result.is_err() { let _ = std::fs::remove_file(&temporary); }

@@ -92,7 +92,7 @@ The Rust embedding API returns `Result<RootedValue, LanaError>`. A rooted handle
 
 The self-hosted compiler runs as verified Lana bytecode within the compiler limits. Lana code performs lexing, parsing, resolution, IR lowering, emission, import-cycle checks, and call remapping. Rust host calls provide OS paths and atomic file operations. A clean build assembles the checked textual bootstrap artifact and needs no Python runtime.
 
-Compilation emits and verifies a complete chunk in a sibling file. It syncs that file, atomically replaces the destination, then syncs the parent directory. Parse, verification, cancellation, OOM, and limit errors occur before replacement and report the applicable code with a source span or bytecode offset when available. If the final directory sync fails, use the uncertain-durability rule above.
+Compilation emits and verifies a complete chunk in a sibling file. It syncs that file, atomically replaces the destination, then syncs the parent directory on Unix or flushes the replacement file metadata on Windows. Parse, verification, cancellation, OOM, and limit errors occur before replacement and report the applicable code with a source span or bytecode offset when available. If the final directory sync fails, use the uncertain-durability rule above.
 
 `lana debug` uses an instruction hook and the deterministic source line stored in each LABC instruction. Stops show the active function and frame count. Step, continue, quit, and low-level trace use that same mapping. Defaults and initializers use owned frames, so debugging cannot publish an incomplete object.
 
@@ -137,7 +137,7 @@ Walk-forward evaluation validates timestamps, feature availability, IDs, options
 
 Package packing uses deterministic archives. `add` verifies the compressed digest before extraction and rejects links, unsafe headers, duplicate names, path traversal, oversize files, and excessive dependency closure. It stores an immutable cache by archive SHA-256. A failed add may leave unused cache data, but imports require a validated lock entry. No fetched code runs during add.
 
-Lock replacement stages a sibling file, syncs it, renames it atomically, and syncs the directory. Build uses the lock and cache without network access. It checks the archive digest again and resolves only recorded package identities and paths. A changed release asset or checksum cannot replace a locked digest silently. Uncertain directory sync follows the shared retry rule above.
+Lock replacement stages a sibling file, syncs it, renames it atomically, and syncs the directory on Unix or flushes the replacement file metadata on Windows. Build uses the lock and cache without network access. It checks the archive digest again and resolves only recorded package identities and paths. A changed release asset or checksum cannot replace a locked digest silently. Uncertain directory sync follows the shared retry rule above.
 
 ## Samples and failures
 
