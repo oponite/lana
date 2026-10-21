@@ -1,8 +1,9 @@
 # Bytecode fuzz testing
 
-This test feeds generated and mutated bytecode into the Lana Rust loader and
-verifier. It checks that Lana rejects malformed files without crashes, hangs,
-or memory errors. The test does not execute the bytecode in the VM.
+The `lana_bytecode` target feeds generated and mutated bytecode into the Rust
+loader and verifier. The `lana_execution` target also runs verified inputs in
+the VM, restricted to opcodes without host effects, output, or task creation.
+It uses a 64 MiB memory limit and a 10,000-instruction limit.
 
 ## Run the test
 
@@ -24,6 +25,7 @@ The commands require Rust and `rustup`. Run them from the Lana repository root.
 
    ```bash
    RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_bytecode --fuzz-dir fuzz -- -max_total_time=600 -timeout=5
+   RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_execution --fuzz-dir fuzz -- -max_total_time=600 -timeout=5
    ```
 
 The `RUSTC` setting explicitly selects the nightly compiler.
@@ -47,10 +49,11 @@ The folder contains the test code and saved inputs:
 
 | Path | Purpose |
 | --- | --- |
-| `fuzz_targets/lana_bytecode.rs` | Passes each input to `lana_fuzz::check`, which calls the loader and verifier. |
+| `fuzz_targets/lana_bytecode.rs` | Passes each input to the loader and verifier. |
+| `fuzz_targets/lana_execution.rs` | Runs verified, effect-free bytecode with VM resource limits. |
 | `seeds/` | Contains minimal assembly examples for LABC versions 1–5. |
-| `corpus/lana_bytecode/` | Contains bytecode inputs that the fuzzer reuses and mutates. |
-| `artifacts/lana_bytecode/` | Contains inputs saved after crashes, timeouts, or other detected problems. |
+| `corpus/lana_bytecode/`, `corpus/lana_execution/` | Contain bytecode inputs that the fuzzers reuse and mutate. |
+| `artifacts/lana_bytecode/`, `artifacts/lana_execution/` | Contain inputs saved after crashes, timeouts, or other detected problems. |
 | `target/` | Contains generated build files. |
 | `Cargo.toml` and `Cargo.lock` | Define the fuzz target and its dependencies. |
 
@@ -65,5 +68,5 @@ cargo run -p lana-cli -- asm fuzz/seeds/v2.lasm -o fuzz/corpus/lana_bytecode/v2
 
 The same command applies to versions 1–5 with the corresponding filenames.
 
-After investigation, keep minimized crashing inputs in `corpus/lana_bytecode/`
+After investigation, keep minimized crashing inputs in the relevant `corpus/`
 as regression inputs. CI uploads files from `artifacts/` after a failed fuzz run.

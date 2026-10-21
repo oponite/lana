@@ -178,6 +178,7 @@ impl Frame {
 /// each statement start), so frames must be sized from the true max index.
 fn instruction_max_register(ins: &Instruction) -> usize {
     use OpCode::*;
+    if matches!(ins.opcode, Nop | Halt | TaskgroupEnter | TaskgroupExit) { return 0; }
     // `LANA_NO_OPERAND` (u32::MAX) marks an unused operand; skip it.
     let reg = |operand: u32| -> Option<usize> {
         if operand == u32::MAX {
@@ -232,7 +233,8 @@ fn instruction_max_register(ins: &Instruction) -> usize {
             }
         }
     }
-    max
+    // Verification bounds real registers; ignored fields must not enlarge frames.
+    max.min(LANA_MAX_REGISTERS as usize - 1)
 }
 
 /// Per-function frame size (max register index + 1), keyed by function index.
@@ -699,6 +701,7 @@ fn write_text_atomic_with_sync(
 ) -> Result<(), (std::io::Error, bool)> {
     let name = path.file_name().ok_or_else(|| (std::io::Error::other("missing file name"), false))?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    #[cfg(not(windows))]
     let directory = std::fs::File::open(parent).map_err(|error| (error, false))?;
     let mut temporary_name = name.to_os_string();
     temporary_name.push(format!(".lana-{}-{}.tmp", std::process::id(), NEXT_ATOMIC_WRITE.fetch_add(1, Ordering::Relaxed)));
@@ -715,6 +718,9 @@ fn write_text_atomic_with_sync(
         sync_file(&file).map_err(|error| (error, false))?;
         drop(file);
         std::fs::rename(&temporary, path).map_err(|error| (error, false))?;
+        // Windows flushes replacement-file metadata instead of a directory handle.
+        #[cfg(windows)]
+        let directory = std::fs::OpenOptions::new().write(true).open(path).map_err(|error| (error, true))?;
         sync_parent(&directory).map_err(|error| (error, true))
     })();
     if result.is_err() { let _ = std::fs::remove_file(&temporary); }
@@ -765,6 +771,36 @@ fn normalize_virtual_path(path: &str) -> String {
         result.push('.');
     }
     result
+}
+
+fn compiler_path(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        // Compiler module IDs use slashes; retain UNC roots after canonicalization.
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return format!("//{}", unc.replace('\\', "/"));
+        }
+        text.strip_prefix(r"\\?\").unwrap_or(&text).replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    text.into_owned()
+}
+
+#[cfg(test)]
+mod compiler_path_tests {
+    use super::compiler_path;
+    use std::path::Path;
+
+    #[test]
+    fn module_paths_keep_native_roots() {
+        #[cfg(windows)] {
+            assert_eq!(compiler_path(Path::new(r"\\?\C:\a b\main.lana")), "C:/a b/main.lana");
+            assert_eq!(compiler_path(Path::new(r"\\?\UNC\server\share\main.lana")), "//server/share/main.lana");
+        }
+        #[cfg(not(windows))]
+        assert_eq!(compiler_path(Path::new(r"/tmp/a\b/main.lana")), r"/tmp/a\b/main.lana");
+    }
 }
 
 /// A queued task: the child VM plus the handle the worker writes the result
@@ -15785,7 +15821,7 @@ impl<'a> Vm<'a> {
                 Ok(path) if path.starts_with(root.join("src")) && path.is_file() => path,
                 _ => return LanaError::Schema,
             };
-            return self.string_output(&path.to_string_lossy(), out);
+            return self.string_output(&compiler_path(&path), out);
         }
         // The virtual filesystem has no real directories, so `canonicalize`
         // (which needs the host filesystem) is replaced by a pure lexical
@@ -15809,24 +15845,27 @@ impl<'a> Vm<'a> {
                 Err(_) => return LanaError::Io,
             };
             if !self.package_path_allowed(&resolved) { return LanaError::UnsupportedValue; }
-            return self.string_output(&resolved.to_string_lossy(), out);
+            return self.string_output(&compiler_path(&resolved), out);
         }
-        let candidate = match base.rfind('/') {
-            Some(index) => format!("{}/{relative}", &base[..index]),
-            None => format!("./{relative}"),
-        };
+        let candidate = std::path::Path::new(base).parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| {
+                let path = std::path::Path::new(base);
+                if path.has_root() { path } else { std::path::Path::new(".") }
+            }).join(relative);
         let resolved = match std::fs::canonicalize(&candidate) {
             Ok(resolved) => resolved,
             Err(_) => return LanaError::Io,
         };
         if !self.package_path_allowed(&resolved) { return LanaError::UnsupportedValue; }
+        let native_base = std::fs::canonicalize(base).unwrap_or_else(|_| base.into());
         for root in self.package_paths.values() {
             let root = std::path::Path::new(root);
-            if std::path::Path::new(base).starts_with(root) && !resolved.starts_with(root) {
+            if native_base.starts_with(root) && !resolved.starts_with(root) {
                 return LanaError::Schema;
             }
         }
-        self.string_output(&resolved.to_string_lossy(), out)
+        self.string_output(&compiler_path(&resolved), out)
     }
 
     fn json_parse(&mut self, text: &str, out: &mut Value) -> LanaError {
@@ -19668,6 +19707,27 @@ mod tests {
         assert!(matches!(copied.kind, ValueKind::Kernel(_)));
         let duplicate_domain = vm.array_value(vec![member.clone(), member]).unwrap();
         assert_eq!(vm.core_kernel_identity(&[duplicate_domain], &mut Value::null()), LanaError::InvalidParameters);
+    }
+
+    #[test]
+    fn ignored_operands_cannot_enlarge_function_frames() {
+        let mut chunk = assembler::assemble(
+            ".function main 0 2\nCALL helper R0 0 R1\nRETURN R1\n.function helper 0 1\nNOP\nLOAD_CONST R0 7\nRETURN R0\n",
+        ).unwrap();
+        for instruction in &mut chunk.code {
+            if instruction.opcode == OpCode::Nop { instruction.a = u32::MAX - 1; }
+            if matches!(instruction.opcode, OpCode::Nop | OpCode::Return) {
+                instruction.b = u32::MAX - 1;
+                instruction.c = u32::MAX - 1;
+                instruction.imm = u32::MAX - 1;
+            }
+        }
+        assert!(lana_bytecode::verifier::verify(&chunk).is_ok());
+        assert!(compute_max_registers(&chunk).iter().all(|count| *count <= LANA_MAX_REGISTERS as usize));
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(64 * 1024 * 1024).unwrap();
+        assert_eq!(vm.run(), LanaError::Ok);
+        assert_eq!(vm.result().unwrap().print(), "7");
     }
 
     #[test]

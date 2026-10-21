@@ -2,15 +2,17 @@
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
 import tarfile
 import tempfile
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from build import install_files
+from build import install_files, EXECUTABLE
 
 cli = Path(sys.argv[1]).resolve()
 compiler = Path(sys.argv[2]).resolve()
@@ -22,12 +24,15 @@ with tempfile.TemporaryDirectory(prefix="lana-binary-package-") as directory:
     install_files(cli, compiler, prefix)
     assert not stale.exists(), "reinstall retained a removed standard-library module"
     output = work / "lana.tar.gz"
-    result = subprocess.run(["sh", ROOT / "package.sh", prefix, output], text=True, capture_output=True, check=True)
+    def package(destination, check=True):
+        return subprocess.run([sys.executable, ROOT / "tools/build.py", "package", "--from", prefix, "--output", destination],
+                              text=True, capture_output=True, check=check)
+    result = package(output)
     report = json.loads(result.stdout)
     assert report["sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
     old = output.read_bytes()
     again = work / "again.tar.gz"
-    subprocess.run(["sh", ROOT / "package.sh", prefix, again], capture_output=True, check=True)
+    package(again)
     assert again.read_bytes() == old, "same installed prefix produced different archive bytes"
     with tarfile.open(output) as archive:
         archive.extractall(work / "unpacked", filter="data")
@@ -38,15 +43,34 @@ with tempfile.TemporaryDirectory(prefix="lana-binary-package-") as directory:
     env = dict(os.environ)
     for key in ["LANA_COMPILER_LABC", "LANA_STDLIB_DIR"]:
         env.pop(key, None)
-    result = subprocess.run([installed / "bin/lana", "run", check], cwd=work, env=env, text=True, capture_output=True, check=True)
+    result = subprocess.run([installed / "bin" / EXECUTABLE, "run", check], cwd=work, env=env, text=True, capture_output=True, check=True)
     assert result.stdout.strip() == "42", result.stdout
+    bare = work / 'bare-cli'
+    bare.mkdir()
+    shutil.copy2(cli, bare / EXECUTABLE)
+    path_source = work / 'path-compiler.lana'
+    path_source.write_text('assert(2 + 2 == 4, "compiler found through PATH");\n')
+    path_env = dict(env, PATH=str(prefix / 'bin') + os.pathsep + env.get('PATH', ''))
+    subprocess.run([bare / EXECUTABLE, 'run', path_source], cwd=work, env=path_env,
+                   text=True, capture_output=True, check=True)
     for relative in ["bin/lana-compiler.labc", "share/lana/stdlib/core.lana", "share/doc/lana/LICENSE"]:
         asset = prefix / relative
         saved = asset.read_bytes()
         asset.unlink()
-        failed = subprocess.run(["sh", ROOT / "package.sh", prefix, output], text=True, capture_output=True)
+        failed = package(output, check=False)
         assert failed.returncode != 0 and "missing installation asset" in failed.stderr, failed
         assert output.read_bytes() == old
         asset.write_bytes(saved)
+    zipped = work / "lana.zip"
+    package(zipped)
+    zip_bytes = zipped.read_bytes()
+    package(zipped)
+    assert zipped.read_bytes() == zip_bytes, "ZIP output is not reproducible"
+    with zipfile.ZipFile(zipped) as archive:
+        assert f"bin/{EXECUTABLE}" in archive.namelist()
+        archive.extractall(work / "unzipped")
+    result = subprocess.run([work / "unzipped/bin" / EXECUTABLE, "version"], text=True, capture_output=True, check=True) if os.name == "nt" else None
+    if result:
+        assert (ROOT / "VERSION").read_text().strip() in result.stdout
     assert not list(work.glob(".lana-package-*"))
 print("BINARY_PACKAGE_PASS")

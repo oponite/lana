@@ -8,6 +8,12 @@ permissions:
   contents: read
 
 jobs:
+  linux-distribution:
+    uses: ./.github/workflows/linux.yml
+
+  windows:
+    uses: ./.github/workflows/windows.yml
+
   linux:
     name: Release gates (Linux)
     runs-on: ubuntu-latest
@@ -35,6 +41,7 @@ jobs:
           rustup run nightly cargo install cargo-fuzz --version 0.13.2 --locked
           cd fuzz
           RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_bytecode -- -max_total_time=600 -timeout=5
+          RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_execution -- -max_total_time=600 -timeout=5
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
@@ -111,10 +118,11 @@ jobs:
           mkdir "$prefix"
           tar -C "$prefix" -xzf "$artifact_dir/$archive"
           python3 tests/verify_install.py --prefix "$prefix" --architecture arm64 --architecture x86_64
+          python3 tests/test_installers.py "$prefix/bin/lana" "$prefix/bin/lana-compiler.labc" --archive "$artifact_dir/$archive"
 
   publish:
     name: Publish GitHub Release
-    needs: [linux, verify-macos-artifact]
+    needs: [linux, verify-macos-artifact, windows, linux-distribution]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -131,14 +139,25 @@ jobs:
         with:
           name: lana-macos-universal
           path: ${{ runner.temp }}/lana-release-files
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: lana-windows-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/lana-release-files
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: lana-linux-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/lana-release-files
       - name: Build source archive and checksums
         run: |
           version="$EXPECTED_VERSION"
           git archive --format=tar.gz --prefix="lana-$version/" --output="$RUNNER_TEMP/lana-release-files/lana-$version-source.tar.gz" "$GITHUB_SHA"
           rm "$RUNNER_TEMP/lana-release-files/lana-$version-macos-universal.tar.gz.sha256"
+          python3 tools/build.py installers --output "$RUNNER_TEMP/lana-release-files"
           (
             cd "$RUNNER_TEMP/lana-release-files"
-            sha256sum *.tar.gz > SHA256SUMS
+            sha256sum *.tar.gz *.zip install.sh install.ps1 > SHA256SUMS
             sha256sum -c SHA256SUMS
           )
       - name: Generate Homebrew formula artifact
@@ -168,6 +187,12 @@ jobs:
             (cd "$existing" && sha256sum -c SHA256SUMS)
             cmp "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-source.tar.gz" "$existing/lana-$EXPECTED_VERSION-source.tar.gz"
             cmp "$RUNNER_TEMP/lana-release-files/lana.rb" "$existing/lana.rb"
+            cmp "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-linux-x64.tar.gz" "$existing/lana-$EXPECTED_VERSION-linux-x64.tar.gz"
+            cmp "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-linux-arm64.tar.gz" "$existing/lana-$EXPECTED_VERSION-linux-arm64.tar.gz"
+            cmp "$RUNNER_TEMP/lana-release-files/install.sh" "$existing/install.sh"
+            cmp "$RUNNER_TEMP/lana-release-files/install.ps1" "$existing/install.ps1"
+            cmp "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-windows-x64.zip" "$existing/lana-$EXPECTED_VERSION-windows-x64.zip"
+            cmp "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-windows-arm64.zip" "$existing/lana-$EXPECTED_VERSION-windows-arm64.zip"
             cmp <(gzip -dc "$RUNNER_TEMP/lana-release-files/lana-$EXPECTED_VERSION-macos-universal.tar.gz") \
                 <(gzip -dc "$existing/lana-$EXPECTED_VERSION-macos-universal.tar.gz")
             test "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '[.isDraft,.isPrerelease] | join(",")')" = "false,false"
@@ -179,9 +204,21 @@ jobs:
               "$RUNNER_TEMP/lana-release-files"/*
           fi
 
+  verify-published-windows:
+    needs: publish
+    uses: ./.github/workflows/windows.yml
+    with:
+      verify-published: true
+
+  verify-published-linux:
+    needs: publish
+    uses: ./.github/workflows/linux.yml
+    with:
+      verify-published: true
+
   tap:
     name: Publish verified Homebrew tap formula
-    needs: publish
+    needs: [publish, verify-published-windows, verify-published-linux]
     runs-on: macos-14
     timeout-minutes: 30
     env:
@@ -205,6 +242,16 @@ jobs:
           test -s "$assets/lana.rb"
           test -s "$assets/lana-$version-source.tar.gz"
           test -s "$assets/lana-$version-macos-universal.tar.gz"
+          test -s "$assets/lana-$version-linux-x64.tar.gz"
+          test -s "$assets/lana-$version-linux-arm64.tar.gz"
+          test -s "$assets/lana-$version-windows-x64.zip"
+          test -s "$assets/lana-$version-windows-arm64.zip"
+          python3 tools/build.py installers --output "$RUNNER_TEMP/expected-installers"
+          cmp "$RUNNER_TEMP/expected-installers/install.sh" "$assets/install.sh"
+          cmp "$RUNNER_TEMP/expected-installers/install.ps1" "$assets/install.ps1"
+          mkdir "$RUNNER_TEMP/lana-public-home"
+          HOME="$RUNNER_TEMP/lana-public-home" SHELL=/bin/zsh sh < "$assets/install.sh"
+          python3 tests/verify_install.py --prefix "$RUNNER_TEMP/lana-public-home/.local/share/lana" --architecture arm64 --architecture x86_64
           git archive --format=tar --prefix="lana-$version/" \
             --output="$RUNNER_TEMP/expected-source.tar" "$GITHUB_SHA"
           gzip -dc "$assets/lana-$version-source.tar.gz" | cmp "$RUNNER_TEMP/expected-source.tar" -

@@ -46344,7 +46344,7 @@ __portable_parts_endwhile_2:
 RETURN R3
 LOAD_CONST R11 null
 RETURN R11
-.function portable_directory 1 11
+.function portable_directory 1 15
 .line 5330
 LOAD_CONST R1 0
 MOVE R2 R1
@@ -46375,59 +46375,175 @@ MOVE R4 R6
 JUMP __portable_directory_while_1
 __portable_directory_endwhile_2:
 .line 5332
-LOAD_CONST R5 0
-COMPARE R2 == R5 R6
-JUMP_IF_FALSE R6 __portable_directory_else_5
-.line 5332
-LOAD_STRING R5 2f
-RETURN R5
+LOAD_CONST R5 1
+MOVE R6 R5
+.line 5333
+HOST_CALL string_length R0 1 R7
+LOAD_CONST R8 3
+COMPARE R7 >= R8 R9
+JUMP_IF_FALSE R9 __portable_directory_else_5
+.line 5334
+LOAD_CONST R7 1
+MOVE R8 R0
+MOVE R9 R7
+HOST_CALL string_byte_at R8 2 R10
+LOAD_CONST R11 58
+COMPARE R10 == R11 R12
+JUMP_IF_FALSE R12 __portable_directory_else_7
+.line 5334
+LOAD_CONST R7 2
+MOVE R8 R0
+MOVE R9 R7
+HOST_CALL string_byte_at R8 2 R10
+LOAD_CONST R11 47
+COMPARE R10 == R11 R12
+JUMP_IF_FALSE R12 __portable_directory_else_9
+.line 5334
+LOAD_CONST R7 3
+MOVE R6 R7
+JUMP __portable_directory_endif_10
+__portable_directory_else_9:
+__portable_directory_endif_10:
+JUMP __portable_directory_endif_8
+__portable_directory_else_7:
+__portable_directory_endif_8:
 JUMP __portable_directory_endif_6
 __portable_directory_else_5:
 __portable_directory_endif_6:
-.line 5332
-LOAD_CONST R5 0
-MOVE R6 R0
-MOVE R7 R5
-MOVE R8 R2
-HOST_CALL string_slice R6 3 R9
+.line 5336
+HOST_CALL string_length R0 1 R7
+LOAD_CONST R8 2
+COMPARE R7 >= R8 R9
+JUMP_IF_FALSE R9 __portable_directory_else_11
+.line 5337
+LOAD_CONST R7 0
+LOAD_CONST R8 2
+MOVE R9 R0
+MOVE R10 R7
+MOVE R11 R8
+HOST_CALL string_slice R9 3 R12
+LOAD_STRING R13 2f2f
+COMPARE R12 == R13 R14
+JUMP_IF_FALSE R14 __portable_directory_else_13
+.line 5338
+HOST_CALL string_length R0 1 R7
+MOVE R6 R7
+.line 5338
+LOAD_CONST R7 0
+MOVE R8 R7
+.line 5338
+LOAD_CONST R9 2
+MOVE R4 R9
+.line 5339
+__portable_directory_while_15:
+HOST_CALL string_length R0 1 R9
+COMPARE R4 < R9 R10
+JUMP_IF_FALSE R10 __portable_directory_endwhile_16
+.line 5340
+MOVE R9 R0
+MOVE R10 R4
+HOST_CALL string_byte_at R9 2 R11
+LOAD_CONST R12 47
+COMPARE R11 == R12 R13
+JUMP_IF_FALSE R13 __portable_directory_else_17
+.line 5341
+LOAD_CONST R9 1
+BINARY R8 + R9 R10
+MOVE R8 R10
+.line 5342
+LOAD_CONST R9 2
+COMPARE R8 == R9 R10
+JUMP_IF_FALSE R10 __portable_directory_else_19
+.line 5342
+MOVE R6 R4
+.line 5342
+HOST_CALL string_length R0 1 R9
+MOVE R4 R9
+JUMP __portable_directory_endif_20
+__portable_directory_else_19:
+__portable_directory_endif_20:
+JUMP __portable_directory_endif_18
+__portable_directory_else_17:
+__portable_directory_endif_18:
+.line 5344
+LOAD_CONST R9 1
+BINARY R4 + R9 R10
+MOVE R4 R10
+JUMP __portable_directory_while_15
+__portable_directory_endwhile_16:
+JUMP __portable_directory_endif_14
+__portable_directory_else_13:
+__portable_directory_endif_14:
+JUMP __portable_directory_endif_12
+__portable_directory_else_11:
+__portable_directory_endif_12:
+.line 5348
+LOAD_CONST R9 0
+COMPARE R2 == R9 R10
+JUMP_IF_FALSE R10 __portable_directory_else_21
+.line 5348
+LOAD_STRING R9 2f
 RETURN R9
-LOAD_CONST R10 null
-RETURN R10
+JUMP __portable_directory_endif_22
+__portable_directory_else_21:
+__portable_directory_endif_22:
+.line 5349
+COMPARE R2 < R6 R9
+JUMP_IF_FALSE R9 __portable_directory_else_23
+.line 5349
+LOAD_CONST R9 0
+MOVE R10 R0
+MOVE R11 R9
+MOVE R12 R6
+HOST_CALL string_slice R10 3 R13
+RETURN R13
+JUMP __portable_directory_endif_24
+__portable_directory_else_23:
+__portable_directory_endif_24:
+.line 5349
+LOAD_CONST R9 0
+MOVE R10 R0
+MOVE R11 R9
+MOVE R12 R2
+HOST_CALL string_slice R10 3 R13
+RETURN R13
+LOAD_CONST R14 null
+RETURN R14
 .function portable_relative 2 20
-.line 5335
+.line 5352
 CALL portable_parts R0 1 R2
 MOVE R3 R2
-.line 5335
+.line 5352
 CALL portable_parts R1 1 R4
 MOVE R5 R4
-.line 5335
+.line 5352
 LOAD_CONST R6 0
 MOVE R7 R6
-.line 5336
+.line 5353
 LOAD_CONST R8 true
 MOVE R9 R8
-.line 5337
+.line 5354
 __portable_relative_while_1:
 JUMP_IF_FALSE R9 __portable_relative_endwhile_2
-.line 5338
+.line 5355
 HOST_CALL array_length R5 1 R10
 COMPARE R7 >= R10 R11
 JUMP_IF_FALSE R11 __portable_relative_else_3
-.line 5338
+.line 5355
 LOAD_CONST R10 false
 MOVE R9 R10
 JUMP __portable_relative_endif_4
 __portable_relative_else_3:
-.line 5339
+.line 5356
 HOST_CALL array_length R3 1 R10
 COMPARE R7 >= R10 R11
 JUMP_IF_FALSE R11 __portable_relative_else_5
-.line 5339
+.line 5356
 LOAD_CONST R10 false
 MOVE R9 R10
 JUMP __portable_relative_endif_6
 __portable_relative_else_5:
-.line 5340
+.line 5357
 MOVE R10 R5
 MOVE R11 R7
 HOST_CALL index_get R10 2 R12
@@ -46436,12 +46552,12 @@ MOVE R14 R7
 HOST_CALL index_get R13 2 R15
 COMPARE R12 != R15 R16
 JUMP_IF_FALSE R16 __portable_relative_else_7
-.line 5340
+.line 5357
 LOAD_CONST R10 false
 MOVE R9 R10
 JUMP __portable_relative_endif_8
 __portable_relative_else_7:
-.line 5340
+.line 5357
 LOAD_CONST R10 1
 BINARY R7 + R10 R11
 MOVE R7 R11
@@ -46450,49 +46566,49 @@ __portable_relative_endif_6:
 __portable_relative_endif_4:
 JUMP __portable_relative_while_1
 __portable_relative_endwhile_2:
-.line 5342
+.line 5359
 LOAD_CONST R10 0
 HOST_CALL array_new R10 1 R11
 MOVE R12 R11
-.line 5342
+.line 5359
 MOVE R13 R7
-.line 5343
+.line 5360
 __portable_relative_while_9:
 HOST_CALL array_length R5 1 R14
 COMPARE R13 < R14 R15
 JUMP_IF_FALSE R15 __portable_relative_endwhile_10
-.line 5343
+.line 5360
 LOAD_STRING R14 2e2e
 MOVE R15 R12
 MOVE R16 R14
 HOST_CALL array_push R15 2 R17
-.line 5343
+.line 5360
 LOAD_CONST R14 1
 BINARY R13 + R14 R15
 MOVE R13 R15
 JUMP __portable_relative_while_9
 __portable_relative_endwhile_10:
-.line 5344
+.line 5361
 MOVE R13 R7
-.line 5344
+.line 5361
 __portable_relative_while_11:
 HOST_CALL array_length R3 1 R14
 COMPARE R13 < R14 R15
 JUMP_IF_FALSE R15 __portable_relative_endwhile_12
-.line 5344
+.line 5361
 MOVE R14 R3
 MOVE R15 R13
 HOST_CALL index_get R14 2 R16
 MOVE R17 R12
 MOVE R18 R16
 HOST_CALL array_push R17 2 R19
-.line 5344
+.line 5361
 LOAD_CONST R14 1
 BINARY R13 + R14 R15
 MOVE R13 R15
 JUMP __portable_relative_while_11
 __portable_relative_endwhile_12:
-.line 5345
+.line 5362
 LOAD_STRING R14 2f
 MOVE R15 R12
 MOVE R16 R14
@@ -46501,22 +46617,22 @@ RETURN R17
 LOAD_CONST R18 null
 RETURN R18
 .function portable_under 2 13
-.line 5348
+.line 5365
 LOAD_STRING R2 2f
 HOST_CALL string_concat R1 2 R3
 MOVE R4 R3
-.line 5349
+.line 5366
 HOST_CALL string_length R0 1 R5
 HOST_CALL string_length R4 1 R6
 COMPARE R5 <= R6 R7
 JUMP_IF_FALSE R7 __portable_under_else_1
-.line 5349
+.line 5366
 LOAD_CONST R5 false
 RETURN R5
 JUMP __portable_under_endif_2
 __portable_under_else_1:
 __portable_under_endif_2:
-.line 5350
+.line 5367
 LOAD_CONST R5 0
 HOST_CALL string_length R4 1 R6
 MOVE R7 R0
@@ -46528,18 +46644,18 @@ RETURN R11
 LOAD_CONST R12 null
 RETURN R12
 .function register_package_module 3 49
-.line 5353
+.line 5370
 HOST_CALL string_length R1 1 R3
 LOAD_CONST R4 4
 COMPARE R3 < R4 R5
 JUMP_IF_FALSE R5 __register_package_module_else_1
-.line 5353
+.line 5370
 LOAD_CONST R3 null
 RETURN R3
 JUMP __register_package_module_endif_2
 __register_package_module_else_1:
 __register_package_module_endif_2:
-.line 5354
+.line 5371
 LOAD_CONST R3 0
 LOAD_CONST R4 4
 MOVE R5 R1
@@ -46549,48 +46665,48 @@ HOST_CALL string_slice R5 3 R8
 LOAD_STRING R9 706b672f
 COMPARE R8 != R9 R10
 JUMP_IF_FALSE R10 __register_package_module_else_3
-.line 5354
+.line 5371
 LOAD_CONST R3 null
 RETURN R3
 JUMP __register_package_module_endif_4
 __register_package_module_else_3:
 __register_package_module_endif_4:
-.line 5355
+.line 5372
 CALL portable_parts R1 1 R3
 MOVE R4 R3
-.line 5355
+.line 5372
 LOAD_CONST R5 0
 HOST_CALL array_new R5 1 R6
 MOVE R7 R6
-.line 5355
+.line 5372
 LOAD_CONST R8 3
 MOVE R9 R8
-.line 5356
+.line 5373
 __register_package_module_while_5:
 HOST_CALL array_length R4 1 R10
 COMPARE R9 < R10 R11
 JUMP_IF_FALSE R11 __register_package_module_endwhile_6
-.line 5356
+.line 5373
 MOVE R10 R4
 MOVE R11 R9
 HOST_CALL index_get R10 2 R12
 MOVE R13 R7
 MOVE R14 R12
 HOST_CALL array_push R13 2 R15
-.line 5356
+.line 5373
 LOAD_CONST R10 1
 BINARY R9 + R10 R11
 MOVE R9 R11
 JUMP __register_package_module_while_5
 __register_package_module_endwhile_6:
-.line 5357
+.line 5374
 LOAD_STRING R10 2f
 MOVE R11 R7
 MOVE R12 R10
 HOST_CALL string_join R11 2 R13
 HOST_CALL string_length R13 1 R14
 MOVE R15 R14
-.line 5358
+.line 5375
 LOAD_CONST R16 0
 HOST_CALL string_length R2 1 R17
 BINARY R17 - R15 R18
@@ -46601,7 +46717,7 @@ MOVE R22 R16
 MOVE R23 R20
 HOST_CALL string_slice R21 3 R24
 MOVE R25 R24
-.line 5359
+.line 5376
 LOAD_STRING R26 7061636b6167655f726f6f7473
 MOVE R27 R0
 MOVE R28 R26
@@ -46625,19 +46741,19 @@ MOVE R45 R29
 MOVE R46 R25
 MOVE R47 R44
 HOST_CALL index_set R45 3 R48
-.line 5359
+.line 5376
 LOAD_CONST R26 null
 RETURN R26
 LOAD_CONST R27 null
 RETURN R27
 .function prepare_portable_modules 2 68
-.line 5362
+.line 5379
 LOAD_STRING R2 6974656d73
 MOVE R3 R0
 MOVE R4 R2
 HOST_CALL index_get R3 2 R5
 MOVE R6 R5
-.line 5362
+.line 5379
 MOVE R7 R6
 MOVE R8 R1
 HOST_CALL index_get R7 2 R9
@@ -46645,62 +46761,62 @@ LOAD_CONST R10 0
 HOST_CALL index_get R9 2 R11
 CALL portable_directory R11 1 R12
 MOVE R13 R12
-.line 5362
+.line 5379
 LOAD_STRING R14 66696c65
 MOVE R15 R14
-.line 5363
+.line 5380
 MOVE R16 R13
-.line 5363
+.line 5380
 LOAD_CONST R17 true
 MOVE R18 R17
-.line 5364
+.line 5381
 __prepare_portable_modules_while_1:
 JUMP_IF_FALSE R18 __prepare_portable_modules_endwhile_2
-.line 5365
+.line 5382
 LOAD_STRING R19 2f6c616e612e746f6d6c
 MOVE R20 R16
 MOVE R21 R19
 HOST_CALL string_concat R20 2 R22
 HOST_CALL path_exists R22 1 R23
 JUMP_IF_FALSE R23 __prepare_portable_modules_else_3
-.line 5365
+.line 5382
 MOVE R13 R16
-.line 5365
+.line 5382
 LOAD_STRING R19 70726f6a656374
 MOVE R15 R19
-.line 5365
+.line 5382
 LOAD_CONST R19 false
 MOVE R18 R19
 JUMP __prepare_portable_modules_endif_4
 __prepare_portable_modules_else_3:
-.line 5366
+.line 5383
 CALL portable_directory R16 1 R19
 MOVE R20 R19
-.line 5366
+.line 5383
 COMPARE R20 == R16 R21
 JUMP_IF_FALSE R21 __prepare_portable_modules_else_5
-.line 5366
+.line 5383
 LOAD_CONST R21 false
 MOVE R18 R21
 JUMP __prepare_portable_modules_endif_6
 __prepare_portable_modules_else_5:
-.line 5366
+.line 5383
 MOVE R16 R20
 __prepare_portable_modules_endif_6:
 __prepare_portable_modules_endif_4:
 JUMP __prepare_portable_modules_while_1
 __prepare_portable_modules_endwhile_2:
-.line 5368
+.line 5385
 LOAD_STRING R21 -
 MOVE R22 R21
-.line 5368
+.line 5385
 LOAD_STRING R23 7374646c69625f646972
 MOVE R24 R0
 MOVE R25 R23
 HOST_CALL index_get R24 2 R26
 HOST_CALL path_exists R26 1 R27
 JUMP_IF_FALSE R27 __prepare_portable_modules_else_7
-.line 5368
+.line 5385
 LOAD_STRING R23 7374646c69625f646972
 MOVE R24 R0
 MOVE R25 R23
@@ -46711,34 +46827,34 @@ MOVE R22 R28
 JUMP __prepare_portable_modules_endif_8
 __prepare_portable_modules_else_7:
 __prepare_portable_modules_endif_8:
-.line 5369
+.line 5386
 LOAD_STRING R23 7061636b6167655f726f6f7473
 MOVE R24 R0
 MOVE R25 R23
 HOST_CALL index_get R24 2 R26
 MOVE R27 R26
-.line 5369
+.line 5386
 HOST_CALL map_keys R27 1 R28
 MOVE R29 R28
-.line 5369
+.line 5386
 HOST_CALL map_new R30 0 R30
 MOVE R31 R30
-.line 5369
+.line 5386
 LOAD_CONST R32 0
 MOVE R33 R32
-.line 5370
+.line 5387
 __prepare_portable_modules_while_9:
 HOST_CALL array_length R6 1 R34
 COMPARE R33 < R34 R35
 JUMP_IF_FALSE R35 __prepare_portable_modules_endwhile_10
-.line 5371
+.line 5388
 MOVE R34 R6
 MOVE R35 R33
 HOST_CALL index_get R34 2 R36
 LOAD_CONST R37 0
 HOST_CALL index_get R36 2 R38
 MOVE R39 R38
-.line 5371
+.line 5388
 LOAD_STRING R40 2f
 MOVE R41 R39
 MOVE R42 R13
@@ -46748,16 +46864,16 @@ MOVE R45 R40
 MOVE R46 R43
 HOST_CALL string_concat R44 3 R47
 MOVE R48 R47
-.line 5372
+.line 5389
 LOAD_STRING R49 -
 COMPARE R22 != R49 R50
 JUMP_IF_FALSE R50 __prepare_portable_modules_else_11
-.line 5372
+.line 5389
 MOVE R49 R39
 MOVE R50 R22
 CALL portable_under R49 2 R51
 JUMP_IF_FALSE R51 __prepare_portable_modules_else_13
-.line 5372
+.line 5389
 LOAD_STRING R49 7374642f
 MOVE R50 R39
 MOVE R51 R22
@@ -46772,15 +46888,15 @@ __prepare_portable_modules_endif_14:
 JUMP __prepare_portable_modules_endif_12
 __prepare_portable_modules_else_11:
 __prepare_portable_modules_endif_12:
-.line 5373
+.line 5390
 LOAD_CONST R49 0
 MOVE R50 R49
-.line 5373
+.line 5390
 __prepare_portable_modules_while_15:
 HOST_CALL array_length R29 1 R51
 COMPARE R50 < R51 R52
 JUMP_IF_FALSE R52 __prepare_portable_modules_endwhile_16
-.line 5374
+.line 5391
 MOVE R51 R29
 MOVE R52 R50
 HOST_CALL index_get R51 2 R53
@@ -46788,7 +46904,7 @@ MOVE R54 R39
 MOVE R55 R53
 CALL portable_under R54 2 R56
 JUMP_IF_FALSE R56 __prepare_portable_modules_else_17
-.line 5374
+.line 5391
 MOVE R51 R29
 MOVE R52 R50
 HOST_CALL index_get R51 2 R53
@@ -46810,111 +46926,111 @@ MOVE R48 R67
 JUMP __prepare_portable_modules_endif_18
 __prepare_portable_modules_else_17:
 __prepare_portable_modules_endif_18:
-.line 5375
+.line 5392
 LOAD_CONST R51 1
 BINARY R50 + R51 R52
 MOVE R50 R52
 JUMP __prepare_portable_modules_while_15
 __prepare_portable_modules_endwhile_16:
-.line 5377
+.line 5394
 MOVE R51 R31
 MOVE R52 R48
 HOST_CALL map_has R51 2 R53
 UNARY ! R53 R54
 LOAD_STRING R55 64697374696e6374206d6f64756c65732068617665207468652073616d6520706f727461626c65206f626a656374206964656e74697479
 HOST_CALL assert R54 2 R56
-.line 5377
+.line 5394
 MOVE R51 R31
 MOVE R52 R48
 MOVE R53 R39
 HOST_CALL index_set R51 3 R54
-.line 5378
+.line 5395
 MOVE R51 R6
 MOVE R52 R33
 HOST_CALL index_get R51 2 R53
 MOVE R54 R53
 MOVE R55 R48
 HOST_CALL array_push R54 2 R56
-.line 5378
+.line 5395
 LOAD_CONST R51 1
 BINARY R33 + R51 R52
 MOVE R33 R52
 JUMP __prepare_portable_modules_while_9
 __prepare_portable_modules_endwhile_10:
-.line 5380
+.line 5397
 LOAD_CONST R51 null
 RETURN R51
 LOAD_CONST R52 null
 RETURN R52
 .function stack_with 2 13
-.line 5385
+.line 5402
 LOAD_CONST R2 0
 HOST_CALL array_new R2 1 R3
 MOVE R4 R3
-.line 5385
+.line 5402
 LOAD_CONST R5 0
 MOVE R6 R5
-.line 5386
+.line 5403
 __stack_with_while_1:
 HOST_CALL array_length R0 1 R7
 COMPARE R6 < R7 R8
 JUMP_IF_FALSE R8 __stack_with_endwhile_2
-.line 5386
+.line 5403
 MOVE R7 R0
 MOVE R8 R6
 HOST_CALL index_get R7 2 R9
 MOVE R10 R4
 MOVE R11 R9
 HOST_CALL array_push R10 2 R12
-.line 5386
+.line 5403
 LOAD_CONST R7 1
 BINARY R6 + R7 R8
 MOVE R6 R8
 JUMP __stack_with_while_1
 __stack_with_endwhile_2:
-.line 5387
+.line 5404
 MOVE R7 R4
 MOVE R8 R1
 HOST_CALL array_push R7 2 R9
-.line 5387
+.line 5404
 RETURN R4
 LOAD_CONST R7 null
 RETURN R7
 .function symbol_location 4 34
-.line 5392
+.line 5409
 LOAD_CONST R4 0
 MOVE R5 R4
-.line 5392
+.line 5409
 HOST_CALL array_length R0 1 R6
 MOVE R7 R6
-.line 5393
+.line 5410
 __symbol_location_while_1:
 COMPARE R5 < R7 R8
 JUMP_IF_FALSE R8 __symbol_location_endwhile_2
-.line 5394
+.line 5411
 BINARY R5 + R7 R8
 LOAD_CONST R9 2
 BINARY R8 / R9 R10
 HOST_CALL floor R10 1 R11
 MOVE R12 R11
-.line 5394
+.line 5411
 MOVE R13 R0
 MOVE R14 R12
 HOST_CALL index_get R13 2 R15
 MOVE R16 R15
-.line 5395
+.line 5412
 LOAD_CONST R17 2
 HOST_CALL index_get R16 2 R18
 COMPARE R18 < R2 R19
 MOVE R20 R19
-.line 5395
+.line 5412
 LOAD_CONST R21 2
 MOVE R22 R16
 MOVE R23 R21
 HOST_CALL index_get R22 2 R24
 COMPARE R24 == R2 R25
 JUMP_IF_FALSE R25 __symbol_location_else_3
-.line 5395
+.line 5412
 LOAD_CONST R21 3
 MOVE R22 R16
 MOVE R23 R21
@@ -46924,41 +47040,41 @@ MOVE R20 R25
 JUMP __symbol_location_endif_4
 __symbol_location_else_3:
 __symbol_location_endif_4:
-.line 5396
+.line 5413
 JUMP_IF_FALSE R20 __symbol_location_else_5
-.line 5396
+.line 5413
 LOAD_CONST R21 1
 BINARY R12 + R21 R22
 MOVE R5 R22
 JUMP __symbol_location_endif_6
 __symbol_location_else_5:
-.line 5396
+.line 5413
 MOVE R7 R12
 __symbol_location_endif_6:
 JUMP __symbol_location_while_1
 __symbol_location_endwhile_2:
-.line 5398
+.line 5415
 __symbol_location_while_7:
 HOST_CALL array_length R0 1 R21
 COMPARE R5 < R21 R22
 JUMP_IF_FALSE R22 __symbol_location_endwhile_8
-.line 5399
+.line 5416
 MOVE R21 R0
 MOVE R22 R5
 HOST_CALL index_get R21 2 R23
 MOVE R24 R23
-.line 5400
+.line 5417
 LOAD_CONST R25 0
 HOST_CALL index_get R24 2 R26
 LOAD_STRING R27 6964656e746966696572
 COMPARE R26 == R27 R28
 JUMP_IF_FALSE R28 __symbol_location_else_9
-.line 5400
+.line 5417
 LOAD_CONST R25 1
 HOST_CALL index_get R24 2 R26
 COMPARE R26 == R1 R27
 JUMP_IF_FALSE R27 __symbol_location_else_11
-.line 5400
+.line 5417
 LOAD_CONST R25 2
 HOST_CALL index_get R24 2 R26
 LOAD_CONST R27 3
@@ -46975,13 +47091,13 @@ __symbol_location_endif_12:
 JUMP __symbol_location_endif_10
 __symbol_location_else_9:
 __symbol_location_endif_10:
-.line 5401
+.line 5418
 LOAD_CONST R25 1
 BINARY R5 + R25 R26
 MOVE R5 R26
 JUMP __symbol_location_while_7
 __symbol_location_endwhile_8:
-.line 5403
+.line 5420
 LOAD_CONST R25 false
 LOAD_STRING R26 6d697373696e672073796d626f6c20736f75726365207370616e3a20
 MOVE R27 R26
@@ -46990,50 +47106,50 @@ HOST_CALL string_concat R27 2 R29
 MOVE R30 R25
 MOVE R31 R29
 HOST_CALL assert R30 2 R32
-.line 5403
+.line 5420
 ARRAY_NEW R25 R2 2
 RETURN R25
 LOAD_CONST R26 null
 RETURN R26
 .function module_symbols 5 150
-.line 5407
+.line 5424
 CALL symbol_table_json R0 1 R5
 MOVE R6 R5
-.line 5407
+.line 5424
 CALL source_tokens R2 1 R7
 MOVE R8 R7
-.line 5408
+.line 5425
 LOAD_STRING R9 646566696e6974696f6e73
 MOVE R10 R6
 MOVE R11 R9
 HOST_CALL index_get R10 2 R12
 MOVE R13 R12
-.line 5408
+.line 5425
 LOAD_STRING R14 7265666572656e636573
 MOVE R15 R6
 MOVE R16 R14
 HOST_CALL index_get R15 2 R17
 MOVE R18 R17
-.line 5408
+.line 5425
 LOAD_CONST R19 0
 MOVE R20 R19
-.line 5409
+.line 5426
 HOST_CALL map_new R21 0 R21
 MOVE R22 R21
-.line 5409
+.line 5426
 HOST_CALL map_new R23 0 R23
 MOVE R24 R23
-.line 5410
+.line 5427
 __module_symbols_while_1:
 HOST_CALL array_length R13 1 R25
 COMPARE R20 < R25 R26
 JUMP_IF_FALSE R26 __module_symbols_endwhile_2
-.line 5411
+.line 5428
 MOVE R25 R13
 MOVE R26 R20
 HOST_CALL index_get R25 2 R27
 MOVE R28 R27
-.line 5412
+.line 5429
 LOAD_STRING R29 6e616d65
 HOST_CALL index_get R28 2 R30
 LOAD_STRING R31 6c696e65
@@ -47050,7 +47166,7 @@ MOVE R41 R34
 MOVE R42 R38
 CALL symbol_location R39 4 R43
 MOVE R44 R43
-.line 5413
+.line 5430
 LOAD_STRING R45 6c696e65
 LOAD_CONST R46 0
 MOVE R47 R44
@@ -47060,7 +47176,7 @@ MOVE R50 R28
 MOVE R51 R45
 MOVE R52 R49
 HOST_CALL index_set R50 3 R53
-.line 5413
+.line 5430
 LOAD_STRING R45 636f6c756d6e
 LOAD_CONST R46 1
 MOVE R47 R44
@@ -47070,19 +47186,19 @@ MOVE R50 R28
 MOVE R51 R45
 MOVE R52 R49
 HOST_CALL index_set R50 3 R53
-.line 5413
+.line 5430
 LOAD_STRING R45 70617468
 MOVE R46 R28
 MOVE R47 R45
 MOVE R48 R1
 HOST_CALL index_set R46 3 R49
-.line 5414
+.line 5431
 LOAD_STRING R45 6964656e74697479
 MOVE R46 R28
 MOVE R47 R45
 HOST_CALL index_get R46 2 R48
 MOVE R49 R48
-.line 5414
+.line 5431
 LOAD_STRING R50 6964656e74697479
 LOAD_STRING R51 23
 LOAD_STRING R52 6e616d65
@@ -47109,7 +47225,7 @@ MOVE R72 R28
 MOVE R73 R50
 MOVE R74 R71
 HOST_CALL index_set R72 3 R75
-.line 5415
+.line 5432
 LOAD_STRING R50 6964656e74697479
 MOVE R51 R28
 MOVE R52 R50
@@ -47118,7 +47234,7 @@ MOVE R54 R24
 MOVE R55 R49
 MOVE R56 R53
 HOST_CALL index_set R54 3 R57
-.line 5416
+.line 5433
 LOAD_STRING R50 6b696e64
 MOVE R51 R28
 MOVE R52 R50
@@ -47126,7 +47242,7 @@ HOST_CALL index_get R51 2 R53
 LOAD_STRING R54 66756e6374696f6e
 COMPARE R53 == R54 R55
 JUMP_IF_FALSE R55 __module_symbols_else_3
-.line 5416
+.line 5433
 LOAD_STRING R50 6e616d65
 MOVE R51 R28
 MOVE R52 R50
@@ -47142,7 +47258,7 @@ HOST_CALL index_set R58 3 R61
 JUMP __module_symbols_endif_4
 __module_symbols_else_3:
 __module_symbols_endif_4:
-.line 5417
+.line 5434
 LOAD_STRING R50 6b696e64
 MOVE R51 R28
 MOVE R52 R50
@@ -47150,7 +47266,7 @@ HOST_CALL index_get R51 2 R53
 LOAD_STRING R54 74797065
 COMPARE R53 == R54 R55
 JUMP_IF_FALSE R55 __module_symbols_else_5
-.line 5417
+.line 5434
 LOAD_STRING R50 6e616d65
 MOVE R51 R28
 MOVE R52 R50
@@ -47166,7 +47282,7 @@ HOST_CALL index_set R58 3 R61
 JUMP __module_symbols_endif_6
 __module_symbols_else_5:
 __module_symbols_endif_6:
-.line 5418
+.line 5435
 LOAD_STRING R50 6b696e64
 MOVE R51 R28
 MOVE R52 R50
@@ -47174,7 +47290,7 @@ HOST_CALL index_get R51 2 R53
 LOAD_STRING R54 636c617373
 COMPARE R53 == R54 R55
 JUMP_IF_FALSE R55 __module_symbols_else_7
-.line 5418
+.line 5435
 LOAD_STRING R50 6e616d65
 MOVE R51 R28
 MOVE R52 R50
@@ -47190,7 +47306,7 @@ HOST_CALL index_set R58 3 R61
 JUMP __module_symbols_endif_8
 __module_symbols_else_7:
 __module_symbols_endif_8:
-.line 5419
+.line 5436
 LOAD_STRING R50 6b696e64
 MOVE R51 R28
 MOVE R52 R50
@@ -47198,7 +47314,7 @@ HOST_CALL index_get R51 2 R53
 LOAD_STRING R54 76616c7565
 COMPARE R53 == R54 R55
 JUMP_IF_FALSE R55 __module_symbols_else_9
-.line 5419
+.line 5436
 LOAD_STRING R50 6e616d65
 MOVE R51 R28
 MOVE R52 R50
@@ -47214,7 +47330,7 @@ HOST_CALL index_set R58 3 R61
 JUMP __module_symbols_endif_10
 __module_symbols_else_9:
 __module_symbols_endif_10:
-.line 5420
+.line 5437
 LOAD_STRING R50 6b696e64
 MOVE R51 R28
 MOVE R52 R50
@@ -47222,7 +47338,7 @@ HOST_CALL index_get R51 2 R53
 LOAD_STRING R54 696e74657266616365
 COMPARE R53 == R54 R55
 JUMP_IF_FALSE R55 __module_symbols_else_11
-.line 5420
+.line 5437
 LOAD_STRING R50 6e616d65
 MOVE R51 R28
 MOVE R52 R50
@@ -47238,7 +47354,7 @@ HOST_CALL index_set R58 3 R61
 JUMP __module_symbols_endif_12
 __module_symbols_else_11:
 __module_symbols_endif_12:
-.line 5421
+.line 5438
 LOAD_STRING R50 6b696e64
 MOVE R51 R28
 MOVE R52 R50
@@ -47246,7 +47362,7 @@ HOST_CALL index_get R51 2 R53
 LOAD_STRING R54 6669656c64
 COMPARE R53 == R54 R55
 JUMP_IF_FALSE R55 __module_symbols_else_13
-.line 5421
+.line 5438
 LOAD_STRING R50 6964656e74697479
 MOVE R51 R28
 MOVE R52 R50
@@ -47258,7 +47374,7 @@ HOST_CALL index_set R54 3 R57
 JUMP __module_symbols_endif_14
 __module_symbols_else_13:
 __module_symbols_endif_14:
-.line 5422
+.line 5439
 LOAD_STRING R50 6b696e64
 MOVE R51 R28
 MOVE R52 R50
@@ -47266,7 +47382,7 @@ HOST_CALL index_get R51 2 R53
 LOAD_STRING R54 6d6574686f64
 COMPARE R53 == R54 R55
 JUMP_IF_FALSE R55 __module_symbols_else_15
-.line 5422
+.line 5439
 LOAD_STRING R50 6964656e74697479
 MOVE R51 R28
 MOVE R52 R50
@@ -47278,26 +47394,26 @@ HOST_CALL index_set R54 3 R57
 JUMP __module_symbols_endif_16
 __module_symbols_else_15:
 __module_symbols_endif_16:
-.line 5423
+.line 5440
 LOAD_CONST R50 1
 BINARY R20 + R50 R51
 MOVE R20 R51
 JUMP __module_symbols_while_1
 __module_symbols_endwhile_2:
-.line 5425
+.line 5442
 LOAD_CONST R50 0
 MOVE R20 R50
-.line 5426
+.line 5443
 __module_symbols_while_17:
 HOST_CALL array_length R4 1 R50
 COMPARE R20 < R50 R51
 JUMP_IF_FALSE R51 __module_symbols_endwhile_18
-.line 5427
+.line 5444
 MOVE R50 R4
 MOVE R51 R20
 HOST_CALL index_get R50 2 R52
 MOVE R53 R52
-.line 5427
+.line 5444
 LOAD_CONST R54 1
 HOST_CALL index_get R53 2 R55
 LOAD_CONST R56 2
@@ -47311,7 +47427,7 @@ MOVE R63 R59
 MOVE R64 R60
 CALL symbol_location R61 4 R65
 MOVE R66 R65
-.line 5428
+.line 5445
 LOAD_STRING R67 23
 LOAD_CONST R68 1
 MOVE R69 R53
@@ -47334,7 +47450,7 @@ MOVE R85 R67
 MOVE R86 R83
 HOST_CALL string_concat R84 3 R87
 MOVE R88 R87
-.line 5429
+.line 5446
 LOAD_STRING R89 6e616d65
 LOAD_CONST R90 1
 MOVE R91 R53
@@ -47374,7 +47490,7 @@ HOST_CALL map_new R110 14 R124
 MOVE R125 R13
 MOVE R126 R124
 HOST_CALL array_push R125 2 R127
-.line 5430
+.line 5447
 LOAD_STRING R89 616c6961733a
 LOAD_CONST R90 1
 MOVE R91 R53
@@ -47387,43 +47503,43 @@ MOVE R97 R24
 MOVE R98 R96
 MOVE R99 R88
 HOST_CALL index_set R97 3 R100
-.line 5431
+.line 5448
 LOAD_CONST R89 1
 BINARY R20 + R89 R90
 MOVE R20 R90
 JUMP __module_symbols_while_17
 __module_symbols_endwhile_18:
-.line 5433
+.line 5450
 LOAD_CONST R89 0
 MOVE R20 R89
-.line 5433
+.line 5450
 HOST_CALL array_length R18 1 R89
 MOVE R90 R89
-.line 5434
+.line 5451
 __module_symbols_while_19:
 COMPARE R20 < R90 R91
 JUMP_IF_FALSE R91 __module_symbols_endwhile_20
-.line 5435
+.line 5452
 MOVE R91 R18
 MOVE R92 R20
 HOST_CALL index_get R91 2 R93
 MOVE R94 R93
-.line 5435
+.line 5452
 LOAD_STRING R95 70617468
 MOVE R96 R94
 MOVE R97 R95
 MOVE R98 R1
 HOST_CALL index_set R96 3 R99
-.line 5436
+.line 5453
 LOAD_STRING R95 6964656e74697479
 HOST_CALL index_get R94 2 R96
 MOVE R97 R96
-.line 5437
+.line 5454
 MOVE R98 R24
 MOVE R99 R97
 HOST_CALL map_has R98 2 R100
 JUMP_IF_FALSE R100 __module_symbols_else_21
-.line 5437
+.line 5454
 LOAD_STRING R98 6964656e74697479
 MOVE R99 R24
 MOVE R100 R97
@@ -47434,12 +47550,12 @@ MOVE R104 R101
 HOST_CALL index_set R102 3 R105
 JUMP __module_symbols_endif_22
 __module_symbols_else_21:
-.line 5438
+.line 5455
 MOVE R98 R22
 MOVE R99 R97
 HOST_CALL map_has R98 2 R100
 JUMP_IF_FALSE R100 __module_symbols_else_23
-.line 5438
+.line 5455
 LOAD_STRING R98 6964656e74697479
 MOVE R99 R22
 MOVE R100 R97
@@ -47450,7 +47566,7 @@ MOVE R104 R101
 HOST_CALL index_set R102 3 R105
 JUMP __module_symbols_endif_24
 __module_symbols_else_23:
-.line 5440
+.line 5457
 LOAD_STRING R98 6964656e74697479
 LOAD_STRING R99 236578706f72743a
 MOVE R100 R1
@@ -47461,32 +47577,32 @@ MOVE R104 R94
 MOVE R105 R98
 MOVE R106 R103
 HOST_CALL index_set R104 3 R107
-.line 5441
+.line 5458
 HOST_CALL map_keys R3 1 R98
 MOVE R99 R98
-.line 5441
+.line 5458
 LOAD_CONST R100 0
 MOVE R101 R100
-.line 5442
+.line 5459
 __module_symbols_while_25:
 HOST_CALL array_length R99 1 R102
 COMPARE R101 < R102 R103
 JUMP_IF_FALSE R103 __module_symbols_endwhile_26
-.line 5443
+.line 5460
 MOVE R102 R99
 MOVE R103 R101
 HOST_CALL index_get R102 2 R104
 MOVE R105 R104
-.line 5443
+.line 5460
 LOAD_STRING R106 2e
 HOST_CALL string_concat R105 2 R107
 MOVE R108 R107
-.line 5444
+.line 5461
 HOST_CALL string_length R97 1 R109
 HOST_CALL string_length R108 1 R110
 COMPARE R109 > R110 R111
 JUMP_IF_FALSE R111 __module_symbols_else_27
-.line 5444
+.line 5461
 LOAD_CONST R109 0
 HOST_CALL string_length R108 1 R110
 MOVE R111 R97
@@ -47495,7 +47611,7 @@ MOVE R113 R110
 HOST_CALL string_slice R111 3 R114
 COMPARE R114 == R108 R115
 JUMP_IF_FALSE R115 __module_symbols_else_29
-.line 5445
+.line 5462
 HOST_CALL string_length R108 1 R109
 HOST_CALL string_length R97 1 R110
 MOVE R111 R97
@@ -47503,7 +47619,7 @@ MOVE R112 R109
 MOVE R113 R110
 HOST_CALL string_slice R111 3 R114
 MOVE R115 R114
-.line 5446
+.line 5463
 LOAD_STRING R116 6964656e74697479
 MOVE R117 R3
 MOVE R118 R105
@@ -47517,14 +47633,14 @@ MOVE R125 R94
 MOVE R126 R116
 MOVE R127 R124
 HOST_CALL index_set R125 3 R128
-.line 5448
+.line 5465
 LOAD_STRING R116 6e616d65
 MOVE R117 R94
 MOVE R118 R116
 HOST_CALL index_get R117 2 R119
 COMPARE R119 == R97 R120
 JUMP_IF_FALSE R120 __module_symbols_else_31
-.line 5449
+.line 5466
 LOAD_STRING R116 6e616d65
 LOAD_STRING R117 6c696e65
 LOAD_STRING R118 6c696e65
@@ -47559,14 +47675,14 @@ HOST_CALL map_new R136 10 R146
 MOVE R147 R18
 MOVE R148 R146
 HOST_CALL array_push R147 2 R149
-.line 5450
+.line 5467
 LOAD_STRING R116 6e616d65
 CALL name_suffix R97 1 R117
 MOVE R118 R94
 MOVE R119 R116
 MOVE R120 R117
 HOST_CALL index_set R118 3 R121
-.line 5451
+.line 5468
 LOAD_STRING R116 636f6c756d6e
 LOAD_STRING R117 636f6c756d6e
 MOVE R118 R94
@@ -47589,7 +47705,7 @@ __module_symbols_endif_30:
 JUMP __module_symbols_endif_28
 __module_symbols_else_27:
 __module_symbols_endif_28:
-.line 5454
+.line 5471
 LOAD_CONST R116 1
 BINARY R101 + R116 R117
 MOVE R101 R117
@@ -47597,7 +47713,7 @@ JUMP __module_symbols_while_25
 __module_symbols_endwhile_26:
 __module_symbols_endif_24:
 __module_symbols_endif_22:
-.line 5457
+.line 5474
 LOAD_STRING R116 6e616d65
 MOVE R117 R94
 MOVE R118 R116
@@ -47616,7 +47732,7 @@ MOVE R130 R123
 MOVE R131 R127
 CALL symbol_location R128 4 R132
 MOVE R133 R132
-.line 5458
+.line 5475
 LOAD_STRING R134 6c696e65
 LOAD_CONST R135 0
 MOVE R136 R133
@@ -47626,7 +47742,7 @@ MOVE R139 R94
 MOVE R140 R134
 MOVE R141 R138
 HOST_CALL index_set R139 3 R142
-.line 5458
+.line 5475
 LOAD_STRING R134 636f6c756d6e
 LOAD_CONST R135 1
 MOVE R136 R133
@@ -47636,24 +47752,24 @@ MOVE R139 R94
 MOVE R140 R134
 MOVE R141 R138
 HOST_CALL index_set R139 3 R142
-.line 5459
+.line 5476
 LOAD_CONST R134 1
 BINARY R20 + R134 R135
 MOVE R20 R135
 JUMP __module_symbols_while_19
 __module_symbols_endwhile_20:
-.line 5461
+.line 5478
 LOAD_STRING R134 6578706f727473
 MOVE R135 R6
 MOVE R136 R134
 MOVE R137 R22
 HOST_CALL index_set R135 3 R138
-.line 5461
+.line 5478
 RETURN R6
 LOAD_CONST R134 null
 RETURN R134
 .function workspace_symbols 1 64
-.line 5465
+.line 5482
 LOAD_STRING R1 646566696e6974696f6e73
 ARRAY_NEW R2 R2 0
 LOAD_STRING R3 7265666572656e636573
@@ -47669,26 +47785,26 @@ MOVE R12 R5
 MOVE R13 R7
 HOST_CALL map_new R8 6 R14
 MOVE R15 R14
-.line 5465
+.line 5482
 HOST_CALL map_keys R0 1 R16
 MOVE R17 R16
-.line 5465
+.line 5482
 HOST_CALL map_new R18 0 R18
 MOVE R19 R18
-.line 5465
+.line 5482
 LOAD_CONST R20 0
 MOVE R21 R20
-.line 5466
+.line 5483
 __workspace_symbols_while_1:
 HOST_CALL array_length R17 1 R22
 COMPARE R21 < R22 R23
 JUMP_IF_FALSE R23 __workspace_symbols_endwhile_2
-.line 5467
+.line 5484
 MOVE R22 R17
 MOVE R23 R21
 HOST_CALL index_get R22 2 R24
 MOVE R25 R24
-.line 5467
+.line 5484
 MOVE R26 R0
 MOVE R27 R25
 HOST_CALL index_get R26 2 R28
@@ -47696,15 +47812,15 @@ LOAD_STRING R29 6578706f727473
 HOST_CALL index_get R28 2 R30
 HOST_CALL map_keys R30 1 R31
 MOVE R32 R31
-.line 5467
+.line 5484
 LOAD_CONST R33 0
 MOVE R34 R33
-.line 5468
+.line 5485
 __workspace_symbols_while_3:
 HOST_CALL array_length R32 1 R35
 COMPARE R34 < R35 R36
 JUMP_IF_FALSE R36 __workspace_symbols_endwhile_4
-.line 5468
+.line 5485
 LOAD_STRING R35 236578706f72743a
 MOVE R36 R32
 MOVE R37 R34
@@ -47728,27 +47844,27 @@ MOVE R54 R19
 MOVE R55 R42
 MOVE R56 R53
 HOST_CALL index_set R54 3 R57
-.line 5468
+.line 5485
 LOAD_CONST R35 1
 BINARY R34 + R35 R36
 MOVE R34 R36
 JUMP __workspace_symbols_while_3
 __workspace_symbols_endwhile_4:
-.line 5469
+.line 5486
 LOAD_CONST R35 1
 BINARY R21 + R35 R36
 MOVE R21 R36
 JUMP __workspace_symbols_while_1
 __workspace_symbols_endwhile_2:
-.line 5471
+.line 5488
 LOAD_CONST R35 0
 MOVE R21 R35
-.line 5472
+.line 5489
 __workspace_symbols_while_5:
 HOST_CALL array_length R17 1 R35
 COMPARE R21 < R35 R36
 JUMP_IF_FALSE R36 __workspace_symbols_endwhile_6
-.line 5473
+.line 5490
 MOVE R35 R17
 MOVE R36 R21
 HOST_CALL index_get R35 2 R37
@@ -47756,10 +47872,10 @@ MOVE R38 R0
 MOVE R39 R37
 HOST_CALL index_get R38 2 R40
 MOVE R41 R40
-.line 5473
+.line 5490
 LOAD_CONST R42 0
 MOVE R43 R42
-.line 5474
+.line 5491
 __workspace_symbols_while_7:
 LOAD_STRING R44 646566696e6974696f6e73
 MOVE R45 R41
@@ -47768,7 +47884,7 @@ HOST_CALL index_get R45 2 R47
 HOST_CALL array_length R47 1 R48
 COMPARE R43 < R48 R49
 JUMP_IF_FALSE R49 __workspace_symbols_endwhile_8
-.line 5474
+.line 5491
 LOAD_STRING R44 646566696e6974696f6e73
 MOVE R45 R15
 MOVE R46 R44
@@ -47783,16 +47899,16 @@ HOST_CALL index_get R52 2 R54
 MOVE R55 R47
 MOVE R56 R54
 HOST_CALL array_push R55 2 R57
-.line 5474
+.line 5491
 LOAD_CONST R44 1
 BINARY R43 + R44 R45
 MOVE R43 R45
 JUMP __workspace_symbols_while_7
 __workspace_symbols_endwhile_8:
-.line 5475
+.line 5492
 LOAD_CONST R44 0
 MOVE R43 R44
-.line 5476
+.line 5493
 __workspace_symbols_while_9:
 LOAD_STRING R44 7265666572656e636573
 MOVE R45 R41
@@ -47801,7 +47917,7 @@ HOST_CALL index_get R45 2 R47
 HOST_CALL array_length R47 1 R48
 COMPARE R43 < R48 R49
 JUMP_IF_FALSE R49 __workspace_symbols_endwhile_10
-.line 5477
+.line 5494
 LOAD_STRING R44 7265666572656e636573
 MOVE R45 R41
 MOVE R46 R44
@@ -47810,14 +47926,14 @@ MOVE R48 R47
 MOVE R49 R43
 HOST_CALL index_get R48 2 R50
 MOVE R51 R50
-.line 5478
+.line 5495
 LOAD_STRING R52 6964656e74697479
 HOST_CALL index_get R51 2 R53
 MOVE R54 R19
 MOVE R55 R53
 HOST_CALL map_has R54 2 R56
 JUMP_IF_FALSE R56 __workspace_symbols_else_11
-.line 5478
+.line 5495
 LOAD_STRING R52 6964656e74697479
 LOAD_STRING R53 6964656e74697479
 MOVE R54 R51
@@ -47833,7 +47949,7 @@ HOST_CALL index_set R60 3 R63
 JUMP __workspace_symbols_endif_12
 __workspace_symbols_else_11:
 __workspace_symbols_endif_12:
-.line 5479
+.line 5496
 LOAD_STRING R52 7265666572656e636573
 MOVE R53 R15
 MOVE R54 R52
@@ -47841,56 +47957,56 @@ HOST_CALL index_get R53 2 R55
 MOVE R56 R55
 MOVE R57 R51
 HOST_CALL array_push R56 2 R58
-.line 5479
+.line 5496
 LOAD_CONST R52 1
 BINARY R43 + R52 R53
 MOVE R43 R53
 JUMP __workspace_symbols_while_9
 __workspace_symbols_endwhile_10:
-.line 5481
+.line 5498
 LOAD_CONST R52 1
 BINARY R21 + R52 R53
 MOVE R21 R53
 JUMP __workspace_symbols_while_5
 __workspace_symbols_endwhile_6:
-.line 5483
+.line 5500
 RETURN R15
 LOAD_CONST R52 null
 RETURN R52
 .function overlay_target 3 50
-.line 5487
+.line 5504
 HOST_CALL string_length R0 1 R3
 LOAD_CONST R4 1
 BINARY R3 - R4 R5
 MOVE R6 R5
-.line 5488
+.line 5505
 LOAD_CONST R7 true
 MOVE R8 R7
-.line 5488
+.line 5505
 __overlay_target_while_1:
 JUMP_IF_FALSE R8 __overlay_target_endwhile_2
-.line 5488
+.line 5505
 LOAD_CONST R9 0
 COMPARE R6 < R9 R10
 JUMP_IF_FALSE R10 __overlay_target_else_3
-.line 5488
+.line 5505
 LOAD_CONST R9 false
 MOVE R8 R9
 JUMP __overlay_target_endif_4
 __overlay_target_else_3:
-.line 5488
+.line 5505
 MOVE R9 R0
 MOVE R10 R6
 HOST_CALL string_byte_at R9 2 R11
 LOAD_CONST R12 47
 COMPARE R11 == R12 R13
 JUMP_IF_FALSE R13 __overlay_target_else_5
-.line 5488
+.line 5505
 LOAD_CONST R9 false
 MOVE R8 R9
 JUMP __overlay_target_endif_6
 __overlay_target_else_5:
-.line 5488
+.line 5505
 LOAD_CONST R9 1
 BINARY R6 - R9 R10
 MOVE R6 R10
@@ -47898,7 +48014,7 @@ __overlay_target_endif_6:
 __overlay_target_endif_4:
 JUMP __overlay_target_while_1
 __overlay_target_endwhile_2:
-.line 5489
+.line 5506
 LOAD_CONST R9 0
 LOAD_CONST R10 1
 BINARY R6 + R10 R11
@@ -47910,28 +48026,28 @@ MOVE R16 R15
 MOVE R17 R1
 HOST_CALL string_concat R16 2 R18
 MOVE R19 R18
-.line 5490
+.line 5507
 ARRAY_NEW R20 R20 0
 MOVE R21 R20
-.line 5490
+.line 5507
 LOAD_CONST R22 0
 MOVE R23 R22
-.line 5490
+.line 5507
 LOAD_CONST R24 0
 MOVE R25 R24
-.line 5491
+.line 5508
 __overlay_target_while_7:
 HOST_CALL string_length R19 1 R26
 COMPARE R25 <= R26 R27
 JUMP_IF_FALSE R27 __overlay_target_endwhile_8
-.line 5492
+.line 5509
 HOST_CALL string_length R19 1 R26
 COMPARE R25 == R26 R27
 MOVE R28 R27
-.line 5493
+.line 5510
 UNARY ! R28 R29
 JUMP_IF_FALSE R29 __overlay_target_else_9
-.line 5493
+.line 5510
 MOVE R29 R19
 MOVE R30 R25
 HOST_CALL string_byte_at R29 2 R31
@@ -47941,65 +48057,65 @@ MOVE R28 R33
 JUMP __overlay_target_endif_10
 __overlay_target_else_9:
 __overlay_target_endif_10:
-.line 5494
+.line 5511
 JUMP_IF_FALSE R28 __overlay_target_else_11
-.line 5495
+.line 5512
 MOVE R29 R19
 MOVE R30 R23
 MOVE R31 R25
 HOST_CALL string_slice R29 3 R32
 MOVE R33 R32
-.line 5496
+.line 5513
 LOAD_STRING R34 2e2e
 COMPARE R33 == R34 R35
 JUMP_IF_FALSE R35 __overlay_target_else_13
-.line 5496
+.line 5513
 HOST_CALL array_length R21 1 R34
 LOAD_CONST R35 0
 COMPARE R34 > R35 R36
 JUMP_IF_FALSE R36 __overlay_target_else_15
-.line 5496
+.line 5513
 ARRAY_NEW R34 R34 0
 MOVE R35 R34
-.line 5496
+.line 5513
 LOAD_CONST R36 0
 MOVE R37 R36
-.line 5496
+.line 5513
 __overlay_target_while_17:
 LOAD_CONST R38 1
 BINARY R37 + R38 R39
 HOST_CALL array_length R21 1 R40
 COMPARE R39 < R40 R41
 JUMP_IF_FALSE R41 __overlay_target_endwhile_18
-.line 5496
+.line 5513
 MOVE R38 R21
 MOVE R39 R37
 HOST_CALL index_get R38 2 R40
 MOVE R41 R35
 MOVE R42 R40
 HOST_CALL array_push R41 2 R43
-.line 5496
+.line 5513
 LOAD_CONST R38 1
 BINARY R37 + R38 R39
 MOVE R37 R39
 JUMP __overlay_target_while_17
 __overlay_target_endwhile_18:
-.line 5496
+.line 5513
 MOVE R21 R35
 JUMP __overlay_target_endif_16
 __overlay_target_else_15:
 __overlay_target_endif_16:
 JUMP __overlay_target_endif_14
 __overlay_target_else_13:
-.line 5497
+.line 5514
 LOAD_STRING R38 -
 COMPARE R33 != R38 R39
 JUMP_IF_FALSE R39 __overlay_target_else_19
-.line 5497
+.line 5514
 LOAD_STRING R38 2e
 COMPARE R33 != R38 R39
 JUMP_IF_FALSE R39 __overlay_target_else_21
-.line 5497
+.line 5514
 MOVE R38 R21
 MOVE R39 R33
 HOST_CALL array_push R38 2 R40
@@ -48010,20 +48126,20 @@ JUMP __overlay_target_endif_20
 __overlay_target_else_19:
 __overlay_target_endif_20:
 __overlay_target_endif_14:
-.line 5498
+.line 5515
 LOAD_CONST R38 1
 BINARY R25 + R38 R39
 MOVE R23 R39
 JUMP __overlay_target_endif_12
 __overlay_target_else_11:
 __overlay_target_endif_12:
-.line 5500
+.line 5517
 LOAD_CONST R38 1
 BINARY R25 + R38 R39
 MOVE R25 R39
 JUMP __overlay_target_while_7
 __overlay_target_endwhile_8:
-.line 5502
+.line 5519
 LOAD_STRING R38 2f
 LOAD_STRING R39 2f
 MOVE R40 R21
@@ -48033,34 +48149,34 @@ MOVE R43 R38
 MOVE R44 R42
 HOST_CALL string_concat R43 2 R45
 MOVE R46 R45
-.line 5503
+.line 5520
 MOVE R47 R2
 MOVE R48 R46
 HOST_CALL map_has R47 2 R49
 JUMP_IF_FALSE R49 __overlay_target_else_23
-.line 5503
+.line 5520
 RETURN R46
 JUMP __overlay_target_endif_24
 __overlay_target_else_23:
 __overlay_target_endif_24:
-.line 5504
+.line 5521
 HOST_CALL path_resolve R0 2 R47
 RETURN R47
 LOAD_CONST R48 null
 RETURN R48
 .function load_module 5 203
-.line 5508
+.line 5525
 MOVE R5 R0
-.line 5509
+.line 5526
 LOAD_CONST R6 false
 MOVE R7 R6
-.line 5510
+.line 5527
 LOAD_STRING R8 6f7665726c617973
 MOVE R9 R2
 MOVE R10 R8
 HOST_CALL map_has R9 2 R11
 JUMP_IF_FALSE R11 __load_module_else_1
-.line 5510
+.line 5527
 LOAD_STRING R8 6f7665726c617973
 MOVE R9 R2
 MOVE R10 R8
@@ -48072,13 +48188,13 @@ MOVE R7 R14
 JUMP __load_module_endif_2
 __load_module_else_1:
 __load_module_endif_2:
-.line 5511
+.line 5528
 UNARY ! R7 R8
 JUMP_IF_FALSE R8 __load_module_else_3
-.line 5511
+.line 5528
 UNARY ! R4 R8
 JUMP_IF_FALSE R8 __load_module_else_5
-.line 5511
+.line 5528
 LOAD_STRING R8 -
 MOVE R9 R0
 MOVE R10 R8
@@ -48086,14 +48202,14 @@ HOST_CALL path_resolve R9 2 R11
 MOVE R5 R11
 JUMP __load_module_endif_6
 __load_module_else_5:
-.line 5511
+.line 5528
 LOAD_STRING R8 736f757263655f6f76657272696465
 MOVE R9 R2
 MOVE R10 R8
 HOST_CALL map_has R9 2 R11
 UNARY ! R11 R12
 JUMP_IF_FALSE R12 __load_module_else_7
-.line 5511
+.line 5528
 LOAD_STRING R8 -
 MOVE R9 R0
 MOVE R10 R8
@@ -48106,39 +48222,39 @@ __load_module_endif_6:
 JUMP __load_module_endif_4
 __load_module_else_3:
 __load_module_endif_4:
-.line 5512
+.line 5529
 LOAD_CONST R8 0
 MOVE R9 R8
-.line 5512
+.line 5529
 __load_module_while_9:
 HOST_CALL array_length R3 1 R10
 COMPARE R9 < R10 R11
 JUMP_IF_FALSE R11 __load_module_endwhile_10
-.line 5512
+.line 5529
 MOVE R10 R3
 MOVE R11 R9
 HOST_CALL index_get R10 2 R12
 COMPARE R12 == R5 R13
 JUMP_IF_FALSE R13 __load_module_else_11
-.line 5512
+.line 5529
 LOAD_CONST R10 false
 LOAD_STRING R11 696d706f7274206379636c65206465746563746564
 HOST_CALL assert R10 2 R12
 JUMP __load_module_endif_12
 __load_module_else_11:
 __load_module_endif_12:
-.line 5512
+.line 5529
 LOAD_CONST R10 1
 BINARY R9 + R10 R11
 MOVE R9 R11
 JUMP __load_module_while_9
 __load_module_endwhile_10:
-.line 5513
+.line 5530
 MOVE R10 R2
 MOVE R11 R5
 HOST_CALL map_has R10 2 R12
 JUMP_IF_FALSE R12 __load_module_else_13
-.line 5513
+.line 5530
 MOVE R10 R2
 MOVE R11 R5
 HOST_CALL map_get R10 2 R12
@@ -48146,12 +48262,12 @@ RETURN R12
 JUMP __load_module_endif_14
 __load_module_else_13:
 __load_module_endif_14:
-.line 5514
+.line 5531
 LOAD_STRING R10 -
 MOVE R11 R10
-.line 5515
+.line 5532
 JUMP_IF_FALSE R7 __load_module_else_15
-.line 5515
+.line 5532
 LOAD_STRING R12 6f7665726c617973
 MOVE R13 R2
 MOVE R14 R12
@@ -48162,15 +48278,15 @@ HOST_CALL index_get R16 2 R18
 MOVE R11 R18
 JUMP __load_module_endif_16
 __load_module_else_15:
-.line 5516
+.line 5533
 JUMP_IF_FALSE R4 __load_module_else_17
-.line 5516
+.line 5533
 LOAD_STRING R12 736f757263655f6f76657272696465
 MOVE R13 R2
 MOVE R14 R12
 HOST_CALL map_has R13 2 R15
 JUMP_IF_FALSE R15 __load_module_else_19
-.line 5516
+.line 5533
 LOAD_STRING R12 736f757263655f6f76657272696465
 MOVE R13 R2
 MOVE R14 R12
@@ -48178,18 +48294,18 @@ HOST_CALL index_get R13 2 R15
 MOVE R11 R15
 JUMP __load_module_endif_20
 __load_module_else_19:
-.line 5516
+.line 5533
 HOST_CALL read_text R5 1 R12
 MOVE R11 R12
 __load_module_endif_20:
 JUMP __load_module_endif_18
 __load_module_else_17:
-.line 5517
+.line 5534
 HOST_CALL read_text R5 1 R12
 MOVE R11 R12
 __load_module_endif_18:
 __load_module_endif_16:
-.line 5518
+.line 5535
 LOAD_STRING R12 736f757263655f6f76657272696465
 MOVE R13 R2
 MOVE R14 R12
@@ -48198,10 +48314,10 @@ MOVE R16 R11
 MOVE R17 R15
 CALL parse_for_symbols R16 2 R18
 MOVE R19 R18
-.line 5519
+.line 5536
 UNARY ! R4 R20
 JUMP_IF_FALSE R20 __load_module_else_21
-.line 5519
+.line 5536
 LOAD_CONST R20 2
 HOST_CALL index_get R19 2 R21
 HOST_CALL array_length R21 1 R22
@@ -48212,46 +48328,46 @@ HOST_CALL assert R24 2 R26
 JUMP __load_module_endif_22
 __load_module_else_21:
 __load_module_endif_22:
-.line 5520
+.line 5537
 LOAD_STRING R20 6974656d73
 MOVE R21 R2
 MOVE R22 R20
 HOST_CALL index_get R21 2 R23
 HOST_CALL array_length R23 1 R24
 MOVE R25 R24
-.line 5521
+.line 5538
 HOST_CALL number_to_string R25 1 R26
 MOVE R27 R26
-.line 5522
+.line 5539
 MOVE R28 R2
 MOVE R29 R5
 MOVE R30 R25
 HOST_CALL map_set R28 3 R31
-.line 5523
+.line 5540
 LOAD_STRING R28 6974656d73
 MOVE R29 R2
 MOVE R30 R28
 HOST_CALL index_get R29 2 R31
 LOAD_CONST R32 null
 HOST_CALL array_push R31 2 R33
-.line 5524
+.line 5541
 MOVE R28 R3
 MOVE R29 R5
 CALL stack_with R28 2 R30
 MOVE R31 R30
-.line 5525
+.line 5542
 HOST_CALL map_new R32 0 R32
 MOVE R33 R32
-.line 5525
+.line 5542
 HOST_CALL map_new R34 0 R34
 MOVE R35 R34
-.line 5525
+.line 5542
 HOST_CALL map_new R36 0 R36
 MOVE R37 R36
-.line 5526
+.line 5543
 LOAD_CONST R38 0
 MOVE R39 R38
-.line 5527
+.line 5544
 __load_module_while_23:
 LOAD_CONST R40 3
 MOVE R41 R19
@@ -48260,7 +48376,7 @@ HOST_CALL index_get R41 2 R43
 HOST_CALL array_length R43 1 R44
 COMPARE R39 < R44 R45
 JUMP_IF_FALSE R45 __load_module_endwhile_24
-.line 5528
+.line 5545
 LOAD_CONST R40 3
 MOVE R41 R19
 MOVE R42 R40
@@ -48269,14 +48385,14 @@ MOVE R44 R43
 MOVE R45 R39
 HOST_CALL index_get R44 2 R46
 MOVE R47 R46
-.line 5529
+.line 5546
 LOAD_CONST R48 0
 HOST_CALL index_get R47 2 R49
 MOVE R50 R49
-.line 5530
+.line 5547
 LOAD_CONST R51 false
 MOVE R52 R51
-.line 5531
+.line 5548
 LOAD_CONST R53 0
 MOVE R54 R47
 MOVE R55 R53
@@ -48285,7 +48401,7 @@ HOST_CALL string_length R56 1 R57
 LOAD_CONST R58 4
 COMPARE R57 >= R58 R59
 JUMP_IF_FALSE R59 __load_module_else_25
-.line 5532
+.line 5549
 LOAD_CONST R53 0
 MOVE R54 R47
 MOVE R55 R53
@@ -48296,7 +48412,7 @@ HOST_CALL string_slice R56 3 R59
 LOAD_STRING R60 7374642f
 COMPARE R59 == R60 R61
 JUMP_IF_FALSE R61 __load_module_else_27
-.line 5532
+.line 5549
 LOAD_CONST R53 true
 MOVE R52 R53
 JUMP __load_module_endif_28
@@ -48305,9 +48421,9 @@ __load_module_endif_28:
 JUMP __load_module_endif_26
 __load_module_else_25:
 __load_module_endif_26:
-.line 5534
+.line 5551
 JUMP_IF_FALSE R52 __load_module_else_29
-.line 5535
+.line 5552
 LOAD_CONST R53 0
 MOVE R54 R47
 MOVE R55 R53
@@ -48323,7 +48439,7 @@ MOVE R64 R57
 MOVE R65 R62
 HOST_CALL string_slice R63 3 R66
 MOVE R67 R66
-.line 5536
+.line 5553
 LOAD_STRING R68 7374646c69625f646972
 MOVE R69 R2
 MOVE R70 R68
@@ -48338,13 +48454,13 @@ HOST_CALL string_concat R74 4 R78
 MOVE R50 R78
 JUMP __load_module_endif_30
 __load_module_else_29:
-.line 5538
+.line 5555
 LOAD_STRING R68 6f7665726c617973
 MOVE R69 R2
 MOVE R70 R68
 HOST_CALL map_has R69 2 R71
 JUMP_IF_FALSE R71 __load_module_else_31
-.line 5538
+.line 5555
 LOAD_CONST R68 0
 MOVE R69 R47
 MOVE R70 R68
@@ -48360,7 +48476,7 @@ CALL overlay_target R76 3 R79
 MOVE R50 R79
 JUMP __load_module_endif_32
 __load_module_else_31:
-.line 5539
+.line 5556
 LOAD_CONST R68 0
 MOVE R69 R47
 MOVE R70 R68
@@ -48371,7 +48487,7 @@ HOST_CALL path_resolve R72 2 R74
 MOVE R50 R74
 __load_module_endif_32:
 __load_module_endif_30:
-.line 5541
+.line 5558
 LOAD_CONST R68 0
 MOVE R69 R47
 MOVE R70 R68
@@ -48380,7 +48496,7 @@ MOVE R72 R2
 MOVE R73 R71
 MOVE R74 R50
 CALL register_package_module R72 3 R75
-.line 5542
+.line 5559
 LOAD_STRING R68 5f5f6d
 LOAD_STRING R69 6974656d73
 MOVE R70 R2
@@ -48394,7 +48510,7 @@ MOVE R77 R74
 MOVE R78 R75
 HOST_CALL string_concat R76 3 R79
 MOVE R80 R79
-.line 5543
+.line 5560
 LOAD_CONST R81 false
 MOVE R82 R50
 MOVE R83 R80
@@ -48403,7 +48519,7 @@ MOVE R85 R31
 MOVE R86 R81
 CALL load_module R82 5 R87
 MOVE R88 R87
-.line 5544
+.line 5561
 LOAD_STRING R89 6974656d73
 MOVE R90 R2
 MOVE R91 R89
@@ -48412,7 +48528,7 @@ MOVE R93 R92
 MOVE R94 R88
 HOST_CALL index_get R93 2 R95
 MOVE R96 R95
-.line 5545
+.line 5562
 LOAD_CONST R97 1
 MOVE R98 R47
 MOVE R99 R97
@@ -48425,7 +48541,7 @@ MOVE R105 R37
 MOVE R106 R100
 MOVE R107 R104
 HOST_CALL index_set R105 3 R108
-.line 5546
+.line 5563
 LOAD_CONST R97 2
 HOST_CALL index_get R96 2 R98
 LOAD_CONST R99 4
@@ -48433,18 +48549,18 @@ HOST_CALL index_get R98 2 R100
 LOAD_CONST R101 3
 HOST_CALL index_get R100 2 R102
 MOVE R103 R102
-.line 5546
+.line 5563
 HOST_CALL map_keys R103 1 R104
 MOVE R105 R104
-.line 5546
+.line 5563
 LOAD_CONST R106 0
 MOVE R107 R106
-.line 5547
+.line 5564
 __load_module_while_33:
 HOST_CALL array_length R105 1 R108
 COMPARE R107 < R108 R109
 JUMP_IF_FALSE R109 __load_module_endwhile_34
-.line 5548
+.line 5565
 MOVE R108 R105
 MOVE R109 R107
 HOST_CALL index_get R108 2 R110
@@ -48452,12 +48568,12 @@ MOVE R111 R103
 MOVE R112 R110
 HOST_CALL index_get R111 2 R113
 MOVE R114 R113
-.line 5549
+.line 5566
 LOAD_STRING R115 696d706f72746564
 HOST_CALL map_has R114 2 R116
 UNARY ! R116 R117
 JUMP_IF_FALSE R117 __load_module_else_35
-.line 5550
+.line 5567
 LOAD_CONST R115 1
 MOVE R116 R47
 MOVE R117 R115
@@ -48471,7 +48587,7 @@ MOVE R124 R119
 MOVE R125 R122
 HOST_CALL string_concat R123 3 R126
 MOVE R127 R126
-.line 5551
+.line 5568
 LOAD_CONST R128 1
 MOVE R129 R47
 MOVE R130 R128
@@ -48487,13 +48603,13 @@ HOST_CALL index_set R136 3 R139
 JUMP __load_module_endif_36
 __load_module_else_35:
 __load_module_endif_36:
-.line 5553
+.line 5570
 LOAD_CONST R128 1
 BINARY R107 + R128 R129
 MOVE R107 R129
 JUMP __load_module_while_33
 __load_module_endwhile_34:
-.line 5555
+.line 5572
 LOAD_CONST R128 2
 MOVE R129 R96
 MOVE R130 R128
@@ -48501,22 +48617,22 @@ HOST_CALL index_get R129 2 R131
 LOAD_CONST R132 1
 HOST_CALL index_get R131 2 R133
 MOVE R134 R133
-.line 5556
+.line 5573
 LOAD_CONST R135 0
 MOVE R136 R135
-.line 5557
+.line 5574
 __load_module_while_37:
 HOST_CALL array_length R134 1 R137
 COMPARE R136 < R137 R138
 JUMP_IF_FALSE R138 __load_module_endwhile_38
-.line 5558
+.line 5575
 MOVE R137 R134
 MOVE R138 R136
 HOST_CALL index_get R137 2 R139
 LOAD_CONST R140 1
 HOST_CALL index_get R139 2 R141
 MOVE R142 R141
-.line 5559
+.line 5576
 LOAD_CONST R143 1
 MOVE R144 R96
 MOVE R145 R143
@@ -48525,7 +48641,7 @@ MOVE R147 R146
 MOVE R148 R142
 HOST_CALL string_concat R147 2 R149
 MOVE R150 R149
-.line 5560
+.line 5577
 LOAD_CONST R151 0
 MOVE R152 R47
 MOVE R153 R151
@@ -48533,21 +48649,21 @@ HOST_CALL index_get R152 2 R154
 LOAD_STRING R155 7374642f636f7265
 COMPARE R154 == R155 R156
 JUMP_IF_FALSE R156 __load_module_else_39
-.line 5561
+.line 5578
 LOAD_STRING R151 646973747269627574696f6e
 COMPARE R142 == R151 R152
 JUMP_IF_FALSE R152 __load_module_else_41
-.line 5561
+.line 5578
 LOAD_STRING R151 5f5f636f72655f646973747269627574696f6e5f5f
 MOVE R150 R151
 JUMP __load_module_endif_42
 __load_module_else_41:
 __load_module_endif_42:
-.line 5562
+.line 5579
 LOAD_STRING R151 6b65726e656c
 COMPARE R142 == R151 R152
 JUMP_IF_FALSE R152 __load_module_else_43
-.line 5562
+.line 5579
 LOAD_STRING R151 5f5f636f72655f6b65726e656c5f5f
 MOVE R150 R151
 JUMP __load_module_endif_44
@@ -48556,7 +48672,7 @@ __load_module_endif_44:
 JUMP __load_module_endif_40
 __load_module_else_39:
 __load_module_endif_40:
-.line 5564
+.line 5581
 LOAD_CONST R151 0
 MOVE R152 R47
 MOVE R153 R151
@@ -48564,11 +48680,11 @@ HOST_CALL index_get R152 2 R154
 LOAD_STRING R155 7374642f6576616c756174696f6e
 COMPARE R154 == R155 R156
 JUMP_IF_FALSE R156 __load_module_else_45
-.line 5565
+.line 5582
 LOAD_STRING R151 77616c6b5f666f7277617264
 COMPARE R142 == R151 R152
 JUMP_IF_FALSE R152 __load_module_else_47
-.line 5565
+.line 5582
 LOAD_STRING R151 5f5f6576616c756174696f6e5f77616c6b5f666f72776172645f5f
 MOVE R150 R151
 JUMP __load_module_endif_48
@@ -48577,7 +48693,7 @@ __load_module_endif_48:
 JUMP __load_module_endif_46
 __load_module_else_45:
 __load_module_endif_46:
-.line 5567
+.line 5584
 LOAD_CONST R151 1
 MOVE R152 R47
 MOVE R153 R151
@@ -48591,19 +48707,19 @@ MOVE R160 R33
 MOVE R161 R159
 MOVE R162 R150
 HOST_CALL map_set R160 3 R163
-.line 5568
+.line 5585
 LOAD_CONST R151 1
 BINARY R136 + R151 R152
 MOVE R136 R152
 JUMP __load_module_while_37
 __load_module_endwhile_38:
-.line 5570
+.line 5587
 LOAD_CONST R151 1
 BINARY R39 + R151 R152
 MOVE R39 R152
 JUMP __load_module_while_23
 __load_module_endwhile_24:
-.line 5572
+.line 5589
 LOAD_STRING R151 736f757263655f6f76657272696465
 MOVE R152 R2
 MOVE R153 R151
@@ -48613,13 +48729,13 @@ MOVE R156 R35
 MOVE R157 R154
 CALL resolve_program_with_symbols R155 3 R158
 MOVE R159 R158
-.line 5573
+.line 5590
 LOAD_STRING R160 736f757263655f6f76657272696465
 MOVE R161 R2
 MOVE R162 R160
 HOST_CALL map_has R161 2 R163
 JUMP_IF_FALSE R163 __load_module_else_49
-.line 5574
+.line 5591
 LOAD_CONST R160 4
 HOST_CALL index_get R159 2 R161
 LOAD_CONST R162 3
@@ -48633,7 +48749,7 @@ MOVE R169 R37
 MOVE R170 R165
 CALL module_symbols R166 5 R171
 MOVE R172 R171
-.line 5575
+.line 5592
 LOAD_STRING R173 73796d626f6c5f6d6f64756c6573
 MOVE R174 R2
 MOVE R175 R173
@@ -48645,16 +48761,16 @@ HOST_CALL index_set R177 3 R180
 JUMP __load_module_endif_50
 __load_module_else_49:
 __load_module_endif_50:
-.line 5577
+.line 5594
 CALL lower R159 1 R173
 MOVE R174 R173
-.line 5578
+.line 5595
 HOST_CALL map_new R175 0 R175
 MOVE R176 R175
-.line 5578
+.line 5595
 LOAD_CONST R177 0
 MOVE R178 R177
-.line 5579
+.line 5596
 __load_module_while_51:
 LOAD_CONST R179 1
 MOVE R180 R174
@@ -48663,7 +48779,7 @@ HOST_CALL index_get R180 2 R182
 HOST_CALL array_length R182 1 R183
 COMPARE R178 < R183 R184
 JUMP_IF_FALSE R184 __load_module_endwhile_52
-.line 5580
+.line 5597
 LOAD_CONST R179 1
 MOVE R180 R174
 MOVE R181 R179
@@ -48674,7 +48790,7 @@ HOST_CALL index_get R183 2 R185
 LOAD_CONST R186 1
 HOST_CALL index_get R185 2 R187
 MOVE R188 R187
-.line 5580
+.line 5597
 MOVE R189 R1
 MOVE R190 R188
 HOST_CALL string_concat R189 2 R191
@@ -48682,13 +48798,13 @@ MOVE R192 R176
 MOVE R193 R188
 MOVE R194 R191
 HOST_CALL index_set R192 3 R195
-.line 5580
+.line 5597
 LOAD_CONST R189 1
 BINARY R178 + R189 R190
 MOVE R178 R190
 JUMP __load_module_while_51
 __load_module_endwhile_52:
-.line 5582
+.line 5599
 LOAD_STRING R189 6d617070696e6773
 MOVE R190 R2
 MOVE R191 R189
@@ -48697,14 +48813,14 @@ MOVE R193 R192
 MOVE R194 R27
 MOVE R195 R176
 HOST_CALL index_set R193 3 R196
-.line 5583
+.line 5600
 MOVE R189 R5
 MOVE R190 R1
 MOVE R191 R174
 MOVE R192 R33
 ARRAY_NEW R193 R189 4
 MOVE R194 R193
-.line 5584
+.line 5601
 LOAD_STRING R195 6974656d73
 MOVE R196 R2
 MOVE R197 R195
@@ -48713,7 +48829,7 @@ MOVE R199 R198
 MOVE R200 R25
 MOVE R201 R194
 HOST_CALL index_set R199 3 R202
-.line 5585
+.line 5602
 LOAD_STRING R195 696d706f72745f6d617070696e6773
 MOVE R196 R2
 MOVE R197 R195
@@ -48722,45 +48838,45 @@ MOVE R199 R198
 MOVE R200 R27
 MOVE R201 R33
 HOST_CALL map_set R199 3 R202
-.line 5586
+.line 5603
 RETURN R25
 LOAD_CONST R195 null
 RETURN R195
 .function project_name 1 12
-.line 5590
+.line 5607
 HOST_CALL string_length R0 1 R1
 MOVE R2 R1
-.line 5590
+.line 5607
 LOAD_CONST R3 0
 MOVE R4 R3
-.line 5590
+.line 5607
 LOAD_CONST R5 0
 MOVE R6 R5
-.line 5591
+.line 5608
 __project_name_while_1:
 COMPARE R6 < R2 R7
 JUMP_IF_FALSE R7 __project_name_endwhile_2
-.line 5592
+.line 5609
 MOVE R7 R0
 MOVE R8 R6
 HOST_CALL string_byte_at R7 2 R9
 LOAD_CONST R10 47
 COMPARE R9 == R10 R11
 JUMP_IF_FALSE R11 __project_name_else_3
-.line 5592
+.line 5609
 LOAD_CONST R7 1
 BINARY R6 + R7 R8
 MOVE R4 R8
 JUMP __project_name_endif_4
 __project_name_else_3:
 __project_name_endif_4:
-.line 5593
+.line 5610
 LOAD_CONST R7 1
 BINARY R6 + R7 R8
 MOVE R6 R8
 JUMP __project_name_while_1
 __project_name_endwhile_2:
-.line 5595
+.line 5612
 MOVE R7 R0
 MOVE R8 R4
 MOVE R9 R2
@@ -48769,7 +48885,7 @@ RETURN R10
 LOAD_CONST R11 null
 RETURN R11
 .function project_path 2 8
-.line 5598
+.line 5615
 LOAD_STRING R2 2f
 MOVE R3 R0
 MOVE R4 R2
@@ -48779,15 +48895,15 @@ RETURN R6
 LOAD_CONST R7 null
 RETURN R7
 .function project_new 1 16
-.line 5601
+.line 5618
 CALL project_name R0 1 R1
 MOVE R2 R1
-.line 5602
+.line 5619
 LOAD_STRING R3 -
 COMPARE R2 != R3 R4
 LOAD_STRING R5 70726f6a656374206469726563746f7279206d75737420686176652061206e616d65
 HOST_CALL assert R4 2 R6
-.line 5603
+.line 5620
 HOST_CALL path_exists R0 1 R3
 UNARY ! R3 R4
 LOAD_STRING R5 70726f6a656374206469726563746f727920616c7265616479206578697374733a20
@@ -48797,21 +48913,21 @@ HOST_CALL string_concat R6 2 R8
 MOVE R9 R4
 MOVE R10 R8
 HOST_CALL assert R9 2 R11
-.line 5604
+.line 5621
 HOST_CALL directory_create R0 1 R3
-.line 5605
+.line 5622
 LOAD_STRING R3 737263
 MOVE R4 R0
 MOVE R5 R3
 CALL project_path R4 2 R6
 HOST_CALL directory_create R6 1 R7
-.line 5606
+.line 5623
 LOAD_STRING R3 7465737473
 MOVE R4 R0
 MOVE R5 R3
 CALL project_path R4 2 R6
 HOST_CALL directory_create R6 1 R7
-.line 5607
+.line 5624
 LOAD_STRING R3 6c616e612e746f6d6c
 MOVE R4 R0
 MOVE R5 R3
@@ -48825,28 +48941,28 @@ HOST_CALL string_concat R9 3 R12
 MOVE R13 R6
 MOVE R14 R12
 HOST_CALL write_text_atomic R13 2 R15
-.line 5610
+.line 5627
 LOAD_STRING R3 7372632f62656c6965662e6c616e61
 MOVE R4 R0
 MOVE R5 R3
 CALL project_path R4 2 R6
 LOAD_STRING R7 666e206c6162656c2829207b2072657475726e2022636f6e6669726d6564223b207d0a
 HOST_CALL write_text_atomic R6 2 R8
-.line 5612
+.line 5629
 LOAD_STRING R3 7372632f6d61696e2e6c616e61
 MOVE R4 R0
 MOVE R5 R3
 CALL project_path R4 2 R6
 LOAD_STRING R7 696d706f727420227374642f636f72652220617320636f72653b0a0a666e206d61696e2829207b206c6574206f7074696f6e73203d20636f72652e646973747269627574696f6e285b5b22636f6e6669726d6564222c20312e305d5d293b207072696e742822436f726520646973747269627574696f6e20726561647922293b207d0a6d61696e28293b0a
 HOST_CALL write_text_atomic R6 2 R8
-.line 5614
+.line 5631
 LOAD_STRING R3 74657374732f6d61696e5f746573742e6c616e61
 MOVE R4 R0
 MOVE R5 R3
 CALL project_path R4 2 R6
 LOAD_STRING R7 696d706f727420222e2e2f7372632f62656c6965662e6c616e61222061732062656c6965663b0a696d706f727420227374642f636f72652220617320636f72653b0a0a6c6574206f7074696f6e73203d20636f72652e646973747269627574696f6e285b5b22636f6e6669726d6564222c20312e305d5d293b0a7072696e74282266697273742070726f6772616d20436f726520646973747269627574696f6e22293b0a
 HOST_CALL write_text_atomic R6 2 R8
-.line 5616
+.line 5633
 LOAD_STRING R3 6372656174656420
 MOVE R4 R3
 MOVE R5 R0
@@ -48855,22 +48971,22 @@ PRINT R6
 LOAD_CONST R7 null
 RETURN R7
 .function project_has_suffix 2 13
-.line 5620
+.line 5637
 HOST_CALL string_length R0 1 R2
 MOVE R3 R2
-.line 5620
+.line 5637
 HOST_CALL string_length R1 1 R4
 MOVE R5 R4
-.line 5621
+.line 5638
 COMPARE R3 < R5 R6
 JUMP_IF_FALSE R6 __project_has_suffix_else_1
-.line 5621
+.line 5638
 LOAD_CONST R6 false
 RETURN R6
 JUMP __project_has_suffix_endif_2
 __project_has_suffix_else_1:
 __project_has_suffix_endif_2:
-.line 5622
+.line 5639
 BINARY R3 - R5 R6
 MOVE R7 R0
 MOVE R8 R6
@@ -48881,38 +48997,38 @@ RETURN R11
 LOAD_CONST R12 null
 RETURN R12
 .function project_lana_files 2 23
-.line 5626
+.line 5643
 HOST_CALL directory_list R0 1 R2
 MOVE R3 R2
-.line 5626
+.line 5643
 LOAD_CONST R4 0
 MOVE R5 R4
-.line 5627
+.line 5644
 __project_lana_files_while_1:
 HOST_CALL array_length R3 1 R6
 COMPARE R5 < R6 R7
 JUMP_IF_FALSE R7 __project_lana_files_endwhile_2
-.line 5628
+.line 5645
 MOVE R6 R3
 MOVE R7 R5
 HOST_CALL index_get R6 2 R8
 MOVE R9 R8
-.line 5628
+.line 5645
 LOAD_STRING R10 6e616d65
 HOST_CALL map_get R9 2 R11
 MOVE R12 R11
-.line 5629
+.line 5646
 LOAD_CONST R13 0
 HOST_CALL string_byte_at R12 2 R14
 LOAD_CONST R15 46
 COMPARE R14 != R15 R16
 JUMP_IF_FALSE R16 __project_lana_files_else_3
-.line 5630
+.line 5647
 MOVE R13 R0
 MOVE R14 R12
 CALL project_path R13 2 R15
 MOVE R16 R15
-.line 5631
+.line 5648
 LOAD_STRING R17 6b696e64
 MOVE R18 R9
 MOVE R19 R17
@@ -48920,15 +49036,15 @@ HOST_CALL map_get R18 2 R20
 LOAD_STRING R21 6469726563746f7279
 COMPARE R20 == R21 R22
 JUMP_IF_FALSE R22 __project_lana_files_else_5
-.line 5632
+.line 5649
 LOAD_STRING R17 6275696c64
 COMPARE R12 != R17 R18
 JUMP_IF_FALSE R18 __project_lana_files_else_7
-.line 5632
+.line 5649
 LOAD_STRING R17 646f6373
 COMPARE R12 != R17 R18
 JUMP_IF_FALSE R18 __project_lana_files_else_9
-.line 5632
+.line 5649
 MOVE R17 R16
 MOVE R18 R1
 CALL project_lana_files R17 2 R19
@@ -48940,13 +49056,13 @@ __project_lana_files_else_7:
 __project_lana_files_endif_8:
 JUMP __project_lana_files_endif_6
 __project_lana_files_else_5:
-.line 5634
+.line 5651
 LOAD_STRING R17 2e6c616e61
 MOVE R18 R12
 MOVE R19 R17
 CALL project_has_suffix R18 2 R20
 JUMP_IF_FALSE R20 __project_lana_files_else_11
-.line 5634
+.line 5651
 MOVE R17 R1
 MOVE R18 R16
 HOST_CALL array_push R17 2 R19
@@ -48957,7 +49073,7 @@ __project_lana_files_endif_6:
 JUMP __project_lana_files_endif_4
 __project_lana_files_else_3:
 __project_lana_files_endif_4:
-.line 5637
+.line 5654
 LOAD_CONST R17 1
 BINARY R5 + R17 R18
 MOVE R5 R18
@@ -48966,97 +49082,97 @@ __project_lana_files_endwhile_2:
 LOAD_CONST R19 null
 RETURN R19
 .function project_text_less 2 19
-.line 5642
+.line 5659
 HOST_CALL string_length R0 1 R2
 MOVE R3 R2
-.line 5642
+.line 5659
 HOST_CALL string_length R1 1 R4
 MOVE R5 R4
-.line 5643
+.line 5660
 MOVE R6 R3
-.line 5643
+.line 5660
 LOAD_CONST R7 0
 MOVE R8 R7
-.line 5644
+.line 5661
 COMPARE R5 < R6 R9
 JUMP_IF_FALSE R9 __project_text_less_else_1
-.line 5644
+.line 5661
 MOVE R6 R5
 JUMP __project_text_less_endif_2
 __project_text_less_else_1:
 __project_text_less_endif_2:
-.line 5645
+.line 5662
 __project_text_less_while_3:
 COMPARE R8 < R6 R9
 JUMP_IF_FALSE R9 __project_text_less_endwhile_4
-.line 5646
+.line 5663
 MOVE R9 R0
 MOVE R10 R8
 HOST_CALL string_byte_at R9 2 R11
 MOVE R12 R11
-.line 5646
+.line 5663
 MOVE R13 R1
 MOVE R14 R8
 HOST_CALL string_byte_at R13 2 R15
 MOVE R16 R15
-.line 5647
+.line 5664
 COMPARE R12 < R16 R17
 JUMP_IF_FALSE R17 __project_text_less_else_5
-.line 5647
+.line 5664
 LOAD_CONST R17 true
 RETURN R17
 JUMP __project_text_less_endif_6
 __project_text_less_else_5:
 __project_text_less_endif_6:
-.line 5648
+.line 5665
 COMPARE R16 < R12 R17
 JUMP_IF_FALSE R17 __project_text_less_else_7
-.line 5648
+.line 5665
 LOAD_CONST R17 false
 RETURN R17
 JUMP __project_text_less_endif_8
 __project_text_less_else_7:
 __project_text_less_endif_8:
-.line 5649
+.line 5666
 LOAD_CONST R17 1
 BINARY R8 + R17 R18
 MOVE R8 R18
 JUMP __project_text_less_while_3
 __project_text_less_endwhile_4:
-.line 5651
+.line 5668
 COMPARE R3 < R5 R17
 RETURN R17
 LOAD_CONST R18 null
 RETURN R18
 .function project_sort_files 1 20
-.line 5655
+.line 5672
 LOAD_CONST R1 1
 MOVE R2 R1
-.line 5656
+.line 5673
 __project_sort_files_while_1:
 HOST_CALL array_length R0 1 R3
 COMPARE R2 < R3 R4
 JUMP_IF_FALSE R4 __project_sort_files_endwhile_2
-.line 5657
+.line 5674
 MOVE R3 R0
 MOVE R4 R2
 HOST_CALL index_get R3 2 R5
 MOVE R6 R5
-.line 5657
+.line 5674
 MOVE R7 R2
-.line 5657
+.line 5674
 MOVE R8 R2
-.line 5657
+.line 5674
 LOAD_CONST R9 true
 MOVE R10 R9
-.line 5658
+.line 5675
 __project_sort_files_while_3:
 LOAD_CONST R11 0
 COMPARE R7 > R11 R12
 JUMP_IF_FALSE R12 __project_sort_files_endwhile_4
-.line 5659
+.line 5676
 JUMP_IF_FALSE R10 __project_sort_files_else_5
-.line 5660
+.line 5677
 LOAD_CONST R11 1
 BINARY R7 - R11 R12
 MOVE R13 R0
@@ -49066,7 +49182,7 @@ MOVE R16 R6
 MOVE R17 R15
 CALL project_text_less R16 2 R18
 JUMP_IF_FALSE R18 __project_sort_files_else_7
-.line 5661
+.line 5678
 LOAD_CONST R11 1
 BINARY R7 - R11 R12
 MOVE R13 R0
@@ -49076,31 +49192,31 @@ MOVE R16 R0
 MOVE R17 R7
 MOVE R18 R15
 HOST_CALL index_set R16 3 R19
-.line 5661
+.line 5678
 LOAD_CONST R11 1
 BINARY R7 - R11 R12
 MOVE R8 R12
 JUMP __project_sort_files_endif_8
 __project_sort_files_else_7:
-.line 5662
+.line 5679
 LOAD_CONST R11 false
 MOVE R10 R11
 __project_sort_files_endif_8:
 JUMP __project_sort_files_endif_6
 __project_sort_files_else_5:
 __project_sort_files_endif_6:
-.line 5664
+.line 5681
 LOAD_CONST R11 1
 BINARY R7 - R11 R12
 MOVE R7 R12
 JUMP __project_sort_files_while_3
 __project_sort_files_endwhile_4:
-.line 5666
+.line 5683
 MOVE R11 R0
 MOVE R12 R8
 MOVE R13 R6
 HOST_CALL index_set R11 3 R14
-.line 5666
+.line 5683
 LOAD_CONST R11 1
 BINARY R2 + R11 R12
 MOVE R2 R12
@@ -49109,110 +49225,110 @@ __project_sort_files_endwhile_2:
 LOAD_CONST R13 null
 RETURN R13
 .function project_hash_sources 2 15
-.line 5671
+.line 5688
 LOAD_CONST R2 0
 HOST_CALL array_new R2 1 R3
 MOVE R4 R3
-.line 5671
+.line 5688
 LOAD_CONST R5 0
 MOVE R6 R5
-.line 5672
+.line 5689
 MOVE R7 R0
 MOVE R8 R4
 CALL project_lana_files R7 2 R9
-.line 5672
+.line 5689
 CALL project_sort_files R4 1 R7
-.line 5673
+.line 5690
 __project_hash_sources_while_1:
 HOST_CALL array_length R4 1 R7
 COMPARE R6 < R7 R8
 JUMP_IF_FALSE R8 __project_hash_sources_endwhile_2
-.line 5674
+.line 5691
 MOVE R7 R4
 MOVE R8 R6
 HOST_CALL index_get R7 2 R9
 MOVE R10 R9
-.line 5674
+.line 5691
 MOVE R11 R1
 MOVE R12 R10
 HOST_CALL hash_update R11 2 R13
 MOVE R1 R13
-.line 5675
+.line 5692
 HOST_CALL read_text R10 1 R11
 MOVE R12 R1
 MOVE R13 R11
 HOST_CALL hash_update R12 2 R14
 MOVE R1 R14
-.line 5675
+.line 5692
 LOAD_CONST R11 1
 BINARY R6 + R11 R12
 MOVE R6 R12
 JUMP __project_hash_sources_while_1
 __project_hash_sources_endwhile_2:
-.line 5677
+.line 5694
 RETURN R1
 LOAD_CONST R11 null
 RETURN R11
 .function project_dependency_line 4 71
-.line 5681
+.line 5698
 HOST_CALL string_length R0 1 R4
 MOVE R5 R4
-.line 5681
+.line 5698
 LOAD_CONST R6 0
 MOVE R7 R6
-.line 5681
+.line 5698
 LOAD_CONST R8 0
 MOVE R9 R8
-.line 5682
+.line 5699
 MOVE R10 R5
-.line 5682
+.line 5699
 MOVE R11 R5
-.line 5682
+.line 5699
 LOAD_CONST R12 0
 MOVE R13 R12
-.line 5683
+.line 5700
 __project_dependency_line_while_1:
 COMPARE R9 < R5 R14
 JUMP_IF_FALSE R14 __project_dependency_line_endwhile_2
-.line 5684
+.line 5701
 MOVE R14 R0
 MOVE R15 R9
 HOST_CALL string_byte_at R14 2 R16
 LOAD_CONST R17 61
 COMPARE R16 == R17 R18
 JUMP_IF_FALSE R18 __project_dependency_line_else_3
-.line 5684
+.line 5701
 MOVE R7 R9
-.line 5684
+.line 5701
 MOVE R9 R5
 JUMP __project_dependency_line_endif_4
 __project_dependency_line_else_3:
-.line 5685
+.line 5702
 LOAD_CONST R14 1
 BINARY R9 + R14 R15
 MOVE R9 R15
 __project_dependency_line_endif_4:
 JUMP __project_dependency_line_while_1
 __project_dependency_line_endwhile_2:
-.line 5687
+.line 5704
 LOAD_CONST R14 0
 COMPARE R7 == R14 R15
 JUMP_IF_FALSE R15 __project_dependency_line_else_5
-.line 5687
+.line 5704
 RETURN R1
 JUMP __project_dependency_line_endif_6
 __project_dependency_line_else_5:
 __project_dependency_line_endif_6:
-.line 5688
+.line 5705
 MOVE R13 R7
-.line 5688
+.line 5705
 MOVE R9 R7
-.line 5689
+.line 5706
 __project_dependency_line_while_7:
 LOAD_CONST R14 0
 COMPARE R9 > R14 R15
 JUMP_IF_FALSE R15 __project_dependency_line_endwhile_8
-.line 5690
+.line 5707
 LOAD_CONST R14 1
 BINARY R9 - R14 R15
 MOVE R16 R0
@@ -49221,108 +49337,108 @@ HOST_CALL string_byte_at R16 2 R18
 LOAD_CONST R19 32
 COMPARE R18 == R19 R20
 JUMP_IF_FALSE R20 __project_dependency_line_else_9
-.line 5690
+.line 5707
 LOAD_CONST R14 1
 BINARY R9 - R14 R15
 MOVE R13 R15
 JUMP __project_dependency_line_endif_10
 __project_dependency_line_else_9:
 __project_dependency_line_endif_10:
-.line 5691
+.line 5708
 LOAD_CONST R14 1
 BINARY R9 - R14 R15
 MOVE R9 R15
 JUMP __project_dependency_line_while_7
 __project_dependency_line_endwhile_8:
-.line 5693
+.line 5710
 LOAD_CONST R14 1
 BINARY R7 + R14 R15
 MOVE R9 R15
-.line 5694
+.line 5711
 __project_dependency_line_while_11:
 COMPARE R9 < R5 R14
 JUMP_IF_FALSE R14 __project_dependency_line_endwhile_12
-.line 5695
+.line 5712
 MOVE R14 R0
 MOVE R15 R9
 HOST_CALL string_byte_at R14 2 R16
 LOAD_CONST R17 34
 COMPARE R16 == R17 R18
 JUMP_IF_FALSE R18 __project_dependency_line_else_13
-.line 5695
+.line 5712
 MOVE R10 R9
-.line 5695
+.line 5712
 MOVE R9 R5
 JUMP __project_dependency_line_endif_14
 __project_dependency_line_else_13:
-.line 5696
+.line 5713
 LOAD_CONST R14 1
 BINARY R9 + R14 R15
 MOVE R9 R15
 __project_dependency_line_endif_14:
 JUMP __project_dependency_line_while_11
 __project_dependency_line_endwhile_12:
-.line 5698
+.line 5715
 COMPARE R10 == R5 R14
 JUMP_IF_FALSE R14 __project_dependency_line_else_15
-.line 5698
+.line 5715
 RETURN R1
 JUMP __project_dependency_line_endif_16
 __project_dependency_line_else_15:
 __project_dependency_line_endif_16:
-.line 5699
+.line 5716
 LOAD_CONST R14 1
 BINARY R10 + R14 R15
 MOVE R9 R15
-.line 5700
+.line 5717
 __project_dependency_line_while_17:
 COMPARE R9 < R5 R14
 JUMP_IF_FALSE R14 __project_dependency_line_endwhile_18
-.line 5701
+.line 5718
 MOVE R14 R0
 MOVE R15 R9
 HOST_CALL string_byte_at R14 2 R16
 LOAD_CONST R17 34
 COMPARE R16 == R17 R18
 JUMP_IF_FALSE R18 __project_dependency_line_else_19
-.line 5701
+.line 5718
 MOVE R11 R9
-.line 5701
+.line 5718
 MOVE R9 R5
 JUMP __project_dependency_line_endif_20
 __project_dependency_line_else_19:
-.line 5702
+.line 5719
 LOAD_CONST R14 1
 BINARY R9 + R14 R15
 MOVE R9 R15
 __project_dependency_line_endif_20:
 JUMP __project_dependency_line_while_17
 __project_dependency_line_endwhile_18:
-.line 5704
+.line 5721
 COMPARE R11 == R5 R14
 JUMP_IF_FALSE R14 __project_dependency_line_else_21
-.line 5704
+.line 5721
 RETURN R1
 JUMP __project_dependency_line_endif_22
 __project_dependency_line_else_21:
 __project_dependency_line_endif_22:
-.line 5705
+.line 5722
 LOAD_CONST R14 0
 COMPARE R13 == R14 R15
 JUMP_IF_FALSE R15 __project_dependency_line_else_23
-.line 5705
+.line 5722
 RETURN R1
 JUMP __project_dependency_line_endif_24
 __project_dependency_line_else_23:
 __project_dependency_line_endif_24:
-.line 5706
+.line 5723
 LOAD_CONST R14 0
 MOVE R15 R0
 MOVE R16 R14
 MOVE R17 R13
 HOST_CALL string_slice R15 3 R18
 MOVE R19 R18
-.line 5707
+.line 5724
 LOAD_CONST R20 1
 BINARY R10 + R20 R21
 MOVE R22 R0
@@ -49330,17 +49446,17 @@ MOVE R23 R21
 MOVE R24 R11
 HOST_CALL string_slice R22 3 R25
 MOVE R26 R25
-.line 5708
+.line 5725
 MOVE R27 R2
 MOVE R28 R26
 CALL project_path R27 2 R29
 MOVE R30 R29
-.line 5709
+.line 5726
 HOST_CALL string_length R26 1 R31
 LOAD_CONST R32 0
 COMPARE R31 > R32 R33
 JUMP_IF_FALSE R33 __project_dependency_line_else_25
-.line 5710
+.line 5727
 LOAD_CONST R31 0
 MOVE R32 R26
 MOVE R33 R31
@@ -49348,7 +49464,7 @@ HOST_CALL string_byte_at R32 2 R34
 LOAD_CONST R35 47
 COMPARE R34 == R35 R36
 JUMP_IF_FALSE R36 __project_dependency_line_else_27
-.line 5710
+.line 5727
 MOVE R30 R26
 JUMP __project_dependency_line_endif_28
 __project_dependency_line_else_27:
@@ -49356,38 +49472,38 @@ __project_dependency_line_endif_28:
 JUMP __project_dependency_line_endif_26
 __project_dependency_line_else_25:
 __project_dependency_line_endif_26:
-.line 5712
+.line 5729
 LOAD_STRING R31 6c616e612e746f6d6c
 CALL project_path R30 2 R32
 HOST_CALL read_text R32 1 R33
 MOVE R34 R33
-.line 5713
+.line 5730
 CALL project_has_schema R34 1 R35
 LOAD_STRING R36 696e76616c696420646570656e64656e637920736368656d61
 HOST_CALL assert R35 2 R37
-.line 5714
+.line 5731
 LOAD_STRING R35 6e616d65
 CALL project_line_value R34 2 R36
 MOVE R37 R36
-.line 5715
+.line 5732
 LOAD_STRING R38 76657273696f6e
 MOVE R39 R34
 MOVE R40 R38
 CALL project_line_value R39 2 R41
 MOVE R42 R41
-.line 5716
+.line 5733
 MOVE R43 R1
-.line 5716
+.line 5733
 MOVE R44 R30
 MOVE R45 R1
 CALL project_hash_sources R44 2 R46
 MOVE R1 R46
-.line 5717
+.line 5734
 MOVE R44 R1
 MOVE R45 R37
 HOST_CALL hash_update R44 2 R46
 MOVE R1 R46
-.line 5718
+.line 5735
 LOAD_CONST R44 0
 LOAD_CONST R45 0
 MOVE R46 R3
@@ -49415,29 +49531,29 @@ MOVE R67 R3
 MOVE R68 R44
 MOVE R69 R66
 HOST_CALL index_set R67 3 R70
-.line 5719
+.line 5736
 RETURN R1
 LOAD_CONST R44 null
 RETURN R44
 .function project_hash_stdlib 1 7
-.line 5723
+.line 5740
 LOAD_STRING R1 4c414e415f5354444c49425f444952
 HOST_CALL getenv R1 1 R2
 MOVE R3 R2
-.line 5724
+.line 5741
 LOAD_STRING R4 -
 COMPARE R3 == R4 R5
 JUMP_IF_FALSE R5 __project_hash_stdlib_else_1
-.line 5724
+.line 5741
 LOAD_STRING R4 7374646c6962
 MOVE R3 R4
 JUMP __project_hash_stdlib_endif_2
 __project_hash_stdlib_else_1:
 __project_hash_stdlib_endif_2:
-.line 5725
+.line 5742
 HOST_CALL path_exists R3 1 R4
 JUMP_IF_FALSE R4 __project_hash_stdlib_else_3
-.line 5725
+.line 5742
 MOVE R4 R3
 MOVE R5 R0
 CALL project_hash_sources R4 2 R6
@@ -49445,39 +49561,39 @@ MOVE R0 R6
 JUMP __project_hash_stdlib_endif_4
 __project_hash_stdlib_else_3:
 __project_hash_stdlib_endif_4:
-.line 5726
+.line 5743
 RETURN R0
 LOAD_CONST R4 null
 RETURN R4
 .function project_hash_plan 2 41
-.line 5730
+.line 5747
 LOAD_STRING R2 6c616e612e746f6d6c
 MOVE R3 R0
 MOVE R4 R2
 CALL project_path R3 2 R5
 HOST_CALL read_text R5 1 R6
 MOVE R7 R6
-.line 5731
+.line 5748
 LOAD_STRING R8 656e747279
 CALL project_line_value R7 2 R9
 MOVE R10 R9
-.line 5732
+.line 5749
 LOAD_STRING R11 63626632396365343834323232333235
 MOVE R12 R11
-.line 5732
+.line 5749
 LOAD_STRING R13 -
 ARRAY_NEW R14 R13 1
 MOVE R15 R14
-.line 5733
+.line 5750
 CALL project_has_schema R7 1 R16
 LOAD_STRING R17 696e76616c6964206c616e612e746f6d6c20736368656d61
 HOST_CALL assert R16 2 R18
-.line 5734
+.line 5751
 MOVE R16 R12
 MOVE R17 R7
 HOST_CALL hash_update R16 2 R18
 MOVE R12 R18
-.line 5735
+.line 5752
 MOVE R16 R0
 MOVE R17 R10
 CALL project_path R16 2 R18
@@ -49486,61 +49602,61 @@ MOVE R20 R12
 MOVE R21 R19
 HOST_CALL hash_update R20 2 R22
 MOVE R12 R22
-.line 5736
+.line 5753
 MOVE R16 R0
 MOVE R17 R12
 CALL project_hash_sources R16 2 R18
 MOVE R12 R18
-.line 5737
+.line 5754
 CALL project_hash_stdlib R12 1 R16
 MOVE R12 R16
-.line 5738
+.line 5755
 CALL project_lines R7 1 R16
 MOVE R17 R16
-.line 5738
+.line 5755
 LOAD_CONST R18 0
 MOVE R19 R18
-.line 5738
+.line 5755
 LOAD_CONST R20 false
 MOVE R21 R20
-.line 5739
+.line 5756
 __project_hash_plan_while_1:
 HOST_CALL array_length R17 1 R22
 COMPARE R19 < R22 R23
 JUMP_IF_FALSE R23 __project_hash_plan_endwhile_2
-.line 5740
+.line 5757
 MOVE R22 R17
 MOVE R23 R19
 HOST_CALL index_get R22 2 R24
 MOVE R25 R24
-.line 5741
+.line 5758
 LOAD_STRING R26 5b646570656e64656e636965735d
 COMPARE R25 == R26 R27
 JUMP_IF_FALSE R27 __project_hash_plan_else_3
-.line 5741
+.line 5758
 LOAD_CONST R26 true
 MOVE R21 R26
 JUMP __project_hash_plan_endif_4
 __project_hash_plan_else_3:
-.line 5743
+.line 5760
 HOST_CALL string_length R25 1 R26
 LOAD_CONST R27 0
 COMPARE R26 > R27 R28
 JUMP_IF_FALSE R28 __project_hash_plan_else_5
-.line 5744
+.line 5761
 LOAD_CONST R26 0
 HOST_CALL string_byte_at R25 2 R27
 LOAD_CONST R28 91
 COMPARE R27 == R28 R29
 JUMP_IF_FALSE R29 __project_hash_plan_else_7
-.line 5744
+.line 5761
 LOAD_CONST R26 false
 MOVE R21 R26
 JUMP __project_hash_plan_endif_8
 __project_hash_plan_else_7:
-.line 5745
+.line 5762
 JUMP_IF_FALSE R21 __project_hash_plan_else_9
-.line 5745
+.line 5762
 MOVE R26 R25
 MOVE R27 R12
 MOVE R28 R0
@@ -49555,13 +49671,13 @@ JUMP __project_hash_plan_endif_6
 __project_hash_plan_else_5:
 __project_hash_plan_endif_6:
 __project_hash_plan_endif_4:
-.line 5748
+.line 5765
 LOAD_CONST R26 1
 BINARY R19 + R26 R27
 MOVE R19 R27
 JUMP __project_hash_plan_while_1
 __project_hash_plan_endwhile_2:
-.line 5750
+.line 5767
 LOAD_STRING R26 636f6e74656e74203d2022
 LOAD_STRING R27 220a
 LOAD_CONST R28 0
@@ -49579,31 +49695,31 @@ HOST_CALL write_text_atomic R37 2 R39
 LOAD_CONST R40 null
 RETURN R40
 .function project_lines 1 17
-.line 5754
+.line 5771
 LOAD_CONST R1 0
 HOST_CALL array_new R1 1 R2
 MOVE R3 R2
-.line 5754
+.line 5771
 HOST_CALL string_length R0 1 R4
 MOVE R5 R4
-.line 5754
+.line 5771
 LOAD_CONST R6 0
 MOVE R7 R6
-.line 5754
+.line 5771
 LOAD_CONST R8 0
 MOVE R9 R8
-.line 5755
+.line 5772
 __project_lines_while_1:
 COMPARE R9 < R5 R10
 JUMP_IF_FALSE R10 __project_lines_endwhile_2
-.line 5756
+.line 5773
 MOVE R10 R0
 MOVE R11 R9
 HOST_CALL string_byte_at R10 2 R12
 LOAD_CONST R13 10
 COMPARE R12 == R13 R14
 JUMP_IF_FALSE R14 __project_lines_else_3
-.line 5757
+.line 5774
 MOVE R10 R0
 MOVE R11 R7
 MOVE R12 R9
@@ -49611,23 +49727,23 @@ HOST_CALL string_slice R10 3 R13
 MOVE R14 R3
 MOVE R15 R13
 HOST_CALL array_push R14 2 R16
-.line 5757
+.line 5774
 LOAD_CONST R10 1
 BINARY R9 + R10 R11
 MOVE R7 R11
 JUMP __project_lines_endif_4
 __project_lines_else_3:
 __project_lines_endif_4:
-.line 5759
+.line 5776
 LOAD_CONST R10 1
 BINARY R9 + R10 R11
 MOVE R9 R11
 JUMP __project_lines_while_1
 __project_lines_endwhile_2:
-.line 5761
+.line 5778
 COMPARE R7 < R5 R10
 JUMP_IF_FALSE R10 __project_lines_else_5
-.line 5761
+.line 5778
 MOVE R10 R0
 MOVE R11 R7
 MOVE R12 R5
@@ -49638,43 +49754,43 @@ HOST_CALL array_push R14 2 R16
 JUMP __project_lines_endif_6
 __project_lines_else_5:
 __project_lines_endif_6:
-.line 5762
+.line 5779
 RETURN R3
 LOAD_CONST R10 null
 RETURN R10
 .function project_line_value 2 28
-.line 5766
+.line 5783
 CALL project_lines R0 1 R2
 MOVE R3 R2
-.line 5766
+.line 5783
 LOAD_STRING R4 203d2022
 MOVE R5 R1
 MOVE R6 R4
 HOST_CALL string_concat R5 2 R7
 MOVE R8 R7
-.line 5767
+.line 5784
 HOST_CALL string_length R8 1 R9
 MOVE R10 R9
-.line 5767
+.line 5784
 LOAD_CONST R11 0
 MOVE R12 R11
-.line 5768
+.line 5785
 __project_line_value_while_1:
 HOST_CALL array_length R3 1 R13
 COMPARE R12 < R13 R14
 JUMP_IF_FALSE R14 __project_line_value_endwhile_2
-.line 5769
+.line 5786
 MOVE R13 R3
 MOVE R14 R12
 HOST_CALL index_get R13 2 R15
 MOVE R16 R15
-.line 5769
+.line 5786
 HOST_CALL string_length R16 1 R17
 MOVE R18 R17
-.line 5770
+.line 5787
 COMPARE R18 >= R10 R19
 JUMP_IF_FALSE R19 __project_line_value_else_3
-.line 5771
+.line 5788
 LOAD_CONST R19 0
 MOVE R20 R16
 MOVE R21 R19
@@ -49682,49 +49798,49 @@ MOVE R22 R10
 HOST_CALL string_slice R20 3 R23
 COMPARE R23 == R8 R24
 JUMP_IF_FALSE R24 __project_line_value_else_5
-.line 5772
+.line 5789
 MOVE R19 R10
-.line 5772
+.line 5789
 MOVE R20 R18
-.line 5772
+.line 5789
 LOAD_CONST R21 true
 MOVE R22 R21
-.line 5773
+.line 5790
 __project_line_value_while_7:
 COMPARE R19 < R18 R23
 JUMP_IF_FALSE R23 __project_line_value_endwhile_8
-.line 5774
+.line 5791
 JUMP_IF_FALSE R22 __project_line_value_else_9
-.line 5775
+.line 5792
 MOVE R23 R16
 MOVE R24 R19
 HOST_CALL string_byte_at R23 2 R25
 LOAD_CONST R26 34
 COMPARE R25 == R26 R27
 JUMP_IF_FALSE R27 __project_line_value_else_11
-.line 5776
+.line 5793
 MOVE R20 R19
-.line 5776
+.line 5793
 LOAD_CONST R23 false
 MOVE R22 R23
 JUMP __project_line_value_endif_12
 __project_line_value_else_11:
-.line 5777
+.line 5794
 LOAD_CONST R23 1
 BINARY R19 + R23 R24
 MOVE R19 R24
 __project_line_value_endif_12:
 JUMP __project_line_value_endif_10
 __project_line_value_else_9:
-.line 5778
+.line 5795
 MOVE R19 R18
 __project_line_value_endif_10:
 JUMP __project_line_value_while_7
 __project_line_value_endwhile_8:
-.line 5780
+.line 5797
 UNARY ! R22 R23
 JUMP_IF_FALSE R23 __project_line_value_else_13
-.line 5780
+.line 5797
 MOVE R23 R16
 MOVE R24 R10
 MOVE R25 R20
@@ -49739,106 +49855,106 @@ __project_line_value_endif_6:
 JUMP __project_line_value_endif_4
 __project_line_value_else_3:
 __project_line_value_endif_4:
-.line 5783
+.line 5800
 LOAD_CONST R23 1
 BINARY R12 + R23 R24
 MOVE R12 R24
 JUMP __project_line_value_while_1
 __project_line_value_endwhile_2:
-.line 5785
+.line 5802
 LOAD_STRING R23 -
 RETURN R23
 LOAD_CONST R24 null
 RETURN R24
 .function project_has_schema 1 10
-.line 5789
+.line 5806
 CALL project_lines R0 1 R1
 MOVE R2 R1
-.line 5789
+.line 5806
 LOAD_CONST R3 0
 MOVE R4 R3
-.line 5790
+.line 5807
 __project_has_schema_while_1:
 HOST_CALL array_length R2 1 R5
 COMPARE R4 < R5 R6
 JUMP_IF_FALSE R6 __project_has_schema_endwhile_2
-.line 5791
+.line 5808
 MOVE R5 R2
 MOVE R6 R4
 HOST_CALL index_get R5 2 R7
 LOAD_STRING R8 736368656d61203d2031
 COMPARE R7 == R8 R9
 JUMP_IF_FALSE R9 __project_has_schema_else_3
-.line 5791
+.line 5808
 LOAD_CONST R5 true
 RETURN R5
 JUMP __project_has_schema_endif_4
 __project_has_schema_else_3:
 __project_has_schema_endif_4:
-.line 5792
+.line 5809
 LOAD_CONST R5 1
 BINARY R4 + R5 R6
 MOVE R4 R6
 JUMP __project_has_schema_while_1
 __project_has_schema_endwhile_2:
-.line 5794
+.line 5811
 LOAD_CONST R5 false
 RETURN R5
 LOAD_CONST R6 null
 RETURN R6
 .function project_format_text 1 28
-.line 5798
+.line 5815
 HOST_CALL string_length R0 1 R1
 MOVE R2 R1
-.line 5798
+.line 5815
 LOAD_STRING R3 -
 MOVE R4 R3
-.line 5798
+.line 5815
 LOAD_CONST R5 0
 MOVE R6 R5
-.line 5799
+.line 5816
 LOAD_CONST R7 0
 COMPARE R2 == R7 R8
 JUMP_IF_FALSE R8 __project_format_text_else_1
-.line 5799
+.line 5816
 LOAD_STRING R7 0a
 RETURN R7
 JUMP __project_format_text_endif_2
 __project_format_text_else_1:
 __project_format_text_endif_2:
-.line 5800
+.line 5817
 __project_format_text_while_3:
 COMPARE R6 < R2 R7
 JUMP_IF_FALSE R7 __project_format_text_endwhile_4
-.line 5801
+.line 5818
 MOVE R7 R6
-.line 5801
+.line 5818
 LOAD_CONST R8 true
 MOVE R9 R8
-.line 5802
+.line 5819
 __project_format_text_while_5:
 JUMP_IF_FALSE R9 __project_format_text_endwhile_6
-.line 5803
+.line 5820
 COMPARE R6 >= R2 R10
 JUMP_IF_FALSE R10 __project_format_text_else_7
-.line 5803
+.line 5820
 LOAD_CONST R10 false
 MOVE R9 R10
 JUMP __project_format_text_endif_8
 __project_format_text_else_7:
-.line 5805
+.line 5822
 MOVE R10 R0
 MOVE R11 R6
 HOST_CALL string_byte_at R10 2 R12
 LOAD_CONST R13 10
 COMPARE R12 == R13 R14
 JUMP_IF_FALSE R14 __project_format_text_else_9
-.line 5805
+.line 5822
 LOAD_CONST R10 false
 MOVE R9 R10
 JUMP __project_format_text_endif_10
 __project_format_text_else_9:
-.line 5806
+.line 5823
 LOAD_CONST R10 1
 BINARY R6 + R10 R11
 MOVE R6 R11
@@ -49846,60 +49962,60 @@ __project_format_text_endif_10:
 __project_format_text_endif_8:
 JUMP __project_format_text_while_5
 __project_format_text_endwhile_6:
-.line 5809
+.line 5826
 MOVE R10 R6
-.line 5809
+.line 5826
 LOAD_CONST R11 true
 MOVE R12 R11
-.line 5810
+.line 5827
 __project_format_text_while_11:
 JUMP_IF_FALSE R12 __project_format_text_endwhile_12
-.line 5811
+.line 5828
 COMPARE R10 == R7 R13
 JUMP_IF_FALSE R13 __project_format_text_else_13
-.line 5811
+.line 5828
 LOAD_CONST R13 false
 MOVE R12 R13
 JUMP __project_format_text_endif_14
 __project_format_text_else_13:
-.line 5813
+.line 5830
 LOAD_CONST R13 1
 BINARY R10 - R13 R14
 MOVE R15 R0
 MOVE R16 R14
 HOST_CALL string_byte_at R15 2 R17
 MOVE R18 R17
-.line 5814
+.line 5831
 LOAD_CONST R19 32
 COMPARE R18 == R19 R20
 JUMP_IF_FALSE R20 __project_format_text_else_15
-.line 5814
+.line 5831
 LOAD_CONST R19 1
 BINARY R10 - R19 R20
 MOVE R10 R20
 JUMP __project_format_text_endif_16
 __project_format_text_else_15:
-.line 5816
+.line 5833
 LOAD_CONST R19 9
 COMPARE R18 == R19 R20
 JUMP_IF_FALSE R20 __project_format_text_else_17
-.line 5816
+.line 5833
 LOAD_CONST R19 1
 BINARY R10 - R19 R20
 MOVE R10 R20
 JUMP __project_format_text_endif_18
 __project_format_text_else_17:
-.line 5818
+.line 5835
 LOAD_CONST R19 13
 COMPARE R18 == R19 R20
 JUMP_IF_FALSE R20 __project_format_text_else_19
-.line 5818
+.line 5835
 LOAD_CONST R19 1
 BINARY R10 - R19 R20
 MOVE R10 R20
 JUMP __project_format_text_endif_20
 __project_format_text_else_19:
-.line 5819
+.line 5836
 LOAD_CONST R19 false
 MOVE R12 R19
 __project_format_text_endif_20:
@@ -49908,7 +50024,7 @@ __project_format_text_endif_16:
 __project_format_text_endif_14:
 JUMP __project_format_text_while_11
 __project_format_text_endwhile_12:
-.line 5824
+.line 5841
 MOVE R19 R0
 MOVE R20 R7
 MOVE R21 R10
@@ -49919,10 +50035,10 @@ MOVE R25 R22
 MOVE R26 R23
 HOST_CALL string_concat R24 3 R27
 MOVE R4 R27
-.line 5825
+.line 5842
 COMPARE R6 < R2 R19
 JUMP_IF_FALSE R19 __project_format_text_else_21
-.line 5825
+.line 5842
 LOAD_CONST R19 1
 BINARY R6 + R19 R20
 MOVE R6 R20
@@ -49931,80 +50047,80 @@ __project_format_text_else_21:
 __project_format_text_endif_22:
 JUMP __project_format_text_while_3
 __project_format_text_endwhile_4:
-.line 5827
+.line 5844
 RETURN R4
 LOAD_CONST R19 null
 RETURN R19
 .function project_format 2 30
-.line 5831
+.line 5848
 LOAD_CONST R2 0
 HOST_CALL array_new R2 1 R3
 MOVE R4 R3
-.line 5831
+.line 5848
 LOAD_CONST R5 false
 MOVE R6 R5
-.line 5831
+.line 5848
 LOAD_CONST R7 0
 MOVE R8 R7
-.line 5832
+.line 5849
 LOAD_STRING R9 737263
 MOVE R10 R0
 MOVE R11 R9
 CALL project_path R10 2 R12
 MOVE R13 R12
-.line 5833
+.line 5850
 LOAD_STRING R14 7465737473
 MOVE R15 R0
 MOVE R16 R14
 CALL project_path R15 2 R17
 MOVE R18 R17
-.line 5834
+.line 5851
 HOST_CALL path_exists R13 1 R19
 JUMP_IF_FALSE R19 __project_format_else_1
-.line 5834
+.line 5851
 MOVE R19 R13
 MOVE R20 R4
 CALL project_lana_files R19 2 R21
 JUMP __project_format_endif_2
 __project_format_else_1:
 __project_format_endif_2:
-.line 5835
+.line 5852
 HOST_CALL path_exists R18 1 R19
 JUMP_IF_FALSE R19 __project_format_else_3
-.line 5835
+.line 5852
 MOVE R19 R18
 MOVE R20 R4
 CALL project_lana_files R19 2 R21
 JUMP __project_format_endif_4
 __project_format_else_3:
 __project_format_endif_4:
-.line 5836
+.line 5853
 __project_format_while_5:
 HOST_CALL array_length R4 1 R19
 COMPARE R8 < R19 R20
 JUMP_IF_FALSE R20 __project_format_endwhile_6
-.line 5837
+.line 5854
 MOVE R19 R4
 MOVE R20 R8
 HOST_CALL index_get R19 2 R21
 MOVE R22 R21
-.line 5837
+.line 5854
 HOST_CALL read_text R22 1 R23
 MOVE R24 R23
-.line 5837
+.line 5854
 CALL project_format_text R24 1 R25
 MOVE R26 R25
-.line 5838
+.line 5855
 COMPARE R24 != R26 R27
 JUMP_IF_FALSE R27 __project_format_else_7
-.line 5839
+.line 5856
 LOAD_CONST R27 true
 MOVE R6 R27
-.line 5840
+.line 5857
 LOAD_STRING R27 7772697465
 COMPARE R1 == R27 R28
 JUMP_IF_FALSE R28 __project_format_else_9
-.line 5840
+.line 5857
 MOVE R27 R22
 MOVE R28 R26
 HOST_CALL write_text_atomic R27 2 R29
@@ -50014,19 +50130,19 @@ __project_format_endif_10:
 JUMP __project_format_endif_8
 __project_format_else_7:
 __project_format_endif_8:
-.line 5842
+.line 5859
 LOAD_CONST R27 1
 BINARY R8 + R27 R28
 MOVE R8 R28
 JUMP __project_format_while_5
 __project_format_endwhile_6:
-.line 5844
+.line 5861
 LOAD_STRING R27 636865636b
 COMPARE R1 == R27 R28
 JUMP_IF_FALSE R28 __project_format_else_11
-.line 5844
+.line 5861
 JUMP_IF_FALSE R6 __project_format_else_13
-.line 5844
+.line 5861
 LOAD_CONST R27 false
 LOAD_STRING R28 666f726d6174206368616e676573207265717569726564
 HOST_CALL assert R27 2 R29
@@ -50036,73 +50152,73 @@ __project_format_endif_14:
 JUMP __project_format_endif_12
 __project_format_else_11:
 __project_format_endif_12:
-.line 5845
+.line 5862
 JUMP_IF_FALSE R6 __project_format_else_15
-.line 5845
+.line 5862
 LOAD_STRING R27 666f726d6174746564
 PRINT R27
 JUMP __project_format_endif_16
 __project_format_else_15:
-.line 5845
+.line 5862
 LOAD_STRING R27 616c726561647920666f726d6174746564
 PRINT R27
 __project_format_endif_16:
 LOAD_CONST R28 null
 RETURN R28
 .function project_document 1 68
-.line 5849
+.line 5866
 LOAD_STRING R1 6c616e612e746f6d6c
 CALL project_path R0 2 R2
 MOVE R3 R2
-.line 5850
+.line 5867
 HOST_CALL path_exists R3 1 R4
 LOAD_STRING R5 6c616e612e746f6d6c206e6f7420666f756e64
 HOST_CALL assert R4 2 R6
-.line 5851
+.line 5868
 HOST_CALL read_text R3 1 R4
 MOVE R5 R4
-.line 5852
+.line 5869
 LOAD_STRING R6 6e616d65
 CALL project_line_value R5 2 R7
 MOVE R8 R7
-.line 5852
+.line 5869
 LOAD_STRING R9 76657273696f6e
 MOVE R10 R5
 MOVE R11 R9
 CALL project_line_value R10 2 R12
 MOVE R13 R12
-.line 5853
+.line 5870
 LOAD_STRING R14 656e747279
 MOVE R15 R5
 MOVE R16 R14
 CALL project_line_value R15 2 R17
 MOVE R18 R17
-.line 5854
+.line 5871
 CALL project_has_schema R5 1 R19
 LOAD_STRING R20 696e76616c6964206c616e612e746f6d6c20736368656d61
 HOST_CALL assert R19 2 R21
-.line 5855
+.line 5872
 LOAD_STRING R19 -
 COMPARE R8 != R19 R20
 LOAD_STRING R21 696e76616c6964206c616e612e746f6d6c20736368656d61
 HOST_CALL assert R20 2 R22
-.line 5855
+.line 5872
 LOAD_STRING R19 -
 COMPARE R13 != R19 R20
 LOAD_STRING R21 696e76616c6964206c616e612e746f6d6c20736368656d61
 HOST_CALL assert R20 2 R22
-.line 5856
+.line 5873
 LOAD_STRING R19 -
 COMPARE R18 != R19 R20
 LOAD_STRING R21 696e76616c6964206c616e612e746f6d6c20736368656d61
 HOST_CALL assert R20 2 R22
-.line 5857
+.line 5874
 MOVE R19 R0
 MOVE R20 R18
 CALL project_path R19 2 R21
 HOST_CALL read_text R21 1 R22
 MOVE R23 R22
-.line 5857
+.line 5874
 LOAD_STRING R24 2320
 LOAD_STRING R25 204150490a0a56657273696f6e20
 LOAD_STRING R26 2e0a0a
@@ -50117,30 +50233,30 @@ MOVE R34 R27
 MOVE R35 R28
 HOST_CALL string_concat R29 7 R36
 MOVE R37 R36
-.line 5861
+.line 5878
 CALL project_lines R23 1 R38
 MOVE R39 R38
-.line 5861
+.line 5878
 LOAD_CONST R40 0
 MOVE R41 R40
-.line 5862
+.line 5879
 __project_document_while_1:
 HOST_CALL array_length R39 1 R42
 COMPARE R41 < R42 R43
 JUMP_IF_FALSE R43 __project_document_endwhile_2
-.line 5863
+.line 5880
 MOVE R42 R39
 MOVE R43 R41
 HOST_CALL index_get R42 2 R44
 MOVE R45 R44
-.line 5863
+.line 5880
 HOST_CALL string_length R45 1 R46
 MOVE R47 R46
-.line 5864
+.line 5881
 LOAD_CONST R48 3
 COMPARE R47 >= R48 R49
 JUMP_IF_FALSE R49 __project_document_else_3
-.line 5865
+.line 5882
 LOAD_CONST R48 0
 LOAD_CONST R49 3
 MOVE R50 R45
@@ -50150,47 +50266,47 @@ HOST_CALL string_slice R50 3 R53
 LOAD_STRING R54 666e20
 COMPARE R53 == R54 R55
 JUMP_IF_FALSE R55 __project_document_else_5
-.line 5866
+.line 5883
 LOAD_CONST R48 3
 MOVE R49 R48
-.line 5866
+.line 5883
 MOVE R50 R47
-.line 5866
+.line 5883
 LOAD_CONST R51 true
 MOVE R52 R51
-.line 5867
+.line 5884
 __project_document_while_7:
 COMPARE R49 < R47 R53
 JUMP_IF_FALSE R53 __project_document_endwhile_8
-.line 5868
+.line 5885
 JUMP_IF_FALSE R52 __project_document_else_9
-.line 5869
+.line 5886
 MOVE R53 R45
 MOVE R54 R49
 HOST_CALL string_byte_at R53 2 R55
 LOAD_CONST R56 123
 COMPARE R55 == R56 R57
 JUMP_IF_FALSE R57 __project_document_else_11
-.line 5869
+.line 5886
 MOVE R50 R49
-.line 5869
+.line 5886
 LOAD_CONST R53 false
 MOVE R52 R53
 JUMP __project_document_endif_12
 __project_document_else_11:
-.line 5870
+.line 5887
 LOAD_CONST R53 1
 BINARY R49 + R53 R54
 MOVE R49 R54
 __project_document_endif_12:
 JUMP __project_document_endif_10
 __project_document_else_9:
-.line 5871
+.line 5888
 MOVE R49 R47
 __project_document_endif_10:
 JUMP __project_document_while_7
 __project_document_endwhile_8:
-.line 5873
+.line 5890
 LOAD_STRING R53 23232060
 LOAD_CONST R54 3
 MOVE R55 R45
@@ -50213,19 +50329,19 @@ __project_document_endif_6:
 JUMP __project_document_endif_4
 __project_document_else_3:
 __project_document_endif_4:
-.line 5876
+.line 5893
 LOAD_CONST R53 1
 BINARY R41 + R53 R54
 MOVE R41 R54
 JUMP __project_document_while_1
 __project_document_endwhile_2:
-.line 5878
+.line 5895
 LOAD_STRING R53 646f6373
 MOVE R54 R0
 MOVE R55 R53
 CALL project_path R54 2 R56
 HOST_CALL directory_create R56 1 R57
-.line 5879
+.line 5896
 LOAD_STRING R53 646f63732f6170692e6d64
 MOVE R54 R0
 MOVE R55 R53
@@ -50233,7 +50349,7 @@ CALL project_path R54 2 R56
 MOVE R57 R56
 MOVE R58 R37
 HOST_CALL write_text_atomic R57 2 R59
-.line 5880
+.line 5897
 LOAD_STRING R53 67656e65726174656420
 LOAD_STRING R54 646f63732f6170692e6d64
 MOVE R55 R0
@@ -50246,28 +50362,28 @@ PRINT R60
 LOAD_CONST R61 null
 RETURN R61
 __main:
-.line 5883
+.line 5900
 HOST_CALL args R0 0 R0
 MOVE R1 R0
-.line 5883
+.line 5900
 HOST_CALL array_length R1 1 R2
 LOAD_CONST R3 2
 COMPARE R2 >= R3 R4
 LOAD_STRING R5 75736167653a206c616e612d636f6d70696c6572203c696e7075742e6c616e613e203c6f75747075742e6c61736d3e
 HOST_CALL assert R4 2 R6
-.line 5884
+.line 5901
 LOAD_CONST R2 0
 HOST_CALL index_get R1 2 R3
 LOAD_STRING R4 2d2d70726f6a6563742d706c616e
 COMPARE R3 == R4 R5
 JUMP_IF_FALSE R5 __main_else_1
-.line 5885
+.line 5902
 HOST_CALL array_length R1 1 R2
 LOAD_CONST R3 3
 COMPARE R2 == R3 R4
 LOAD_STRING R5 75736167653a206c616e612d636f6d70696c6572202d2d70726f6a6563742d706c616e203c6469726563746f72793e203c6f75747075743e
 HOST_CALL assert R4 2 R6
-.line 5886
+.line 5903
 LOAD_CONST R2 1
 HOST_CALL index_get R1 2 R3
 LOAD_CONST R4 2
@@ -50279,25 +50395,25 @@ MOVE R9 R7
 CALL project_hash_plan R8 2 R10
 JUMP __main_endif_2
 __main_else_1:
-.line 5888
+.line 5905
 LOAD_CONST R2 0
 HOST_CALL index_get R1 2 R3
 LOAD_STRING R4 2d2d70726f6a6563742d6e6577
 COMPARE R3 == R4 R5
 JUMP_IF_FALSE R5 __main_else_3
-.line 5889
+.line 5906
 LOAD_CONST R2 1
 HOST_CALL index_get R1 2 R3
 CALL project_new R3 1 R4
 JUMP __main_endif_4
 __main_else_3:
-.line 5891
+.line 5908
 LOAD_CONST R2 0
 HOST_CALL index_get R1 2 R3
 LOAD_STRING R4 2d2d70726f6a6563742d666d74
 COMPARE R3 == R4 R5
 JUMP_IF_FALSE R5 __main_else_5
-.line 5892
+.line 5909
 LOAD_STRING R2 2e
 LOAD_CONST R3 1
 MOVE R4 R1
@@ -50308,47 +50424,47 @@ MOVE R8 R6
 CALL project_format R7 2 R9
 JUMP __main_endif_6
 __main_else_5:
-.line 5894
+.line 5911
 LOAD_CONST R2 0
 HOST_CALL index_get R1 2 R3
 LOAD_STRING R4 2d2d70726f6a6563742d646f63
 COMPARE R3 == R4 R5
 JUMP_IF_FALSE R5 __main_else_7
-.line 5895
+.line 5912
 LOAD_CONST R2 1
 HOST_CALL index_get R1 2 R3
 CALL project_document R3 1 R4
 JUMP __main_endif_8
 __main_else_7:
-.line 5897
+.line 5914
 LOAD_CONST R2 0
 HOST_CALL index_get R1 2 R3
 LOAD_STRING R4 2d2d73796d626f6c73
 COMPARE R3 == R4 R5
 JUMP_IF_FALSE R5 __main_else_9
-.line 5898
+.line 5915
 HOST_CALL array_length R1 1 R2
 LOAD_CONST R3 3
 COMPARE R2 >= R3 R4
 LOAD_STRING R5 75736167653a206c616e612d636f6d70696c6572202d2d73796d626f6c73203c696e7075742e6c616e613e203c6f75747075742e6a736f6e3e205b6f726967696e616c2e6c616e615d
 HOST_CALL assert R4 2 R6
-.line 5899
+.line 5916
 LOAD_CONST R2 1
 HOST_CALL index_get R1 2 R3
 HOST_CALL read_text R3 1 R4
 MOVE R5 R4
-.line 5899
+.line 5916
 LOAD_CONST R6 1
 MOVE R7 R1
 MOVE R8 R6
 HOST_CALL index_get R7 2 R9
 MOVE R10 R9
-.line 5900
+.line 5917
 HOST_CALL array_length R1 1 R11
 LOAD_CONST R12 3
 COMPARE R11 > R12 R13
 JUMP_IF_FALSE R13 __main_else_11
-.line 5900
+.line 5917
 LOAD_CONST R11 3
 MOVE R12 R1
 MOVE R13 R11
@@ -50357,7 +50473,7 @@ MOVE R10 R14
 JUMP __main_endif_12
 __main_else_11:
 __main_endif_12:
-.line 5901
+.line 5918
 LOAD_STRING R11 6974656d73
 ARRAY_NEW R12 R12 0
 LOAD_STRING R13 6d617070696e6773
@@ -50387,12 +50503,12 @@ MOVE R36 R22
 MOVE R37 R23
 HOST_CALL map_new R24 14 R38
 MOVE R39 R38
-.line 5902
+.line 5919
 HOST_CALL array_length R1 1 R40
 LOAD_CONST R41 4
 COMPARE R40 > R41 R42
 JUMP_IF_FALSE R42 __main_else_13
-.line 5902
+.line 5919
 LOAD_STRING R40 6f7665726c617973
 LOAD_CONST R41 4
 MOVE R42 R1
@@ -50409,27 +50525,27 @@ HOST_CALL index_set R49 3 R52
 JUMP __main_endif_14
 __main_else_13:
 __main_endif_14:
-.line 5903
+.line 5920
 LOAD_STRING R40 4c414e415f5354444c49425f444952
 HOST_CALL getenv R40 1 R41
 MOVE R42 R41
-.line 5903
+.line 5920
 LOAD_STRING R43 -
 COMPARE R42 == R43 R44
 JUMP_IF_FALSE R44 __main_else_15
-.line 5903
+.line 5920
 LOAD_STRING R43 7374646c6962
 MOVE R42 R43
 JUMP __main_endif_16
 __main_else_15:
 __main_endif_16:
-.line 5904
+.line 5921
 LOAD_STRING R43 7374646c69625f646972
 MOVE R44 R39
 MOVE R45 R43
 MOVE R46 R42
 HOST_CALL index_set R44 3 R47
-.line 5905
+.line 5922
 LOAD_STRING R43 -
 ARRAY_NEW R44 R44 0
 LOAD_CONST R45 true
@@ -50440,11 +50556,11 @@ MOVE R49 R44
 MOVE R50 R45
 CALL load_module R46 5 R51
 MOVE R52 R51
-.line 5906
+.line 5923
 MOVE R53 R39
 MOVE R54 R52
 CALL emit_modules R53 2 R55
-.line 5907
+.line 5924
 LOAD_CONST R53 2
 MOVE R54 R1
 MOVE R55 R53
@@ -50460,10 +50576,10 @@ MOVE R64 R62
 HOST_CALL write_text R63 2 R65
 JUMP __main_endif_10
 __main_else_9:
-.line 5909
+.line 5926
 HOST_CALL map_new R53 0 R53
 MOVE R54 R53
-.line 5909
+.line 5926
 LOAD_STRING R55 6974656d73
 LOAD_CONST R56 0
 HOST_CALL array_new R56 1 R57
@@ -50471,39 +50587,39 @@ MOVE R58 R54
 MOVE R59 R55
 MOVE R60 R57
 HOST_CALL map_set R58 3 R61
-.line 5909
+.line 5926
 LOAD_STRING R55 6d617070696e6773
 HOST_CALL map_new R56 0 R56
 HOST_CALL map_set R54 3 R57
-.line 5909
+.line 5926
 LOAD_STRING R55 696d706f72745f6d617070696e6773
 HOST_CALL map_new R56 0 R56
 HOST_CALL map_set R54 3 R57
-.line 5909
+.line 5926
 LOAD_STRING R55 7061636b6167655f726f6f7473
 HOST_CALL map_new R56 0 R56
 HOST_CALL map_set R54 3 R57
-.line 5910
+.line 5927
 LOAD_STRING R55 4c414e415f5354444c49425f444952
 HOST_CALL getenv R55 1 R56
 MOVE R57 R56
-.line 5911
+.line 5928
 LOAD_STRING R58 -
 COMPARE R57 == R58 R59
 JUMP_IF_FALSE R59 __main_else_17
-.line 5911
+.line 5928
 LOAD_STRING R58 7374646c6962
 MOVE R57 R58
 JUMP __main_endif_18
 __main_else_17:
 __main_endif_18:
-.line 5912
+.line 5929
 LOAD_STRING R58 7374646c69625f646972
 MOVE R59 R54
 MOVE R60 R58
 MOVE R61 R57
 HOST_CALL map_set R59 3 R62
-.line 5913
+.line 5930
 LOAD_CONST R58 0
 MOVE R59 R1
 MOVE R60 R58
@@ -50519,7 +50635,7 @@ MOVE R69 R64
 MOVE R70 R65
 CALL load_module R66 5 R71
 MOVE R72 R71
-.line 5914
+.line 5931
 LOAD_CONST R73 1
 MOVE R74 R1
 MOVE R75 R73

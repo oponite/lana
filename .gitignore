@@ -18,6 +18,7 @@ integrations/editors/vscode/*.vsix
 target/
 fuzz/artifacts/
 fuzz/corpus/lana_bytecode/
+fuzz/corpus/lana_execution/
 benchmark/results/
 vijay-docs/
 archive

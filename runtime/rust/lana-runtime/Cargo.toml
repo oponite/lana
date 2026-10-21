@@ -29,3 +29,9 @@ serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ring = "0.17"
 rusqlite = { version = "0.37.0", features = ["hooks"] }
+
+[target.'cfg(windows)'.dependencies]
+rusqlite = { version = "0.37.0", features = ["bundled-windows"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusqlite = { version = "0.37.0", features = ["bundled"] }

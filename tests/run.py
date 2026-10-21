@@ -12,7 +12,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-from build import build, DEFAULT
+from build import build, DEFAULT, EXECUTABLE
 import workflows
 
 
@@ -48,7 +48,7 @@ def main():
     prefix = args.prefix.resolve()
     if not args.no_build:
         build(prefix)
-    cli, compiler = prefix / 'bin/lana', prefix / 'bin/lana-compiler.labc'
+    cli, compiler = prefix / 'bin' / EXECUTABLE, prefix / 'bin/lana-compiler.labc'
     if not cli.is_file() or not compiler.is_file():
         parser.error(f"missing built CLI/compiler in {prefix}/bin")
     failed = []

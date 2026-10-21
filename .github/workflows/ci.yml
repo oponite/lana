@@ -16,9 +16,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  EXPECTED_VERSION: "4.1.0"
+  EXPECTED_VERSION: "4.1.1"
 
 jobs:
+  windows:
+    uses: ./.github/workflows/windows.yml
+
+  linux-distribution:
+    uses: ./.github/workflows/linux.yml
+
   native:
     name: Rust CLI and regression tests
     runs-on: ubuntu-latest

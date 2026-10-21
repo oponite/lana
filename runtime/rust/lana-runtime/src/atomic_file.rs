@@ -21,8 +21,8 @@ pub fn durability_uncertain(error: &io::Error) -> bool {
     error.get_ref().is_some_and(|cause| cause.is::<UncertainWrite>())
 }
 
-/// Validation/write/rename errors leave the old destination intact. A directory
-/// sync error after rename means the complete new file is visible but its crash
+/// Validation/write/rename errors leave the old destination intact. A metadata
+/// flush error after rename means the complete new file is visible but its crash
 /// durability is uncertain; callers must inspect it before retrying.
 pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_with_sync(path, bytes,
@@ -48,7 +48,7 @@ fn write_with_sync(
     before_rename: impl FnOnce() -> io::Result<()>,
     sync_parent: impl FnOnce(&fs::File) -> io::Result<()>,
 ) -> io::Result<()> {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let _ = sync_parent;
     let name = path.file_name().ok_or_else(|| io::Error::other("missing file name"))?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -70,7 +70,10 @@ fn write_with_sync(
         drop(file);
         before_rename()?;
         fs::rename(&temporary, path)?;
-        #[cfg(unix)]
+        // Windows flushes replacement-file metadata instead of a directory handle.
+        #[cfg(windows)]
+        let directory = OpenOptions::new().write(true).open(path).map_err(|_| io::Error::other(UncertainWrite))?;
+        #[cfg(any(unix, windows))]
         sync_parent(&directory).map_err(|_| io::Error::other(UncertainWrite))?;
         Ok(())
     })();
@@ -94,7 +97,7 @@ fn replacement_failure_preserves_destination_and_cleans_owned_file() {
     fs::remove_dir_all(root).unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[test]
 fn pre_and_post_replacement_errors_have_distinct_outcomes() {
     let root = std::env::temp_dir().join(format!("lana-atomic-outcomes-{}", std::process::id()));
