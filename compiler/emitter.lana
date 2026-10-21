@@ -1408,7 +1408,24 @@ fn portable_parts(path) {
 fn portable_directory(path) {
     let end = 0; let index = 0;
     while (index < string_length(path)) { if (string_byte_at(path, index) == 47) { end = index; } index = index + 1; }
-    if (end == 0) { return "/"; } return string_slice(path, 0, end);
+    let root = 1;
+    if (string_length(path) >= 3) {
+        if (string_byte_at(path, 1) == 58) { if (string_byte_at(path, 2) == 47) { root = 3; } }
+    }
+    if (string_length(path) >= 2) {
+        if (string_slice(path, 0, 2) == "//") {
+            root = string_length(path); let separators = 0; index = 2;
+            while (index < string_length(path)) {
+                if (string_byte_at(path, index) == 47) {
+                    separators = separators + 1;
+                    if (separators == 2) { root = index; index = string_length(path); }
+                }
+                index = index + 1;
+            }
+        }
+    }
+    if (end == 0) { return "/"; }
+    if (end < root) { return string_slice(path, 0, root); } return string_slice(path, 0, end);
 }
 fn portable_relative(path, base) {
     let target = portable_parts(path); let root = portable_parts(base); let common = 0;

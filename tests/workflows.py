@@ -58,6 +58,17 @@ def run(name, cli, compiler, work, env):
         call(cli, "run", compiler, "--memory-limit-mib", "256", "--instruction-limit", "50000000", "--", source, output)
 
     if name == "bootstrap":
+        directory_test = work / "compiler-directory.lana"
+        directory_function = (ROOT / "compiler/emitter.lana").read_text(encoding="utf-8").split("fn portable_directory(path) {", 1)[1].split("fn portable_relative", 1)[0]
+        directory_test.write_text("fn portable_directory(path) {" + directory_function + "\n" + "\n".join(
+            f'assert(portable_directory({json.dumps(path)}) == {json.dumps(parent)});'
+            for path, parent in [
+                ("/a/file.lana", "/a"), ("/a", "/"), ("/", "/"),
+                ("C:/a/file.lana", "C:/a"), ("C:/a", "C:/"), ("C:/", "C:/"),
+                ("//server/share/a/file.lana", "//server/share/a"),
+                ("//server/share/a", "//server/share"), ("//server/share", "//server/share"),
+            ]), encoding="utf-8", newline="\n")
+        call(cli, "run", directory_test)
         bundle = work / "compiler-bootstrap.lana"
         bundle_compiler(bundle)
         reference = (ROOT / "compiler/bootstrap/compiler.lasm").read_bytes()

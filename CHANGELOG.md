@@ -8,6 +8,7 @@
   binaries. Keep Homebrew as an optional installation method.
 - Correct Windows compiler path normalization and compiler discovery through PATH.
 - Flush replacement-file metadata on Windows instead of opening Unix-style directory handles.
+- Bound function-frame inference when bytecode contains large unused operands.
 - Keep source-build instructions in the contributor guide.
 
 ## 4.1.0

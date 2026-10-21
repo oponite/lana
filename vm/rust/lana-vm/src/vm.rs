@@ -178,6 +178,7 @@ impl Frame {
 /// each statement start), so frames must be sized from the true max index.
 fn instruction_max_register(ins: &Instruction) -> usize {
     use OpCode::*;
+    if matches!(ins.opcode, Nop | Halt | TaskgroupEnter | TaskgroupExit) { return 0; }
     // `LANA_NO_OPERAND` (u32::MAX) marks an unused operand; skip it.
     let reg = |operand: u32| -> Option<usize> {
         if operand == u32::MAX {
@@ -232,7 +233,8 @@ fn instruction_max_register(ins: &Instruction) -> usize {
             }
         }
     }
-    max
+    // Verification bounds real registers; ignored fields must not enlarge frames.
+    max.min(LANA_MAX_REGISTERS as usize - 1)
 }
 
 /// Per-function frame size (max register index + 1), keyed by function index.
@@ -19705,6 +19707,27 @@ mod tests {
         assert!(matches!(copied.kind, ValueKind::Kernel(_)));
         let duplicate_domain = vm.array_value(vec![member.clone(), member]).unwrap();
         assert_eq!(vm.core_kernel_identity(&[duplicate_domain], &mut Value::null()), LanaError::InvalidParameters);
+    }
+
+    #[test]
+    fn ignored_operands_cannot_enlarge_function_frames() {
+        let mut chunk = assembler::assemble(
+            ".function main 0 2\nCALL helper R0 0 R1\nRETURN R1\n.function helper 0 1\nNOP\nLOAD_CONST R0 7\nRETURN R0\n",
+        ).unwrap();
+        for instruction in &mut chunk.code {
+            if instruction.opcode == OpCode::Nop { instruction.a = u32::MAX - 1; }
+            if matches!(instruction.opcode, OpCode::Nop | OpCode::Return) {
+                instruction.b = u32::MAX - 1;
+                instruction.c = u32::MAX - 1;
+                instruction.imm = u32::MAX - 1;
+            }
+        }
+        assert!(lana_bytecode::verifier::verify(&chunk).is_ok());
+        assert!(compute_max_registers(&chunk).iter().all(|count| *count <= LANA_MAX_REGISTERS as usize));
+        let mut vm = Vm::new(&chunk);
+        vm.set_memory_limit(64 * 1024 * 1024).unwrap();
+        assert_eq!(vm.run(), LanaError::Ok);
+        assert_eq!(vm.result().unwrap().print(), "7");
     }
 
     #[test]
