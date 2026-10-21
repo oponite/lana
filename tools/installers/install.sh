@@ -144,7 +144,14 @@ BLOCK
     mv "$bundle" "$prefix"; promoted=yes
     case "${SHELL:-/bin/zsh}" in
         */zsh) configure_profile "${ZDOTDIR:-$HOME}/.zshrc" 1 ;;
-        */bash) configure_profile "$HOME/.bash_profile" 1; configure_profile "$HOME/.bashrc" 2 ;;
+        */bash)
+            login_profile="$HOME/.profile"
+            for candidate in "$HOME/.bash_profile" "$HOME/.bash_login"; do
+                if [ -e "$candidate" ] || [ -L "$candidate" ]; then login_profile=$candidate; break; fi
+            done
+            configure_profile "$login_profile" 1
+            configure_profile "$HOME/.bashrc" 2
+            ;;
         *) printf 'Shell setup is manual for %s.\n' "${SHELL:-unknown}" ;;
     esac
     committed=yes

@@ -19,7 +19,8 @@
    installs fail on an exclusive lock. Windows refuses upgrades while files in
    the installed bundle are locked; close those programs and retry.
 4. Configure macOS/Linux Zsh through `${ZDOTDIR:-$HOME}/.zshrc`, or Bash through
-   `.bash_profile` and `.bashrc`. Existing contents and permissions are retained;
+   the first existing `.bash_profile`/`.bash_login`, or `.profile` when neither
+   exists, plus `.bashrc`. Existing contents and permissions are retained;
    profile symlinks are followed to their target. One marked PATH block is added
    to each file. Modified or malformed existing Lana blocks are refused. Other
    shells receive manual instructions. A child `sh` cannot update the calling

@@ -184,21 +184,31 @@ try {
     if not windows:
         assert profile.read_bytes() == content, 'reinstall duplicated shell configuration'
         bash_home = work / 'bash-home'
+        bash_home.mkdir()
+        (bash_home / '.profile').write_text('# existing login configuration\n')
         run(bash_home, shell='/bin/bash')
-        for name in ('.bashrc', '.bash_profile'):
+        assert not (bash_home / '.bash_profile').exists(), 'installer hid the existing .profile'
+        for name in ('.bashrc', '.profile'):
             configured = subprocess.run(['bash', '-c', f'. "$HOME/{name}"; command -v lana'],
                                         env=dict(os.environ, HOME=str(bash_home)), text=True, capture_output=True, check=True)
             assert str(destination(bash_home) / 'bin/lana') in configured.stdout
+        login_home = work / 'bash-login-home'
+        login_home.mkdir()
+        (login_home / '.bash_login').write_text('# existing bash login configuration\n')
+        (login_home / '.profile').write_text('# lower-priority profile stays untouched\n')
+        run(login_home, shell='/bin/bash')
+        assert '# >>> Lana PATH >>>' in (login_home / '.bash_login').read_text()
+        assert (login_home / '.profile').read_text() == '# lower-priority profile stays untouched\n'
         # Fail after promotion; both the installed bundle and earlier profile edits roll back.
         (bash_home / '.bashrc').unlink()
         (bash_home / '.bashrc').mkdir()
-        (bash_home / '.bash_profile').write_text('# restore this user configuration\n')
-        old_profile = (bash_home / '.bash_profile').read_bytes()
+        (bash_home / '.profile').write_text('# restore this user configuration\n')
+        old_profile = (bash_home / '.profile').read_bytes()
         (destination(bash_home) / 'keep-me').write_text('previous installation')
         before = tree(destination(bash_home))
         run(bash_home, success=False, shell='/bin/bash')
         assert tree(destination(bash_home)) == before
-        assert (bash_home / '.bash_profile').read_bytes() == old_profile
+        assert (bash_home / '.profile').read_bytes() == old_profile
         # A truncated script must never start installation.
         truncated_home = work / 'truncated'
         subprocess.run(['sh'], input=script[:script.index('main "$@"')], text=True,
