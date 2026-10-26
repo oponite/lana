@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory() as directory:
     before = current.read_bytes()
     assert prepare(candidate, current, "4.1.0", digest) == "updated"
     assert current.read_bytes() == before and archived.exists()
-    for version, checksum in [("../bad", digest), ("4.1.0", "bad"), ("4.1.0-beta", digest)]:
+    for version, checksum in [("1.1.1", digest), ("../bad", digest), ("4.1.0", "bad"), ("4.1.0-beta", digest)]:
         rejected(lambda: render_formula(version, checksum))
 
     def git(path, *args):

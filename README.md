@@ -22,7 +22,7 @@ brew update
 brew upgrade oponite/nitebrews/lana
 ```
 
-Every public stable release is also available by exact version:
+Public stable releases from 2.0.0 onward are also available by exact version:
 
 ```sh
 brew install oponite/nitebrews/lana@4.0.0

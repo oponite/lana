@@ -13,6 +13,8 @@ SHA = re.compile(r'sha256 "([0-9a-f]{64})"')
 def render_formula(version, digest):
     if not re.fullmatch(r"\d+\.\d+\.\d+", version) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("invalid release version or source checksum")
+    if int(version.split(".")[0]) < 2:
+        raise ValueError("the tap supports public Lana releases from 2.0.0 onward")
     return '''class Lana < Formula
   desc "Verified register-based language with explicit uncertainty"
   homepage "https://github.com/oponite/lana"
