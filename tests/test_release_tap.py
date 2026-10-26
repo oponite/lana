@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory() as directory:
     candidate.write_text(render_formula("4.1.0", digest))
     assert prepare(candidate, current, "4.1.0", digest) == "updated"
     assert "class LanaAT410 < Formula" in archived.read_text()
-    assert "keg_only :versioned_formula" in archived.read_text()
+    assert 'keg_only "exact releases must not replace the default lana command"' in archived.read_text()
     assert prepare(candidate, current, "4.1.0", digest) == "already-matching"
     original = {p: p.read_bytes() for p in (current, archived)}
     candidate.write_text(render_formula("4.1.0", digest).replace("end\n", '  system "unexpected Ruby"\nend\n', 1))

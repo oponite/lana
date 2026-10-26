@@ -56,7 +56,7 @@ def prepare(candidate, current, version, digest):
         raise ValueError("release formula differs from the generated formula")
     archived = current.with_name(f"lana@{version}.rb")
     versioned = expected.replace(b"class Lana < Formula", f"class LanaAT{version.replace('.', '')} < Formula".encode()).replace(
-        b'  license "Apache-2.0"\n', b'  license "Apache-2.0"\n\n  keg_only :versioned_formula\n'
+        b'  license "Apache-2.0"\n', b'  license "Apache-2.0"\n\n  keg_only "exact releases must not replace the default lana command"\n'
     )
     if archived.exists() and archived.read_bytes() != versioned:
         raise ValueError("same-version archived formula differs from the published formula")
