@@ -83,6 +83,7 @@ with tempfile.TemporaryDirectory() as directory:
 
     # Include staged admission, as the release workflow audits before publishing.
     prepare(candidate, clones[0] / "Formula/lana.rb", "4.1.0", digest)
+    git(clones[0], "add", "Formula/lana.rb", "Formula/lana@4.1.0.rb")
     with patch("release_tap.subprocess.run", side_effect=race):
         assert publish(candidate, clones[0] / "Formula/lana.rb", "4.1.0", digest) == "published"
     assert raced
