@@ -4,6 +4,37 @@
 
 ## Install
 
+### Homebrew (optional)
+
+Install the latest public release from [nitebrews](https://github.com/oponite/homebrew-nitebrews):
+
+```sh
+brew install oponite/nitebrews/lana
+lana version
+```
+
+Homebrew builds from source and installs the required build dependencies
+(Rust and Python for current releases). The installed Lana command does not
+require Python. The tap updates after each public stable release; upgrade with:
+
+```sh
+brew update
+brew upgrade oponite/nitebrews/lana
+```
+
+Every public stable release is also available by exact version:
+
+```sh
+brew install oponite/nitebrews/lana@4.0.0
+"$(brew --prefix oponite/nitebrews/lana@4.0.0)/bin/lana" version
+```
+
+Exact-version formulas remain at that version and are not linked into your
+PATH, so they can coexist with the default `lana`. Older versions retain their
+original language behavior and bugs. See the tap README for the version list.
+
+### Build from source
+
 You need Git, Rust/Cargo, Python 3.11 or newer, and a native linker to build Lana. The installed `lana` command does not require Python.
 
 1. Download and install Lana:

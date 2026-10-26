@@ -73,8 +73,13 @@ substitute for the tag workflow.
 - [ ] The source archive passes SHA-256 verification, builds and installs in a clean directory, and runs the example.
 - [ ] The release includes `SHA256SUMS` and a Homebrew formula with the source archive digest.
 - [ ] The tap job verifies published assets, audits and source-installs that exact
-      formula on macOS, and either updates `oponite/oponite` or verifies its
-      already matching version and checksum. A failed tap job is rerun.
+      formula on macOS, and either updates `oponite/nitebrews` or verifies its
+      already matching version and checksum. It also publishes the exact-version
+      `lana@X.Y.Z` formula. Both staged formulas pass audit and source-install
+      checks before publication. Older releases never downgrade `lana`, and
+      reruns reject conflicting versioned formulas. A failed tap job is rerun.
+      `HOMEBREW_TAP_DEPLOY_KEY` is scoped to `oponite/homebrew-nitebrews` and
+      is available only during the push step.
 
 Tag SHA, workflow run, and artifact evidence: ________
 
@@ -83,7 +88,7 @@ Tag SHA, workflow run, and artifact evidence: ________
 - [ ] The GitHub Release exists for the recorded tag and candidate SHA.
 - [ ] The release is public, non-draft, non-prerelease, and has the expected archives, `SHA256SUMS`, and formula.
 - [ ] Download the published archives and verify them against the published checksums.
-- [ ] `oponite/oponite/Formula/lana.rb` matches the published formula and is the
+- [ ] `oponite/nitebrews/Formula/lana.rb` matches the published formula and is the
       latest Lana version; verify its source install, test, and `lana version`.
 
 Release URL and verification log: ________
