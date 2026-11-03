@@ -29,6 +29,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(302 if self.path == "/redirect" else 204 if self.path == "/ok" else 503)
         if self.path == "/redirect":
             self.send_header("Location", "/ok")
+        # Without a length, curl with OpenSSL 3.5+ fails on the close_notify-less EOF.
+        if self.path != "/ok":
+            self.send_header("Content-Length", "0")
         self.end_headers()
     def log_message(self, *_):
         pass
