@@ -353,8 +353,10 @@ expected revision. All affected registered queries are recomputed
 against the same candidate source revision. One atomic store commit
 publishes the source and every resulting snapshot only when rows,
 order, Information, derivations, and serialized bytes equal a clean
-full rerun. Failure publishes neither a source revision nor a partial
-query revision. Historical snapshots retain their original evidence
+full rerun. Validation or evaluation failure publishes neither a source
+revision nor a partial query revision. Storage I/O failure after a complete
+commit record may leave the whole revision committed; it reports an uncertain
+outcome and requires reopening and inspecting the batch before retry. Historical snapshots retain their original evidence
 or report compacted history; they never substitute current rows.
 
 ## 0.2 Language type and object contracts

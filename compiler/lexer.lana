@@ -25,8 +25,6 @@ fn is_letter(byte) {
     return false;
 }
 
-fn is_identifier_byte(byte) { if (is_letter(byte)) { return true; } return is_digit(byte); }
-
 fn skip_comment(source, offset, column) {
     let length = string_length(source);
     let scanning = true;

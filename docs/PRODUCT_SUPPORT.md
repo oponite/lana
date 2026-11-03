@@ -1,4 +1,4 @@
-# Lana 4.1 support matrix
+# Lana 4.2.0 support matrix
 
 | Interface | Status | Bytecode contract |
 | --- | --- | --- |
@@ -15,3 +15,7 @@ limit v1-v6 loader compatibility. Published v1-v2 goldens preserve coverage.
 Run `bash tools/rust/lana-wasm/tests/run-wasm-conformance.sh` for actual WASM
 execution. It selects the Rustup compiler and requires the wasm32 target and
 wasm-bindgen CLI 0.2.100. Native rlib tests alone do not qualify this interface.
+
+Lana 4.2.0 preserves these supported surfaces and published bytecode formats.
+Store I/O errors may report an uncertain complete revision; reopen and inspect
+the revision or receipt before retrying. Closed uncertain handles cannot be reused.

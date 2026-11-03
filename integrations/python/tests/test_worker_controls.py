@@ -163,3 +163,24 @@ def test_malformed_worker_controls(built_lana: Path) -> None:
     assert len(replies) == len(bad) + 1
     assert all(not reply["ok"] and reply["phase"] == "protocol" for reply in replies[:-1])
     assert replies[-1]["ok"]
+
+
+def test_bootstrap_failures_preserve_worker(built_lana: Path, tmp_path: Path, bridge_module) -> None:
+    source = tmp_path / "bootstrap.lana"
+    source.write_text('import "./bridge.lana" as bridge;\n'
+                      'fn constant(data) { return 42; }\n'
+                      'let input = bridge.read_request();\n'
+                      'let result = bootstrap([1], constant, input["count"]);\n'
+                      'bridge.write_response(result["estimate"]);\n')
+    bytecode = tmp_path / "bootstrap.labc"
+    subprocess.run([built_lana, "compile", source, "-o", bytecode], check=True)
+    with Lana(built_lana) as lana:
+        for operation, path in ((lana.run, source), (lana.run_labc, bytecode)):
+            for count, options, code in [(2**64, {}, "LANA_ERR_INVALID_PARAMETERS"),
+                    (0, {}, "LANA_ERR_INVALID_PARAMETERS"), (-1, {}, "LANA_ERR_INVALID_PARAMETERS"),
+                    (1.5, {}, "LANA_ERR_INVALID_PARAMETERS"),
+                    (1000000, {"memory_limit_mib":1}, "LANA_ERR_OOM"),
+                    (1000000, {"instruction_limit":1000}, "LANA_ERR_LIMIT")]:
+                result = operation(path, {"count":count}, **options)
+                assert not result.ok and result.error["code"] == code, result
+                assert operation(path, {"count":10}).value == 42

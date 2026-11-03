@@ -165,7 +165,7 @@ fn load_module(path, prefix, modules, stack, root) {
         let child_index = load_module(target, child_prefix, modules, next_stack, false);
         let child_record = modules["items"][child_index];
         symbol_imports[imported[1]] = child_record[0];
-        let child_objects = child_record[2][4][3]; let object_names = map_keys(child_objects); let object_index = 0;
+        let child_objects = child_record[2][4][2]; let object_names = map_keys(child_objects); let object_index = 0;
         while (object_index < array_length(object_names)) {
             let original = child_objects[object_names[object_index]];
             if (!map_has(original, "imported")) {

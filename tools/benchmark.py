@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import select
 import statistics
@@ -30,6 +31,17 @@ def paired(old, new, runs=30):
     before, after = map(summarize, samples)
     ratio = after['warm_median_ms'] / before['warm_median_ms']
     return {'baseline': before, 'candidate': after, 'ratio': ratio, 'pass': ratio <= 1.05}
+
+
+def validate_versions(versions, expected):
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", expected):
+        raise ValueError("candidate VERSION is not a release version")
+    baselines = ('3.0.2', '4.0.0', '4.1.0')
+    if not any(versions[0].startswith(f'Lana {version} ') for version in baselines):
+        raise ValueError(f'unsupported baseline: {versions[0]}')
+    if not versions[1].startswith(f'Lana {expected} '):
+        raise ValueError(f'candidate executable does not match VERSION {expected}: {versions[1]}')
+    return versions[0].startswith('Lana 3.0.2 ')
 
 
 def timed(command, env, cwd):
@@ -102,17 +114,20 @@ def main():
     parser.add_argument('--baseline-cli', type=Path, required=True)
     parser.add_argument('--baseline-library', type=Path, help='required for the 3.0.2 native bridge')
     parser.add_argument('--candidate-root', type=Path, default=ROOT)
-    parser.add_argument('--candidate-cli', type=Path, default=ROOT / 'target/lana/bin/lana')
-    parser.add_argument('--compiler', type=Path, default=ROOT / 'target/lana/bin/lana-compiler.labc')
+    parser.add_argument('--candidate-cli', type=Path)
+    parser.add_argument('--compiler', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     old_root, new_root = args.baseline_root.resolve(), args.candidate_root.resolve()
-    old_cli, new_cli, compiler = args.baseline_cli.resolve(), args.candidate_cli.resolve(), args.compiler.resolve()
+    old_cli = args.baseline_cli.resolve()
+    new_cli = (args.candidate_cli or new_root / 'target/lana/bin/lana').resolve()
+    compiler = (args.compiler or new_cli.parent / 'lana-compiler.labc').resolve()
     env = dict(os.environ, LANA_COMPILER_LABC=str(compiler), LANA_STDLIB_DIR=str(new_root / 'stdlib'))
     versions = [subprocess.check_output([cli, 'version'], text=True).strip() for cli in (old_cli, new_cli)]
-    baseline_3 = versions[0].startswith('Lana 3.0.2 ')
-    baseline_4 = versions[0].startswith('Lana 4.0.0 ')
-    assert (baseline_3 or baseline_4) and versions[1].startswith('Lana 4.1.0 '), versions
+    try:
+        baseline_3 = validate_versions(versions, (new_root / 'VERSION').read_text().strip())
+    except ValueError as error:
+        parser.error(str(error))
     if baseline_3 and args.baseline_library is None:
         parser.error('--baseline-library is required for Lana 3.0.2')
     old_config = {'root': str(old_root), 'cli': str(old_cli)}
@@ -130,15 +145,26 @@ def main():
         for name, operation, paths in [('python_bytecode', 'run_labc', bytecodes), ('python_source', 'run', sources)]:
             with python_call(configs[0], operation, paths[0], env) as old, python_call(configs[1], operation, paths[1], env) as new:
                 workloads[name] = paired(old, new)
-        fixture = new_root / 'tests/regression/isa_ops_pass.lana'
-        workloads['rust_vm'] = paired(lambda: timed([old_cli, 'run', fixture], env, work),
-                                      lambda: timed([new_cli, 'run', fixture], env, work))
+        fixture_source = new_root / 'tests/regression/isa_ops_pass.lana'
+        fixture = work / 'isa.labc'
+        timed([new_cli, 'compile', fixture_source, '-o', fixture], env, work)
+        outputs = [subprocess.check_output([cli, 'run', fixture], env=env, cwd=work, timeout=30)
+                   for cli in (old_cli, new_cli)]
+        if outputs[0] != outputs[1]:
+            raise RuntimeError('precompiled CLI workloads returned different output')
+        fixture_sha256 = hashlib.sha256(fixture.read_bytes()).hexdigest()
+        workloads['precompiled_cli'] = paired(lambda: timed([old_cli, 'run', fixture], env, work),
+                                             lambda: timed([new_cli, 'run', fixture], env, work))
         source = sources[1]
         workloads['rust_compile'] = paired(lambda: timed([old_cli, 'compile', source, '-o', work / 'old-output.labc'], env, work),
                                            lambda: timed([new_cli, 'compile', source, '-o', work / 'new-output.labc'], env, work))
-    report = {'schema': 1, 'versions': versions, 'runs': 30, 'warmups': 5,
+    report = {'schema': 2, 'fixture_sha256': fixture_sha256, 'versions': versions, 'runs': 30, 'warmups': 5,
               'compiler_sha256': hashlib.sha256(compiler.read_bytes()).hexdigest(),
               'binary_sha256': [hashlib.sha256(cli.read_bytes()).hexdigest() for cli in (old_cli, new_cli)],
+               'boundaries': {'python_bytecode': 'Python API call: worker or native bridge, bytecode load, VM execution; excludes Python process startup',
+                             'python_source': 'Python API call including source compilation; excludes Python process startup',
+                             'precompiled_cli': 'CLI process startup, bytecode load and VM execution; excludes compilation',
+                             'rust_compile': 'CLI process startup, source compilation and output publication'},
               'workloads': workloads, 'pass': all(item['pass'] for item in workloads.values())}
     args.output.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({name: {'ratio': value['ratio'], 'pass': value['pass']} for name, value in workloads.items()}, indent=2))

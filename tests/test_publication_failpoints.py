@@ -1,5 +1,6 @@
 """Opt-in CLI build: publication failures leave complete old or new artifacts."""
 import os
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -49,5 +50,36 @@ with tempfile.TemporaryDirectory() as directory:
                 checked = run(*inspect)
                 assert checked.returncode == 0, (inspect, checked.stdout, checked.stderr)
             assert not list(root.glob(path.name + '.lana-*.tmp'))
+
+    for operation in ("run", "run_labc", "start_live", "python"):
+        store = root / ("store-" + operation)
+        source.write_text('store_open(' + json.dumps(str(store)) + '); store_put("key", 42); store_commit();\n')
+        assert run('compile', source, '-o', output).returncode == 0
+        failed_env = dict(env, LANA_TEST_STORE_STAGE="commit_manifest")
+        if operation == "python":
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integrations/python/src"))
+            from lana_integrations import Lana
+            # Set only the child's environment; restore it before recovery.
+            previous = os.environ.get("LANA_TEST_STORE_STAGE")
+            os.environ["LANA_TEST_STORE_STAGE"] = "commit_manifest"
+            try:
+                with Lana(lana) as host:
+                    result = host.run(source, {})
+                assert not result.ok
+                error = result.error
+            finally:
+                if previous is None: os.environ.pop("LANA_TEST_STORE_STAGE", None)
+                else: os.environ["LANA_TEST_STORE_STAGE"] = previous
+        else:
+            request = {"schema":1,"op":operation,"path":str(output if operation == "run_labc" else source),"input":{}}
+            failed = subprocess.run([lana, "bridge-worker"], input=json.dumps(request) + "\n",
+                env=failed_env, capture_output=True, text=True, timeout=30)
+            assert failed.returncode == 0, failed.stderr
+            error = json.loads(failed.stdout)["error"]
+        assert error["code"] == "LANA_ERR_IO", error
+        assert error["durability"] == "uncertain" and error["path"] == str(store), error
+        source.write_text('store_open(' + json.dumps(str(store)) + '); print(store_current_revision()); print(store_get("key"));\n')
+        recovered = run('run', source)
+        assert recovered.returncode == 0 and recovered.stdout == "1\n42\n", recovered.stderr
 
 print('PUBLICATION_FAILPOINTS_PASS')

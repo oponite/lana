@@ -1,5 +1,36 @@
 # Changelog
 
+## 4.2.0
+
+- Accept decimal exponent literals such as `1e-5` and `2.5E+3`; an incomplete
+  exponent is a lexical error.
+- Keep unweighted guard paths unweighted: `sample` on them returns
+  `LANA_ERR_UNSUPPORTED_OPERATION`. Weighted guards retain branch weights
+  through pure operations.
+- Use the checked tensor path for unaligned state views.
+- Add the `lana_execution` VM fuzz target and expand CI and release checks.
+
+Robustness and hardening. Security: store journals now reject symlinks,
+non-regular files, and shared hard links (defense in depth; see `SECURITY.md`
+for the trust model).
+
+- Size legacy VM function frames safely when control flow crosses function
+  boundaries or arguments occupy registers unused by the function body,
+  including `ASYNC` argument ranges in the caller's frame.
+- Document the trust model and private vulnerability reporting in `SECURITY.md`.
+- Bound bootstrap temporary memory, sample counts, and native work; return
+  structured errors instead of aborting the worker on oversized requests.
+- Bound bytecode file reads before loading and preserve loader limit errors
+  across CLI, worker, and live entry points.
+- Publish store manifests and snapshots through exclusive temporary files;
+  reject unsafe journal inputs and report uncertain commit outcomes with
+  reopen guidance through CLI and Python errors.
+- Update Rustls, certificate validation, and trust roots to current versions.
+- Remove unused internal compiler helpers and storage, regenerate the checked
+  bootstrap, and retain public APIs and legacy bytecode support.
+- Validate benchmark candidates against VERSION and measure precompiled CLI
+  execution separately from source compilation in report schema 2.
+
 ## 4.1.0
 
 - Add process-local persistent live programs with explicit named Information

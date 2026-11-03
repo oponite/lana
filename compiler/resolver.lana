@@ -9,7 +9,6 @@ fn type_sample(value_type, dependency, operation) {
 }
 fn type_planned_effect(result_type, effect_kind) { return ["planned_effect", result_type, effect_kind]; }
 fn type_task_handle(result_type, capabilities) { return ["task_handle", result_type, capabilities]; }
-fn type_capability(name) { return ["capability", name]; }
 fn type_shared_capability(value_type, permission) { return ["shared_capability", value_type, permission]; }
 fn type_result(ok_type, error_type) { return ["result", ok_type, error_type]; }
 fn type_generator(element_type) { return ["generator", element_type]; }
@@ -22,7 +21,6 @@ fn shape_literal(dims) { return ["shape", dims]; }
 fn shape_var(name) { return ["shape_var", name]; }
 fn shape_dynamic() { return ["shape_dynamic"]; }
 fn type_unknown() { return type_ordinary("unknown"); }
-fn type_tag(value_type) { return value_type[0]; }
 fn shared_permission_valid(permission) {
     if (permission == "read") { return true; }
     if (permission == "observe") { return true; }
@@ -191,8 +189,6 @@ fn is_state_value_type(value_type) {
     }
     return false;
 }
-
-fn is_uncertain_type(value_type) { return (value_type)[0] == "uncertain"; }
 
 fn is_uncertain_tensor_type(value_type) {
     if ((value_type)[0] != "uncertain") { return false; }
@@ -614,10 +610,6 @@ fn literal_type(node) {
 
 fn environment_new() { return map_new(); }
 
-fn environment_find(environment, name) {
-    return map_has(environment, name);
-}
-
 fn environment_get(environment, name) {
     if (!map_has(environment, name)) { return type_unknown(); }
     return map_get(environment, name);
@@ -696,24 +688,18 @@ fn symbol_add_reference(environment, name, line, column) {
 // field count] and types maps a type name to its ordered variant names. It is
 // carried inside the environment under a reserved key so it flows through the
 // existing environment threading without changing signatures.
-fn type_registry_new() { return [map_new(), map_new(), map_new(), map_new(), map_new(), compiler_fast_hosts(), compiler_reserved_calls(), map_new()]; }
+fn type_registry_new() { return [map_new(), map_new(), map_new(), map_new(), compiler_fast_hosts(), compiler_reserved_calls(), map_new()]; }
 
 fn type_registry_of(environment) {
     if (!map_has(environment, "__types__")) { return null; }
     return map_get(environment, "__types__");
 }
 
-fn type_registry_add(registry, type_name, variant_name, index, field_count, field_types) {
+fn type_registry_add(registry, type_name, variant_name, index, field_count) {
     map_set(registry[0], variant_name, [type_name, index, field_count]);
     if (!map_has(registry[1], type_name)) { map_set(registry[1], type_name, array_new(0)); }
     array_push(map_get(registry[1], type_name), variant_name);
-    map_set(registry[2], variant_name, field_types);
     return null;
-}
-
-fn type_registry_field_types(registry, variant_name) {
-    if (!map_has(registry[2], variant_name)) { return null; }
-    return map_get(registry[2], variant_name);
 }
 
 fn type_registry_lookup_variant(registry, name) {
@@ -1579,8 +1565,8 @@ fn resolve_call(node, environment) {
     let resolved = resolve_arguments(node[2], environment);
     let effect_value = arguments_effect(resolved);
     let registry = type_registry_of(environment);
-    if (registry != null) { if (map_has(registry[7], node[1])) {
-        let signature = registry[7][node[1]];
+    if (registry != null) { if (map_has(registry[6], node[1])) {
+        let signature = registry[6][node[1]];
         if (array_length(signature[0]) != array_length(resolved)) { type_error(node, "typed function argument count mismatch"); }
         let parameter = 0; while (parameter < array_length(resolved)) { oo_require_type(signature[0][parameter], resolved[parameter][1], environment, node); parameter = parameter + 1; }
         let called_effect = effects("external_call");
@@ -1588,10 +1574,10 @@ fn resolve_call(node, environment) {
         let result_type = type_unknown(); if (signature[1] != null) { result_type = oo_type(signature[1], environment); }
         return typed(node, result_type, effects_combine(effect_value, called_effect));
     } }
-    if (registry != null) { if (map_has(registry[5], node[1])) {
-        let host = registry[5][node[1]]; return typed(node, host[0], effects_combine(effect_value, host[1]));
+    if (registry != null) { if (map_has(registry[4], node[1])) {
+        let host = registry[4][node[1]]; return typed(node, host[0], effects_combine(effect_value, host[1]));
     } }
-    if (registry != null) { if (!map_has(registry[6], node[1])) { if (map_has(environment, "__function_ops__")) {
+    if (registry != null) { if (!map_has(registry[5], node[1])) { if (map_has(environment, "__function_ops__")) {
         if (map_has(environment["__function_ops__"], node[1])) {
             let called_effect = effects("external_call");
             if (map_has(environment["__function_effects__"], node[1])) { called_effect = environment["__function_effects__"][node[1]]; }
@@ -1911,8 +1897,8 @@ fn resolve_runtime_expression(node, environment) {
     if (node[0] == 35) {
         let resolved = resolve_arguments(node[2], environment);
         let result_type = type_unknown(); let registry = type_registry_of(environment);
-        if (registry != null) { if (map_has(registry[7], node[1])) {
-            let signature = registry[7][node[1]];
+        if (registry != null) { if (map_has(registry[6], node[1])) {
+            let signature = registry[6][node[1]];
             if (array_length(signature[0]) != array_length(resolved)) { type_error(node, "fork argument count mismatch"); }
             let parameter = 0; while (parameter < array_length(resolved)) { oo_require_type(signature[0][parameter], resolved[parameter][1], environment, node); parameter = parameter + 1; }
             if (signature[1] != null) { result_type = oo_type(signature[1], environment); }
@@ -2121,8 +2107,6 @@ fn resolve_expression_with_environment(node, environment) {
     return resolve_extended_expression(node, environment);
 }
 
-fn resolve_expression(node) { return resolve_expression_with_environment(node, environment_new()); }
-
 fn statements_effect(statements) {
     let result = effects("pure"); let index = 0;
     while (index < array_length(statements)) { result = effects_combine(result, statements[index][2]); index = index + 1; }
@@ -2315,21 +2299,6 @@ fn resolve_list_with_environment(nodes, environment) {
     return result;
 }
 
-fn resolve_list(nodes, in_generator, in_async) {
-    let environment = environment_new();
-    map_set(environment, "__in_generator__", in_generator);
-    map_set(environment, "__in_async__", in_async);
-    return resolve_list_with_environment(nodes, environment);
-}
-
-fn resolve_list_with_binding(nodes, name, value_type, in_generator, in_async) {
-    let environment = environment_new();
-    map_set(environment, "__in_generator__", in_generator);
-    map_set(environment, "__in_async__", in_async);
-    environment_set(environment, name, value_type);
-    return resolve_list_with_environment(nodes, environment);
-}
-
 fn statement_contains_yield(node) {
     if (node[0] == 14) { return true; }
     if (node[0] == 4) { if (list_contains_yield(node[2])) { return true; } return list_contains_yield(node[3]); }
@@ -2484,7 +2453,7 @@ fn resolve_function(node, box, registry, generators, asyncs, function_effects, u
     let environment = environment_new(); let index = 0;
     map_set(environment, "__symbols__", box);
     map_set(environment, "__types__", registry);
-    if (array_length(map_keys(registry[3])) > 0) { environment["__oo__"] = true; }
+    if (array_length(map_keys(registry[2])) > 0) { environment["__oo__"] = true; }
     map_set(environment, "__generators__", generators);
     map_set(environment, "__asyncs__", asyncs);
     map_set(environment, "__function_effects__", function_effects);
@@ -2495,14 +2464,14 @@ fn resolve_function(node, box, registry, generators, asyncs, function_effects, u
     if (is_generator) { if (is_async) { assert(false, "a function cannot be both a generator and async"); } }
     map_set(environment, "__in_generator__", is_generator);
     map_set(environment, "__in_async__", is_async);
-    if (!map_has(registry[4], node[1])) { symbol_add_definition(environment, node[1], "function", type_ordinary("function"), node[5], node[6]); }
+    if (!map_has(registry[3], node[1])) { symbol_add_definition(environment, node[1], "function", type_ordinary("function"), node[5], node[6]); }
     while (index < array_length(node[3])) {
         environment_set(environment, node[3][index], type_unknown());
 
         index = index + 1;
     }
-    if (map_has(registry[4], node[1])) {
-        let meta = registry[4][node[1]]; environment["__oo_owner__"] = meta["owner"]; environment["__oo_meta__"] = meta;
+    if (map_has(registry[3], node[1])) {
+        let meta = registry[3][node[1]]; environment["__oo_owner__"] = meta["owner"]; environment["__oo_meta__"] = meta;
         let parameter = 0; let typed_index = 0;
         while (parameter < array_length(node[3])) {
             let value_type = type_ordinary(meta["owner"]);
@@ -2518,7 +2487,7 @@ fn resolve_function(node, box, registry, generators, asyncs, function_effects, u
         let location = [node[5], node[6]];
         if (box[3]) {
             let metadata = node[array_length(node) - 1];
-            if (map_has(registry[4], node[1])) { metadata = registry[4][node[1]]; }
+            if (map_has(registry[3], node[1])) { metadata = registry[3][node[1]]; }
             if (type_of(metadata) == "map") { if (map_has(metadata, "parameter_positions")) { location = metadata["parameter_positions"][node[3][index]]; } }
         }
         symbol_add_definition(environment, node[3][index], "parameter", environment_get(environment, node[3][index]), location[0], location[1]); index = index + 1;
@@ -2527,10 +2496,10 @@ fn resolve_function(node, box, registry, generators, asyncs, function_effects, u
     let feffect = statements_effect(body);
     if (is_async) { feffect = effects_add(feffect, "io"); }
     map_set(function_effects, node[1], feffect);
-    if (map_has(registry[4], node[1])) {
-        let meta = registry[4][node[1]];
+    if (map_has(registry[3], node[1])) {
+        let meta = registry[3][node[1]];
         if (meta["default"]) { if (!effects_is_pure(feffect)) { type_error([node[5],node[6]], "field defaults must be pure"); } }
-        else { registry[3][meta["owner"]]["methods"][meta["member"]]["inferred"] = feffect; }
+        else { registry[2][meta["owner"]]["methods"][meta["member"]]["inferred"] = feffect; }
     }
     return [1, node[1], node[2], node[3], body, node[5], is_generator, is_async];
 }
@@ -2540,21 +2509,17 @@ fn resolve_type_declaration(node, environment) {
     let name = node[1]; let variants = node[3]; let index = 0;
     while (index < array_length(variants)) {
         let variant = variants[index];
-        let field_types = array_new(0); let field_index = 0;
-        while (field_index < array_length(variant[2])) { array_push(field_types, variant[2][field_index][1]); field_index = field_index + 1; }
-        type_registry_add(registry, name, variant[1], index, array_length(variant[2]), field_types);
+        type_registry_add(registry, name, variant[1], index, array_length(variant[2]));
         index = index + 1;
     }
     symbol_add_definition(environment, name, "type", type_ordinary(name), node[4], node[5]);
     return null;
 }
 
-fn resolve_program(program) { return resolve_program_with_objects(program, map_new()); }
-fn resolve_program_with_objects(program, imported_objects) { return resolve_program_with_symbols(program, imported_objects, false); }
 fn resolve_program_with_symbols(program, imported_objects, tracking) {
     let box = symbol_box_new(); box[3] = tracking;
     if (tracking) { if (array_length(program) > 6) { box[1] = program[6]; } }
-    let registry = type_registry_new(); registry[3] = imported_objects;
+    let registry = type_registry_new(); registry[2] = imported_objects;
     oo_prepare(program, registry);
     let generators = map_new();
     let asyncs = map_new();
@@ -2567,7 +2532,7 @@ fn resolve_program_with_symbols(program, imported_objects, tracking) {
     let top_environment = environment_new();
     map_set(top_environment, "__symbols__", box);
     map_set(top_environment, "__types__", registry);
-    if (array_length(map_keys(registry[3])) > 0) { top_environment["__oo__"] = true; }
+    if (array_length(map_keys(registry[2])) > 0) { top_environment["__oo__"] = true; }
     map_set(top_environment, "__generators__", generators);
     map_set(top_environment, "__asyncs__", asyncs);
     map_set(top_environment, "__function_effects__", function_effects);
@@ -2599,7 +2564,7 @@ fn resolve_program_with_symbols(program, imported_objects, tracking) {
         if (program[1][index][7]) { map_set(asyncs, program[1][index][1], true); }
         index = index + 1;
     }
-    let object_program = array_length(map_keys(registry[3])) > 0;
+    let object_program = array_length(map_keys(registry[2])) > 0;
     if (object_program) { index = 0; while (index < array_length(program[1])) { function_effects[program[1][index][1]] = effects("pure"); index = index + 1; } }
     if (tracking) { index = 0;
         while (index < array_length(program[1])) {
@@ -2618,14 +2583,14 @@ fn resolve_program_with_symbols(program, imported_objects, tracking) {
         if (object_program) { changed = prior != json_stringify(function_effects); }
         iteration = iteration + 1; assert(iteration <= array_length(program[1]) * 6 + 2, "object effect inference did not converge");
     }
-    oo_validate(registry[3], function_effects);
+    oo_validate(registry[2], function_effects);
     oo_symbols(top_environment);
     let statements = resolve_list_with_environment(program[2], top_environment);
     return [100, functions, statements, program[3], box, registry, map_has(uses_ad, "yes")];
 }
 
 fn oo_error(member, message) { return type_error([member["line"], member["column"]], message); }
-fn oo_registry(environment) { let registry = type_registry_of(environment); if (registry == null) { return map_new(); } return registry[3]; }
+fn oo_registry(environment) { let registry = type_registry_of(environment); if (registry == null) { return map_new(); } return registry[2]; }
 fn oo_owner(environment) { if (map_has(environment, "__oo_owner__")) { return environment["__oo_owner__"]; } return ""; }
 fn oo_name(name, environment) { if (name == "Self") { return oo_owner(environment); } return name; }
 fn oo_type(name, environment) {
@@ -2790,12 +2755,6 @@ fn oo_call(node, environment) {
     }
     return null;
 }
-fn oo_effect_mask(effect) {
-    let names = ["observation", "stochastic", "io", "mutation", "task", "external_call"]; let mask = 0; let bit = 1; let index = 0;
-    while (index < 6) { if (effects_contains(effect, names[index])) { mask = mask + bit; } bit = bit * 2; index = index + 1; }
-    return mask;
-}
-
 fn oo_merge_members(inherited, declared) {
     let result = resolve(result_value(json_parse(json_stringify(inherited)))); let index = 0;
     while (index < array_length(declared)) {
@@ -2832,10 +2791,10 @@ fn oo_prepare(program, registry) {
     let function_index = 0;
     while (function_index < array_length(program[1])) {
         let function = program[1][function_index];
-        if (array_length(function) > 8) { if (type_of(function[8]) == "array") { registry[7][function[1]] = [function[8], function[9]]; } }
+        if (array_length(function) > 8) { if (type_of(function[8]) == "array") { registry[6][function[1]] = [function[8], function[9]]; } }
         function_index = function_index + 1;
     }
-    let objects = registry[3]; let metadata = registry[4]; let pending = program[5]; let remaining = array_length(pending);
+    let objects = registry[2]; let metadata = registry[3]; let pending = program[5]; let remaining = array_length(pending);
     while (remaining > 0) {
         let progress = false; let index = 0;
         while (index < array_length(pending)) {

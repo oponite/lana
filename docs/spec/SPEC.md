@@ -536,6 +536,13 @@ Keys are checked even for singleton inputs and empty joins. Use an explicit
 supported `resolve` operation before selection; selection never samples or
 implicitly resolves a value. Failure returns no partially materialized dataset.
 
+Store publication preserves the existing record encoding. An I/O failure before
+publication leaves the previous revision intact. If a complete journal commit
+record may exist, or rollback cannot be confirmed, the error is `LANA_ERR_IO`
+with `durability: "uncertain"` and the store path. The failed handle is closed;
+reopen and inspect the revision or receipt before retrying. No automatic retry
+is performed. Worker error objects preserve these optional diagnostic fields.
+
 ## Dataset history calls (all six calls implemented)
 
 Existing `dataset`, `filter`, `map`, `select`, `limit`, `sort`,

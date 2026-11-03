@@ -1,4 +1,5 @@
 [
+  {"name": "native_bytecode_file_limits", "command": ["{python}", "{root}/tests/test_bytecode_limits.py", "{cli}"], "contains": ["BYTECODE_LIMITS_PASS"]},
   {"name": "native_contiguous_call_arguments", "command": ["{cli}", "run", "{root}/tests/regression/contiguous_call_arguments.lana"], "contains": ["CONTIGUOUS_ARGUMENTS_PASS"]},
   {"name": "lana_benchmark_method", "command": ["{python}", "{root}/tests/test_benchmark.py"], "contains": ["BENCHMARK_METHOD_PASS"]},
   {"name": "lana_binary_package", "command": ["{python}", "{root}/tests/test_binary_package.py", "{cli}", "{compiler}"], "contains": ["BINARY_PACKAGE_PASS"]},
@@ -145,5 +146,8 @@
   {"name": "native_decision_recommendation", "command": ["{cli}", "run", "{root}/tests/regression/decision_recommendation_pass.lana"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_decision_review", "command": ["{cli}", "run", "{root}/tests/regression/decision_review_pass.lana"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_decision_value_of_information", "command": ["{cli}", "run", "{root}/examples/basic-programs/decision.lana"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
-  {"name": "lana_workflow_runner", "command": ["{python}", "{root}/tests/test_workflow_runner.py"], "contains": ["WORKFLOW_RUNNER_PASS"]}
+  {"name": "lana_workflow_runner", "command": ["{python}", "{root}/tests/test_workflow_runner.py"], "contains": ["WORKFLOW_RUNNER_PASS"]},
+  {"name": "native_bootstrap_overflow", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_overflow.lana"], "expect_failure": true, "contains": ["LANA_ERR_INVALID_PARAMETERS"]},
+  {"name": "native_bootstrap_memory", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_budget.lana", "--memory-limit-mib", "1"], "expect_failure": true, "contains": ["LANA_ERR_OOM"]},
+  {"name": "native_bootstrap_instructions", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_budget.lana", "--instruction-limit", "1000"], "expect_failure": true, "contains": ["LANA_ERR_LIMIT"]}
 ]

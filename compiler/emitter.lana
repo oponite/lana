@@ -2,11 +2,9 @@ import "./syntax.lana" as syntax;
 import "./resolver.lana" as resolver;
 
 fn emitter_new(namespace, registry, generators, asyncs, features) { return [array_new(0), map_new(), 0, 0, namespace, map_new(), map_new(), 0, registry, generators, asyncs, features, 0]; }
-fn emit(context, line) { array_push(context[0], line); return null; }
 fn reg(number) { return string_concat("R", number_to_string(number)); }
 
 fn sb_new() { return array_new(0); }
-fn sb_push(sb, part) { array_push(sb, part); return null; }
 fn sb_join(sb) { return string_join(sb, ""); }
 
 fn new_register(context) {
@@ -287,12 +285,6 @@ fn emit_literal(context, node) {
 fn emit_tagged_pair(context, tag, value) {
     let arguments = [syntax.literal_node("bool", tag, 0, 0), value];
     let packed = emit_contiguous(context, arguments); let destination = new_register(context);
-    array_push(context[0], string_concat("ARRAY_NEW ", reg(destination), " ", reg(packed[0]), " 2"));
-    return destination;
-}
-
-fn emit_pair(context, left, right) {
-    let arguments = [left, right]; let packed = emit_contiguous(context, arguments); let destination = new_register(context);
     array_push(context[0], string_concat("ARRAY_NEW ", reg(destination), " ", reg(packed[0]), " 2"));
     return destination;
 }
@@ -906,7 +898,7 @@ fn emit_expression(context, node) {
 fn emit_assignment(context, target, value, information) {
     if (target[0] == 48) {
         let receiver = emit_expression(context, target[3][0]); let source = emit_expression(context, value);
-        array_push(context[0], string_concat("OO_SET ", reg(receiver), " ", reg(source), " ", context[8][3][target[2]]["hex"], " ", number_to_string(target[4]))); return null;
+        array_push(context[0], string_concat("OO_SET ", reg(receiver), " ", reg(source), " ", context[8][2][target[2]]["hex"], " ", number_to_string(target[4]))); return null;
     }
     if (target[0] == 21) {
         let source = emit_expression(context, value); let destination = symbol_find(context, target[1]);
@@ -1289,7 +1281,7 @@ fn emit_modules(modules, root_index) {
     if (has_objects) {
         let descriptor_register = new_register(main); module_index = 0;
         while (module_index < array_length(items)) {
-            let objects = items[module_index][2][4][3]; let names = map_keys(objects); let index = 0;
+            let objects = items[module_index][2][4][2]; let names = map_keys(objects); let index = 0;
             while (index < array_length(names)) { if (!map_has(objects[names[index]], "imported")) { array_push(main[0], string_concat("LOAD_STRING ", reg(descriptor_register), " ", objects[names[index]]["hex"])); } index = index + 1; }
             module_index = module_index + 1;
         }
@@ -1307,7 +1299,7 @@ fn emit_modules(modules, root_index) {
 }
 
 fn emit_object(context, node) {
-    let opcode = node[1]; let descriptor = context[8][3][node[2]]["hex"]; let destination = new_register(context);
+    let opcode = node[1]; let descriptor = context[8][2][node[2]]["hex"]; let destination = new_register(context);
     if (opcode == "OO_GET") {
         let receiver = emit_expression(context, node[3][0]);
         array_push(context[0], string_concat(opcode, " ", reg(destination), " ", reg(receiver), " ", descriptor, " ", number_to_string(node[4]))); return destination;
@@ -1336,13 +1328,13 @@ fn prepare_object_descriptors(modules, root_index) {
     while (module_index < array_length(items)) {
         let module = items[module_index]; let index = 0;
         while (index < array_length(module[2][1])) { functions[string_concat(module[1], module[2][1][index][1])] = next; next = next + 1; index = index + 1; }
-        let objects = module[2][4][3]; let names = map_keys(objects); index = 0;
+        let objects = module[2][4][2]; let names = map_keys(objects); index = 0;
         while (index < array_length(names)) { if (!map_has(objects[names[index]], "imported")) { objects[names[index]]["qualified_name"] = string_concat(module[4], "/", names[index]); } has_objects = true; index = index + 1; }
         module_index = module_index + 1;
     }
     module_index = 0;
     while (module_index < array_length(items)) {
-        let module = items[module_index]; let objects = module[2][4][3]; let names = map_keys(objects); let index = 0;
+        let module = items[module_index]; let objects = module[2][4][2]; let names = map_keys(objects); let index = 0;
         while (index < array_length(names)) {
             let object = objects[names[index]];
             if (!map_has(object, "imported")) {
@@ -1369,7 +1361,7 @@ fn prepare_object_descriptors(modules, root_index) {
     }
     module_index = 0;
     while (module_index < array_length(items)) {
-        let objects = items[module_index][2][4][3]; let names = map_keys(objects); let index = 0;
+        let objects = items[module_index][2][4][2]; let names = map_keys(objects); let index = 0;
         while (index < array_length(names)) {
             let object = objects[names[index]];
             if (map_has(object, "imported")) { object["hex"] = object["imported"]["hex"]; object["qualified_name"] = object["imported"]["qualified_name"]; }

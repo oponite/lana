@@ -1,5 +1,4 @@
 """Object member LSP ranges, debugger frames, formatter, and export boundaries."""
-import json
 from pathlib import Path
 import subprocess
 import sys

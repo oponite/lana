@@ -637,7 +637,8 @@ mod tests {
     fn uncertain_commit_is_reconciled_after_reopen() {
         let heap = Heap::default();
         let (path, mut store) = fresh_store();
-        let blocked_manifest = std::path::Path::new(&path).join("manifest.tmp");
+        let blocked_manifest = std::path::Path::new(&path).join("manifest");
+        std::fs::remove_file(&blocked_manifest).unwrap();
         std::fs::create_dir(&blocked_manifest).unwrap();
         let input = message(&heap, "uncertain", object(&heap, &[("not_before_utc", Value::number(2.0))]).unwrap(), text("saved"));
         let result = create(&mut store, &input, 1.0, &heap);

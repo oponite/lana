@@ -27,6 +27,35 @@ const MAX_INSTRUCTIONS: u32 = 1_000_000;
 const MAX_STRING_LENGTH: u32 = 10_000_000;
 const MAX_FUNCTION_NAME_LENGTH: u32 = 1_000_000;
 
+/// Read at most one byte beyond the serialized limit before rejecting input.
+pub fn read_file(path: impl AsRef<std::path::Path>) -> Result<Vec<u8>, LanaErrorInfo> {
+    let file = std::fs::File::open(path).map_err(|error| LanaErrorInfo::new(LanaError::Io, 0, 0, 0, error.to_string()))?;
+    read_bounded(file)
+}
+
+fn read_bounded(mut reader: impl std::io::Read) -> Result<Vec<u8>, LanaErrorInfo> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let remaining = (MAX_CHUNK_SIZE + 1 - bytes.len()).min(buffer.len());
+        let count = match reader.read(&mut buffer[..remaining]) {
+            Ok(0) => return Ok(bytes),
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(LanaErrorInfo::new(LanaError::Io, 0, 0, 0, error.to_string())),
+        };
+        let required = bytes.len() + count;
+        if required > MAX_CHUNK_SIZE {
+            return Err(LanaErrorInfo::new(LanaError::Limit, 0, 0, 0, "chunk exceeds size limit"));
+        }
+        if required > bytes.capacity() {
+            let capacity = required.max(bytes.capacity().saturating_mul(2)).min(MAX_CHUNK_SIZE);
+            bytes.try_reserve_exact(capacity - bytes.len()).map_err(|_| LanaErrorInfo::new(LanaError::Oom, 0, 0, 0, "cannot allocate bytecode input"))?;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+}
+
 struct Reader<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -194,4 +223,26 @@ pub fn load(bytes: &[u8]) -> Result<Chunk, LanaErrorInfo> {
 
 fn format_error(code: LanaError, ip: usize, opcode: u8, line: u32) -> LanaErrorInfo {
     LanaErrorInfo::new(code, ip, opcode, line, "truncated LABC file")
+}
+
+#[cfg(test)]
+mod bounded_read_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn bytecode_read_stops_at_the_limit_and_handles_short_reads() {
+        let bytes = read_bounded(std::io::repeat(0).take(MAX_CHUNK_SIZE as u64)).unwrap();
+        assert_eq!(bytes.len(), MAX_CHUNK_SIZE);
+        drop(bytes);
+        let mut source = std::io::repeat(0).take((MAX_CHUNK_SIZE + 100) as u64);
+        assert_eq!(read_bounded(&mut source).unwrap_err().code, LanaError::Limit);
+        assert_eq!(source.limit(), 99);
+        assert_eq!(read_bounded(&b"LABC"[..]).unwrap(), b"LABC");
+        struct Broken;
+        impl Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { Err(std::io::Error::other("broken")) }
+        }
+        assert_eq!(read_bounded(Broken).unwrap_err().code, LanaError::Io);
+    }
 }

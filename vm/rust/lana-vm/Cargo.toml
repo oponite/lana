@@ -20,8 +20,8 @@ serde = "1.0.229"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libloading = "0.8"
 # LIP-019 TLS client for https hosts. Optional (see the `net-tls` feature).
-rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "std"], optional = true }
-webpki-roots = { version = "0.26", optional = true }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "tls12", "std"], optional = true }
+webpki-roots = { version = "1.0.10", optional = true }
 
 # Explicit GPU matmul (LIP-004 section 5). macOS-only: the Metal framework is
 # the GPU backend; every other platform returns "unsupported" from gpu_matmul.

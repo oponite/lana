@@ -9,7 +9,12 @@ Each VM owns its registers, heap, instruction budget, memory budget, random stre
 
 Validate a complete result before publishing it. An invalid input, unsupported operation, cancellation, exhausted budget, allocation failure, or failed callback exposes no partial value, register update, store revision, or effect receipt. Operations charge their work and temporary memory to the active task. The compiler is limited to 256 MiB and 50,000,000 instructions.
 
-An I/O error before atomic replacement leaves the old file or store state intact. If directory sync fails after replacement, report `LANA_ERR_IO` with `durability: "uncertain"` and the path. Reopen and inspect the result before retrying.
+An I/O error before atomic replacement leaves the old file or store state intact. If directory sync fails after replacement, report `LANA_ERR_IO` with `durability: "uncertain"` and the path. Reopen and inspect the result before retrying. A complete journal commit record is also a publication boundary. A failed sync or later manifest write reports the same uncertain outcome. Before that boundary, failed writes truncate and sync back to the previous journal offset; a failed rollback is uncertain. An uncertain store handle releases its lock and rejects further operations until a fresh open.
+
+Legacy bytecode may jump or fall through across function layout boundaries.
+Compact frames are used only for locally contained control flow. Other frames
+reserve the full verified register bank against the heap budget. Supplied
+arguments must fit even when the function body never reads them.
 
 ## Derivations and Information
 

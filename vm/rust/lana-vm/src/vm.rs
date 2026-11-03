@@ -197,7 +197,7 @@ fn instruction_max_register(ins: &Instruction) -> usize {
         // `ins.imm` is a constant index, not a register.
         LoadConst => {}
         // Arguments occupy `ins.c .. ins.c + ins.imm - 1`.
-        Call | Fork | HostCall | Generator => {
+        Call | Fork | HostCall | Generator | Async => {
             if ins.imm != u32::MAX && ins.imm > 0 {
                 max = max.max(ins.c as usize + ins.imm as usize - 1);
             }
@@ -215,7 +215,7 @@ fn instruction_max_register(ins: &Instruction) -> usize {
             }
         }
         // `ins.imm` is a register operand.
-        StateBuild | Mix | JointCondition | Observe => {
+        StateBuild | Mix | JointCondition | Observe | AppendRedundant | AppendComplementary | Bootstrap | ObserveMap => {
             if let Some(b) = reg(ins.b) {
                 max = max.max(b);
             }
@@ -262,13 +262,24 @@ fn compute_max_registers(chunk: &Chunk) -> Vec<usize> {
         } else {
             chunk.code.len()
         };
+        let code = &chunk.code[entry..end];
+        // Legacy bytecode permits jumps and fallthrough across function entries.
+        let escapes = code.last().is_none_or(|ins| !matches!(ins.opcode, OpCode::Return | OpCode::Halt | OpCode::Jump))
+            || code.iter().any(|ins| matches!(ins.opcode,
+                OpCode::Jump | OpCode::JumpIfTrue | OpCode::JumpIfFalse | OpCode::PathSplit | OpCode::AdtCase)
+                && !(entry..end).contains(&(ins.imm as usize)));
         let mut max = 0usize;
-        for ins in &chunk.code[entry..end] {
-            max = max.max(instruction_max_register(ins));
+        for ins in code { max = max.max(instruction_max_register(ins)); }
+        let needed = (max + 1).max(chunk.functions[index].arity as usize);
+        result[index] = if escapes { LANA_MAX_REGISTERS as usize }
+            else if chunk.version == 6 { needed.max(chunk.functions[index].register_count as usize).min(LANA_MAX_REGISTERS as usize) }
+            else { needed.min(LANA_MAX_REGISTERS as usize) };
+    }
+    for ins in &chunk.code {
+        if matches!(ins.opcode, OpCode::Generator | OpCode::Async) {
+            let index = ins.b as usize;
+            result[index] = result[index].max((chunk.functions[index].arity as usize + 1).min(LANA_MAX_REGISTERS as usize));
         }
-        result[index] = (if chunk.version == 6 {
-            (max + 1).max(chunk.functions[index].register_count as usize)
-        } else { max + 1 }).min(LANA_MAX_REGISTERS as usize);
     }
     result
 }
@@ -1635,6 +1646,14 @@ impl<'a> Vm<'a> {
     /// The error recorded by the last failed run.
     pub fn error(&self) -> &VmError {
         &self.error
+    }
+
+    /// Preserve host storage outcome when the runtime reports an I/O failure.
+    pub fn record_io_failure(&mut self, uncertain: bool, path: &str) {
+        self.pending_io_outcome = Some((uncertain, path.to_string()));
+        self.pending_error_message = Some(if uncertain {
+            format!("store outcome uncertain; reopen and inspect before retry; path: {path}")
+        } else { format!("store write failed before publication; path: {path}") });
     }
 
     /// The instruction count, for `--stats` output.
@@ -6179,8 +6198,11 @@ impl<'a> Vm<'a> {
                 if ins.imm != function.arity {
                     return LanaError::Type;
                 }
-                let mut registers = Vec::with_capacity(function.register_count as usize);
-                registers.resize_with(function.register_count as usize, Value::null);
+                if ins.imm >= LANA_MAX_REGISTERS { return LanaError::Register; }
+                let register_count = self.max_registers[ins.b as usize];
+                let mut registers = Vec::new();
+                if registers.try_reserve_exact(register_count).is_err() { return LanaError::Oom; }
+                registers.resize_with(register_count, Value::null);
                 for index in 0..ins.imm as usize {
                     registers[1 + index] =
                         self.current_frame().registers[ins.c as usize + index].clone();
@@ -6272,8 +6294,10 @@ impl<'a> Vm<'a> {
                 // (not `register_count`, which is only a lower bound) so the
                 // async frame created on resume has room for every register the
                 // function body may touch. Mirrors how OP_CALL sizes frames.
+                if ins.imm >= LANA_MAX_REGISTERS { return LanaError::Register; }
                 let register_count = self.max_registers[ins.b as usize];
-                let mut registers = Vec::with_capacity(register_count);
+                let mut registers = Vec::new();
+                if registers.try_reserve_exact(register_count).is_err() { return LanaError::Oom; }
                 registers.resize_with(register_count, Value::null);
                 for index in 0..ins.imm as usize {
                     registers[1 + index] =
@@ -6369,11 +6393,13 @@ impl<'a> Vm<'a> {
                 let ValueKind::Number(b) = b_value.kind else {
                     return LanaError::Type;
                 };
-                if !b.is_finite() || b < 1.0 || b.floor() != b || b > usize::MAX as f64 {
+                if !b.is_finite() || b < 1.0 || b.floor() != b || b >= 2.0_f64.powi(usize::BITS as i32) {
                     return LanaError::InvalidParameters;
                 }
                 let b = b as usize;
-                let data = data_arc.lock().unwrap().items.to_vec();
+                let data = match Buffer::from_slice(&self.heap, &data_arc.lock().unwrap().items) {
+                    Ok(data) => data, Err(error) => return error,
+                };
                 let n = data.len();
                 if n == 0 {
                     return LanaError::InvalidParameters;
@@ -6384,6 +6410,18 @@ impl<'a> Vm<'a> {
                 if self.chunk.functions[ins.b as usize].arity != 1 {
                     return LanaError::Type;
                 }
+                let work = match b.checked_mul(n).and_then(|work| work.checked_add(n))
+                    .and_then(|work| b.checked_mul(usize::BITS as usize - b.leading_zeros() as usize)
+                        .and_then(|sort| work.checked_add(sort))) {
+                    Some(work) => work, None => return LanaError::Limit,
+                };
+                if let Err(error) = self.charge_bounded_work(work as u64) { return error; }
+                let mut resamples = match Buffer::<f64>::new(&self.heap, b, 0) {
+                    Ok(buffer) => buffer, Err(error) => return error,
+                };
+                let _sort_memory = match self.heap.reserve(b.saturating_mul(std::mem::size_of::<f64>())) {
+                    Ok(reservation) => reservation, Err(error) => return error,
+                };
                 let estimate = {
                     let mut result = Value::null();
                     let error = self.run_function(ins.b, &data_value, ins.a, &mut result);
@@ -6395,14 +6433,18 @@ impl<'a> Vm<'a> {
                     };
                     value
                 };
-                let mut resamples = Vec::with_capacity(b);
                 for _ in 0..b {
-                    let mut items = Vec::with_capacity(n);
+                    if let Err(error) = self.charge_bounded_work(0) { return error; }
+                    let mut items = match Buffer::new(&self.heap, n, std::mem::size_of::<Array>()) {
+                        Ok(items) => items, Err(error) => return error,
+                    };
                     for _ in 0..n {
                         let draw = (self.rng.random() as usize) % n;
-                        items.push(data[draw].clone());
+                        if let Err(error) = items.push(data[draw].clone()) { return error; }
                     }
-                    let resampled = match self.array_value(items) { Ok(value) => value, Err(error) => return error };
+                    let resampled = match Array::from_buffer(items) {
+                        Ok(array) => Value::array(Arc::new(Mutex::new(array))), Err(error) => return error,
+                    };
                     let mut result = Value::null();
                     let error = self.run_function(ins.b, &resampled, ins.a, &mut result);
                     if error != LanaError::Ok {
@@ -6411,9 +6453,10 @@ impl<'a> Vm<'a> {
                     let ValueKind::Number(value) = result.kind else {
                         return LanaError::Type;
                     };
-                    resamples.push(value);
+                    if let Err(error) = resamples.push(value) { return error; }
                 }
                 resamples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                if let Err(error) = self.charge_bounded_work(0) { return error; }
                 let lo = ((0.025 * b as f64) as usize).min(b - 1);
                 let hi = ((0.975 * b as f64) as usize).min(b - 1);
                 let ci_low = resamples[lo];
@@ -7361,10 +7404,8 @@ impl<'a> Vm<'a> {
         }
     }
 
-    /// Build a dirac state distribution, mirroring `lana_vm_state_dist_dirac`.
-    /// Part of the public C11 API; no increment-2 opcode constructs a dirac
-    /// node directly (host calls use it in increment 5).
-    #[allow(dead_code)]
+    /// Construct test graphs directly without adding a production host call.
+    #[cfg(test)]
     fn state_dist_dirac(&mut self, state: &StateValue) -> Result<Arc<StateDist>, LanaError> {
         if !state::state_valid(&state.state) {
             return Err(LanaError::InvalidState);
@@ -20284,6 +20325,44 @@ mod tests {
         );
         assert_eq!(error, LanaError::Ok);
         assert_eq!(result, "7");
+    }
+
+    #[test]
+    fn legacy_function_frames_cover_cross_boundary_control_flow_and_arguments() {
+        let bytes = include_bytes!("../../../../fuzz/corpus/lana_execution/cross_function_return");
+        let chunk = lana_bytecode::loader::load(bytes).unwrap();
+        let mut vm = Vm::new(&chunk);
+        assert_eq!(vm.run(), LanaError::Ok);
+        for body in ["NOP\n", "JUMP tail\n"] {
+            let chunk = assembler::assemble(&format!(".function main 0 2\nCALL helper R0 0 R1\nRETURN R1\n.function helper 0 1\n{body}.function tail 0 1\ntail:\nRETURN R255\n")).unwrap();
+            let mut vm = Vm::new(&chunk);
+            assert_eq!(vm.run(), LanaError::Ok);
+        }
+        let chunk = assembler::assemble(".function main 0 3\nLOAD_CONST R0 7\nLOAD_CONST R1 8\nCALL helper R0 2 R2\nRETURN R2\n.function helper 2 2\nRETURN R0\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        assert_eq!(vm.run(), LanaError::Ok);
+        assert_eq!(vm.result().unwrap().as_number(), 7.0);
+    }
+
+    #[test]
+    fn suspended_frames_cover_reserved_slots_and_resume_registers() {
+        for (version, opcode) in [(3, "GENERATOR"), (4, "ASYNC")] {
+            let chunk = assembler::assemble(&format!(".version {version}\n.function main 0 3\nLOAD_CONST R0 7\n{opcode} helper R0 1 R1\nHALT\n.function helper 1 1\nRETURN R0\n")).unwrap();
+            let mut vm = Vm::new(&chunk);
+            assert_eq!(vm.run(), LanaError::Ok);
+            let chunk = assembler::assemble(&format!(".version {version}\n.function main 0 256\n{opcode} helper R0 256 R0\nHALT\n.function helper 256 256\nRETURN R0\n")).unwrap();
+            let mut vm = Vm::new(&chunk);
+            assert_eq!(vm.run(), LanaError::Register);
+        }
+        let chunk = assembler::assemble(".version 3\n.function main 0 3\nGENERATOR helper R0 0 R1\nNEXT R1 R2\nRETURN R2\n.function helper 0 256\nRETURN R0\n").unwrap();
+        let mut vm = Vm::new(&chunk);
+        assert_eq!(vm.run(), LanaError::Ok);
+        // Argument ranges must size compact caller frames, not just the callee.
+        for (version, opcode) in [(3, "GENERATOR"), (4, "ASYNC")] {
+            let chunk = assembler::assemble(&format!(".version {version}\n.function main 0 2\nCALL caller R0 0 R1\nRETURN R1\n.function caller 0 1\n{opcode} helper R0 8 R0\nRETURN R0\n.function helper 8 8\nRETURN R0\n")).unwrap();
+            let mut vm = Vm::new(&chunk);
+            assert_eq!(vm.run(), LanaError::Ok);
+        }
     }
 
     #[test]
