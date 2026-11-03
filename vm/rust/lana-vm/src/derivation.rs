@@ -1,5 +1,5 @@
-//! Derivation model, mirroring `LanaDerivation` in `vm/include/value.h` and
-//! the derivation helpers in `vm/c/vm.c`.
+//! Derivation model, mirroring `LanaDerivation` in `6aacbde2f67f:vm/include/value.h` and
+//! the derivation helpers in `6aacbde2f67f:vm/c/vm.c`.
 //!
 //! Derivations are immutable records: each operation that produces a value
 //! attaches a derivation describing how the value was obtained. The derivation
@@ -73,7 +73,7 @@ pub struct Derivation {
     pub outcome: DerivationOutcome,
     pub reason: Arc<str>,
     /// LIP-011 reverse-mode autodiff fields, mirroring the `ad_*` fields of
-    /// `LanaDerivation` in `vm/include/value.h`. `ad_op` is -1 for a leaf
+    /// `LanaDerivation` in `6aacbde2f67f:vm/include/value.h`. `ad_op` is -1 for a leaf
     /// (input) node; 0=add 1=sub 2=mul 3=div 4=matmul 5=sum 6=mean. `ad_grad`
     /// is the accumulated cotangent, mutated in place by the backward pass, so
     /// it is guarded by a `Mutex` (the C11 VM mutates `ad_grad->data` directly).
@@ -86,7 +86,7 @@ pub struct Derivation {
     pub ad_axis: i32,
 }
 
-/// The stable kind name, matching `derivation_kind_name` in `vm/c/vm.c`.
+/// The stable kind name, matching `derivation_kind_name` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn kind_name(kind: DerivationKind) -> &'static str {
     match kind {
         DerivationKind::Evidence => "evidence",

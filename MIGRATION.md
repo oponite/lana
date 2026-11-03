@@ -1,3 +1,19 @@
+# Migrating to Lana 4.2.0
+
+Published bytecode and store encoding are unchanged. Decimal exponent literals
+(`1e-5`) are new syntax. `sample` on paths from an unweighted guard returns
+`LANA_ERR_UNSUPPORTED_OPERATION`; weight the guard to sample its branches.
+Oversized bootstrap requests and bytecode files now fail with structured resource errors.
+After a store error carrying `durability: "uncertain"`, reopen and inspect the
+revision or receipt before retrying. The old handle is closed. Worker errors
+preserve the optional `durability` and `path` fields. No effect is retried
+automatically. Store journal files must be regular files with a single hard link; symlinks
+and shared hard links are rejected.
+
+Benchmark report schema 2 replaces `rust_vm` with `precompiled_cli`. It includes
+CLI startup, bytecode loading, and execution, and excludes source compilation.
+Historical schema-1 results are not directly comparable for that workload.
+
 # Migrating to Lana 4.0
 
 Lana 4.0 distributes one Rust `lana` executable and its adjacent

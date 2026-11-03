@@ -207,6 +207,11 @@ A syntax feature SHOULD pass all five checks:
 5. **Consistent** — the syntax follows patterns already established elsewhere
    in Lana.
 
+Decimal number literals may use an `e` or `E` exponent followed by an optional
+sign and at least one digit, as in `1e-5` or `2.5E+3`. This follows the
+notation already emitted by numeric output and rejects incomplete exponents
+at the literal rather than treating `e` as a separate name.
+
 ## Additive object grammar
 
 The canonical module-top-level declarations are:

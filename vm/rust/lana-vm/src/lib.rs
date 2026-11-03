@@ -1,4 +1,7 @@
 //! Lana VM core. Rust ownership and byte accounting enforce the 256 MiB limit.
+//! Historical C VM references in implementation comments use
+//! `6aacbde2f67f:<path>` and can be read with `git show`. Rust is the
+//! canonical implementation.
 
 pub mod backend;
 pub mod derivation;

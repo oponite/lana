@@ -25,9 +25,12 @@ assert(inspect_information(narrowed).remaining_alternatives == 2, "pure refineme
 ```
 
 `condition` creates a derived value and leaves the source unchanged.
+
 `observe` records evidence on the live source. In this example, `narrowed`
 still contains two alternatives after the observation.
+
 `resolve` requires one remaining result. Sampling does not establish certainty.
+
 `snapshot` captures immutable data without a live subscription.
 
 Separate possibilities do not imply independence. Operations preserve declared shared dependencies. State distributions do not automatically become Core distributions.

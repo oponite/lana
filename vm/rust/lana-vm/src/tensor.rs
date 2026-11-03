@@ -1,4 +1,4 @@
-//! LIP-004 tensor helpers, mirroring `vm/c/vm.c` lines 3163-3496.
+//! LIP-004 tensor helpers, mirroring `6aacbde2f67f:vm/c/vm.c` lines 3163-3496.
 //!
 //! Payloads, view metadata, and scratch buffers reserve capacity on the caller's
 //! heap before allocation. Each owner releases its reservation on drop; views
@@ -22,7 +22,7 @@ pub fn tensor_dimension(n: f64) -> Result<usize, LanaError> {
     Ok(n as usize)
 }
 /// LIP-027: convert a double to a binary16 (f16) bit pattern,
-/// round-to-nearest-even. Mirrors `f64_to_f16_bits` in `vm/c/vm.c`.
+/// round-to-nearest-even. Mirrors `f64_to_f16_bits` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn f64_to_f16_bits(x: f64) -> u16 {
     if x.is_nan() {
         return 0x7E00;
@@ -78,7 +78,7 @@ pub fn f64_to_f16_bits(x: f64) -> u16 {
 }
 
 /// LIP-027: convert a binary16 (f16) bit pattern to a double. Mirrors
-/// `f16_to_double` in `vm/c/vm.c`.
+/// `f16_to_double` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn f16_bits_to_f64(h: u16) -> f64 {
     let sign = (h >> 15) & 1;
     let exp = (h >> 10) & 0x1F;
@@ -94,13 +94,13 @@ pub fn f16_bits_to_f64(h: u16) -> f64 {
 }
 
 /// LIP-027: round a double to binary16 (f16) precision, round-to-nearest-even,
-/// stored back as a double. Mirrors `round_f16` in `vm/c/vm.c`.
+/// stored back as a double. Mirrors `round_f16` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn round_f16(x: f64) -> f64 {
     f16_bits_to_f64(f64_to_f16_bits(x))
 }
 
 /// LIP-027: convert a double to a bfloat16 (bf16) bit pattern,
-/// round-to-nearest-even. Mirrors `f64_to_bf16_bits` in `vm/c/vm.c`.
+/// round-to-nearest-even. Mirrors `f64_to_bf16_bits` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn f64_to_bf16_bits(x: f64) -> u16 {
     if x.is_nan() {
         return 0x7FC0;
@@ -132,14 +132,14 @@ pub fn f64_to_bf16_bits(x: f64) -> u16 {
 
 /// LIP-027: convert a bfloat16 (bf16) bit pattern to a double. bf16 is the top
 /// 16 bits of an f32, so widen the f32 to f64. Mirrors `bf16_to_double` in
-/// `vm/c/vm.c`.
+/// `6aacbde2f67f:vm/c/vm.c`.
 pub fn bf16_bits_to_f64(h: u16) -> f64 {
     let f32_bits = (h as u32) << 16;
     f32::from_bits(f32_bits) as f64
 }
 
 /// LIP-027: round a double to bfloat16 (bf16) precision, round-to-nearest-even,
-/// stored back as a double. Mirrors `round_bf16` in `vm/c/vm.c`.
+/// stored back as a double. Mirrors `round_bf16` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn round_bf16(x: f64) -> f64 {
     bf16_bits_to_f64(f64_to_bf16_bits(x))
 }
@@ -156,7 +156,7 @@ pub fn tensor_elem_bytes(t: &Tensor) -> usize {
 
 /// LIP-027: read the real part of element `i` (absolute element index, already
 /// including `offset`), converting from the storage dtype to f64. Mirrors
-/// `tensor_get_real` in `vm/c/vm.c`.
+/// `tensor_get_real` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn tensor_get_real(t: &Tensor, i: usize) -> f64 {
     match t.dtype {
         TensorDtype::F32 => {
@@ -188,7 +188,7 @@ pub fn tensor_get_real(t: &Tensor, i: usize) -> f64 {
 }
 
 /// LIP-027: read the imaginary part of element `i` (0.0 for a real dtype).
-/// Mirrors `tensor_get_imag` in `vm/c/vm.c`.
+/// Mirrors `tensor_get_imag` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn tensor_get_imag(t: &Tensor, i: usize) -> f64 {
     if t.dtype != TensorDtype::Complex {
         return 0.0;
@@ -200,7 +200,7 @@ pub fn tensor_get_imag(t: &Tensor, i: usize) -> f64 {
 
 /// LIP-027: write the real part of element `i`, converting from f64 to the
 /// storage dtype (round-to-nearest-even for f16/bf16). Mirrors
-/// `tensor_set_real` in `vm/c/vm.c`. Panics if the buffer is shared (a view);
+/// `tensor_set_real` in `6aacbde2f67f:vm/c/vm.c`. Panics if the buffer is shared (a view);
 /// callers write only to freshly-created tensors, matching the existing
 /// `Arc::get_mut` usage.
 pub fn tensor_set_real(t: &mut Tensor, i: usize, v: f64) {
@@ -228,7 +228,7 @@ pub fn tensor_set_real(t: &mut Tensor, i: usize, v: f64) {
 }
 
 /// LIP-027: write the imaginary part of element `i` (no-op for a real dtype).
-/// Mirrors `tensor_set_imag` in `vm/c/vm.c`.
+/// Mirrors `tensor_set_imag` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn tensor_set_imag(t: &mut Tensor, i: usize, v: f64) {
     if t.dtype != TensorDtype::Complex {
         return;
@@ -720,7 +720,7 @@ pub fn tensor_random(
         let u2 = random_unit(&mut state);
         if u1 == 0.0 { u1 = 1.0 / 9007199254740992.0; }
         let radius = (-2.0 * u1.ln()).sqrt();
-        let angle = 6.283185307179586476925286766559 * u2;
+        let angle = std::f64::consts::TAU * u2;
         tensor_set_real(&mut result, i, radius * angle.cos());
         i += 1;
         if i < count { tensor_set_real(&mut result, i, radius * angle.sin()); i += 1; }
@@ -1113,9 +1113,11 @@ pub fn tensor_matmul(
     // scratch buffer via tensor_get_real. Complex (interleaved doubles) and
     // f64 read directly.
     let pack_a = a_col_stride != 1
-        || (a.dtype != TensorDtype::F64 && a.dtype != TensorDtype::Complex);
+        || (a.dtype != TensorDtype::F64 && a.dtype != TensorDtype::Complex)
+        || !(a.data.as_ptr() as usize).is_multiple_of(std::mem::align_of::<f64>());
     let pack_b = b_col_stride != 1
-        || (b.dtype != TensorDtype::F64 && b.dtype != TensorDtype::Complex);
+        || (b.dtype != TensorDtype::F64 && b.dtype != TensorDtype::Complex)
+        || !(b.data.as_ptr() as usize).is_multiple_of(std::mem::align_of::<f64>());
     // Leading dimensions for direct (non-packed) operands: the true row
     // stride of the view, which BLAS accepts instead of a copy. A promoted
     // vector has one row (lda = K) or one column (ldb = its row stride).
@@ -1178,9 +1180,10 @@ pub fn tensor_matmul(
             b_ptr = b_packed.as_ptr();
         }
         let c_ptr = c_scratch.as_mut_ptr();
-        backend::backend_gemm(
+        // Packed operands and aligned direct buffers satisfy backend_gemm's pointer contract.
+        unsafe { backend::backend_gemm(
             m, k, n, complex, matmul_accumulation_fp32(a, b), a_ptr, a_ld, b_ptr, b_ld, c_ptr,
-        );
+        ); }
         // Stage the binary64 result into the compact output buffer.
         for i in 0..c_core {
             let elem = batch * m * n + i / mult;
@@ -1473,7 +1476,7 @@ pub fn tensor_reduce_axis(
 }
 
 /// Total number of real elements in a tensor (autodiff is real-only),
-/// mirroring `tensor_element_count` in `vm/c/vm.c`.
+/// mirroring `tensor_element_count` in `6aacbde2f67f:vm/c/vm.c`.
 pub fn tensor_element_count(t: &Tensor) -> usize {
     let mut total = 1usize;
     for i in 0..t.ndim {
@@ -1939,7 +1942,7 @@ fn tensor_resolve_slice_bound(n: f64, dim: usize) -> Result<usize, LanaError> {
 }
 
 /// LIP-004 indexing and slicing: build a view (or scalar) of `t` from a spec,
-/// mirroring `tensor_index` in `vm/c/vm.c`. The spec is a single number (one
+/// mirroring `tensor_index` in `6aacbde2f67f:vm/c/vm.c`. The spec is a single number (one
 /// integer position) or an array of positions, each a number (integer) or a
 /// two-element array `[start, end]` (slice). Fewer positions than the rank
 /// keep the remaining trailing axes whole. Integer positions drop their axis;
@@ -2830,8 +2833,8 @@ mod tests {
     fn dtype_rounding_and_string_roundtrip() {
         // f16 round-to-nearest-even: 0.1 -> 0.0999755859375.
         assert_eq!(round_f16(0.1), 0.0999755859375);
-        // bf16 round-to-nearest-even: 3.14159 -> 3.140625.
-        assert_eq!(round_bf16(3.14159), 3.140625);
+        // bf16 round-to-nearest-even: 3.2 -> 3.203125.
+        assert_eq!(round_bf16(3.2), 3.203125);
         // f16 overflow to inf (max finite f16 is 65504).
         assert_eq!(round_f16(65520.0), f64::INFINITY);
         // f16 halfway rounds to even: 0.5 is exact; 1.0 + 2^-11 rounds to 1.0.

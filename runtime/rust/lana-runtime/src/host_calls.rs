@@ -98,6 +98,7 @@ fn load_dataset_query_record(store: &Store, key: &str, value: Value,
 /// Owns the single durable store the VM drives, and dispatches the
 /// store/policy/ledger host calls against it.
 pub struct StoreHost {
+    storage_failure: Option<(bool, String)>,
     store: Option<Store>,
     bound_queries: HashMap<String, DatasetQueryRecord>,
     source_relationships: crate::dataset_source_codec::Registry,
@@ -117,7 +118,7 @@ impl StoreHost {
     }
 
     pub fn with_heap(heap: lana_vm::heap::Heap) -> Self {
-        Self { source_relationships: Default::default(), store: None, bound_queries: HashMap::new(), chunk_bytes: None, adapter: None, heap, execution: None, execution_credential: None, execution_ca_file: None, authorizations: Vec::new(), issued_decisions: Vec::new() }
+        Self { storage_failure: None, source_relationships: Default::default(), store: None, bound_queries: HashMap::new(), chunk_bytes: None, adapter: None, heap, execution: None, execution_credential: None, execution_ca_file: None, authorizations: Vec::new(), issued_decisions: Vec::new() }
     }
 
     /// Keep the exact verified, linked LABC bytes used to run this VM.
@@ -246,6 +247,7 @@ impl StoreHost {
     pub fn dispatch(&mut self, vm: &mut Vm, host_id: u32, args: &[Value], out: &mut Value) -> LanaError {
         *out = Value::null();
         self.heap = vm.heap();
+        self.storage_failure = None;
         #[cfg(target_arch = "wasm32")]
         if !matches!(host_id, LANA_HOST_RULES_LEARN | LANA_HOST_RULES_PREDICT
             | LANA_HOST_TREES_FIT | LANA_HOST_TREES_PREDICT | LANA_HOST_TREES_EXPLAIN
@@ -253,7 +255,7 @@ impl StoreHost {
             return LanaError::UnsupportedOperation;
         }
         let status = match host_id {
-            LANA_HOST_STORE_OPEN => self.store_open(args, out),
+            LANA_HOST_STORE_OPEN => self.store_open(vm, args, out),
             LANA_HOST_STORE_PUT => self.store_put(args, out),
             LANA_HOST_STORE_GET => self.store_get(args, out),
             LANA_HOST_STORE_DELETE => self.store_delete(args, out),
@@ -309,6 +311,11 @@ impl StoreHost {
             LANA_HOST_TREES_LOAD => self.trees_load(vm, args, out),
             _ => LanaError::Format,
         };
+        if status == LanaError::Io {
+            let context = self.storage_failure.take().or_else(|| self.store.as_ref()
+                .and_then(Store::io_failure).map(|(uncertain, path)| (uncertain, path.to_string())));
+            if let Some((uncertain, path)) = context { vm.record_io_failure(uncertain, &path); }
+        }
         // Issued decisions are sealed by map identity. They are allocated on
         // this VM's heap above and must keep the exact issued identity.
         if status == LanaError::Ok && host_id != LANA_HOST_POLICY_EVALUATE {
@@ -318,6 +325,12 @@ impl StoreHost {
             }
         }
         status
+    }
+
+    fn close_failed_store(&mut self) {
+        self.storage_failure = self.store.as_ref().and_then(Store::io_failure)
+            .map(|(uncertain, path)| (uncertain, path.to_string()));
+        self.store = None;
     }
 
     fn opaque_token(&self) -> Arc<lana_vm::value::CapabilityToken> {
@@ -394,7 +407,7 @@ impl StoreHost {
         }
     }
 
-    fn store_open(&mut self, args: &[Value], out: &mut Value) -> LanaError {
+    fn store_open(&mut self, vm: &mut Vm, args: &[Value], out: &mut Value) -> LanaError {
         if args.len() != 1 {
             return LanaError::Type;
         }
@@ -409,14 +422,17 @@ impl StoreHost {
             path: path.to_string(),
             timeout_ms: 0,
         };
-        match store::store_open(&options) {
+        match store::open_with_outcome(&options) {
             Ok(store) => {
                 self.source_relationships = Default::default();
                 self.store = Some(store);
                 *out = Value::null();
                 LanaError::Ok
             }
-            Err(e) => e,
+            Err((error, uncertain)) => {
+                if error == LanaError::Io { vm.record_io_failure(uncertain, path); }
+                error
+            }
         }
     }
 
@@ -459,7 +475,7 @@ impl StoreHost {
         if let Err(error) = store::store_put(store, &key, &record) { return error; }
         match store::store_commit(store) {
             Ok(_) => { *out = Value::null(); LanaError::Ok }
-            Err(error) => { self.store = None; error }
+            Err(error) => { self.close_failed_store(); error }
         }
     }
 
@@ -519,7 +535,7 @@ impl StoreHost {
         }
         match store::store_commit(store) {
             Ok(_) => { self.bound_queries.insert(query_id.to_string(), record); *out = Value::null(); LanaError::Ok }
-            Err(error) => { self.store = None; error }
+            Err(error) => { self.close_failed_store(); error }
         }
     }
 
@@ -718,7 +734,7 @@ impl StoreHost {
                 for (_, query, _, _, _) in affected { self.bound_queries.insert(query.query_id.clone(), query); }
                 *out = Value::number(info.revision_id as f64); LanaError::Ok
             }
-            Err(error) => { self.store = None; error }
+            Err(error) => { self.close_failed_store(); error }
         }
     }
 
@@ -855,7 +871,7 @@ impl StoreHost {
             ("cancel", 2) => future_messages::utc_now().and_then(|now| future_messages::cancel(store, &args[1], now, &self.heap)),
             _ => Err(LanaError::Type),
         };
-        if store::store_current_revision(store).is_err() { self.store = None; }
+        if store::store_current_revision(store).is_err() { self.close_failed_store(); }
         match result {
             Ok(value) => { *out = value; LanaError::Ok }
             Err(error) => error,
@@ -1084,7 +1100,7 @@ impl StoreHost {
         }
         match store::store_commit(store) {
             Ok(_) => { *out = Value::string(Arc::from("1")); LanaError::Ok }
-            Err(error) => { self.store = None; error }
+            Err(error) => { self.close_failed_store(); error }
         }
     }
 
@@ -1178,7 +1194,7 @@ impl StoreHost {
         }
         match store::store_commit(store) {
             Ok(_) => { *out = Value::string(Arc::from(version_id)); LanaError::Ok }
-            Err(error) => { self.store = None; error }
+            Err(error) => { self.close_failed_store(); error }
         }
     }
 
@@ -1211,7 +1227,7 @@ impl StoreHost {
         }
         match store::store_commit(store) {
             Ok(_) => { *out = Value::string(prior.clone()); LanaError::Ok }
-            Err(error) => { self.store = None; error }
+            Err(error) => { self.close_failed_store(); error }
         }
     }
 
@@ -1243,7 +1259,7 @@ impl StoreHost {
         }
         match store::store_commit(store) {
             Ok(_) => { *out = Value::string(Arc::from(version_id)); LanaError::Ok }
-            Err(error) => { self.store = None; error }
+            Err(error) => { self.close_failed_store(); error }
         }
     }
 

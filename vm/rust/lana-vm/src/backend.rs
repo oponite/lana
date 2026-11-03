@@ -1,8 +1,5 @@
-//! Native matmul backend dispatch (LIP-004 section 5), mirroring
-//! `vm/c/backend.c`. Both VMs must select the same backend on a given
-//! platform so C/Rust differential byte identity holds: macOS links the
-//! Accelerate framework, everything else runs the portable loop through the
-//! same dispatch point.
+//! Native matmul backend dispatch (LIP-004 section 5). macOS links the
+//! Accelerate framework; other platforms use the portable loop.
 
 #[cfg(target_os = "macos")]
 mod accelerate {
@@ -67,7 +64,7 @@ mod accelerate {
     }
 
     /// LIP-027 item 9: route the fp32-accumulation matmul (f32/f16/bf16
-    /// inputs) through cblas_sgemm, mirroring `gemm_sgemm` in `vm/c/backend.c`.
+    /// inputs) through cblas_sgemm.
     /// The caller stages every element as a double; pack each operand's
     /// logical elements into float scratch, run the fp32 BLAS product, and
     /// store the float result upcast to a double. Returns false (so the caller
@@ -159,7 +156,11 @@ fn blas_gemm_fp32(
 /// LIP-027: when `fp32` is set, each input element is downcast to float and
 /// the dot product accumulates in binary32 (for f32/f16/bf16 inputs); the
 /// result is upcast to double. Complex never takes this path.
-pub fn backend_gemm(
+///
+/// # Safety
+/// The pointers must be aligned, valid for the matrix extents and leading
+/// dimensions, and `c` must not alias either input.
+pub unsafe fn backend_gemm(
     m: usize, k: usize, n: usize, complex: bool, fp32: bool,
     a: *const f64, lda: usize, b: *const f64, ldb: usize, c: *mut f64,
 ) {

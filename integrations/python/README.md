@@ -198,6 +198,9 @@ An MCP client launches this command and communicates over standard input/output.
 
 By default, the server exposes only `lana_version`.
 Add `--allow-run` to expose `lana_run`.
+This lets the client run any Lana program under `--root` with your
+permissions; enable it only for clients you trust with a shell
+(see [SECURITY.md](../../SECURITY.md)).
 
 The run tool accepts a program path, JSON `input`, and the execution controls.
 

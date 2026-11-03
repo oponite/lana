@@ -40,8 +40,12 @@ Evidence (commit, checks, and tag protection): ________
    `git diff --check`. Require twice-repeated byte-stable bootstrap, frozen
    compatibility, generated projects/imports, LSP, debugger, installation,
    packaging and isolated publication-failure checks.
-2. Run the Rust malformed-bytecode fuzz target for 600 seconds with the matching
-   nightly compiler and a five-second input timeout. Preserve any failing input.
+2. Run both Rust bytecode fuzz targets (`lana_bytecode` and `lana_execution`)
+   for 600 seconds each with the matching nightly compiler, a five-second
+   input timeout, and `-rss_limit_mb=4096`. Preserve any failing input.
+   The raised RSS limit is deliberate: each execution input may use up to its
+   64 MB VM heap, and ASan retains freed memory across millions of runs past
+   libFuzzer's 2048 MB default (4.2.0: 0 leaks, plateau without ASan).
 3. Build and install the universal macOS prefix. Verify arm64/x86_64 headers and
    actually execute both slices. Extract the checksum-verified archive outside
    the checkout and run source using its adjacent compiler and installed stdlib.
@@ -54,7 +58,11 @@ Evidence (commit, checks, and tag protection): ________
    discards five warmups, records samples and SHA-256 identities, and fails if
    any candidate warm median exceeds 1.05 times its paired 3.0.2 median.
    Check that the old C11 and current Rust echo wrappers return the same input.
-   Also run a paired 4.0.0 comparison. Report Python first calls separately.
+   Precompile the ISA fixture outside timing. The `precompiled_cli` workload
+   includes process startup, bytecode loading, and execution; it is not an
+   in-process VM timer. Schema 2 records this boundary and the fixture digest.
+   The candidate CLI must match its root VERSION. Also run paired 4.0.0 and
+   pre-fix 4.1.0 comparisons. Report Python first calls separately.
    Do not run fuzzing or builds during measurements.
 
 Evidence for each gate: ________

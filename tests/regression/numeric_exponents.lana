@@ -1,0 +1,4 @@
+assert(1e-5 == 0.00001, "negative exponent");
+assert(2.5E+3 == 2500, "signed uppercase exponent");
+assert(1e0 == 1, "zero exponent");
+print("NUMERIC_EXPONENTS_PASS");

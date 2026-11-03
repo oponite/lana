@@ -1,0 +1,2 @@
+fn constant(data) { return 1; }
+print(bootstrap([1], constant, 1000000));

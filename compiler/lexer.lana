@@ -25,8 +25,6 @@ fn is_letter(byte) {
     return false;
 }
 
-fn is_identifier_byte(byte) { if (is_letter(byte)) { return true; } return is_digit(byte); }
-
 fn skip_comment(source, offset, column) {
     let length = string_length(source);
     let scanning = true;
@@ -61,6 +59,30 @@ fn scan_number(source, offset, line, column, classes) {
                 if (byte == 46) {
                     if (seen_dot) { scanning = false; } else { seen_dot = true; offset = offset + 1; column = column + 1; }
                 } else { scanning = false; }
+            }
+        }
+    }
+    if (offset < length) {
+        let marker = string_byte_at(source, offset);
+        let exponent = false;
+        if (marker == 69) { exponent = true; }
+        if (marker == 101) { exponent = true; }
+        if (exponent) {
+            offset = offset + 1; column = column + 1;
+            if (offset < length) {
+                let sign = string_byte_at(source, offset);
+                if (sign == 43) { offset = offset + 1; column = column + 1; }
+                else { if (sign == 45) { offset = offset + 1; column = column + 1; } }
+            }
+            if (offset >= length) { lex_error(line, start_column, "expected exponent digits"); }
+            if (!is_digit(string_byte_at(source, offset))) { lex_error(line, start_column, "expected exponent digits"); }
+            let scanning_exponent = true;
+            while (scanning_exponent) {
+                if (offset >= length) { scanning_exponent = false; }
+                else {
+                    if (is_digit(string_byte_at(source, offset))) { offset = offset + 1; column = column + 1; }
+                    else { scanning_exponent = false; }
+                }
             }
         }
     }

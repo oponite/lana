@@ -63,6 +63,13 @@ fn failure(phase: &str, code: &str, message: &str, stdout: &str) -> String {
     )
 }
 
+fn failure_with_context(phase: &str, code: &str, message: &str, stdout: &str, durability: Option<&str>, path: Option<&str>) -> String {
+    let mut response: serde_json::Value = serde_json::from_str(&failure(phase, code, message, stdout)).unwrap();
+    if let Some(value) = durability { response["error"]["durability"] = value.into(); }
+    if let Some(value) = path { response["error"]["path"] = value.into(); }
+    response.to_string()
+}
+
 fn success(result: &str, stdout: &str) -> String {
     format!(
         "{{\"schema\":1,\"ok\":true,\"result\":{result},\"stdout\":{},\"stderr\":\"\",\"execution\":{{\"engine\":\"rust-worker\",\"lana_version\":{}}}}}",
@@ -85,6 +92,7 @@ fn live_failure(error: LiveFailure) -> String {
 }
 
 fn live_request(request: &serde_json::Value, operation: &str, controls: &Controls, host: &mut LiveHost) -> String {
+    host.take_vm_error();
     let mut stdout = String::new();
     let required = |field: &str| request.get(field).and_then(serde_json::Value::as_str)
         .ok_or_else(|| LiveFailure { code: LanaError::Schema, message: format!("missing {field}") });
@@ -92,7 +100,7 @@ fn live_request(request: &serde_json::Value, operation: &str, controls: &Control
         match operation {
             "start_live" | "start_live_labc" => {
                 let path = Path::new(required("path")?);
-                if !path.is_file() { return Err(LiveFailure { code: LanaError::Io, message: "program file not found".into() }); }
+                if !path.is_file() { return Err(LiveFailure::new(LanaError::Io, "program file not found")); }
                 let path = path.canonicalize().map_err(|error| LiveFailure { code: LanaError::Io, message: error.to_string() })?;
                 let bytecode = temp_path("lana-live-bytecode");
                 let _scratch = Scratch(vec![bytecode.clone()]);
@@ -100,13 +108,13 @@ fn live_request(request: &serde_json::Value, operation: &str, controls: &Control
                     let compiler = find_compiler().ok_or_else(|| LiveFailure { code: LanaError::Io, message: "compiler bytecode not found".into() })?;
                     compile_source_file(&compiler, &path.to_string_lossy(), &bytecode.to_string_lossy())
                         .map_err(|error| match error {
-                            CliError::Run(error) | CliError::Compile { error, .. } => LiveFailure { code: error.code, message: error.message },
+                            CliError::Run(error) | CliError::Compile { error, .. } => LiveFailure::from(&error),
                             CliError::Load { info, .. } | CliError::Assemble { info, .. } | CliError::Write { info, .. } => LiveFailure { code: info.code, message: info.message },
                             CliError::Project => LiveFailure { code: LanaError::Io, message: "project build failed".into() },
                         })?;
                     &bytecode
                 } else { &path };
-                let bytes = std::fs::read(effective).map_err(|error| LiveFailure { code: LanaError::Io, message: error.to_string() })?;
+                let bytes = lana_bytecode::loader::read_file(effective).map_err(|error| LiveFailure::new(error.code, error.message))?;
                 let original_dir = std::env::current_dir().map_err(|error| LiveFailure { code: LanaError::Io, message: error.to_string() })?;
                 if operation == "start_live" {
                     std::env::set_current_dir(path.parent().unwrap_or(Path::new(".")))
@@ -129,7 +137,10 @@ fn live_request(request: &serde_json::Value, operation: &str, controls: &Control
     })();
     match result {
         Ok(value) => success(&value.to_string(), &stdout),
-        Err(error) => live_failure(error),
+        Err(error) => match host.take_vm_error() {
+            Some(detail) => failure_with_context("live", error.code.name(), &error.message, "", detail.durability.as_deref(), detail.path.as_deref()),
+            None => live_failure(error),
+        },
     }
 }
 
@@ -210,9 +221,9 @@ fn run_program(operation: &str, path: &Path, compiler: Option<&Path>, bytecode: 
     } else {
         path
     };
-    let bytes = match std::fs::read(effective) {
+    let bytes = match lana_bytecode::loader::read_file(effective) {
         Ok(bytes) => bytes,
-        Err(_) => return failure("load", "LANA_ERR_IO", "cannot read bytecode", ""),
+        Err(error) => return failure("load", error.code.name(), &error.message, ""),
     };
     let chunk = match lana_bytecode::loader::load(&bytes) {
         Ok(chunk) => chunk,
@@ -230,7 +241,7 @@ fn run_program(operation: &str, path: &Path, compiler: Option<&Path>, bytecode: 
     let status = vm.run();
     let stdout = vm.output().unwrap_or_default();
     if status != LanaError::Ok {
-        return failure("run", status.name(), &vm.error().message, &stdout);
+        return failure_with_context("run", status.name(), &vm.error().message, &stdout, vm.error().durability.as_deref(), vm.error().path.as_deref());
     }
     let size = match std::fs::metadata(response) {
         Ok(meta) => meta.len(),

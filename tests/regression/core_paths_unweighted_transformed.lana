@@ -1,0 +1,4 @@
+let guard = possibility([true, false]);
+let result = 0;
+if (guard) { result = 10; } else { result = 20; }
+print(sample_value(sample(result + 1)));

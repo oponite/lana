@@ -229,10 +229,8 @@ fn find_compiler() -> Option<PathBuf> {
 /// mirroring `run_compiler_program` in `tools/c/cli.c`.
 fn run_compiler_program(compiler: &Path, args: &[String]) -> Result<(), CliError> {
     let path_str = compiler.to_string_lossy().into_owned();
-    let bytes = std::fs::read(compiler).map_err(|_| CliError::Load {
-        path: path_str.clone(),
-        info: LanaErrorInfo::new(LanaError::Io, 0, 0, 0, "cannot read compiler bytecode"),
-    })?;
+    let bytes = lana_bytecode::loader::read_file(compiler)
+        .map_err(|info| CliError::Load { path: path_str.clone(), info })?;
     let chunk = lana_bytecode::loader::load(&bytes)
         .map_err(|info| CliError::Load { path: path_str, info })?;
     let mut vm = Vm::new(&chunk);
@@ -409,10 +407,10 @@ fn run_command(args: &[String]) -> ExitCode {
         run_usage("lana");
         return ExitCode::from(2);
     };
-    let bytes = match std::fs::read(path) {
+    let bytes = match lana_bytecode::loader::read_file(path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("{path}: error[LANA_ERR_IO]: {error}");
+            eprintln!("{path}: error[{}]: {}", error.code.name(), error.message);
             return ExitCode::from(1);
         }
     };
@@ -581,10 +579,10 @@ fn disassemble_command(args: &[String]) -> Result<(), u8> {
         usage("lana");
         return Err(2);
     };
-    let bytes = match std::fs::read(path) {
+    let bytes = match lana_bytecode::loader::read_file(path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("{path}: error[LANA_ERR_IO]: {error}");
+            eprintln!("{path}: error[{}]: {}", error.code.name(), error.message);
             return Err(1);
         }
     };
@@ -653,8 +651,6 @@ fn run_project_tool(mode: &str, argument: &str) -> ExitCode {
 
 struct Project {
     name: String,
-    #[allow(dead_code)] // parsed and validated, but not used by the build path
-    version: String,
     entry: String,
 }
 
@@ -688,13 +684,10 @@ fn project_load(directory: &str) -> Option<Project> {
             return None;
         }
     };
-    let version = match quoted_value(&text, "version") {
-        Some(value) => value,
-        None => {
-            eprintln!("invalid lana.toml schema");
-            return None;
-        }
-    };
+    if quoted_value(&text, "version").is_none() {
+        eprintln!("invalid lana.toml schema");
+        return None;
+    }
     let entry = match quoted_value(&text, "entry") {
         Some(value) => value,
         None => {
@@ -702,7 +695,7 @@ fn project_load(directory: &str) -> Option<Project> {
             return None;
         }
     };
-    Some(Project { name, version, entry })
+    Some(Project { name, entry })
 }
 
 /// Everything after the first line of a plan file (the dependency lock lines).
@@ -743,7 +736,7 @@ fn project_finish_build(
             return Err(());
         }
     }
-    let bytes = std::fs::read(&cache_path).map_err(|_| ())?;
+    let bytes = lana_bytecode::loader::read_file(&cache_path).map_err(|_| ())?;
     lana_bytecode::loader::load(&bytes).map_err(|_| ())?;
     if lana_runtime::atomic_file::write(&output_path, &bytes).is_err() {
         return Err(());
@@ -847,7 +840,7 @@ fn debug_command(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     }
     let breakpoint = if args.len() == 4 { args[3].parse::<u32>().ok() } else { None };
-    let code = match std::fs::read(&bytecode_path).ok().and_then(|bytes| lana_bytecode::loader::load(&bytes).ok()) {
+    let code = match lana_bytecode::loader::read_file(&bytecode_path).ok().and_then(|bytes| lana_bytecode::loader::load(&bytes).ok()) {
         Some(chunk) => {
             let mut vm = Vm::new(&chunk);
             if let Some(line) = breakpoint {
@@ -939,10 +932,10 @@ fn inspect_command(args: &[String]) -> ExitCode {
     } else {
         effective_path = path.to_string();
     }
-    let bytes = match std::fs::read(&effective_path) {
+    let bytes = match lana_bytecode::loader::read_file(&effective_path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("{effective_path}: error[LANA_ERR_IO]: {error}");
+            eprintln!("{effective_path}: error[{}]: {}", error.code.name(), error.message);
             return ExitCode::from(1);
         }
     };

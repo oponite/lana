@@ -1,4 +1,4 @@
-//! State math, mirroring `vm/c/state.c` and `vm/include/state.h`.
+//! State math, mirroring `6aacbde2f67f:vm/c/state.c` and `6aacbde2f67f:vm/include/state.h`.
 //!
 //! The numeric behavior (epsilon clamping, `positive_zero`, radius
 //! normalization) is preserved exactly so the Rust VM produces identical
@@ -261,7 +261,7 @@ pub fn mix(left: &State, right: &State, w: f64, out: &mut State) -> LanaError {
 }
 
 /// The relationship modes for relationship-aware append, matching
-/// `LanaAppendRelationshipId` in `vm/include/bytecode.h`.
+/// `LanaAppendRelationshipId` in `6aacbde2f67f:vm/include/bytecode.h`.
 pub const APPEND_INDEPENDENT: u32 = 0;
 pub const APPEND_REDUNDANT: u32 = 1;
 pub const APPEND_FULL_REDUNDANCY: u32 = 2;

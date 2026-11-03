@@ -1,4 +1,4 @@
-//! State-dist operations, mirroring the state-dist helpers in `vm/c/vm.c`
+//! State-dist operations, mirroring the state-dist helpers in `6aacbde2f67f:vm/c/vm.c`
 //! (`lana_vm_state_dist_*`).
 //!
 //! The pure evaluator (`support`) lives here; the VM-dependent operations
@@ -14,11 +14,11 @@ use crate::state::{self, State, StateValue};
 use crate::value::{DistOperand, StateDist, StateDistKind, Value, ValueKind};
 
 /// The maximum state-dist evaluation depth, matching
-/// `LANA_STATE_DIST_DEPTH_LIMIT` in `vm/include/value.h`.
+/// `LANA_STATE_DIST_DEPTH_LIMIT` in `6aacbde2f67f:vm/include/value.h`.
 pub const LANA_STATE_DIST_DEPTH_LIMIT: usize = 1024;
 
 /// One frame of the iterative state-dist evaluators, mirroring
-/// `LanaDistEvalFrame` in `vm/c/vm.c`.
+/// `LanaDistEvalFrame` in `6aacbde2f67f:vm/c/vm.c`.
 pub(crate) struct DistEvalFrame {
     pub node: Arc<StateDist>,
     pub stage: u32,
@@ -71,7 +71,7 @@ pub fn support(distribution: &Arc<StateDist>, limit: u32) -> Result<Vec<StateVal
     Ok(items)
 }
 
-/// Sort by `(p, d_re, d_im)`, matching `support_compare` in `vm/c/vm.c`.
+/// Sort by `(p, d_re, d_im)`, matching `support_compare` in `6aacbde2f67f:vm/c/vm.c`.
 fn support_compare(a: &StateValue, b: &StateValue) -> Ordering {
     a.state
         .p

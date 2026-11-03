@@ -10,7 +10,7 @@ let law = joint correlated (t, x, y) with support:
 let result = info.broja(law, "t", "x", "y");
 assert(result.status == "unconverged", "uncertified law status");
 assert(result.error_bound_bits > 0.000001, "uncertified objective bound");
-assert(result.marginal_residual <= 0.000000001, "feasible reported marginal");
+assert(result.reason == "objective_gap", "uncertified objective reason");
 assert(result.mass_residual <= 0.000000001, "feasible reported mass");
 assert(!map_has(result, "shared"), "no uncertified component");
 assert(!map_has(result, "total"), "no uncertified total");

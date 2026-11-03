@@ -4,5 +4,9 @@
         "**/build/**": true,
         "**/target/**": true,
         "**/*.labc": true
-    }
+    },
+    "markdown.validate.enabled": true,
+    "editor.fontSize": 14,
+    "chat.fontSize": 14,
+    "markdown.preview.fontSize": 15
 }

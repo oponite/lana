@@ -1,4 +1,5 @@
 [
+  {"name": "native_bytecode_file_limits", "command": ["{python}", "{root}/tests/test_bytecode_limits.py", "{cli}"], "contains": ["BYTECODE_LIMITS_PASS"]},
   {"name": "native_contiguous_call_arguments", "command": ["{cli}", "run", "{root}/tests/regression/contiguous_call_arguments.lana"], "contains": ["CONTIGUOUS_ARGUMENTS_PASS"]},
   {"name": "lana_benchmark_method", "command": ["{python}", "{root}/tests/test_benchmark.py"], "contains": ["BENCHMARK_METHOD_PASS"]},
   {"name": "lana_binary_package", "command": ["{python}", "{root}/tests/test_binary_package.py", "{cli}", "{compiler}"], "contains": ["BINARY_PACKAGE_PASS"]},
@@ -88,9 +89,15 @@
   {"name": "native_imports", "command": ["{cli}", "run", "{root}/tests/regression/import_main.lana"]},
   {"name": "native_core_import", "command": ["{cli}", "compile", "{root}/tests/regression/core_import_only.lana", "-o", "{work}/compiled.labc"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_core_distribution", "command": ["{cli}", "run", "{root}/tests/regression/core_distribution.lana"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
+  {"name": "native_core_paths_unweighted", "command": ["{cli}", "run", "{root}/tests/regression/core_paths_unweighted.lana"], "expect_failure": true, "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
+  {"name": "native_core_paths_unweighted_transformed", "command": ["{cli}", "run", "{root}/tests/regression/core_paths_unweighted_transformed.lana"], "expect_failure": true, "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
+  {"name": "native_core_paths_weighted", "command": ["{cli}", "run", "{root}/tests/regression/core_paths_weighted.lana"], "contains": ["CORE_PATHS_WEIGHTED_PASS"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_core_information_measures", "command": ["{cli}", "run", "{root}/tests/regression/core_information_measures.lana"], "contains": ["CORE_INFORMATION_MEASURES_PASS"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_core_information_bad_names", "command": ["{cli}", "run", "{root}/tests/regression/core_information_bad_names.lana"], "expect_failure": true, "contains": ["LANA_ERR_INVALID_PARAMETERS"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
+  {"name": "native_numeric_exponents", "command": ["{cli}", "run", "{root}/tests/regression/numeric_exponents.lana"], "contains": ["NUMERIC_EXPONENTS_PASS"]},
+  {"name": "native_numeric_exponent_missing_digits", "command": ["{cli}", "run", "{root}/tests/regression/numeric_exponent_missing_digits.lana"], "expect_failure": true, "contains": ["expected exponent digits"]},
   {"name": "native_core_broja_xor", "command": ["{cli}", "run", "{root}/tests/regression/core_broja_xor.lana"], "contains": ["CORE_BROJA_XOR_PASS"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
+  {"name": "native_core_broja_rdn", "command": ["{cli}", "run", "{root}/tests/regression/core_broja_rdn.lana"], "contains": ["CORE_BROJA_RDN_PASS"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_core_broja_copy", "command": ["{cli}", "run", "{root}/tests/regression/core_broja_copy.lana"], "contains": ["CORE_BROJA_COPY_PASS"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_core_broja_and", "command": ["{cli}", "run", "{root}/tests/regression/core_broja_and.lana"], "contains": ["CORE_BROJA_AND_PASS"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_core_broja_ternary", "command": ["{cli}", "run", "{root}/tests/regression/core_broja_ternary.lana"], "contains": ["CORE_BROJA_TERNARY_PASS"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
@@ -139,5 +146,8 @@
   {"name": "native_decision_recommendation", "command": ["{cli}", "run", "{root}/tests/regression/decision_recommendation_pass.lana"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_decision_review", "command": ["{cli}", "run", "{root}/tests/regression/decision_review_pass.lana"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
   {"name": "native_decision_value_of_information", "command": ["{cli}", "run", "{root}/examples/basic-programs/decision.lana"], "env": {"LANA_STDLIB_DIR": "{root}/stdlib"}},
-  {"name": "lana_workflow_runner", "command": ["{python}", "{root}/tests/test_workflow_runner.py"], "contains": ["WORKFLOW_RUNNER_PASS"]}
+  {"name": "lana_workflow_runner", "command": ["{python}", "{root}/tests/test_workflow_runner.py"], "contains": ["WORKFLOW_RUNNER_PASS"]},
+  {"name": "native_bootstrap_overflow", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_overflow.lana"], "expect_failure": true, "contains": ["LANA_ERR_INVALID_PARAMETERS"]},
+  {"name": "native_bootstrap_memory", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_budget.lana", "--memory-limit-mib", "1"], "expect_failure": true, "contains": ["LANA_ERR_OOM"]},
+  {"name": "native_bootstrap_instructions", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_budget.lana", "--instruction-limit", "1000"], "expect_failure": true, "contains": ["LANA_ERR_LIMIT"]}
 ]

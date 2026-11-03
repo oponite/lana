@@ -10,9 +10,9 @@ members = [
 ]
 
 [workspace.package]
-version = "4.1.0"
+version = "4.2.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [workspace.dependencies]
 lana-bytecode = { path = "vm/rust/lana-bytecode" }

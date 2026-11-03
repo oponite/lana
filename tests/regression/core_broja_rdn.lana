@@ -1,0 +1,11 @@
+import "std/core" as info;
+
+let rdn = joint correlated (t, x, y) with support:
+    [[0, 0, 0, 0.5], [1, 1, 1, 0.5]];
+let result = info.broja(rdn, "t", "x", "y");
+assert(result.status == "converged", "rdn certificate");
+assert(result.shared == 1, "rdn shared");
+assert(result.synergy == 0, "rdn synergy");
+assert(result.unique_x == 0, "rdn unique x");
+assert(result.unique_y == 0, "rdn unique y");
+print("CORE_BROJA_RDN_PASS");

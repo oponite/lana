@@ -633,18 +633,16 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn uncertain_commit_is_reconciled_after_reopen() {
-        use std::os::unix::fs::PermissionsExt;
-
         let heap = Heap::default();
         let (path, mut store) = fresh_store();
-        let original = std::fs::metadata(&path).unwrap().permissions();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let blocked_manifest = std::path::Path::new(&path).join("manifest");
+        std::fs::remove_file(&blocked_manifest).unwrap();
+        std::fs::create_dir(&blocked_manifest).unwrap();
         let input = message(&heap, "uncertain", object(&heap, &[("not_before_utc", Value::number(2.0))]).unwrap(), text("saved"));
         let result = create(&mut store, &input, 1.0, &heap);
-        std::fs::set_permissions(&path, original).unwrap();
+        std::fs::remove_dir(&blocked_manifest).unwrap();
         assert_eq!(result.unwrap_err(), LanaError::Io);
         assert_eq!(store_get(&store, &key("pending", "uncertain")).unwrap_err(), LanaError::InvalidState);
         let mut reopened = store_open(&StoreOptions { schema_version: 1, path: path.clone(), timeout_ms: 0 }).unwrap();

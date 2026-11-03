@@ -1,4 +1,4 @@
-# 1.0 - Lana Mathematical Semantics
+# Lana Mathematical Semantics
 
 ***Tl/dr:***
 
@@ -288,7 +288,9 @@ An unresolved Boolean used as an `if` guard creates guarded alternatives. Path
 conditions remain separate from dependencies inside a joint law. Pure functions
 map over each guarded path and preserve its condition and information. Joining
 paths preserves conditions and results; it does not silently select or average
-one alternative.
+one alternative. An unweighted guard gives its paths no probability weight, so
+sampling them is unsupported. A weighted guard retains its branch probabilities
+through pure operations.
 
 External I/O, printing, task creation, and host calls require definite inputs
 unless an explicit per-path effect policy is present. The initial execution
@@ -351,8 +353,10 @@ expected revision. All affected registered queries are recomputed
 against the same candidate source revision. One atomic store commit
 publishes the source and every resulting snapshot only when rows,
 order, Information, derivations, and serialized bytes equal a clean
-full rerun. Failure publishes neither a source revision nor a partial
-query revision. Historical snapshots retain their original evidence
+full rerun. Validation or evaluation failure publishes neither a source
+revision nor a partial query revision. Storage I/O failure after a complete
+commit record may leave the whole revision committed; it reports an uncertain
+outcome and requires reopening and inspecting the batch before retry. Historical snapshots retain their original evidence
 or report compacted history; they never substitute current rows.
 
 ## 0.2 Language type and object contracts

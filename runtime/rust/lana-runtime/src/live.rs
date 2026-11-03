@@ -24,7 +24,13 @@ pub struct LiveFailure {
 }
 
 impl LiveFailure {
-    fn new(code: LanaError, message: impl Into<String>) -> Self { Self { code, message: message.into() } }
+    pub fn new(code: LanaError, message: impl Into<String>) -> Self { Self { code, message: message.into() } }
+}
+
+impl From<&lana_vm::VmError> for LiveFailure {
+    fn from(error: &lana_vm::VmError) -> Self {
+        Self { code: error.code, message: error.message.clone() }
+    }
 }
 
 impl From<LanaError> for LiveFailure {
@@ -79,6 +85,7 @@ pub struct LiveHost {
     host_id: String,
     next_handle: u64,
     instances: BTreeMap<String, LiveInstance>,
+    last_vm_error: Option<lana_vm::VmError>,
 }
 
 impl Default for LiveHost {
@@ -89,6 +96,7 @@ impl Default for LiveHost {
             host_id: format!("{:x}-{:x}-{:x}", std::process::id(), nanos, sequence),
             next_handle: 0,
             instances: BTreeMap::new(),
+            last_vm_error: None,
         }
     }
 }
@@ -96,12 +104,18 @@ impl Default for LiveHost {
 impl LiveHost {
     pub fn new() -> Self { Self::default() }
 
+    /// Consume the VM diagnostic from the most recent initial evaluation.
+    pub fn take_vm_error(&mut self) -> Option<lana_vm::VmError> { self.last_vm_error.take() }
+
+
     pub fn start_live(&mut self, chunk: Arc<Chunk>) -> Result<String, LiveFailure> {
+        self.last_vm_error = None;
         let bytes = lana_bytecode::encoder::encode(&chunk);
         self.start_live_with(chunk, bytes, |_| Ok(()))
     }
 
     pub fn start_live_labc(&mut self, bytes: &[u8]) -> Result<String, LiveFailure> {
+        self.last_vm_error = None;
         let chunk = lana_bytecode::loader::load(bytes)
             .map_err(|error| LiveFailure::new(error.code, error.message))?;
         self.start_live_with(Arc::new(chunk), bytes.to_vec(), |_| Ok(()))
@@ -109,6 +123,7 @@ impl LiveHost {
 
     pub fn start_live_labc_with<F>(&mut self, bytes: &[u8], configure: F) -> Result<String, LiveFailure>
     where F: FnOnce(&mut Vm<'static>) -> Result<(), LanaError> {
+        self.last_vm_error = None;
         let chunk = lana_bytecode::loader::load(bytes)
             .map_err(|error| LiveFailure::new(error.code, error.message))?;
         self.start_live_with(Arc::new(chunk), bytes.to_vec(), configure)
@@ -123,7 +138,10 @@ impl LiveHost {
         store.set_chunk_bytes(bytes);
         vm.set_host_call_extension(Box::new(move |vm, id, args, out| store.dispatch(vm, id, args, out)));
         let status = vm.run();
-        if status != LanaError::Ok { return Err(LiveFailure::new(status, vm.error().message.clone())); }
+        if status != LanaError::Ok {
+            self.last_vm_error = Some(vm.error().clone());
+            return Err(LiveFailure::from(vm.error()));
+        }
         self.next_handle = self.next_handle.checked_add(1).ok_or(LanaError::Limit)?;
         let handle = format!("lanaprog_{}_{}", self.host_id, self.next_handle);
         let mut instance = LiveInstance {

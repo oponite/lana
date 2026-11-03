@@ -78,9 +78,21 @@ pub struct Store {
     retention_boundary: u64,
     journal: Option<File>,
     journal_offset: u64,
+    io_failure: Option<bool>,
 }
 
 impl Store {
+    /// Last storage I/O outcome, available even after an uncertain handle closes.
+    pub fn io_failure(&self) -> Option<(bool, &str)> {
+        self.io_failure.map(|uncertain| (uncertain, self.path.as_str()))
+    }
+
+    fn fail_io(&mut self, uncertain: bool) -> LanaError {
+        self.io_failure = Some(uncertain);
+        if uncertain { self.journal.take(); self.staged.clear(); }
+        LanaError::Io
+    }
+
     pub(crate) fn ensure_clean(&self) -> Result<(), LanaError> {
         self.ensure_open()?;
         if self.staged.is_empty() { Ok(()) } else { Err(LanaError::InvalidState) }
@@ -121,8 +133,24 @@ fn lock_journal(file: &File, timeout_ms: u32) -> Result<(), LanaError> {
     }
 }
 
-fn sync_directory(path: &str) -> Result<(), LanaError> {
-    File::open(path).and_then(|file| file.sync_all()).map_err(|_| LanaError::Io)
+fn regular_file(path: &str) -> Result<(), LanaError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => Err(LanaError::Io),
+    }
+}
+
+#[cfg(test)]
+thread_local! { static FAIL_STAGE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+
+fn failpoint(stage: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_STAGE.with(|value| value.get() == Some(stage) || (value.get() == Some("rollback") && stage == "journal_payload")) { return Err(std::io::Error::other("injected store failure")); }
+    #[cfg(feature = "publication-fault-injection")]
+    if std::env::var("LANA_TEST_STORE_STAGE").as_deref() == Ok(stage) { return Err(std::io::Error::other("injected store failure")); }
+    let _ = stage;
+    Ok(())
 }
 
 fn decode_bytes(data: &[u8]) -> Result<Value, LanaError> {
@@ -134,8 +162,8 @@ fn store_path(store_path: &str, name: &str) -> String {
     format!("{}/{}", store_path, name)
 }
 
-fn snapshot_path(path: &str, revision: u64, temporary: bool) -> String {
-    store_path(path, &format!("snapshot-{}{}", revision, if temporary { ".tmp" } else { "" }))
+fn snapshot_path(path: &str, revision: u64) -> String {
+    store_path(path, &format!("snapshot-{revision}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -238,27 +266,18 @@ fn parse_payload(data: &[u8], count: u32) -> Result<Vec<Mutation>, LanaError> {
 // Manifest
 // ---------------------------------------------------------------------------
 
-fn write_manifest(store: &Store) -> Result<(), LanaError> {
+fn write_manifest(store: &mut Store) -> Result<(), LanaError> {
     let path = store_path(&store.path, "manifest");
-    let text = format!(
-        "LANA_STORE {}\ncurrent {}\nsnapshot {}\nretention {}\n",
-        STORE_SCHEMA, store.current_rev, store.snapshot_rev, store.retention_boundary
-    );
-    let temporary = store_path(&store.path, "manifest.tmp");
-    let result = (|| {
-        let mut file = File::create(&temporary).map_err(|_| LanaError::Io)?;
-        file.write_all(text.as_bytes()).map_err(|_| LanaError::Io)?;
-        file.sync_all().map_err(|_| LanaError::Io)?;
-        drop(file);
-        std::fs::rename(&temporary, &path).map_err(|_| LanaError::Io)?;
-        sync_directory(&store.path)
-    })();
-    if result.is_err() { let _ = std::fs::remove_file(&temporary); }
-    result
+    let text = format!("LANA_STORE {}\ncurrent {}\nsnapshot {}\nretention {}\n",
+        STORE_SCHEMA, store.current_rev, store.snapshot_rev, store.retention_boundary);
+    failpoint("manifest").and_then(|_| if store.current_rev > 0 { failpoint("commit_manifest") } else { Ok(()) })
+        .and_then(|_| crate::atomic_file::write(std::path::Path::new(&path), text.as_bytes()))
+        .map_err(|error| store.fail_io(crate::atomic_file::durability_uncertain(&error)))
 }
 
 fn read_manifest(store: &mut Store) -> Result<u64, LanaError> {
     let path = store_path(&store.path, "manifest");
+    regular_file(&path)?;
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -287,7 +306,8 @@ fn read_manifest(store: &mut Store) -> Result<u64, LanaError> {
 // ---------------------------------------------------------------------------
 
 fn load_snapshot(store: &mut Store) -> Result<(), LanaError> {
-    let path = snapshot_path(&store.path, store.snapshot_rev, false);
+    let path = snapshot_path(&store.path, store.snapshot_rev);
+    regular_file(&path)?;
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(LanaError::Corruption),
@@ -436,40 +456,64 @@ fn replay(store: &mut Store) -> Result<(), LanaError> {
 // ---------------------------------------------------------------------------
 
 pub fn store_open(options: &StoreOptions) -> Result<Store, LanaError> {
-    if options.path.is_empty() {
-        return Err(LanaError::InvalidState);
-    }
-    if options.schema_version != STORE_SCHEMA {
-        return Err(LanaError::IncompatibleFormat);
-    }
-    std::fs::create_dir_all(&options.path).map_err(|_| LanaError::Io)?;
-    let journal_path = store_path(&options.path, "journal");
-    let journal = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(&journal_path)
-        .map_err(|_| LanaError::Io)?;
-    lock_journal(&journal, options.timeout_ms)?;
-    let mut store = Store {
-        path: options.path.clone(),
-        index: BTreeMap::new(),
-        staged: Vec::new(),
-        revisions: Vec::new(),
-        current_rev: 0,
-        snapshot_rev: 0,
-        retention_boundary: 0,
-        journal: Some(journal),
-        journal_offset: 0,
-    };
-    let acknowledged = read_manifest(&mut store)?;
-    if store.snapshot_rev != 0 {
-        load_snapshot(&mut store)?;
-    }
-    replay(&mut store)?;
-    if store.current_rev < acknowledged { return Err(LanaError::Corruption); }
-    write_manifest(&store)?;
-    Ok(store)
+    open_with_outcome(options).map_err(|(error, _)| error)
+}
+
+pub(crate) fn open_with_outcome(options: &StoreOptions) -> Result<Store, (LanaError, bool)> {
+    let mut uncertain = false;
+    let result = (|| -> Result<Store, LanaError> {
+        if options.path.is_empty() {
+            return Err(LanaError::InvalidState);
+        }
+        if options.schema_version != STORE_SCHEMA {
+            return Err(LanaError::IncompatibleFormat);
+        }
+        std::fs::create_dir_all(&options.path).map_err(|_| LanaError::Io)?;
+        let journal_path = store_path(&options.path, "journal");
+        regular_file(&journal_path)?;
+        let exists = std::fs::symlink_metadata(&journal_path).is_ok();
+        let mut options_file = OpenOptions::new();
+        options_file.read(true).write(true).create_new(!exists);
+        #[cfg(unix)] {
+            use std::os::unix::fs::OpenOptionsExt;
+            options_file.mode(0o600);
+        }
+        let journal = options_file.open(&journal_path).map_err(|_| LanaError::Io)?;
+        if !journal.metadata().map_err(|_| LanaError::Io)?.is_file() { return Err(LanaError::Io); }
+        #[cfg(unix)] {
+            use std::os::unix::fs::MetadataExt;
+            let opened = journal.metadata().map_err(|_| LanaError::Io)?;
+            let named = std::fs::symlink_metadata(&journal_path).map_err(|_| LanaError::Io)?;
+            if !named.is_file() || opened.ino() != named.ino() || opened.dev() != named.dev() || opened.nlink() != 1 {
+                return Err(LanaError::Io);
+            }
+        }
+        lock_journal(&journal, options.timeout_ms)?;
+        let mut store = Store {
+            path: options.path.clone(),
+            index: BTreeMap::new(),
+            staged: Vec::new(),
+            revisions: Vec::new(),
+            current_rev: 0,
+            snapshot_rev: 0,
+            retention_boundary: 0,
+            journal: Some(journal),
+            journal_offset: 0,
+            io_failure: None,
+        };
+        let acknowledged = read_manifest(&mut store)?;
+        if store.snapshot_rev != 0 {
+            load_snapshot(&mut store)?;
+        }
+        replay(&mut store)?;
+        if store.current_rev < acknowledged { return Err(LanaError::Corruption); }
+        if let Err(error) = write_manifest(&mut store) {
+            uncertain = store.io_failure.unwrap_or(false);
+            return Err(error);
+        }
+        Ok(store)
+    })();
+    result.map_err(|error| (error, uncertain))
 }
 
 pub fn store_close(store: &mut Store) -> Result<(), LanaError> {
@@ -524,14 +568,33 @@ pub fn store_commit(store: &mut Store) -> Result<StoreRevisionInfo, LanaError> {
     trailer.extend_from_slice(&revision.to_be_bytes());
     trailer.extend_from_slice(&digest);
 
-    store.journal.as_mut().ok_or(LanaError::InvalidState)?.set_len(store.journal_offset).map_err(|_| LanaError::Io)?;
-    store.journal.as_mut().ok_or(LanaError::InvalidState)?.seek(SeekFrom::Start(store.journal_offset)).map_err(|_| LanaError::Io)?;
-    store.journal.as_mut().ok_or(LanaError::InvalidState)?.write_all(&header).map_err(|_| LanaError::Io)?;
-    store.journal.as_mut().ok_or(LanaError::InvalidState)?.write_all(&payload).map_err(|_| LanaError::Io)?;
-    store.journal.as_mut().ok_or(LanaError::InvalidState)?.write_all(b"LCMT").map_err(|_| LanaError::Io)?;
-    store.journal.as_mut().ok_or(LanaError::InvalidState)?.write_all(&trailer).map_err(|_| LanaError::Io)?;
-    store.journal.as_mut().ok_or(LanaError::InvalidState)?.flush().map_err(|_| LanaError::Io)?;
-    store.journal.as_mut().ok_or(LanaError::InvalidState)?.sync_all().map_err(|_| LanaError::Io)?;
+    store.io_failure = None;
+    let boundary = store.journal_offset;
+    let end = boundary.checked_add((header.len() + payload.len() + 4 + trailer.len()) as u64).ok_or(LanaError::Limit)?;
+    let mut complete = false;
+    let written = (|| -> std::io::Result<()> {
+        let journal = store.journal.as_mut().unwrap();
+        journal.set_len(boundary)?;
+        journal.seek(SeekFrom::Start(boundary))?;
+        journal.write_all(&header)?;
+        failpoint("journal_payload")?;
+        journal.write_all(&payload)?;
+        journal.write_all(b"LCMT")?;
+        journal.write_all(&trailer)?;
+        complete = true;
+        failpoint("journal_commit")?;
+        journal.flush()?;
+        failpoint("journal_sync")?;
+        journal.sync_all()
+    })();
+    if written.is_err() {
+        let rollback = if complete { false } else {
+            let journal = store.journal.as_mut().unwrap();
+            failpoint("rollback").and_then(|_| journal.set_len(boundary))
+                .and_then(|_| journal.sync_all()).and_then(|_| journal.seek(SeekFrom::Start(boundary))).is_ok()
+        };
+        return Err(store.fail_io(!rollback));
+    }
 
     let mutations = store.staged.clone();
     store.revisions.push(Revision {
@@ -547,9 +610,9 @@ pub fn store_commit(store: &mut Store) -> Result<StoreRevisionInfo, LanaError> {
         }
     }
     store.current_rev = revision;
-    store.journal_offset = store.journal.as_mut().ok_or(LanaError::InvalidState)?.seek(SeekFrom::End(0)).map_err(|_| LanaError::Io)?;
+    store.journal_offset = end;
     store.staged.clear();
-    write_manifest(store)?;
+    if write_manifest(store).is_err() { return Err(store.fail_io(true)); }
     Ok(StoreRevisionInfo {
         revision_id: revision,
         schema_version: STORE_SCHEMA,
@@ -692,19 +755,14 @@ pub fn store_snapshot(store: &mut Store) -> Result<(Value, StoreRevisionInfo), L
     header.extend_from_slice(&(encoded.len() as u64).to_be_bytes());
     header.extend_from_slice(&digest);
 
-    let temporary = snapshot_path(&store.path, store.current_rev, true);
-    let published = snapshot_path(&store.path, store.current_rev, false);
-    let mut file = File::create(&temporary).map_err(|_| LanaError::Io)?;
-    file.write_all(&header).map_err(|_| LanaError::Io)?;
-    file.write_all(encoded.as_bytes()).map_err(|_| LanaError::Io)?;
-    file.flush().map_err(|_| LanaError::Io)?;
-    file.sync_all().map_err(|_| LanaError::Io)?;
-    drop(file);
-    std::fs::rename(&temporary, &published).map_err(|_| LanaError::Io)?;
-    sync_directory(&store.path)?;
-
+    store.io_failure = None;
+    let published = snapshot_path(&store.path, store.current_rev);
+    let mut bytes = header;
+    bytes.extend_from_slice(encoded.as_bytes());
+    crate::atomic_file::write(std::path::Path::new(&published), &bytes)
+        .map_err(|error| store.fail_io(crate::atomic_file::durability_uncertain(&error)))?;
     store.snapshot_rev = store.current_rev;
-    write_manifest(store)?;
+    if write_manifest(store).is_err() { return Err(store.fail_io(true)); }
     Ok((
         out_value,
         StoreRevisionInfo {
@@ -722,16 +780,23 @@ pub fn store_compact(store: &mut Store, retention: u64) -> Result<StoreRevisionI
         store_snapshot(store)?;
     }
     let boundary = if retention >= store.current_rev { 0 } else { store.current_rev - retention };
-    store.retention_boundary = store.retention_boundary.max(boundary);
-    write_manifest(store)?;
+    let previous = store.retention_boundary;
+    store.retention_boundary = previous.max(boundary);
+    if let Err(error) = write_manifest(store) {
+        if store.journal.is_some() { store.retention_boundary = previous; }
+        return Err(error);
+    }
     if retention == 0 {
-        store.journal.as_mut().ok_or(LanaError::InvalidState)?.set_len(0).map_err(|_| LanaError::Io)?;
-        store.journal.as_mut().ok_or(LanaError::InvalidState)?.seek(SeekFrom::Start(0)).map_err(|_| LanaError::Io)?;
-        store.journal.as_mut().ok_or(LanaError::InvalidState)?.sync_all().map_err(|_| LanaError::Io)?;
+        let result = (|| -> std::io::Result<()> {
+            let journal = store.journal.as_mut().unwrap();
+            journal.set_len(0)?;
+            journal.seek(SeekFrom::Start(0))?;
+            journal.sync_all()
+        })();
+        if result.is_err() { return Err(store.fail_io(true)); }
         store.journal_offset = 0;
         store.revisions.clear();
     }
-    write_manifest(store)?;
     let digest = store.revisions.last().map(|r| r.digest).unwrap_or([0u8; 32]);
     Ok(StoreRevisionInfo {
         revision_id: store.current_rev,
@@ -827,6 +892,55 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
 
+    #[test]
+    fn journal_failures_distinguish_rollback_from_uncertain_commit() {
+        for stage in ["journal_payload", "journal_commit", "journal_sync", "manifest", "rollback"] {
+            let path = temp_store(stage);
+            let options = StoreOptions { schema_version: 1, path: path.clone(), timeout_ms: 20 };
+            let mut store = store_open(&options).unwrap();
+            store_put(&mut store, "key", &Value::number(42.0)).unwrap();
+            FAIL_STAGE.with(|value| value.set(Some(stage)));
+            let failed = store_commit(&mut store);
+            FAIL_STAGE.with(|value| value.set(None));
+            assert!(matches!(failed, Err(LanaError::Io)));
+            let uncertain = stage != "journal_payload";
+            assert_eq!(store.io_failure(), Some((uncertain, path.as_str())));
+            if uncertain {
+                assert!(matches!(store_current_revision(&store), Err(LanaError::InvalidState)));
+            }
+            drop(store);
+            let reopened = store_open(&options).unwrap();
+            assert_eq!(store_current_revision(&reopened).unwrap().revision_id, u64::from(uncertain && stage != "rollback"));
+            if uncertain && stage != "rollback" { assert_eq!(store_get(&reopened, "key").unwrap().as_number(), 42.0); }
+            drop(reopened);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn store_links_never_modify_the_target() {
+        use std::os::unix::fs::symlink;
+        let path = temp_store("symlinks");
+        let options = StoreOptions { schema_version: 1, path: path.clone(), timeout_ms: 20 };
+        std::fs::create_dir_all(&path).unwrap();
+        let victim = store_path(&path, "victim");
+        std::fs::write(&victim, b"sentinel").unwrap();
+        symlink(&victim, store_path(&path, "manifest.tmp")).unwrap();
+        symlink(&victim, store_path(&path, "snapshot-1.tmp")).unwrap();
+        let mut store = store_open(&options).unwrap();
+        store_put(&mut store, "key", &Value::number(42.0)).unwrap();
+        store_commit(&mut store).unwrap();
+        store_snapshot(&mut store).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"sentinel");
+        drop(store);
+        std::fs::remove_file(store_path(&path, "journal")).unwrap();
+        symlink(&victim, store_path(&path, "journal")).unwrap();
+        assert!(matches!(store_open(&options), Err(LanaError::Io)));
+        assert_eq!(std::fs::read(&victim).unwrap(), b"sentinel");
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
     fn temp_store(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("lana_store_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -837,11 +951,11 @@ mod tests {
     fn put_get_round_trip() {
         let path = temp_store("roundtrip");
         let mut store = store_open(&StoreOptions { schema_version: 1, path: path.clone(), timeout_ms: 0 }).unwrap();
-        let value = Value::number(3.14);
+        let value = Value::number(3.25);
         store_put(&mut store, "k", &value).unwrap();
         store_commit(&mut store).unwrap();
         let got = store_get(&store, "k").unwrap();
-        assert_eq!(got.as_number(), 3.14);
+        assert_eq!(got.as_number(), 3.25);
         let _ = std::fs::remove_dir_all(&path);
     }
 

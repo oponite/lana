@@ -1,5 +1,5 @@
 //! Deterministic PCG32 RNG, mirroring `lana_vm_random` and `lana_vm_seed` in
-//! `vm/c/vm.c`.
+//! `6aacbde2f67f:vm/c/vm.c`.
 //!
 //! The stream must be identical to the C11 VM so that sampling and
 //! measurement produce the same results under both implementations.

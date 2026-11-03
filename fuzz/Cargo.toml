@@ -9,11 +9,20 @@ cargo-fuzz = true
 
 [dependencies]
 lana-fuzz = { path = "../tools/rust/lana-fuzz" }
+lana-bytecode = { path = "../vm/rust/lana-bytecode" }
+lana-vm = { path = "../vm/rust/lana-vm" }
 libfuzzer-sys = "0.4"
 
 [[bin]]
 name = "lana_bytecode"
 path = "fuzz_targets/lana_bytecode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lana_execution"
+path = "fuzz_targets/lana_execution.rs"
 test = false
 doc = false
 bench = false

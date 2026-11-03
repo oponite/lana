@@ -2,7 +2,8 @@
 
 ## Build
 
-Build prerequisites are Rust/Cargo, Python 3.11 or newer, and a native linker.
+Build prerequisites are Rust/Cargo, Python 3.11 or newer, a native linker, and
+SQLite development headers and libraries (`libsqlite3-dev` on Debian/Ubuntu).
 The regression suite also uses Bash, curl, and OpenSSL. Supported release hosts
 are Linux and macOS. The installed CLI does not require Python.
 
