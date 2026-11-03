@@ -25,7 +25,8 @@ for the trust model).
 - Publish store manifests and snapshots through exclusive temporary files;
   reject unsafe journal inputs and report uncertain commit outcomes with
   reopen guidance through CLI and Python errors.
-- Update Rustls, certificate validation, and trust roots to current versions.
+- Update Rustls to 0.23.46, fixing five GitHub advisories against 0.23.44
+  (two moderate, three low), and certificate validation and trust roots.
 - Remove unused internal compiler helpers and storage, regenerate the checked
   bootstrap, and retain public APIs and legacy bytecode support.
 - Validate benchmark candidates against VERSION and measure precompiled CLI
