@@ -34,8 +34,8 @@ jobs:
           rustup toolchain install nightly --profile minimal
           rustup run nightly cargo install cargo-fuzz --version 0.13.2 --locked
           cd fuzz
-          RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_bytecode -- -max_total_time=600 -timeout=5
-          RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_execution -- -max_total_time=600 -timeout=5
+          RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_bytecode -- -max_total_time=600 -timeout=5 -rss_limit_mb=4096
+          RUSTC="$(rustup which --toolchain nightly rustc)" rustup run nightly cargo fuzz run lana_execution -- -max_total_time=600 -timeout=5 -rss_limit_mb=4096
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure()
         with:
