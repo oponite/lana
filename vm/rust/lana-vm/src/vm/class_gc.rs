@@ -3296,20 +3296,36 @@ mod tests {
         let hex: String = descriptor.bytes().map(|b| format!("{b:02x}")).collect();
         let chunk = assembler::assemble(&format!(
             ".version 6\n.function main 0 4\nLOAD_CONST R0 7\nOBJECT_NEW R1 R0 {hex} 1\nRETURN R1\n\
-             .function init 2 3\nOO_SET R0 R1 {hex} 0\nRETURN R2\n")).unwrap();
+             .function init 2 3\nOO_SET R0 R1 {hex} 0\nRETURN R2\n"))
+        .unwrap();
         let mut vm = Vm::new(&chunk);
         assert_eq!(vm.run(), LanaError::Ok);
         vm.frames.clear();
         let value = std::mem::replace(&mut vm.result, Value::null());
-        let ValueKind::ClassObject(reference) = &value.kind else { panic!("class") };
+        let ValueKind::ClassObject(reference) = &value.kind else {
+            panic!("class")
+        };
         let mut complete = false;
         for _ in 0..10_000 {
-            if vm.collect_slice(true, 1).unwrap() { complete = true; break; }
+            if vm.collect_slice(true, 1).unwrap() {
+                complete = true;
+                break;
+            }
         }
         assert!(complete);
         let storage = vm.class_storage(reference).unwrap();
-        assert_eq!(storage.fields.lock().unwrap().len(), 1, "a reachable object's fields were swept");
-        assert_eq!(storage.fields.lock().unwrap()[0].as_ref().unwrap().as_number(), 7.0);
+        assert_eq!(
+            storage.fields.lock().unwrap().len(),
+            1,
+            "a reachable object's fields were swept"
+        );
+        assert_eq!(
+            storage.fields.lock().unwrap()[0]
+                .as_ref()
+                .unwrap()
+                .as_number(),
+            7.0
+        );
     }
 
     #[test]
