@@ -1866,9 +1866,7 @@ impl<'a> Vm<'a> {
             let mut callee = match Frame::charged(registers.len(), &self.heap) {
                 Ok(frame) => frame, Err(error) => return error,
             };
-            for index in 0..registers.len() {
-                callee.registers[index] = registers[index].clone();
-            }
+            callee.registers[..registers.len()].clone_from_slice(&registers);
             callee.registers[0] = Value::future(future.clone());
             callee.return_ip = 0;
             callee.return_register = 0;
@@ -2224,8 +2222,8 @@ impl<'a> Vm<'a> {
             {
                 error.resource_limit = Some((
                     LANA_RESOURCE_INSTRUCTIONS,
-                    self.instruction_limit as u64,
-                    self.instruction_count as u64,
+                    self.instruction_limit,
+                    self.instruction_count,
                     "instructions".to_string(),
                 ));
             }
@@ -2551,7 +2549,7 @@ impl<'a> Vm<'a> {
         if arity as usize != args.len() {
             return LanaError::Type;
         }
-        if args.len() > self.max_registers[function_index as usize] as usize
+        if args.len() > self.max_registers[function_index as usize]
             || scratch_register as usize >= self.current_frame().registers.len() {
             return LanaError::Format;
         }
@@ -2745,7 +2743,7 @@ impl<'a> Vm<'a> {
             return LanaError::Ok;
         }
         match node.ad_op {
-            0 | 1 | 2 | 3 => {
+            0..=3 => {
                 let a = node.ad_a.as_ref().unwrap();
                 let b = node.ad_b.as_ref().unwrap();
                 let (ga, gb) = {
@@ -2967,7 +2965,7 @@ impl<'a> Vm<'a> {
                 if let Some(a_deriv) = &node.ad_a_deriv { return self.ad_backward(a_deriv, &ga); }
                 LanaError::Ok
             }
-            12 | 13 | 14 | 15 => {
+            12..=15 => {
                 let a = node.ad_a.as_ref().unwrap();
                 let mut ga = {
                     let alloc = self.heap.clone();
@@ -3546,7 +3544,7 @@ impl<'a> Vm<'a> {
         if arguments.len() > 2 {
             return LanaError::Type;
         }
-        if arguments.len() >= 1 {
+        if !arguments.is_empty() {
             let ValueKind::Number(n) = arguments[0].kind else {
                 return LanaError::Type;
             };
@@ -3590,7 +3588,7 @@ impl<'a> Vm<'a> {
         if arguments.len() > 4 {
             return LanaError::Type;
         }
-        if arguments.len() >= 1 {
+        if !arguments.is_empty() {
             let ValueKind::Number(n) = arguments[0].kind else {
                 return LanaError::Type;
             };
@@ -3772,7 +3770,7 @@ impl<'a> Vm<'a> {
             Arc::new(tensor::tensor_new(&alloc, params.ndim, &params.shape, params.is_complex)?)
         };
 
-        let total_steps = epoch_count * ((dataset_size + batch - 1) / batch);
+        let total_steps = epoch_count * dataset_size.div_ceil(batch);
         let mut steps = Array::new(&self.heap, total_steps)?;
 
         let mut params_deriv: Option<Arc<Derivation>> = None;
@@ -4562,7 +4560,7 @@ impl<'a> Vm<'a> {
         if batch == 0 || batch > dataset_size {
             batch = dataset_size;
         }
-        let batches_per_epoch = (dataset_size + batch - 1) / batch;
+        let batches_per_epoch = dataset_size.div_ceil(batch);
 
         let optimizer = prior.optimizer.clone();
         let is_adam = &*optimizer.name == "adam";
@@ -5029,7 +5027,7 @@ impl<'a> Vm<'a> {
         if arguments.len() > 2 {
             return LanaError::Type;
         }
-        if arguments.len() >= 1 {
+        if !arguments.is_empty() {
             let ValueKind::Number(n) = arguments[0].kind else {
                 return LanaError::Type;
             };
@@ -5078,7 +5076,7 @@ impl<'a> Vm<'a> {
         if arguments.len() > 2 {
             return LanaError::Type;
         }
-        if arguments.len() >= 1 {
+        if !arguments.is_empty() {
             let ValueKind::String(s) = &arguments[0].kind else {
                 return LanaError::Type;
             };
@@ -5119,7 +5117,7 @@ impl<'a> Vm<'a> {
         if arguments.len() > 1 {
             return LanaError::Type;
         }
-        if arguments.len() >= 1 {
+        if !arguments.is_empty() {
             let ValueKind::Number(n) = arguments[0].kind else {
                 return LanaError::Type;
             };
@@ -5389,7 +5387,7 @@ impl<'a> Vm<'a> {
             let matrix_tensor = Arc::get_mut(&mut matrix).unwrap();
             for p in 0..particles {
                 for k in 0..param_count {
-                    tensor_set_real(matrix_tensor, p * param_count + k, tensor_get_real(&prior, prior.offset + k));
+                    tensor_set_real(matrix_tensor, p * param_count + k, tensor_get_real(prior, prior.offset + k));
                 }
             }
         }
@@ -5736,9 +5734,8 @@ impl<'a> Vm<'a> {
                     LanaError::UnsupportedOperation
                 } else if !matches!(left.kind, ValueKind::State(_))
                     || !matches!(right.kind, ValueKind::State(_))
+                    || !matches!(weight.kind, ValueKind::Number(_))
                 {
-                    LanaError::Type
-                } else if !matches!(weight.kind, ValueKind::Number(_)) {
                     LanaError::Type
                 } else {
                     state::mix(&left.as_state().state, &right.as_state().state,
@@ -6261,9 +6258,7 @@ impl<'a> Vm<'a> {
                 let mut callee = match Frame::charged(self.max_registers[function as usize], &self.heap) {
                     Ok(frame) => frame, Err(error) => return error,
                 };
-                for index in 0..registers.len() {
-                    callee.registers[index] = registers[index].clone();
-                }
+                callee.registers[..registers.len()].clone_from_slice(&registers);
                 callee.registers[0] = gen_value;
                 callee.return_ip = self.ip;
                 callee.return_register = ins.b;
@@ -7663,7 +7658,7 @@ impl<'a> Vm<'a> {
                         stack.pop();
                     }
                     EvalAction::Push(node) => {
-                        if stack.len() >= LANA_STATE_DIST_DEPTH_LIMIT + 1 {
+                        if stack.len() > LANA_STATE_DIST_DEPTH_LIMIT {
                             return Err(LanaError::InvalidDistribution);
                         }
                         stack.push(DistEvalFrame::new(node));
@@ -7698,7 +7693,7 @@ impl<'a> Vm<'a> {
                 match action {
                     EvalAction::Pop => unreachable!("stage 2 never pops"),
                     EvalAction::Push(node) => {
-                        if stack.len() >= LANA_STATE_DIST_DEPTH_LIMIT + 1 {
+                        if stack.len() > LANA_STATE_DIST_DEPTH_LIMIT {
                             return Err(LanaError::InvalidDistribution);
                         }
                         stack.push(DistEvalFrame::new(node));
@@ -7804,7 +7799,7 @@ impl<'a> Vm<'a> {
                         stack.pop();
                     }
                     EvalAction::Push(node) => {
-                        if stack.len() >= LANA_STATE_DIST_DEPTH_LIMIT + 1 {
+                        if stack.len() > LANA_STATE_DIST_DEPTH_LIMIT {
                             return Err(LanaError::InvalidDistribution);
                         }
                         stack.push(DistEvalFrame::new(node));
@@ -7839,7 +7834,7 @@ impl<'a> Vm<'a> {
                 match action {
                     EvalAction::Pop => unreachable!("stage 2 never pops"),
                     EvalAction::Push(node) => {
-                        if stack.len() >= LANA_STATE_DIST_DEPTH_LIMIT + 1 {
+                        if stack.len() > LANA_STATE_DIST_DEPTH_LIMIT {
                             return Err(LanaError::InvalidDistribution);
                         }
                         stack.push(DistEvalFrame::new(node));
@@ -7919,7 +7914,7 @@ impl<'a> Vm<'a> {
             total += probability;
         }
         let out = total / samples as f64;
-        if out.is_finite() && out >= 0.0 && out <= 1.0 {
+        if out.is_finite() && (0.0..=1.0).contains(&out) {
             Ok(out)
         } else {
             Err(LanaError::InvalidDistribution)
@@ -10566,11 +10561,11 @@ impl<'a> Vm<'a> {
         }
         let dependency_id = self.next_dependency_id;
         self.next_dependency_id += 1;
-        Ok(self.managed_payload(Possibility {
+        self.managed_payload(Possibility {
             values: cloned,
             weights: None,
             dependency_id,
-        })?)
+        })
     }
 
     /// Build a finite weighted Core distribution from `[[value, weight], ...]`.
@@ -10612,7 +10607,7 @@ impl<'a> Vm<'a> {
         }
         let dependency_id = self.next_dependency_id;
         self.next_dependency_id += 1;
-        Ok(self.managed_payload(Possibility { values: cloned, weights: Some(weights), dependency_id })?)
+        self.managed_payload(Possibility { values: cloned, weights: Some(weights), dependency_id })
     }
 
     /// Resolve any information value, mirroring `lana_vm_information_resolve`.
@@ -10986,24 +10981,14 @@ impl<'a> Vm<'a> {
             *out = Value::tensor(Arc::new(t));
             return LanaError::Ok;
         }
-        if left_paths.is_some() || right_paths.is_some() {
-            if left_paths.is_some() && right_paths.is_some() {
-                let lp = left_paths.as_ref().unwrap();
-                let rp = right_paths.as_ref().unwrap();
+        if let Some(first) = left_paths.as_ref().or(right_paths.as_ref()) {
+            if let (Some(lp), Some(rp)) = (&left_paths, &right_paths) {
                 if lp.dependency_id != rp.dependency_id || lp.alternatives.len() != rp.alternatives.len() {
                     return LanaError::UnsupportedOperation;
                 }
             }
-            let count = if left_paths.is_some() {
-                left_paths.as_ref().unwrap().alternatives.len()
-            } else {
-                right_paths.as_ref().unwrap().alternatives.len()
-            };
-            let dependency_id = if left_paths.is_some() {
-                left_paths.as_ref().unwrap().dependency_id
-            } else {
-                right_paths.as_ref().unwrap().dependency_id
-            };
+            let count = first.alternatives.len();
+            let dependency_id = first.dependency_id;
             let mut alternatives = Vec::with_capacity(count);
             for index in 0..count {
                 let left_value = match &left_paths {
@@ -11014,13 +10999,7 @@ impl<'a> Vm<'a> {
                     Some(paths) => &paths.alternatives[index].result,
                     None => right,
                 };
-                let (guard, weight) = if left_paths.is_some() {
-                    let paths = left_paths.as_ref().unwrap();
-                    (paths.alternatives[index].guard, paths.alternatives[index].weight)
-                } else {
-                    let paths = right_paths.as_ref().unwrap();
-                    (paths.alternatives[index].guard, paths.alternatives[index].weight)
-                };
+                let (guard, weight) = (first.alternatives[index].guard, first.alternatives[index].weight);
                 let mut result = Value::null();
                 let error = self.lift_binary_raw(left_value, right_value, kind, operation, &mut result);
                 if error != LanaError::Ok {
@@ -12480,7 +12459,7 @@ impl<'a> Vm<'a> {
                 }
             }
             LANA_HOST_MAP_NEW => {
-                if argc % 2 != 0 {
+                if !argc.is_multiple_of(2) {
                     return LanaError::Type;
                 }
                 let mut map = match self.allocate_with_collection(|vm| Map::new(&vm.heap, argc / 2)) {
@@ -14683,7 +14662,7 @@ impl<'a> Vm<'a> {
                         let ValueKind::String(col_name) = &col.kind else {
                             return Err(LanaError::Type);
                         };
-                        let col_value = row_map.get(&**col_name).cloned().ok_or(LanaError::Type)?;
+                        let col_value = row_map.get(col_name).cloned().ok_or(LanaError::Type)?;
                         projected.set(col_name.clone(), col_value, false)?;
                     }
                     let mut selected = Value::map(Arc::new(Mutex::new(projected)));
@@ -14826,7 +14805,7 @@ impl<'a> Vm<'a> {
                         let mut acc: Option<Value> = None;
                         for r in &rows.items {
                             self.charge_dataset_work(1)?;
-                            let cell = Self::dataset_row_key(r, &**col)?;
+                            let cell = Self::dataset_row_key(r, col)?;
                             self.dataset_check_number(&cell)?;
                             acc = Some(if let Some(previous) = acc {
                                 let operation = match &**agg_op {
@@ -16449,7 +16428,7 @@ fn format_g17(value: f64) -> String {
     let negative = value.is_sign_negative();
     let abs = value.abs();
     let exponent = abs.log10().floor() as i32;
-    let use_scientific = exponent < -4 || exponent >= 17;
+    let use_scientific = !(-4..17).contains(&exponent);
     let mut digits;
     if use_scientific {
         let mantissa = abs / 10f64.powi(exponent);
@@ -18928,7 +18907,7 @@ mod tests {
         assert!(matches!(vm.run_pure_dataset_plan("plan", &[]), Err(LanaError::Type)));
         assert!(matches!(vm.run_pure_dataset_plan("scalar", &[]), Err(LanaError::Type)));
         let input = vm.array_value(vec![Value::number(3.0)]).unwrap();
-        assert!(matches!(vm.run_pure_dataset_plan("mutate", &[input.clone()]), Err(LanaError::UnsupportedOperation)));
+        assert!(matches!(vm.run_pure_dataset_plan("mutate", std::slice::from_ref(&input)), Err(LanaError::UnsupportedOperation)));
         assert_eq!(input.print(), "[3]");
     }
 

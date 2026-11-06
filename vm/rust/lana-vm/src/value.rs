@@ -278,7 +278,7 @@ impl Map {
     /// `reject_existing` the insert fails with `Key` when the key is present.
     pub fn set(&mut self, key: Arc<str>, value: Value, reject_existing: bool) -> Result<(), LanaError> {
         if self.frozen { return Err(LanaError::UnsupportedOperation); }
-        if let Some(entry) = self.entries.iter_mut().find(|entry| &*entry.key == &*key) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| *entry.key == *key) {
             if reject_existing {
                 return Err(LanaError::Key);
             }
@@ -1520,11 +1520,11 @@ fn tensor_print_rec(tensor: &Tensor, dim: usize, offset: usize, out: &mut PrintO
             let _ = write!(
                 out,
                 "[{}, {}]",
-                lana_bytecode::format_g(tensor_get_real(&tensor, offset)),
-                lana_bytecode::format_g(tensor_get_imag(&tensor, offset))
+                lana_bytecode::format_g(tensor_get_real(tensor, offset)),
+                lana_bytecode::format_g(tensor_get_imag(tensor, offset))
             );
         } else {
-            out.push_str(&lana_bytecode::format_g(tensor_get_real(&tensor, offset)));
+            out.push_str(&lana_bytecode::format_g(tensor_get_real(tensor, offset)));
         }
         return;
     }

@@ -1527,8 +1527,8 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
         if cursor.is_empty() {
             continue;
         }
-        if cursor.ends_with(':') {
-            let name = cursor[..cursor.len() - 1].trim();
+        if let Some(name) = cursor.strip_suffix(':') {
+            let name = name.trim();
             if labels.len() >= LANA_ASSEMBLER_MAX_FIXUPS || name.is_empty() || name.len() >= 64 {
                 return Err(LanaErrorInfo::new(
                     LanaError::Limit,
@@ -1545,7 +1545,7 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
             continue;
         }
         let tokens: Vec<&str> = cursor
-            .split(|c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',')
+            .split([' ', '\t', '\r', '\n', ','])
             .filter(|token| !token.is_empty())
             .collect();
         if tokens.is_empty() {

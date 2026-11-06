@@ -112,6 +112,10 @@ pub struct StoreHost {
     issued_decisions: Vec<(Arc<Mutex<Map>>, [u8; 32])>,
 }
 
+impl Default for StoreHost {
+    fn default() -> Self { Self::new() }
+}
+
 impl StoreHost {
     pub fn new() -> Self {
         Self::with_heap(lana_vm::heap::Heap::new(256 * 1024 * 1024))

@@ -17,7 +17,7 @@ const ROUND_CONSTANTS: [u32; 64] = [
 ];
 
 fn rotate_right(value: u32, count: u32) -> u32 {
-    (value >> count) | (value << (32 - count))
+    value.rotate_right(count)
 }
 
 /// A streaming SHA-256 context.

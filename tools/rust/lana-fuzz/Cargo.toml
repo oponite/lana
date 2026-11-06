@@ -16,3 +16,6 @@ crate-type = ["rlib"]
 [[bin]]
 name = "fuzz-driver"
 path = "src/bin/fuzz_driver.rs"
+
+[lints]
+workspace = true

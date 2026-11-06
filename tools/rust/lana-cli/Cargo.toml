@@ -26,3 +26,6 @@ toml = "1.1.6"
 
 [build-dependencies]
 lana-bytecode = { workspace = true }
+
+[lints]
+workspace = true

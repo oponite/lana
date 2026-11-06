@@ -732,10 +732,10 @@ mod tests {
         let chunk = chunk(&["Information<number>"]);
         let mut vm = Vm::new(&chunk);
         let uncertain = Value::possibility(vm.possibility_build(&[Value::number(1.0), Value::number(2.0)]).unwrap());
-        assert_eq!(construct(&mut vm, &[uncertain.clone()]).unwrap_err(), LanaError::UnsupportedValue);
+        assert_eq!(construct(&mut vm, std::slice::from_ref(&uncertain)).unwrap_err(), LanaError::UnsupportedValue);
         assert_eq!(construct(&mut vm, &[Value::number(1.0)]).unwrap_err(), LanaError::Type);
         let snapshot = vm.information_snapshot(&uncertain).unwrap();
-        let captured = construct(&mut vm, &[snapshot.clone()]).unwrap();
+        let captured = construct(&mut vm, std::slice::from_ref(&snapshot)).unwrap();
         let ValueKind::ObjectValue(value) = &captured.kind else { panic!("value"); };
         let (ValueKind::Possibility(before), ValueKind::Possibility(after)) = (&snapshot.kind, &value.fields[0].kind) else { panic!("law"); };
         assert_eq!(before.dependency_id, after.dependency_id);

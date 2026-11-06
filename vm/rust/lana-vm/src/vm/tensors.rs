@@ -22,7 +22,7 @@ impl Vm<'_> {
         match host_id {
             LANA_HOST_TENSOR_ALLOC => {
                 // Arguments: shape array (VAL_ARRAY), optional is_complex (VAL_BOOL).
-                if argc < 1 || argc > 2 {
+                if !(1..=2).contains(&argc) {
                     return LanaError::Type;
                 }
                 let mut is_complex = false;
@@ -48,7 +48,7 @@ impl Vm<'_> {
                 if argc != 1 && argc != 2 {
                     return LanaError::Type;
                 }
-                let dtype = match tensor_optional_dtype(&arguments, argc) {
+                let dtype = match tensor_optional_dtype(arguments, argc) {
                     Some(d) => d,
                     None => return LanaError::InvalidParameters,
                 };
@@ -69,7 +69,7 @@ impl Vm<'_> {
                 if argc != 1 && argc != 2 {
                     return LanaError::Type;
                 }
-                let dtype = match tensor_optional_dtype(&arguments, argc) {
+                let dtype = match tensor_optional_dtype(arguments, argc) {
                     Some(d) => d,
                     None => return LanaError::InvalidParameters,
                 };
@@ -100,7 +100,7 @@ impl Vm<'_> {
                 let ValueKind::Number(d) = arguments[0].kind else {
                     return LanaError::Type;
                 };
-                let dtype = match tensor_optional_dtype(&arguments, argc) {
+                let dtype = match tensor_optional_dtype(arguments, argc) {
                     Some(d) => d,
                     None => return LanaError::InvalidParameters,
                 };
@@ -545,7 +545,7 @@ impl Vm<'_> {
                 if argc != 1 && argc != 2 {
                     return LanaError::Type;
                 }
-                let dtype = match tensor_optional_dtype(&arguments, argc) {
+                let dtype = match tensor_optional_dtype(arguments, argc) {
                     Some(d) => d,
                     None => return LanaError::InvalidParameters,
                 };

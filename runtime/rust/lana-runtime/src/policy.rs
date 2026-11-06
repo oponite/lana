@@ -75,7 +75,7 @@ pub struct Decision {
 }
 
 fn text_ok(text: Option<&str>) -> bool {
-    text.map_or(false, |t| !t.is_empty())
+    text.is_some_and(|t| !t.is_empty())
 }
 
 fn json_safe(text: Option<&str>) -> bool {
@@ -178,7 +178,7 @@ fn condition_matches(rule: &PolicyRule, input: &Value) -> bool {
             matches!(value.kind, ValueKind::Number(n) if n < rule.threshold && n >= 0.0)
         }
         PolicyRuleKind::Equals => match (&value.kind, &rule.expected) {
-            (ValueKind::String(s), Some(expected)) => &**s == &**expected,
+            (ValueKind::String(s), Some(expected)) => **s == **expected,
             _ => false,
         },
         PolicyRuleKind::Present => true,

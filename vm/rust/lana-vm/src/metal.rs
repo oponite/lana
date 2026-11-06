@@ -84,7 +84,7 @@ mod imp {
         encoder.set_buffer(5, Some(&buf_dims), 8);
 
         let threads = MTLSize::new(16, 16, 1);
-        let groups = MTLSize::new(((m + 15) / 16) as u64, ((n + 15) / 16) as u64, 1);
+        let groups = MTLSize::new(m.div_ceil(16) as u64, n.div_ceil(16) as u64, 1);
         encoder.dispatch_thread_groups(groups, threads);
         encoder.end_encoding();
         command_buffer.commit();

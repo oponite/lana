@@ -31,7 +31,7 @@ pub fn format_17g(value: f64) -> String {
     let sci = format!("{:.*e}", 16, abs);
     let (mantissa, exp) = sci.split_once('e').expect("scientific notation has an exponent");
     let exponent: i32 = exp.parse().expect("exponent is an integer");
-    let use_scientific = exponent < -4 || exponent >= 17;
+    let use_scientific = !(-4..17).contains(&exponent);
     let mut mantissa = if use_scientific {
         mantissa.to_string()
     } else {

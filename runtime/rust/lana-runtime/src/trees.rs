@@ -715,9 +715,9 @@ pub fn validate_report(value: &Value, vm: &mut Vm) -> Result<Json, LanaError> {
     let train: Vec<Example> = serde_json::from_value(report["train"].clone()).map_err(|_| LanaError::Schema)?;
     let holdout: Vec<Example> = serde_json::from_value(report["holdout"].clone()).map_err(|_| LanaError::Schema)?;
     let mut options = report["options"].clone();
-    let seed = options["seed"].as_str().ok_or(LanaError::Schema)?;
-    let seed = seed.parse::<u64>().map_err(|_| LanaError::Schema)?;
-    if seed.to_string() != options["seed"] { return Err(LanaError::Schema); }
+    let seed_text = options["seed"].as_str().ok_or(LanaError::Schema)?;
+    let seed = seed_text.parse::<u64>().map_err(|_| LanaError::Schema)?;
+    if seed_text != seed.to_string() { return Err(LanaError::Schema); }
     options["seed"] = json!(seed);
     let options: Options = serde_json::from_value(options).map_err(|_| LanaError::Schema)?;
     let settings = validate(&task, &train, &holdout, &options)?;

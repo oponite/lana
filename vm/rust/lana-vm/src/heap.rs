@@ -43,7 +43,7 @@ impl CycleWeak {
         }
         Ok(match self {
             Self::Task(_) => Some(size_of::<crate::value::Task>() + size_of::<crate::value::TaskState>()
-                + size_of::<std::sync::Condvar>() + size_of::<AtomicBool>() + 8 * size_of::<usize>()),
+                + size_of::<std::sync::Condvar>() + size_of::<AtomicBool>() + usize::BITS as usize),
             Self::Generator(value) => locked!(value, crate::value::Generator, registers),
             Self::Future(value) => locked!(value, crate::value::Future, registers),
             Self::Reactive(value) => locked!(value, crate::value::Reactive, history),
@@ -543,7 +543,7 @@ impl Heap {
         let bytes = text.len().checked_add(1).ok_or(LanaError::Oom)?;
         let mut reservation = self.reserve(bytes)?;
         let mut state = self.0.lock();
-        if state.allocations % 256 == 0 { state.collect_strings(); }
+        if state.allocations.is_multiple_of(256) { state.collect_strings(); }
         state.strings.try_reserve(1).map_err(|_| LanaError::Oom)?;
         let string: Arc<str> = Arc::from(text);
         state.strings.insert(Arc::as_ptr(&string) as *const () as usize, (Arc::downgrade(&string), bytes));
@@ -896,7 +896,7 @@ mod tests {
         let result = receiver.recv_timeout(std::time::Duration::from_secs(1));
         drop(guard);
         worker.join().unwrap();
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
         assert!(heap.prune_cycle_at(0));
         drop(slot);
         assert_eq!(heap.live_bytes(), 0);

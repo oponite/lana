@@ -247,13 +247,13 @@ fn scan_events(
         let event_action = map_text(&map, "action")?;
         let event_reason = map_text(&map, "reason")?;
         let timestamp = map_number(&map, "timestamp")?;
-        if entity.map_or(false, |e| e != &*event_entity) {
+        if entity.is_some_and(|e| e != &*event_entity) {
             continue;
         }
-        if actor.map_or(false, |a| a != &*event_actor) {
+        if actor.is_some_and(|a| a != &*event_actor) {
             continue;
         }
-        if action.map_or(false, |a| a != &*event_action) {
+        if action.is_some_and(|a| a != &*event_action) {
             continue;
         }
         if start_timestamp != 0 && timestamp < start_timestamp {
@@ -379,7 +379,7 @@ pub fn ledger_traverse(
             let event_parsed = scan_value_map(&event.value)?;
             let event_parsed = event_parsed.lock().unwrap();
             let reason = map_text(&event_parsed, "reason")?;
-            if &*reason == decision_text {
+            if *reason == *decision_text {
                 let id = key_tail_id(&event.key);
                 if event_id == 0 || id < event_id {
                     event_id = id;

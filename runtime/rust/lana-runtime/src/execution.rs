@@ -174,7 +174,7 @@ fn valid_origin(origin: &str) -> bool {
     let (host, port) = if authority.starts_with('[') {
         let Some((host, rest)) = authority.split_once(']') else { return false; };
         if host[1..].parse::<std::net::Ipv6Addr>().is_err() { return false; }
-        (host, rest.strip_prefix(':').or_else(|| if rest.is_empty() { Some("") } else { None }))
+        (host, rest.strip_prefix(':').or(if rest.is_empty() { Some("") } else { None }))
     } else {
         let (host, port) = authority.split_once(':').unwrap_or((authority, ""));
         if host.is_empty() || !host.split('.').all(|label| !label.is_empty()

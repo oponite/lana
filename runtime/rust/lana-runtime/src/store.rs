@@ -779,7 +779,7 @@ pub fn store_compact(store: &mut Store, retention: u64) -> Result<StoreRevisionI
     if retention == 0 {
         store_snapshot(store)?;
     }
-    let boundary = if retention >= store.current_rev { 0 } else { store.current_rev - retention };
+    let boundary = store.current_rev.saturating_sub(retention);
     let previous = store.retention_boundary;
     store.retention_boundary = previous.max(boundary);
     if let Err(error) = write_manifest(store) {

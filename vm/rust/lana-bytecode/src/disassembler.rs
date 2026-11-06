@@ -56,7 +56,7 @@ pub fn format_g(value: f64) -> String {
     let negative = value.is_sign_negative();
     let abs = value.abs();
     let exponent = abs.log10().floor() as i32;
-    let use_scientific = exponent < -4 || exponent >= 12;
+    let use_scientific = !(-4..12).contains(&exponent);
     let mut digits;
     if use_scientific {
         let mantissa = abs / 10f64.powi(exponent);

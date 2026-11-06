@@ -196,19 +196,19 @@ fn emit_dot_edge(out: &mut String, graph: &InspectGraph, from: usize, label: &st
     let _ = write!(out, "  n{from} -> ");
     match operand {
         DistOperand::Inline(state) => {
-            let _ = write!(
+            let _ = writeln!(
                 out,
-                "i{from}_{label} [label=\"{label}: state(p={})\"];\n",
+                "i{from}_{label} [label=\"{label}: state(p={})\"];",
                 lana_bytecode::format_g(state.state.p)
             );
-            let _ = write!(
+            let _ = writeln!(
                 out,
-                "  i{from}_{label} [label=\"state(p={})\"];\n",
+                "  i{from}_{label} [label=\"state(p={})\"];",
                 lana_bytecode::format_g(state.state.p)
             );
         }
         DistOperand::Node(node) => {
-            let _ = write!(out, "n{} [label=\"{label}\"];\n", graph.node_id(node));
+            let _ = writeln!(out, "n{} [label=\"{label}\"];", graph.node_id(node));
         }
     }
 }

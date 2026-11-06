@@ -853,10 +853,10 @@ pub fn tensor_elementwise(
             bi += idx[i] * b_strides[i];
         }
         if complex {
-            let ar = tensor_get_real(&a, a.offset + ai);
-            let aim = tensor_get_imag(&a, a.offset + ai);
-            let br = tensor_get_real(&b, b.offset + bi);
-            let bim = tensor_get_imag(&b, b.offset + bi);
+            let ar = tensor_get_real(a, a.offset + ai);
+            let aim = tensor_get_imag(a, a.offset + ai);
+            let br = tensor_get_real(b, b.offset + bi);
+            let bim = tensor_get_imag(b, b.offset + bi);
             let (rr, ri) = match op {
                 0 => (ar + br, aim + bim),
                 1 => (ar - br, aim - bim),
@@ -872,8 +872,8 @@ pub fn tensor_elementwise(
             tensor_set_real(&mut r, lin, rr);
             tensor_set_imag(&mut r, lin, ri);
         } else {
-            let av = tensor_get_real(&a, a.offset + ai);
-            let bv = tensor_get_real(&b, b.offset + bi);
+            let av = tensor_get_real(a, a.offset + ai);
+            let bv = tensor_get_real(b, b.offset + bi);
             tensor_set_real(&mut r, lin, match op {
                 0 => av + bv,
                 1 => av - bv,
@@ -964,9 +964,7 @@ fn dtype_rank(d: TensorDtype) -> i32 {
 /// LIP-027: default matmul output dtype. Same dtype -> that dtype; otherwise
 /// the higher-precision operand (f64/f32 mix -> f64, f32/f16 -> f32).
 pub fn matmul_default_dtype(a: &Tensor, b: &Tensor) -> TensorDtype {
-    if a.dtype == b.dtype {
-        a.dtype
-    } else if dtype_rank(a.dtype) >= dtype_rank(b.dtype) {
+    if a.dtype == b.dtype || dtype_rank(a.dtype) >= dtype_rank(b.dtype) {
         a.dtype
     } else {
         b.dtype
@@ -1017,8 +1015,8 @@ pub fn tensor_matmul(
         return Err(LanaError::InvalidParameters);
     }
     let k = a_cols;
-    let a_batch = if a_ndim <= 2 { 0 } else { a_ndim - 2 };
-    let b_batch = if b_ndim <= 2 { 0 } else { b_ndim - 2 };
+    let a_batch = a_ndim.saturating_sub(2);
+    let b_batch = b_ndim.saturating_sub(2);
     let batch_ndim = a_batch.max(b_batch);
     let mut batch_shape = crate::heap::Buffer::filled(alloc, batch_ndim, 0usize)?;
     for i in 0..batch_ndim {
@@ -1158,9 +1156,9 @@ pub fn tensor_matmul(
                 for kk in 0..k {
                     let elem = a.offset + a_off + i * a_row_stride + kk * a_col_stride;
                     let dst = (i * k + kk) * mult;
-                    a_packed[dst] = tensor_get_real(&a, elem);
+                    a_packed[dst] = tensor_get_real(a, elem);
                     if mult == 2 {
-                        a_packed[dst + 1] = tensor_get_imag(&a, elem);
+                        a_packed[dst + 1] = tensor_get_imag(a, elem);
                     }
                 }
             }
@@ -1171,9 +1169,9 @@ pub fn tensor_matmul(
                 for j in 0..n {
                     let elem = b.offset + b_off + kk * b_row_stride + j * b_col_stride;
                     let dst = (kk * n + j) * mult;
-                    b_packed[dst] = tensor_get_real(&b, elem);
+                    b_packed[dst] = tensor_get_real(b, elem);
                     if mult == 2 {
-                        b_packed[dst + 1] = tensor_get_imag(&b, elem);
+                        b_packed[dst + 1] = tensor_get_imag(b, elem);
                     }
                 }
             }
@@ -1229,8 +1227,8 @@ pub fn tensor_gpu_matmul(
         return Err(LanaError::InvalidParameters);
     }
     let k = a_cols;
-    let a_batch = if a_ndim <= 2 { 0 } else { a_ndim - 2 };
-    let b_batch = if b_ndim <= 2 { 0 } else { b_ndim - 2 };
+    let a_batch = a_ndim.saturating_sub(2);
+    let b_batch = b_ndim.saturating_sub(2);
     let batch_ndim = a_batch.max(b_batch);
     let mut batch_shape = crate::heap::Buffer::filled(alloc, batch_ndim, 0usize)?;
     for i in 0..batch_ndim {
@@ -1336,13 +1334,13 @@ pub fn tensor_gpu_matmul(
         for i in 0..m {
             for kk in 0..k {
                 a_float[i * k + kk] =
-                    tensor_get_real(&a, a.offset + a_off + i * a_row_stride + kk * a_col_stride) as f32;
+                    tensor_get_real(a, a.offset + a_off + i * a_row_stride + kk * a_col_stride) as f32;
             }
         }
         for kk in 0..k {
             for j in 0..n {
                 b_float[kk * n + j] =
-                    tensor_get_real(&b, b.offset + b_off + kk * b_row_stride + j * b_col_stride) as f32;
+                    tensor_get_real(b, b.offset + b_off + kk * b_row_stride + j * b_col_stride) as f32;
             }
         }
         let device_bytes = a_core.checked_add(b_core).and_then(|n| n.checked_add(c_core))
@@ -1377,14 +1375,14 @@ fn tensor_reduce_fiber(
     let mut im = 0.0;
     for i in 0..count {
         let index = t.offset + offset + i * stride;
-        let v = tensor_get_real(&t, index);
+        let v = tensor_get_real(t, index);
         if !v.is_finite() { return Err(LanaError::InvalidParameters); }
         if op < 2 {
             if fp32 { re32 += v as f32; } else { re += v; }
         }
         else if if op == 2 { v > re } else { v < re } { re = v; }
         if t.is_complex {
-            let component = tensor_get_imag(&t, index);
+            let component = tensor_get_imag(t, index);
             if !component.is_finite() { return Err(LanaError::InvalidParameters); }
             im += component;
         }
@@ -1415,14 +1413,14 @@ pub fn tensor_reduce(
             index += if t.shape[d] == 0 { 0 } else { rem % t.shape[d] } * t.strides[d];
             rem /= t.shape[d];
         }
-        let v = tensor_get_real(&t, index);
+        let v = tensor_get_real(t, index);
         if !v.is_finite() { return Err(LanaError::InvalidParameters); }
         if op < 2 {
             if fp32 { re32 += v as f32; } else { re += v; }
         }
         else if if op == 2 { v > re } else { v < re } { re = v; }
         if t.is_complex {
-            let component = tensor_get_imag(&t, index);
+            let component = tensor_get_imag(t, index);
             if !component.is_finite() { return Err(LanaError::InvalidParameters); }
             im += component;
         }
@@ -1552,7 +1550,7 @@ pub fn tensor_all_finite(t: &Tensor) -> bool {
     let total: usize = t.shape.iter().product();
     let mult = if t.is_complex { 2 } else { 1 };
     for i in 0..total * mult {
-        if !tensor_get_real(&t, t.offset + i).is_finite() {
+        if !tensor_get_real(t, t.offset + i).is_finite() {
             return false;
         }
     }
@@ -1653,8 +1651,8 @@ pub fn tensor_scale(
     let mut r = tensor_new(alloc, t.ndim, &t.shape, t.is_complex)?;
     let total: usize = t.shape.iter().product();
     for e in 0..total {
-        tensor_set_real(&mut r, e, tensor_get_real(&t, t.offset + e) * factor);
-        tensor_set_imag(&mut r, e, tensor_get_imag(&t, t.offset + e) * factor);
+        tensor_set_real(&mut r, e, tensor_get_real(t, t.offset + e) * factor);
+        tensor_set_imag(&mut r, e, tensor_get_imag(t, t.offset + e) * factor);
     }
     Ok(r)
 }
@@ -1718,8 +1716,8 @@ pub fn tensor_outer(
             tensor_set_real(
                 &mut r,
                 i * n + j,
-                tensor_get_real(&u, u.offset + i * u.strides[0])
-                    * tensor_get_real(&v, v.offset + j * v.strides[0]),
+                tensor_get_real(u, u.offset + i * u.strides[0])
+                    * tensor_get_real(v, v.offset + j * v.strides[0]),
             );
         }
     }
@@ -1741,7 +1739,7 @@ pub fn tensor_negate(
             index += (if t.shape[d] == 0 { 0 } else { rem % t.shape[d] }) * t.strides[d];
             rem /= t.shape[d];
         }
-        tensor_set_real(&mut r, lin, -tensor_get_real(&t, index));
+        tensor_set_real(&mut r, lin, -tensor_get_real(t, index));
     }
     Ok(r)
 }
@@ -1772,7 +1770,7 @@ pub fn tensor_unbroadcast(
             ti = ti * target.shape[i] + coord;
         }
         let cur = tensor_get_real(&r, ti);
-        tensor_set_real(&mut r, ti, cur + tensor_get_real(&g, g.offset + lin));
+        tensor_set_real(&mut r, ti, cur + tensor_get_real(g, g.offset + lin));
     }
     Ok(r)
 }
@@ -1815,7 +1813,7 @@ pub fn tensor_broadcast_reduce(
                 gd += 1;
             }
         }
-        tensor_set_real(&mut r, lin, tensor_get_real(&g, g.offset + gi) * scale);
+        tensor_set_real(&mut r, lin, tensor_get_real(g, g.offset + gi) * scale);
     }
     Ok(r)
 }
@@ -1954,14 +1952,14 @@ pub fn tensor_index(
     let mut is_int = [false; TENSOR_MAX_RANK];
     let mut start = [0usize; TENSOR_MAX_RANK];
     let mut count = [0usize; TENSOR_MAX_RANK];
-    let positions: usize;
-    match &spec.kind {
+    
+    let positions: usize = match &spec.kind {
         ValueKind::Number(n) => {
             if t.ndim == 0 { return Err(LanaError::InvalidParameters); }
             start[0] = tensor_resolve_index(*n, t.shape[0])?;
             is_int[0] = true;
             count[0] = 1;
-            positions = 1;
+            1
         }
         ValueKind::Array(array) => {
             let array = array.lock().unwrap();
@@ -1997,10 +1995,10 @@ pub fn tensor_index(
                     _ => return Err(LanaError::Type),
                 }
             }
-            positions = array.items.len();
+            array.items.len()
         }
         _ => return Err(LanaError::Type),
-    }
+    };
 
     // Fold every axis into the view: integer axes contribute their offset and
     // drop out; slice axes keep their (clamped) extent; trailing axes beyond
@@ -2026,11 +2024,11 @@ pub fn tensor_index(
         // A full set of integer positions selects one element: a number, or
         // the established rank-zero complex tensor for complex tensors.
         if !t.is_complex {
-            return Ok(Value::number(tensor_get_real(&t, view_offset)));
+            return Ok(Value::number(tensor_get_real(t, view_offset)));
         }
         let mut r = tensor_new(alloc, 0, &[], true)?;
-        tensor_set_real(&mut r, 0, tensor_get_real(&t, view_offset));
-        tensor_set_imag(&mut r, 0, tensor_get_imag(&t, view_offset));
+        tensor_set_real(&mut r, 0, tensor_get_real(t, view_offset));
+        tensor_set_imag(&mut r, 0, tensor_get_imag(t, view_offset));
         return Ok(Value::tensor(Arc::new(r)));
     }
 

@@ -259,7 +259,7 @@ fn run_compiler_program(compiler: &Path, args: &[String]) -> Result<(), CliError
 fn write_chunk(chunk: &Chunk, path: &str) -> Result<(), (LanaErrorInfo, bool)> {
     let out = lana_bytecode::encoder::encode(chunk);
     lana_runtime::atomic_file::write(Path::new(path), &out)
-        .map_err(|error| (LanaErrorInfo::new(LanaError::Io, 0, 0, 0, &format!("cannot write output file: {error}")),
+        .map_err(|error| (LanaErrorInfo::new(LanaError::Io, 0, 0, 0, format!("cannot write output file: {error}")),
             lana_runtime::atomic_file::durability_uncertain(&error)))
 }
 
@@ -915,8 +915,8 @@ fn inspect_command(args: &[String]) -> ExitCode {
     // A `.lana` source is compiled to a temporary chunk first, mirroring the
     // C CLI's `main()` dispatch.
     let bytecode_path;
-    let effective_path;
-    if path.ends_with(".lana") {
+    
+    let effective_path = if path.ends_with(".lana") {
         let Some(compiler) = find_compiler() else {
             eprintln!("native Lana compiler bytecode not found");
             return ExitCode::from(1);
@@ -928,10 +928,10 @@ fn inspect_command(args: &[String]) -> ExitCode {
             report_cli_error(&error);
             return ExitCode::from(1);
         }
-        effective_path = bytecode_str;
+        bytecode_str
     } else {
-        effective_path = path.to_string();
-    }
+        path.to_string()
+    };
     let bytes = match lana_bytecode::loader::read_file(&effective_path) {
         Ok(bytes) => bytes,
         Err(error) => {

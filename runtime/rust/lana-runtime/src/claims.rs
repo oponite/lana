@@ -323,7 +323,7 @@ fn record_hex(map: &Map, name: &str) -> Result<Vec<u8>, LanaError> {
     if text.len() % 2 != 0 || !text.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
         return Err(LanaError::Schema);
     }
-    text.as_bytes().chunks_exact(2).map(|pair| {
+    text.as_bytes().as_chunks::<2>().0.iter().map(|pair| {
         u8::from_str_radix(std::str::from_utf8(pair).map_err(|_| LanaError::Schema)?, 16).map_err(|_| LanaError::Schema)
     }).collect()
 }
