@@ -158,15 +158,6 @@ fuzz_target!(|data: &[u8]| {
             | OpCode::Async
             | OpCode::Await
             | OpCode::RunAsync => true,
-            // shortcut: class opcodes stay excluded, as before, because fuzzing finds an
-            // OO_SET on a live object whose fields the class collector already cleared
-            // (value.rs set_field index panic); include them once that collector bug is fixed.
-            OpCode::ObjectNew
-            | OpCode::OoGet
-            | OpCode::OoSet
-            | OpCode::OoCall
-            | OpCode::OoStaticCall
-            | OpCode::OoAsInterface => true,
             OpCode::HostCall => !PURE_HOST_CALLS.contains(&instruction.b),
             _ => false,
         })
