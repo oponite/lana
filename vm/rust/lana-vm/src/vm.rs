@@ -12729,7 +12729,9 @@ impl<'a> Vm<'a> {
                 let start = arguments[1].as_number() as usize;
                 let end = arguments[2].as_number() as usize;
                 let text = arguments[0].as_string();
-                if start > end || end > text.len() {
+                // Byte offsets inside a multi-byte character would split it.
+                if start > end || end > text.len()
+                    || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
                     return LanaError::Limit;
                 }
                 self.string_output(&text[start..end], out)
@@ -19645,6 +19647,23 @@ mod tests {
         let mut out = Value::null();
         assert_eq!(vm.net_http_request("GET", "https://127.0.0.1:9/", None, 1., true, &[], &mut out), LanaError::Ok);
         assert_eq!(out.print(), "[false, tls]");
+    }
+
+    #[test]
+    fn string_slice_rejects_offsets_inside_a_character() {
+        // "éx" is c3 a9 78: offset 1 falls inside "é" (found by lana_execution fuzzing).
+        for (start, end) in [(1, 3), (0, 1)] {
+            let (error, _) = run_chunk(&format!(
+                "LOAD_STRING R0 c3a978\nLOAD_CONST R1 {start}\nLOAD_CONST R2 {end}\n\
+                 HOST_CALL string_slice R0 3 R3\nRETURN R3\n"
+            ));
+            assert_eq!(error, LanaError::Limit, "{start}..{end}");
+        }
+        let (error, result) = run_chunk(
+            "LOAD_STRING R0 c3a978\nLOAD_CONST R1 0\nLOAD_CONST R2 2\nHOST_CALL string_slice R0 3 R3\nRETURN R3\n",
+        );
+        assert_eq!(error, LanaError::Ok);
+        assert_eq!(result, "é");
     }
 
     #[test]

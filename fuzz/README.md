@@ -2,8 +2,10 @@
 
 The `lana_bytecode` target feeds generated and mutated bytecode into the Rust
 loader and verifier. The `lana_execution` target also runs verified inputs in
-the VM, restricted to opcodes without host effects, output, or task creation.
-It uses a 64 MiB memory limit and a 10,000-instruction limit.
+the VM. It skips inputs with output, task, async, or class opcodes, and host calls
+outside the effect-free list in `fuzz_targets/lana_execution.rs` (no files,
+store, network, FFI, environment, clock, threads, datasets, or GPU).
+It allows 64 KiB of memory above the VM baseline and 10,000 instructions.
 
 ## Run the test
 
