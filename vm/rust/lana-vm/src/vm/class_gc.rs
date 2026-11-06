@@ -273,6 +273,9 @@ impl RootOwner {
         owner
     }
 
+    // shortcut: newer stable Rust deprecates `fetch_update` in favor of `try_update`,
+    // which older toolchains lack; rename once the oldest supported toolchain has it.
+    #[allow(deprecated)]
     pub(crate) fn admit(&self, nodes: usize, edges: usize) -> Result<(), LanaError> {
         self.admitted_nodes
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
