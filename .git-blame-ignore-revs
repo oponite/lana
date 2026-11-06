@@ -1,0 +1,6 @@
+# Mechanical reformatting commits, skipped by `git blame` when configured with
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub applies this file automatically.
+
+# style: format the Rust workspace with rustfmt
+5c97bb5fad0ec62d1b3d176c388b471a16556240
