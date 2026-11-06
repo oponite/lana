@@ -1,5 +1,5 @@
-//! Append-only event ledger, mirroring `runtime/c/ledger.c` and
-//! `runtime/include/ledger.h`.
+//! Append-only event ledger, mirroring `6aacbde2f67f:runtime/c/ledger.c` and
+//! `6aacbde2f67f:runtime/include/ledger.h`.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;

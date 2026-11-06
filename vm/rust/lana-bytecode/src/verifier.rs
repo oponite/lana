@@ -42,7 +42,7 @@ fn verify_register(error: &mut LanaErrorInfo, ip: usize, instruction: &Instructi
     Ok(())
 }
 
-/// Mirror of `lana_state_make_complex` in `vm/c/state.c`, used to validate the
+/// Mirror of `lana_state_make_complex` in `6aacbde2f67f:vm/c/state.c`, used to validate the
 /// three constant operands of OP_STATE_NEW.
 fn state_make_complex(p: f64, d_re: f64, d_im: f64) -> Result<(), LanaError> {
     if !p.is_finite() || !d_re.is_finite() || !d_im.is_finite() {

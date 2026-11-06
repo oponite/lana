@@ -1,5 +1,5 @@
-//! File-backed key/value store, mirroring `runtime/c/store.c` and
-//! `runtime/include/store.h`.
+//! File-backed key/value store, mirroring `6aacbde2f67f:runtime/c/store.c` and
+//! `6aacbde2f67f:runtime/include/store.h`.
 //!
 //! The on-disk format is byte-identical to the C11 reference: a text
 //! `manifest`, an append-only `journal` of `LREV`/`LCMT` records, and

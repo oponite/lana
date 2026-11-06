@@ -1,5 +1,5 @@
 //! Lana bytecode: the LABC v2 binary format, loader, verifier, and
-//! disassembler, mirroring the C11 implementation in `vm/c/bytecode.c`.
+//! disassembler, mirroring the C11 implementation in `6aacbde2f67f:vm/c/bytecode.c`.
 //!
 //! This crate is the first stage of the Rust runtime boundary: it must accept
 //! exactly the chunks the C11 loader accepts and reject exactly the chunks it

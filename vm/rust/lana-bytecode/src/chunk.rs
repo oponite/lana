@@ -1,4 +1,4 @@
-//! Chunk model, mirroring `LanaChunk` in `vm/include/bytecode.h`.
+//! Chunk model, mirroring `LanaChunk` in `6aacbde2f67f:vm/include/bytecode.h`.
 
 use crate::opcode::OpCode;
 use crate::value::Value;

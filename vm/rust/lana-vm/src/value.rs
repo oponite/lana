@@ -739,7 +739,7 @@ pub struct PlannedEffectState {
 }
 
 /// A shared-information capability token, matching `struct LanaCapabilityToken`
-/// in `runtime/c/shared.c`.
+/// in `6aacbde2f67f:runtime/c/shared.c`.
 #[derive(Debug)]
 pub struct CapabilityToken {
     pub shared: Arc<SharedInformation>,
@@ -749,13 +749,13 @@ pub struct CapabilityToken {
 }
 
 /// Capability permission bits, matching `LanaCapability` in
-/// `runtime/include/shared.h`.
+/// `6aacbde2f67f:runtime/include/shared.h`.
 pub const LANA_CAPABILITY_READ: u32 = 1 << 0;
 pub const LANA_CAPABILITY_OBSERVE: u32 = 1 << 1;
 pub const LANA_CAPABILITY_ADMIN: u32 = 1 << 2;
 
 /// One observation pending against a shared-information cell, matching
-/// `LanaSharedObservation` in `runtime/c/shared.c`.
+/// `LanaSharedObservation` in `6aacbde2f67f:runtime/c/shared.c`.
 #[derive(Debug, Clone)]
 pub struct SharedObservation {
     pub effective_time: f64,
@@ -781,7 +781,7 @@ pub struct SharedCommit {
 
 /// The mutable state of a shared-information cell, guarded by the cell's
 /// mutex. Mirrors the fields of `LanaSharedInformation` that are read and
-/// written under `shared->mutex` in `runtime/c/shared.c`.
+/// written under `shared->mutex` in `6aacbde2f67f:runtime/c/shared.c`.
 #[derive(Debug, Default)]
 pub struct SharedState {
     pub capability_epoch: u64,
@@ -793,7 +793,7 @@ pub struct SharedState {
 }
 
 /// A shared-information cell, matching `struct LanaSharedInformation` in
-/// `runtime/c/shared.c`. The C implementation keeps a per-version storage VM so the
+/// `6aacbde2f67f:runtime/c/shared.c`. The C implementation keeps a per-version storage VM so the
 /// mark-sweep GC can trace cloned snapshots; the Rust VM's `Arc`-based values
 /// are self-contained, so the snapshots are stored directly and the transient
 /// clone/recompute happens against the caller's VM.

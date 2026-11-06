@@ -56,7 +56,7 @@ pub enum LanaError {
 
 impl LanaError {
     /// The error kind name, mirroring `lana_error_kind_from_code` +
-    /// `lana_error_kind_name` in `vm/c/error.c` (e.g. `validation` for
+    /// `lana_error_kind_name` in `6aacbde2f67f:vm/c/error.c` (e.g. `validation` for
     /// `LANA_ERR_HISTORY`). Used by the CLI to format `error[kind/code]`.
     pub fn kind_name(self) -> &'static str {
         use LanaError::*;

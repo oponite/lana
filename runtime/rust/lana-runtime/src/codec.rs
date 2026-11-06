@@ -1,4 +1,4 @@
-//! JSON value codec, mirroring `runtime/c/codec.c` and `runtime/include/codec.h`.
+//! JSON value codec, mirroring `6aacbde2f67f:runtime/c/codec.c` and `6aacbde2f67f:runtime/include/codec.h`.
 //!
 //! This is the *canonical* encoder used by the store to serialize values into
 //! the journal and snapshots. It differs from `data::json_stringify` in two

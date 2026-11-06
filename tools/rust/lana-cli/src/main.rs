@@ -69,7 +69,7 @@ fn execution_config_command(args: &[String]) -> ExitCode {
 
 fn report_error(error: &lana_vm::VmError) {
     let path = if error.function.is_empty() { "<bytecode>" } else { &error.function };
-    // Matches `tools/c/cli.c` `report_error`: VM runtime errors carry a source
+    // Matches `6aacbde2f67f:tools/c/cli.c` `report_error`: VM runtime errors carry a source
     // span of (line, 1)-(line, 1) and an error kind, e.g.
     // `<bytecode>:7:1-7:1: error[validation/LANA_ERR_HISTORY]: ...`.
     eprintln!(
@@ -187,7 +187,7 @@ fn temp_path(prefix: &str) -> PathBuf {
 }
 
 /// Resolve the self-hosted compiler bytecode, mirroring `find_compiler` in
-/// `tools/c/cli.c`: `LANA_COMPILER_LABC`, then `lana-compiler.labc` in the CWD,
+/// `6aacbde2f67f:tools/c/cli.c`: `LANA_COMPILER_LABC`, then `lana-compiler.labc` in the CWD,
 /// then next to the executable, then each `PATH` entry.
 fn find_compiler() -> Option<PathBuf> {
     if let Ok(configured) = std::env::var("LANA_COMPILER_LABC") {
@@ -226,7 +226,7 @@ fn find_compiler() -> Option<PathBuf> {
 }
 
 /// Run the compiler bytecode on the Rust VM with the given program args,
-/// mirroring `run_compiler_program` in `tools/c/cli.c`.
+/// mirroring `run_compiler_program` in `6aacbde2f67f:tools/c/cli.c`.
 fn run_compiler_program(compiler: &Path, args: &[String]) -> Result<(), CliError> {
     let path_str = compiler.to_string_lossy().into_owned();
     let bytes = lana_bytecode::loader::read_file(compiler)
@@ -254,7 +254,7 @@ fn run_compiler_program(compiler: &Path, args: &[String]) -> Result<(), CliError
 }
 
 /// Serialize a chunk to the LABC v2 on-disk format, mirroring
-/// `lana_chunk_write_file` in `vm/c/bytecode.c` (the inverse of
+/// `lana_chunk_write_file` in `6aacbde2f67f:vm/c/bytecode.c` (the inverse of
 /// `lana_bytecode::loader::load`).
 fn write_chunk(chunk: &Chunk, path: &str) -> Result<(), (LanaErrorInfo, bool)> {
     let out = lana_bytecode::encoder::encode(chunk);
@@ -264,7 +264,7 @@ fn write_chunk(chunk: &Chunk, path: &str) -> Result<(), (LanaErrorInfo, bool)> {
 }
 
 /// Compile a `.lana` source to a `.labc` chunk, mirroring
-/// `compile_source_file` in `tools/c/cli.c`: run the compiler to emit assembly,
+/// `compile_source_file` in `6aacbde2f67f:tools/c/cli.c`: run the compiler to emit assembly,
 /// assemble it, and write the chunk.
 fn compile_source_file(compiler: &Path, source_path: &str, output_path: &str) -> Result<(), CliError> {
     let asm_path = temp_path("lana-assembly");
@@ -603,7 +603,7 @@ fn disassemble_command(args: &[String]) -> Result<(), u8> {
 }
 
 /// Assemble a `.lasm` text file to a `.labc` chunk, mirroring
-/// `assemble_command` in `tools/c/cli.c`.
+/// `assemble_command` in `6aacbde2f67f:tools/c/cli.c`.
 fn assemble_command(args: &[String]) -> ExitCode {
     if args.len() != 3 || args[1] != "-o" {
         usage("lana");
@@ -633,7 +633,7 @@ fn assemble_command(args: &[String]) -> ExitCode {
 }
 
 /// Run a compiler project tool (`--project-fmt` / `--project-doc`), mirroring
-/// `run_project_tool` in `tools/c/cli.c`.
+/// `run_project_tool` in `6aacbde2f67f:tools/c/cli.c`.
 fn run_project_tool(mode: &str, argument: &str) -> ExitCode {
     let Some(compiler) = find_compiler() else {
         eprintln!("native Lana compiler bytecode not found");
@@ -655,7 +655,7 @@ struct Project {
 }
 
 /// Extract `key = "value"` from a TOML-ish manifest, mirroring `quoted_value`
-/// in `tools/c/project.c`.
+/// in `6aacbde2f67f:tools/c/project.c`.
 fn quoted_value(text: &str, key: &str) -> Option<String> {
     let prefix = format!("{key} = \"");
     let start = text.find(&prefix)? + prefix.len();
@@ -663,7 +663,7 @@ fn quoted_value(text: &str, key: &str) -> Option<String> {
     Some(text[start..end].to_string())
 }
 
-/// Load a project manifest, mirroring `lana_project_load` in `tools/c/project.c`.
+/// Load a project manifest, mirroring `lana_project_load` in `6aacbde2f67f:tools/c/project.c`.
 fn project_load(directory: &str) -> Option<Project> {
     let manifest_path = Path::new(directory).join("lana.toml");
     let text = match std::fs::read_to_string(&manifest_path) {
@@ -708,7 +708,7 @@ fn extract_dependencies(plan: &str) -> String {
 
 /// Finish a project build: compile the entry source into the content-addressed
 /// cache, copy it to `build/<name>.labc`, and write `lana.lock`. Mirrors
-/// `project_finish_build` in `tools/c/project.c`.
+/// `project_finish_build` in `6aacbde2f67f:tools/c/project.c`.
 fn project_finish_build(
     directory: &str,
     project: &Project,
@@ -756,7 +756,7 @@ fn project_finish_build(
 }
 
 /// Build a project using the compiler's `--project-plan` output, mirroring
-/// `lana_project_build_with_plan` in `tools/c/project.c`.
+/// `lana_project_build_with_plan` in `6aacbde2f67f:tools/c/project.c`.
 fn project_build_with_plan(directory: &str, compiler: &Path, output: &mut String) -> Result<(), ()> {
     let project = project_load(directory).ok_or(())?;
     let plan_path = temp_path("lana-project-plan");
@@ -792,7 +792,7 @@ fn project_build_with_plan(directory: &str, compiler: &Path, output: &mut String
     project_finish_build(directory, &project, hash, &locked, hosted, compiler, output)
 }
 
-/// Run a project's tests, mirroring `lana_project_test` in `tools/c/project.c`.
+/// Run a project's tests, mirroring `lana_project_test` in `6aacbde2f67f:tools/c/project.c`.
 fn project_test(directory: &str) -> u8 {
     let tests_dir = Path::new(directory).join("tests");
     let Ok(entries) = std::fs::read_dir(&tests_dir) else {
@@ -818,7 +818,7 @@ fn project_test(directory: &str) -> u8 {
     0
 }
 
-/// Compile a source and interactively step it, mirroring `tools/c/cli.c`.
+/// Compile a source and interactively step it, mirroring `6aacbde2f67f:tools/c/cli.c`.
 fn debug_command(args: &[String]) -> ExitCode {
     // args[0] == "debug", args[1] == source, optional args[2] == "--break".
     let valid = (args.len() == 2 || args.len() == 4)
@@ -867,7 +867,7 @@ fn debug_command(args: &[String]) -> ExitCode {
 }
 
 /// Serialize a program's returned state distribution as JSON or Graphviz DOT,
-/// mirroring `inspect_command` in `tools/c/cli.c` (LIP-002).
+/// mirroring `inspect_command` in `6aacbde2f67f:tools/c/cli.c` (LIP-002).
 fn inspect_command(args: &[String]) -> ExitCode {
     // args[0] == "inspect", args[1] == path, optional `--format json|dot`.
     if args.len() < 2 {

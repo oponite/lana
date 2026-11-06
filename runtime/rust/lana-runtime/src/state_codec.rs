@@ -1,5 +1,5 @@
-//! State codec, mirroring `vm/c/state.codec.c` and
-//! `runtime/include/state_codec.h`.
+//! State codec, mirroring `6aacbde2f67f:runtime/c/state_codec.c` and
+//! `6aacbde2f67f:runtime/include/state_codec.h`.
 //!
 //! Two encodings live here:
 //!

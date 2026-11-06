@@ -1,5 +1,5 @@
-//! Relationship claims and resolution, mirroring `runtime/c/claims.c` and
-//! `runtime/include/claims.h`.
+//! Relationship claims and resolution, mirroring `6aacbde2f67f:runtime/c/claims.c` and
+//! `6aacbde2f67f:runtime/include/claims.h`.
 //!
 //! The payload encoding, digest, and Ed25519 signature verification are
 //! byte-identical to the C11 reference so that differential conformance can

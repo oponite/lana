@@ -703,7 +703,7 @@ pub const LANA_HOST_DATASET_MATERIALIZE: u32 = 139;
 pub const LANA_HOST_DATASET_EXPLAIN: u32 = 140;
 
 /// The shared-information identity and commit-revision counters, matching the
-/// `next_shared_identity` / `next_commit_revision` atomics in `runtime/c/shared.c`.
+/// `next_shared_identity` / `next_commit_revision` atomics in `6aacbde2f67f:runtime/c/shared.c`.
 static NEXT_SHARED_IDENTITY: AtomicU64 = AtomicU64::new(1);
 static NEXT_COMMIT_REVISION: AtomicU64 = AtomicU64::new(1);
 static NEXT_ATOMIC_WRITE: AtomicU64 = AtomicU64::new(0);
@@ -16975,7 +16975,7 @@ impl<'a> Vm<'a> {
 }
 
 /// Format a number like C's `%.17g`, matching `number_to_string` and
-/// `json_emit` in `runtime/c/data.c`.
+/// `json_emit` in `6aacbde2f67f:runtime/c/data.c`.
 fn format_g17(value: f64) -> String {
     if value.is_nan() {
         return "nan".to_string();
@@ -17443,7 +17443,7 @@ fn hex16(hash: u64) -> String {
     result
 }
 
-/// Validate UTF-8 and reject NUL, mirroring `utf8_valid` in `runtime/c/data.c`.
+/// Validate UTF-8 and reject NUL, mirroring `utf8_valid` in `6aacbde2f67f:runtime/c/data.c`.
 fn utf8_valid(bytes: &[u8]) -> bool {
     if bytes.contains(&0) {
         return false;
@@ -17461,7 +17461,7 @@ fn hex_value(c: u8) -> i32 {
     }
 }
 
-/// Skip JSON whitespace, mirroring `json_space` in `runtime/c/data.c`.
+/// Skip JSON whitespace, mirroring `json_space` in `6aacbde2f67f:runtime/c/data.c`.
 fn json_space(bytes: &[u8], pos: &mut usize) {
     while *pos < bytes.len() && bytes[*pos].is_ascii_whitespace() {
         *pos += 1;
@@ -17503,7 +17503,7 @@ fn json_large_integer(token: &[u8]) -> bool {
 }
 
 /// Parse a JSON number, mirroring the `strtod` branch of `json_value` in
-/// `runtime/c/data.c`.
+/// `6aacbde2f67f:runtime/c/data.c`.
 fn json_number(bytes: &[u8], pos: &mut usize) -> Result<f64, LanaError> {
     let start = *pos;
     if *pos < bytes.len() && bytes[*pos] == b'-' {
@@ -17553,7 +17553,7 @@ fn json_number(bytes: &[u8], pos: &mut usize) -> Result<f64, LanaError> {
     Ok(number)
 }
 
-/// Parse CSV records, mirroring `csv_records` in `runtime/c/data.c`.
+/// Parse CSV records, mirroring `csv_records` in `6aacbde2f67f:runtime/c/data.c`.
 fn csv_records(text: &str) -> Result<Vec<Vec<String>>, LanaError> {
     let bytes = text.as_bytes();
     let mut records: Vec<Vec<String>> = Vec::new();
@@ -17613,7 +17613,7 @@ fn csv_records(text: &str) -> Result<Vec<Vec<String>>, LanaError> {
     Ok(records)
 }
 
-/// Render a CSV scalar, mirroring `csv_scalar` in `runtime/c/data.c`.
+/// Render a CSV scalar, mirroring `csv_scalar` in `6aacbde2f67f:runtime/c/data.c`.
 fn csv_scalar(value: &Value, field: &mut String) -> bool {
     let text = match &value.kind {
         ValueKind::Null => String::new(),
@@ -17697,7 +17697,7 @@ fn reactive_staged_input(
 }
 
 /// Whether a capability token allows a permission, mirroring
-/// `capability_allows_locked` in `runtime/c/shared.c`.
+/// `capability_allows_locked` in `6aacbde2f67f:runtime/c/shared.c`.
 fn capability_allows_locked(
     shared: &Arc<SharedInformation>,
     capability: &Arc<CapabilityToken>,
@@ -17743,7 +17743,7 @@ fn grant_permission(value: &Value) -> u32 {
 }
 
 /// Whether an effective time is valid, mirroring `effective_time_valid` in
-/// `runtime/c/shared.c`.
+/// `6aacbde2f67f:runtime/c/shared.c`.
 fn effective_time_valid(effective_time: f64) -> bool {
     effective_time.is_finite()
         && effective_time.floor() == effective_time
@@ -21517,8 +21517,7 @@ mod tests {
         assert_eq!(error, LanaError::Capability);
     }
 
-    // LIP-005: linear algebra on STATEs. Each test mirrors a differential
-    // fixture in tests/conformance/differential/hostcalls/lip005_*.lasm.
+    // LIP-005: linear algebra on STATEs.
 
     #[test]
     fn lip005_density_operator_from_state() {
@@ -21584,8 +21583,7 @@ mod tests {
     }
 
     // LIP-006: auditable, replayable training primitive. These mirror the C
-    // unit test tests/unit/test_training.c and the differential fixture
-    // tests/conformance/differential/hostcalls/lip006_train.lasm.
+    // unit test 6c40932a:tests/unit/test_training.c.
 
     #[test]
     fn lip006_sgd_defaults() {

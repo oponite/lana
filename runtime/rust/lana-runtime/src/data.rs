@@ -1,4 +1,4 @@
-//! JSON and CSV data boundaries, mirroring `runtime/c/data.c` and `runtime/include/data.h`.
+//! JSON and CSV data boundaries, mirroring `6aacbde2f67f:runtime/c/data.c` and `6aacbde2f67f:runtime/include/data.h`.
 //!
 //! This is the *lenient* JSON surface used by the store, ledger, and adapters
 //! to decode stored values (`lana_json_parse`) and by host calls to stringify

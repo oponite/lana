@@ -1,5 +1,5 @@
-//! Policy evaluation and decision storage, mirroring `runtime/c/policy.c` and
-//! `runtime/include/policy.h`.
+//! Policy evaluation and decision storage, mirroring `6aacbde2f67f:runtime/c/policy.c` and
+//! `6aacbde2f67f:runtime/include/policy.h`.
 
 use std::sync::Arc;
 

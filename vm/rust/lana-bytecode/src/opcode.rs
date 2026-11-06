@@ -232,7 +232,7 @@ impl TryFrom<u8> for OpCode {
     }
 }
 
-/// LABC version constants, mirroring `vm/include/bytecode.h`.
+/// LABC version constants, mirroring `6aacbde2f67f:vm/include/bytecode.h`.
 pub const LABC_VERSION: u32 = 2;
 pub const LABC_VERSION_1: u32 = 1;
 pub const LABC_VERSION_3: u32 = 3;

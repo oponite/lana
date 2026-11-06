@@ -1,5 +1,5 @@
-//! Effect execution and attempt storage, mirroring `runtime/c/effects.c` and
-//! `runtime/include/effects.h`.
+//! Effect execution and attempt storage, mirroring `6aacbde2f67f:runtime/c/effects.c` and
+//! `6aacbde2f67f:runtime/include/effects.h`.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

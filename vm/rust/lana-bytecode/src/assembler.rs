@@ -30,7 +30,7 @@ const LANA_COMPARE_GREATER_EQUAL: u32 = 5;
 const LANA_HISTORY_LATEST: u32 = 0;
 const LANA_HISTORY_DURATION: u32 = 1;
 
-/// Host-call names in id order, mirroring the table in `vm/c/assembler.c`.
+/// Host-call names in id order, mirroring the table in `6aacbde2f67f:vm/c/assembler.c`.
 pub const HOST_CALL_NAMES: &[&str] = &[
     "args", "read_text", "write_text", "now", "random", "assert",
     "map_new", "map_has", "map_get", "map_set", "map_keys", "index_get", "index_set", "json_parse", "json_stringify",
@@ -298,7 +298,7 @@ fn add_hex_string(chunk: &mut Chunk, encoded: &str) -> Result<u32, LanaError> {
     Ok(index)
 }
 
-/// Emit one instruction line, mirroring `emit_line` in `vm/c/assembler.c`.
+/// Emit one instruction line, mirroring `emit_line` in `6aacbde2f67f:vm/c/assembler.c`.
 fn emit_line(
     chunk: &mut Chunk,
     tokens: &[&str],
@@ -1508,7 +1508,7 @@ fn emit_line(
 }
 
 /// Assemble LABC assembly text into a verified chunk, mirroring
-/// `lana_assemble_file` in `vm/c/assembler.c`.
+/// `lana_assemble_file` in `6aacbde2f67f:vm/c/assembler.c`.
 pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
     let mut chunk = Chunk::new(LABC_VERSION, 0);
     let mut labels: Vec<Label> = Vec::new();

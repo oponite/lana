@@ -1,5 +1,5 @@
 //! LABC disassembler, mirroring `lana_disassemble_instruction` and
-//! `lana_disassemble` in `vm/c/bytecode.c`.
+//! `lana_disassemble` in `6aacbde2f67f:vm/c/bytecode.c`.
 //!
 //! Output is byte-identical to the C11 disassembler for the same chunk.
 
@@ -42,7 +42,7 @@ fn number(constants: &[Value], index: u32) -> f64 {
 }
 
 /// Format a number like C's `%.12g`, matching the STATE_NEW disassembly in
-/// `vm/c/bytecode.c` and `lana_value_print` in `vm/c/value.c`.
+/// `6aacbde2f67f:vm/c/bytecode.c` and `lana_value_print` in `6aacbde2f67f:vm/c/value.c`.
 pub fn format_g(value: f64) -> String {
     if value.is_nan() {
         return "nan".to_string();
