@@ -1268,7 +1268,9 @@ impl Graph {
                 if cursor != 0 { return Ok(Some(true)); }
                 if !self.trace(&node, vm)? { return Ok(None); }
                 self.nodes[index].trace_cursor = 1;
-                return Ok(Some(true));
+                // Incremental `trace` queues its edge (Class -> Storage); finish on the
+                // next step so the edge is pushed inside this node's range, not after it.
+                return Ok(Some(false));
             }
         };
         self.nodes[index].trace_cursor += 1;
@@ -2137,6 +2139,33 @@ fn collect_graph(classes: &mut Vec<Arc<ClassObject>>, roots: &[RootRecord], vm: 
 mod tests {
     use super::*;
     use lana_bytecode::assembler;
+
+    #[test]
+    fn incremental_major_collection_keeps_storage_reached_through_its_reference() {
+        // A reference reaches its storage only through the Class -> Storage edge,
+        // which incremental tracing queues; it must land in the reference's edge range.
+        let descriptor = serde_json::json!({"schema_version":1,"kind":"class","qualified_name":"file/main.lana/Counter",
+            "fields":[{"name":"count","type":"number","visibility":"public","mutable":true,"default_function":null}],
+            "methods":[{"name":"init","visibility":"public","static":false,"parameter_types":["number"],
+                "result_type":null,"effect_mask":8,"function_index":1,"is_init":true}],"implements":[]}).to_string();
+        let hex: String = descriptor.bytes().map(|b| format!("{b:02x}")).collect();
+        let chunk = assembler::assemble(&format!(
+            ".version 6\n.function main 0 4\nLOAD_CONST R0 7\nOBJECT_NEW R1 R0 {hex} 1\nRETURN R1\n\
+             .function init 2 3\nOO_SET R0 R1 {hex} 0\nRETURN R2\n")).unwrap();
+        let mut vm = Vm::new(&chunk);
+        assert_eq!(vm.run(), LanaError::Ok);
+        vm.frames.clear();
+        let value = std::mem::replace(&mut vm.result, Value::null());
+        let ValueKind::ClassObject(reference) = &value.kind else { panic!("class") };
+        let mut complete = false;
+        for _ in 0..10_000 {
+            if vm.collect_slice(true, 1).unwrap() { complete = true; break; }
+        }
+        assert!(complete);
+        let storage = vm.class_storage(reference).unwrap();
+        assert_eq!(storage.fields.lock().unwrap().len(), 1, "a reachable object's fields were swept");
+        assert_eq!(storage.fields.lock().unwrap()[0].as_ref().unwrap().as_number(), 7.0);
+    }
 
     #[test]
     fn full_collection_defers_mutation_after_marking_before_sweep() {
