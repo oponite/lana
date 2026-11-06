@@ -14,9 +14,11 @@ fn main() {
     if env::var("CARGO_PKG_NAME").unwrap() == "lana-wasm" {
         let stdlib = manifest.join("../../../stdlib");
         println!("cargo:rerun-if-changed={}", stdlib.display());
-        let mut paths: Vec<_> = fs::read_dir(&stdlib).expect("read stdlib")
+        let mut paths: Vec<_> = fs::read_dir(&stdlib)
+            .expect("read stdlib")
             .map(|entry| entry.expect("stdlib entry").path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "lana")).collect();
+            .filter(|path| path.extension().is_some_and(|ext| ext == "lana"))
+            .collect();
         paths.sort();
         let mut embedded = String::from("const STDLIB: &[(&str, &str)] = &[\n");
         for path in paths {

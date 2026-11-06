@@ -60,11 +60,17 @@ fn error_json(vm: &Vm) -> String {
 /// Compile Lana source to a chunk, running the embedded compiler against the
 /// VM's in-memory filesystem. Returns the assembled chunk or a JSON error.
 fn compile_source(source: &str) -> Result<Chunk, String> {
-    let compiler_chunk = lana_bytecode::loader::load(COMPILER)
-        .map_err(|info| format!("{{\"line\":0,\"message\":\"cannot load compiler: {}\"}}", json_escape(&info.message)))?;
+    let compiler_chunk = lana_bytecode::loader::load(COMPILER).map_err(|info| {
+        format!(
+            "{{\"line\":0,\"message\":\"cannot load compiler: {}\"}}",
+            json_escape(&info.message)
+        )
+    })?;
     let mut vm = Vm::new(&compiler_chunk);
     vm.set_virtual_file(SOURCE_PATH, source.to_string());
-    for (path, source) in STDLIB { vm.set_virtual_file(path, source.to_string()); }
+    for (path, source) in STDLIB {
+        vm.set_virtual_file(path, source.to_string());
+    }
     vm.set_program_args(&[SOURCE_PATH.to_string(), ASM_PATH.to_string()]);
     if vm.run() != LanaError::Ok {
         return Err(error_json(&vm));
@@ -72,8 +78,13 @@ fn compile_source(source: &str) -> Result<Chunk, String> {
     let assembly = vm
         .take_virtual_file(ASM_PATH)
         .ok_or_else(|| "{\"line\":0,\"message\":\"compiler did not emit assembly\"}".to_string())?;
-    lana_bytecode::assemble(&assembly)
-        .map_err(|info| format!("{{\"line\":{},\"message\":\"{}\"}}", info.line, json_escape(&info.message)))
+    lana_bytecode::assemble(&assembly).map_err(|info| {
+        format!(
+            "{{\"line\":{},\"message\":\"{}\"}}",
+            info.line,
+            json_escape(&info.message)
+        )
+    })
 }
 
 /// Compile-check a Lana source program, returning a JSON status string.

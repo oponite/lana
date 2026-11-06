@@ -21,7 +21,11 @@ use lana_vm::value::{Array, Map, MapEntry, Value, ValueKind};
 /// uses `%.12g` (see `lana_bytecode::format_g`), so this is a separate routine.
 pub fn format_17g(value: f64) -> String {
     if value == 0.0 {
-        return if value.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+        return if value.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
     }
     let negative = value.is_sign_negative();
     let abs = value.abs();
@@ -29,7 +33,9 @@ pub fn format_17g(value: f64) -> String {
     // robustly (avoids the log10 rounding that a direct `log10().floor()`
     // would suffer near powers of ten).
     let sci = format!("{:.*e}", 16, abs);
-    let (mantissa, exp) = sci.split_once('e').expect("scientific notation has an exponent");
+    let (mantissa, exp) = sci
+        .split_once('e')
+        .expect("scientific notation has an exponent");
     let exponent: i32 = exp.parse().expect("exponent is an integer");
     let use_scientific = !(-4..17).contains(&exponent);
     let mut mantissa = if use_scientific {
@@ -48,7 +54,11 @@ pub fn format_17g(value: f64) -> String {
         }
     }
     let mut out = if use_scientific {
-        let exp_str = format!("{}{:02}", if exponent < 0 { "-" } else { "+" }, exponent.abs());
+        let exp_str = format!(
+            "{}{:02}",
+            if exponent < 0 { "-" } else { "+" },
+            exponent.abs()
+        );
         format!("{mantissa}e{exp_str}")
     } else {
         mantissa
@@ -60,7 +70,9 @@ pub fn format_17g(value: f64) -> String {
 }
 
 fn append_string(out: &mut String, string: &str) -> Result<(), LanaError> {
-    if string.contains('\0') { return Err(LanaError::Schema); }
+    if string.contains('\0') {
+        return Err(LanaError::Schema);
+    }
     out.push('"');
     for character in string.chars() {
         let replacement = match character {
@@ -85,15 +97,24 @@ fn append_string(out: &mut String, string: &str) -> Result<(), LanaError> {
     Ok(())
 }
 
-fn encode_value_into(out: &mut String, value: &Value, ancestors: &mut Vec<usize>, depth: usize) -> Result<(), LanaError> {
-    if depth > 256 { return Err(LanaError::Limit); }
+fn encode_value_into(
+    out: &mut String,
+    value: &Value,
+    ancestors: &mut Vec<usize>,
+    depth: usize,
+) -> Result<(), LanaError> {
+    if depth > 256 {
+        return Err(LanaError::Limit);
+    }
     let identity = match &value.kind {
         ValueKind::Array(value) => Some(Arc::as_ptr(value) as usize),
         ValueKind::Map(value) => Some(Arc::as_ptr(value) as usize),
         _ => None,
     };
     if let Some(identity) = identity {
-        if ancestors.contains(&identity) { return Err(LanaError::UnsupportedValue); }
+        if ancestors.contains(&identity) {
+            return Err(LanaError::UnsupportedValue);
+        }
         ancestors.push(identity);
     }
     match &value.kind {
@@ -134,7 +155,9 @@ fn encode_value_into(out: &mut String, value: &Value, ancestors: &mut Vec<usize>
         }
         _ => return Err(LanaError::UnsupportedValue),
     }
-    if identity.is_some() { ancestors.pop(); }
+    if identity.is_some() {
+        ancestors.pop();
+    }
     Ok(())
 }
 
@@ -148,11 +171,19 @@ pub fn encode_value(value: &Value) -> Result<String, LanaError> {
 #[test]
 fn cyclic_values_fail_without_recursive_locking() {
     let heap = lana_vm::heap::Heap::new(4096);
-    let map = Arc::new(std::sync::Mutex::new(lana_vm::value::Map::new(&heap, 1).unwrap()));
+    let map = Arc::new(std::sync::Mutex::new(
+        lana_vm::value::Map::new(&heap, 1).unwrap(),
+    ));
     let value = Value::map(map.clone());
-    map.lock().unwrap().set(Arc::from("self"), value.clone(), false).unwrap();
+    map.lock()
+        .unwrap()
+        .set(Arc::from("self"), value.clone(), false)
+        .unwrap();
     assert_eq!(encode_value(&value), Err(LanaError::UnsupportedValue));
-    map.lock().unwrap().set(Arc::from("self"), Value::null(), false).unwrap();
+    map.lock()
+        .unwrap()
+        .set(Arc::from("self"), Value::null(), false)
+        .unwrap();
 }
 
 struct Parser<'a> {
@@ -163,7 +194,9 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn skip_space(&mut self) {
-        while self.offset < self.data.len() && (self.data[self.offset] as char).is_ascii_whitespace() {
+        while self.offset < self.data.len()
+            && (self.data[self.offset] as char).is_ascii_whitespace()
+        {
             self.offset += 1;
         }
     }
@@ -312,7 +345,11 @@ pub fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, LanaError>
     if *offset > data.len() {
         return Err(LanaError::InvalidState);
     }
-    let mut parser = Parser { data, offset: *offset, heap: lana_vm::heap::Heap::new(256 * 1024 * 1024) };
+    let mut parser = Parser {
+        data,
+        offset: *offset,
+        heap: lana_vm::heap::Heap::new(256 * 1024 * 1024),
+    };
     let value = parse_value(&mut parser)?;
     *offset = parser.offset;
     Ok(value)
@@ -354,8 +391,14 @@ mod tests {
     fn encode_scalars() {
         assert_eq!(encode_value(&Value::null()).unwrap(), "null");
         assert_eq!(encode_value(&Value::boolean(true)).unwrap(), "true");
-        assert_eq!(encode_value(&Value::number(0.4)).unwrap(), "0.40000000000000002");
-        assert_eq!(encode_value(&Value::string(Arc::from("hi"))).unwrap(), "\"hi\"");
+        assert_eq!(
+            encode_value(&Value::number(0.4)).unwrap(),
+            "0.40000000000000002"
+        );
+        assert_eq!(
+            encode_value(&Value::string(Arc::from("hi"))).unwrap(),
+            "\"hi\""
+        );
     }
 
     #[test]
@@ -379,20 +422,32 @@ mod tests {
     fn round_trip() {
         let text = br#"{"a":[1,2.5,true,null],"b":"x"}"#;
         let value = decode_document(text).unwrap();
-        assert_eq!(encode_value(&value).unwrap(), "{\"a\":[1,2.5,true,null],\"b\":\"x\"}");
+        assert_eq!(
+            encode_value(&value).unwrap(),
+            "{\"a\":[1,2.5,true,null],\"b\":\"x\"}"
+        );
     }
 
     #[test]
     fn round_trip_unicode_and_control_characters() {
         let value = Value::string(Arc::from("café 🦀\u{1}\n"));
         let encoded = encode_value(&value).unwrap();
-        assert_eq!(decode_document(encoded.as_bytes()).unwrap().as_string(), value.as_string());
-        assert_eq!(encode_value(&Value::string(Arc::from("a\0b"))).unwrap_err(), LanaError::Schema);
+        assert_eq!(
+            decode_document(encoded.as_bytes()).unwrap().as_string(),
+            value.as_string()
+        );
+        assert_eq!(
+            encode_value(&Value::string(Arc::from("a\0b"))).unwrap_err(),
+            LanaError::Schema
+        );
     }
 
     #[test]
     fn decode_accepts_unicode_escape() {
         assert_eq!(&*decode_document(br#""\u0041""#).unwrap().as_string(), "A");
-        assert_eq!(decode_document(br#""\ud800""#).unwrap_err(), LanaError::Parse);
+        assert_eq!(
+            decode_document(br#""\ud800""#).unwrap_err(),
+            LanaError::Parse
+        );
     }
 }

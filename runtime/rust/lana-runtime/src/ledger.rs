@@ -11,7 +11,10 @@ use lana_vm::value::{Map, Value, ValueKind};
 use crate::data::json_parse;
 use crate::effects::EffectStatus;
 use crate::policy::PolicyOutcome;
-use crate::store::{ScanRecord, Store, store_commit, store_current_revision, store_get, store_get_path, store_put, store_scan};
+use crate::store::{
+    store_commit, store_current_revision, store_get, store_get_path, store_put, store_scan,
+    ScanRecord, Store,
+};
 
 /// Input to `ledger_append`, mirroring `LanaEventInput`.
 pub struct EventInput {
@@ -97,17 +100,28 @@ fn text_ok(text: &str) -> bool {
 
 fn map_text(map: &Map, key: &str) -> Result<Arc<str>, LanaError> {
     match map.get(key) {
-        Some(Value { kind: ValueKind::String(s), .. }) => Ok(s.clone()),
+        Some(Value {
+            kind: ValueKind::String(s),
+            ..
+        }) => Ok(s.clone()),
         _ => Err(LanaError::Corruption),
     }
 }
 
 fn map_number(map: &Map, key: &str) -> Result<u64, LanaError> {
     match map.get(key) {
-        Some(Value { kind: ValueKind::Number(n), .. })
-            if n.is_finite() && *n >= 0.0 && *n < 18446744073709551616.0 && n.fract() == 0.0 => Ok(*n as u64),
-        Some(Value { kind: ValueKind::String(s), .. })
-            if !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) => s.parse().map_err(|_| LanaError::Corruption),
+        Some(Value {
+            kind: ValueKind::Number(n),
+            ..
+        }) if n.is_finite() && *n >= 0.0 && *n < 18446744073709551616.0 && n.fract() == 0.0 => {
+            Ok(*n as u64)
+        }
+        Some(Value {
+            kind: ValueKind::String(s),
+            ..
+        }) if !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()) => {
+            s.parse().map_err(|_| LanaError::Corruption)
+        }
         _ => Err(LanaError::Corruption),
     }
 }
@@ -166,7 +180,10 @@ pub fn ledger_open(store: &mut Store) -> Result<Ledger<'_>, LanaError> {
         .create(true)
         .open(&journal_path)
         .map_err(|_| LanaError::Io)?;
-    Ok(Ledger { store, journal: Some(journal) })
+    Ok(Ledger {
+        store,
+        journal: Some(journal),
+    })
 }
 
 pub fn ledger_close(ledger: &mut Ledger<'_>) -> Result<(), LanaError> {
@@ -334,7 +351,8 @@ pub fn ledger_traverse(
     ledger: &Ledger<'_>,
     query: &TraversalQuery,
 ) -> Result<Vec<TraversalRecord>, LanaError> {
-    if query.schema_version != 1 || query.evidence_id.is_empty() || query.evidence_id.contains(',') {
+    if query.schema_version != 1 || query.evidence_id.is_empty() || query.evidence_id.contains(',')
+    {
         return Err(LanaError::InvalidState);
     }
     let decisions: Vec<ScanRecord> = store_scan(ledger.store, "decision/")?;
@@ -359,7 +377,10 @@ pub fn ledger_traverse(
         let attempts: Vec<ScanRecord> = store_scan(ledger.store, &attempt_prefix)?;
         let mut attempt_id = 0u64;
         let mut attempt_status = EffectStatus::Pending;
-        if let Some(first) = attempts.iter().min_by_key(|record| key_tail_id(&record.key)) {
+        if let Some(first) = attempts
+            .iter()
+            .min_by_key(|record| key_tail_id(&record.key))
+        {
             let attempt_parsed = scan_value_map(&first.value)?;
             let attempt_parsed = attempt_parsed.lock().unwrap();
             let status_value = map_number(&attempt_parsed, "status")?;
@@ -418,9 +439,15 @@ mod tests {
     fn traversal_matches_whole_ids_and_numeric_attempt_order() {
         let path = temp_store("exact_links");
         let mut store = crate::store::store_open(&crate::store::StoreOptions {
-            schema_version: 1, path: path.clone(), timeout_ms: 20,
-        }).unwrap();
-        let decision = format!(r#"{{"decision_id":7,"policy_id":"policy","policy_version":"{}","evidence_ids":"first,evidence-10,last","outcome":0,"effect":"notify"}}"#, "00".repeat(32));
+            schema_version: 1,
+            path: path.clone(),
+            timeout_ms: 20,
+        })
+        .unwrap();
+        let decision = format!(
+            r#"{{"decision_id":7,"policy_id":"policy","policy_version":"{}","evidence_ids":"first,evidence-10,last","outcome":0,"effect":"notify"}}"#,
+            "00".repeat(32)
+        );
         for (key, json) in [
             ("decision/7", decision.as_str()),
             ("event/1", r#"{"reason":"decision 17"}"#),
@@ -432,14 +459,26 @@ mod tests {
         store_commit(&mut store).unwrap();
         let ledger = ledger_open(&mut store).unwrap();
         for id in ["evidence-1", "evidence", "missing"] {
-            assert!(matches!(ledger_traverse(&ledger, &TraversalQuery {
-                schema_version: 1, evidence_id: Arc::from(id),
-            }), Err(LanaError::NoMatchingEvent)));
+            assert!(matches!(
+                ledger_traverse(
+                    &ledger,
+                    &TraversalQuery {
+                        schema_version: 1,
+                        evidence_id: Arc::from(id),
+                    }
+                ),
+                Err(LanaError::NoMatchingEvent)
+            ));
         }
         for id in ["first", "evidence-10", "last"] {
-            let rows = ledger_traverse(&ledger, &TraversalQuery {
-                schema_version: 1, evidence_id: Arc::from(id),
-            }).unwrap();
+            let rows = ledger_traverse(
+                &ledger,
+                &TraversalQuery {
+                    schema_version: 1,
+                    evidence_id: Arc::from(id),
+                },
+            )
+            .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].event_id, 0);
             assert_eq!(rows[0].attempt_id, 2);

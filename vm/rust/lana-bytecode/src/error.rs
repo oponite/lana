@@ -73,12 +73,32 @@ impl LanaError {
             UnsupportedOperation | UnsupportedExactMeasurement => "unsupported",
             InvalidConditioning | UnresolvedValue => "resolution",
             Assertion => "assertion",
-            InvalidState | InvalidProbability | InvalidDependency | Transform | Compose
-            | Measure | History | InvalidTransformResult | InvalidDistribution | Key
-            | Capability | Conflict | NotFound | CompactedHistory | Schema
-            | UnsupportedValue | Corruption | InvalidParameters | ClaimMismatch
-            | ClaimRevoked | ClaimExpired | UnauthorizedIssuer | Integrity
-            | NoMatchingEvent | External | Network => "validation",
+            InvalidState
+            | InvalidProbability
+            | InvalidDependency
+            | Transform
+            | Compose
+            | Measure
+            | History
+            | InvalidTransformResult
+            | InvalidDistribution
+            | Key
+            | Capability
+            | Conflict
+            | NotFound
+            | CompactedHistory
+            | Schema
+            | UnsupportedValue
+            | Corruption
+            | InvalidParameters
+            | ClaimMismatch
+            | ClaimRevoked
+            | ClaimExpired
+            | UnauthorizedIssuer
+            | Integrity
+            | NoMatchingEvent
+            | External
+            | Network => "validation",
         }
     }
 
@@ -158,8 +178,20 @@ pub struct LanaErrorInfo {
 }
 
 impl LanaErrorInfo {
-    pub fn new(code: LanaError, ip: usize, opcode: u8, line: u32, message: impl Into<String>) -> Self {
-        Self { code, ip, opcode, line, message: message.into() }
+    pub fn new(
+        code: LanaError,
+        ip: usize,
+        opcode: u8,
+        line: u32,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code,
+            ip,
+            opcode,
+            line,
+            message: message.into(),
+        }
     }
 }
 

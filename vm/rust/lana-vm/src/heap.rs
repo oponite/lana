@@ -1,9 +1,9 @@
 //! Checked, lifetime-owned reservations for VM allocations.
-use std::mem::size_of;
 use std::collections::HashMap;
+use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use lana_bytecode::LanaError;
 
@@ -37,20 +37,36 @@ impl CycleWeak {
         macro_rules! locked {
             ($value:expr, $ty:ty, $field:ident) => {{
                 let value = $value.upgrade().ok_or(LanaError::Task)?;
-                let value = value.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
-                Some(add_bytes(&[size_of::<$ty>() + 2 * size_of::<usize>(), vector_bytes(&value.$field)?])?)
+                let value = value
+                    .try_lock()
+                    .map_err(|_| LanaError::UnsupportedOperation)?;
+                Some(add_bytes(&[
+                    size_of::<$ty>() + 2 * size_of::<usize>(),
+                    vector_bytes(&value.$field)?,
+                ])?)
             }};
         }
         Ok(match self {
-            Self::Task(_) => Some(size_of::<crate::value::Task>() + size_of::<crate::value::TaskState>()
-                + size_of::<std::sync::Condvar>() + size_of::<AtomicBool>() + usize::BITS as usize),
+            Self::Task(_) => Some(
+                size_of::<crate::value::Task>()
+                    + size_of::<crate::value::TaskState>()
+                    + size_of::<std::sync::Condvar>()
+                    + size_of::<AtomicBool>()
+                    + usize::BITS as usize,
+            ),
             Self::Generator(value) => locked!(value, crate::value::Generator, registers),
             Self::Future(value) => locked!(value, crate::value::Future, registers),
             Self::Reactive(value) => locked!(value, crate::value::Reactive, history),
             Self::Effect(value) => {
                 let value = value.upgrade().ok_or(LanaError::Task)?;
-                let state = value.state.try_lock().map_err(|_| LanaError::UnsupportedOperation)?;
-                Some(add_bytes(&[size_of::<crate::value::PlannedEffect>() + 2 * size_of::<usize>(), vector_bytes(&state.receipts)?])?)
+                let state = value
+                    .state
+                    .try_lock()
+                    .map_err(|_| LanaError::UnsupportedOperation)?;
+                Some(add_bytes(&[
+                    size_of::<crate::value::PlannedEffect>() + 2 * size_of::<usize>(),
+                    vector_bytes(&state.receipts)?,
+                ])?)
             }
             _ => None,
         })
@@ -154,11 +170,16 @@ macro_rules! managed_payloads {
 }
 
 fn vector_bytes<T>(value: &Vec<T>) -> Result<usize, LanaError> {
-    value.capacity().checked_mul(size_of::<T>()).ok_or(LanaError::Oom)
+    value
+        .capacity()
+        .checked_mul(size_of::<T>())
+        .ok_or(LanaError::Oom)
 }
 
 fn add_bytes(parts: &[usize]) -> Result<usize, LanaError> {
-    parts.iter().try_fold(0usize, |total, part| total.checked_add(*part).ok_or(LanaError::Oom))
+    parts.iter().try_fold(0usize, |total, part| {
+        total.checked_add(*part).ok_or(LanaError::Oom)
+    })
 }
 
 managed_payloads! {
@@ -216,17 +237,31 @@ pub(crate) enum Generation {
 
 impl CycleSlot {
     pub(crate) fn bind(&self, node: CycleWeak) {
-        let managed = self._allocation.lock().unwrap().heap().0.collector.lock().unwrap().strong_count() != 0;
+        let managed = self
+            ._allocation
+            .lock()
+            .unwrap()
+            .heap()
+            .0
+            .collector
+            .lock()
+            .unwrap()
+            .strong_count()
+            != 0;
         let owner = if managed { node.strong_node() } else { None };
         self.owns_node.store(owner.is_some(), Ordering::Release);
         *self.owner.lock().unwrap() = owner;
         *self.node.lock().unwrap() = Some(node);
     }
 
-    pub(crate) fn owns_node(&self) -> bool { self.owns_node.load(Ordering::Acquire) }
+    pub(crate) fn owns_node(&self) -> bool {
+        self.owns_node.load(Ordering::Acquire)
+    }
 
     pub(crate) fn release_owner(&self) -> bool {
-        let Ok(mut owner) = self.owner.try_lock() else { return false; };
+        let Ok(mut owner) = self.owner.try_lock() else {
+            return false;
+        };
         let value = owner.take();
         self.owns_node.store(false, Ordering::Release);
         drop(owner);
@@ -243,7 +278,8 @@ impl CycleSlot {
     }
 
     pub(crate) fn promote(&self, generation: Generation) {
-        self.generation.fetch_max(generation as u8, Ordering::AcqRel);
+        self.generation
+            .fetch_max(generation as u8, Ordering::AcqRel);
     }
 
     pub(crate) fn remembered(&self) -> bool {
@@ -254,7 +290,9 @@ impl CycleSlot {
         self.remembered.store(value, Ordering::Release);
     }
 
-    pub(crate) fn set_tracing(&self, value: bool) { self.tracing.store(value, Ordering::Release); }
+    pub(crate) fn set_tracing(&self, value: bool) {
+        self.tracing.store(value, Ordering::Release);
+    }
 
     pub(crate) fn reserve_edges(&self, edges: usize, bytes: usize) -> Result<(), LanaError> {
         let mut allocation = self._allocation.lock().unwrap();
@@ -268,10 +306,13 @@ impl CycleSlot {
         Ok(())
     }
 
-
     pub(crate) fn mutated(&self) {
         if self.tracing.load(Ordering::Acquire) || self.generation() != Generation::Young {
-            self._allocation.lock().unwrap().heap().bump_mutation_epoch();
+            self._allocation
+                .lock()
+                .unwrap()
+                .heap()
+                .bump_mutation_epoch();
         }
         if self.generation() == Generation::Old {
             self.remembered.store(true, Ordering::Release);
@@ -284,8 +325,10 @@ impl Drop for CycleSlot {
         let allocation = self._allocation.get_mut().unwrap();
         let mut state = allocation.heap.0.lock();
         state.live_cycles -= 1;
-        if state.live_cycles == 0 && (state.cycles.is_empty()
-            || !allocation.heap.0.routine_collection.load(Ordering::Acquire)) {
+        if state.live_cycles == 0
+            && (state.cycles.is_empty()
+                || !allocation.heap.0.routine_collection.load(Ordering::Acquire))
+        {
             state.live -= state.cycles.capacity() * size_of::<Weak<CycleSlot>>();
             state.cycles = Vec::new();
             state.cycle_bytes_at_collection = 0;
@@ -319,18 +362,26 @@ impl State {
     fn collect_strings(&mut self) {
         let live = &mut self.live;
         self.strings.retain(|_, (string, bytes)| {
-            if string.strong_count() != 0 { return true; }
+            if string.strong_count() != 0 {
+                return true;
+            }
             *live -= *bytes;
             false
         });
     }
 
     fn charge(&mut self, bytes: usize) -> Result<(), LanaError> {
-        if bytes > self.limit.saturating_sub(self.live) { self.collect_strings(); }
-        if bytes > self.limit.saturating_sub(self.live) { return Err(LanaError::Oom); }
+        if bytes > self.limit.saturating_sub(self.live) {
+            self.collect_strings();
+        }
+        if bytes > self.limit.saturating_sub(self.live) {
+            return Err(LanaError::Oom);
+        }
         self.live += bytes;
         self.peak = self.peak.max(self.live);
-        if bytes != 0 { self.allocations = self.allocations.saturating_add(1); }
+        if bytes != 0 {
+            self.allocations = self.allocations.saturating_add(1);
+        }
         Ok(())
     }
 }
@@ -356,30 +407,44 @@ struct HeapGuard<'a> {
 
 impl HeapState {
     fn lock(&self) -> HeapGuard<'_> {
-        HeapGuard { state: self.state.lock().unwrap(), published_live: &self.live }
+        HeapGuard {
+            state: self.state.lock().unwrap(),
+            published_live: &self.live,
+        }
     }
 }
 
 impl Deref for HeapGuard<'_> {
     type Target = State;
-    fn deref(&self) -> &State { &self.state }
+    fn deref(&self) -> &State {
+        &self.state
+    }
 }
 
 impl DerefMut for HeapGuard<'_> {
-    fn deref_mut(&mut self) -> &mut State { &mut self.state }
+    fn deref_mut(&mut self) -> &mut State {
+        &mut self.state
+    }
 }
 
 impl Drop for HeapGuard<'_> {
-    fn drop(&mut self) { self.published_live.store(self.state.live, Ordering::Release); }
+    fn drop(&mut self) {
+        self.published_live
+            .store(self.state.live, Ordering::Release);
+    }
 }
 
 impl Default for Heap {
-    fn default() -> Self { Self::new(256 * 1024 * 1024) }
+    fn default() -> Self {
+        Self::new(256 * 1024 * 1024)
+    }
 }
 
 pub(crate) struct RoutineCollection<'a>(&'a Heap);
 impl Drop for RoutineCollection<'_> {
-    fn drop(&mut self) { self.0.0.routine_collection.store(false, Ordering::Release); }
+    fn drop(&mut self) {
+        self.0 .0.routine_collection.store(false, Ordering::Release);
+    }
 }
 
 impl Heap {
@@ -388,7 +453,25 @@ impl Heap {
         RoutineCollection(self)
     }
     pub fn new(limit: usize) -> Self {
-        Self(Arc::new(HeapState { state: Mutex::new(State { limit, live: 0, peak: 0, allocations: 0, strings: HashMap::new(), cycles: Vec::new(), cycles_since_collection: 0, live_cycles: 0, cycle_bytes_at_collection: 0, cycle_bytes_at_major: 0, collection_deferred: false }), live: AtomicUsize::new(0), mutation_epoch: AtomicU64::new(0), routine_collection: AtomicBool::new(false), collector: Mutex::new(Weak::new()) }))
+        Self(Arc::new(HeapState {
+            state: Mutex::new(State {
+                limit,
+                live: 0,
+                peak: 0,
+                allocations: 0,
+                strings: HashMap::new(),
+                cycles: Vec::new(),
+                cycles_since_collection: 0,
+                live_cycles: 0,
+                cycle_bytes_at_collection: 0,
+                cycle_bytes_at_major: 0,
+                collection_deferred: false,
+            }),
+            live: AtomicUsize::new(0),
+            mutation_epoch: AtomicU64::new(0),
+            routine_collection: AtomicBool::new(false),
+            collector: Mutex::new(Weak::new()),
+        }))
     }
 
     pub(crate) fn set_collector(&self, owner: &Arc<crate::vm::class_gc::RootOwner>) {
@@ -397,18 +480,24 @@ impl Heap {
 
     pub(crate) fn clear_collector(&self, owner: *const crate::vm::class_gc::RootOwner) {
         let mut collector = self.0.collector.lock().unwrap();
-        if collector.as_ptr() == owner { *collector = Weak::new(); }
+        if collector.as_ptr() == owner {
+            *collector = Weak::new();
+        }
     }
 
     fn admit_gc(&self, nodes: usize, edges: usize) -> Result<(), LanaError> {
         let owner = self.0.collector.lock().unwrap().upgrade();
-        if let Some(owner) = owner { owner.admit(nodes, edges)?; }
+        if let Some(owner) = owner {
+            owner.admit(nodes, edges)?;
+        }
         Ok(())
     }
 
     fn release_gc(&self, nodes: usize, edges: usize) {
         let owner = self.0.collector.lock().unwrap().upgrade();
-        if let Some(owner) = owner { owner.release_admission(nodes, edges); }
+        if let Some(owner) = owner {
+            owner.release_admission(nodes, edges);
+        }
     }
 
     pub(crate) fn cycle_slot(&self) -> Result<Arc<CycleSlot>, LanaError> {
@@ -424,7 +513,9 @@ impl Heap {
             if state.cycles.len() == state.cycles.capacity() {
                 let capacity = state.cycles.capacity().saturating_mul(2).max(16);
                 let additional = capacity - state.cycles.len();
-                let bytes = additional.checked_mul(size_of::<Weak<CycleSlot>>()).ok_or(LanaError::Oom)?;
+                let bytes = additional
+                    .checked_mul(size_of::<Weak<CycleSlot>>())
+                    .ok_or(LanaError::Oom)?;
                 state.charge(bytes)?;
                 if state.cycles.try_reserve_exact(additional).is_err() {
                     state.live -= bytes;
@@ -432,27 +523,44 @@ impl Heap {
                 }
             }
         }
-        let slot = Arc::new(CycleSlot { node: Mutex::new(None),
+        let slot = Arc::new(CycleSlot {
+            node: Mutex::new(None),
             generation: std::sync::atomic::AtomicU8::new(Generation::Young as u8),
             remembered: std::sync::atomic::AtomicBool::new(false),
-            tracing: std::sync::atomic::AtomicBool::new(false), _allocation: Mutex::new(allocation),
-            payload_allocation: Mutex::new(None), owner: Mutex::new(None), owns_node: AtomicBool::new(false) });
+            tracing: std::sync::atomic::AtomicBool::new(false),
+            _allocation: Mutex::new(allocation),
+            payload_allocation: Mutex::new(None),
+            owner: Mutex::new(None),
+            owns_node: AtomicBool::new(false),
+        });
         state.live_cycles += 1;
         state.cycles.push(Arc::downgrade(&slot));
         state.cycles_since_collection = state.cycles_since_collection.saturating_add(1);
         Ok(slot)
     }
 
-    pub(crate) fn cycle_count(&self) -> usize { self.0.lock().cycles.len() }
+    pub(crate) fn cycle_count(&self) -> usize {
+        self.0.lock().cycles.len()
+    }
 
     pub(crate) fn mutate_cycle(&self, identity: usize) {
         self.bump_mutation_epoch();
         // ponytail: suspended frames use the existing weak registry; add a
         // direct slot link if measured mutation lookup cost becomes material.
         for index in 0..self.cycle_count() {
-            let Some(slot) = self.cycle_slot_at(index) else { continue; };
-            let matches = slot.node.lock().unwrap().as_ref().is_some_and(|node| node.identity() == identity);
-            if matches { slot.mutated(); break; }
+            let Some(slot) = self.cycle_slot_at(index) else {
+                continue;
+            };
+            let matches = slot
+                .node
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|node| node.identity() == identity);
+            if matches {
+                slot.mutated();
+                break;
+            }
         }
     }
 
@@ -467,24 +575,34 @@ impl Heap {
     }
 
     pub(crate) fn cycles_due(&self, pressure: bool) -> bool {
-        if !pressure { return false; }
+        if !pressure {
+            return false;
+        }
         let mut state = self.0.lock();
         state.cycle_bytes_at_collection = state.cycle_bytes_at_collection.min(state.live);
         // A full trace should buy headroom, not repeat for every allocation
         // while a large live graph keeps the heap above the pressure threshold.
-        pressure && (state.cycles_since_collection > 0 || state.collection_deferred)
-            && state.live >= state.cycle_bytes_at_collection.saturating_add(state.limit / 8)
+        pressure
+            && (state.cycles_since_collection > 0 || state.collection_deferred)
+            && state.live
+                >= state
+                    .cycle_bytes_at_collection
+                    .saturating_add(state.limit / 8)
     }
 
     pub(crate) fn major_collection_due(&self, pressure: bool) -> bool {
-        if !pressure { return false; }
+        if !pressure {
+            return false;
+        }
         let state = self.0.lock();
         state.live >= state.cycle_bytes_at_major.saturating_add(state.limit / 2)
     }
 
     // One weak-registry visit per routine slice work unit.
     pub(crate) fn prune_cycle_at(&self, index: usize) -> bool {
-        let Some(weak) = self.0.lock().cycles.get(index).cloned() else { return false; };
+        let Some(weak) = self.0.lock().cycles.get(index).cloned() else {
+            return false;
+        };
         let slot = weak.upgrade();
         let dead = match &slot {
             None => true,
@@ -494,8 +612,14 @@ impl Heap {
             },
         };
         let mut state = self.0.lock();
-        let remove = dead && state.cycles.get(index).is_some_and(|current| current.ptr_eq(&weak));
-        if remove { state.cycles.swap_remove(index); }
+        let remove = dead
+            && state
+                .cycles
+                .get(index)
+                .is_some_and(|current| current.ptr_eq(&weak));
+        if remove {
+            state.cycles.swap_remove(index);
+        }
         // A concurrently retired slot may now have its last strong owner here.
         // Its destructor takes the heap lock, so release that lock first.
         drop(state);
@@ -511,7 +635,9 @@ impl Heap {
         state.cycles_since_collection = 0;
         state.cycle_bytes_at_collection = state.live;
         state.collection_deferred = false;
-        if major { state.cycle_bytes_at_major = state.live; }
+        if major {
+            state.cycle_bytes_at_major = state.live;
+        }
     }
 
     pub(crate) fn finish_cycles(&self, major: bool) {
@@ -520,7 +646,9 @@ impl Heap {
         state.cycles_since_collection = 0;
         state.cycle_bytes_at_collection = state.live;
         state.collection_deferred = false;
-        if major { state.cycle_bytes_at_major = state.live; }
+        if major {
+            state.cycle_bytes_at_major = state.live;
+        }
     }
 
     pub(crate) fn defer_cycles(&self) {
@@ -530,12 +658,24 @@ impl Heap {
         state.collection_deferred = true;
     }
 
-    pub fn live_bytes(&self) -> usize { self.0.live.load(Ordering::Acquire) }
-    pub(crate) fn same_heap(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
-    pub(crate) fn mutation_epoch(&self) -> u64 { self.0.mutation_epoch.load(Ordering::Acquire) }
-    pub(crate) fn bump_mutation_epoch(&self) { self.0.mutation_epoch.fetch_add(1, Ordering::AcqRel); }
-    pub fn peak_bytes(&self) -> usize { self.0.lock().peak }
-    pub fn allocations(&self) -> u64 { self.0.lock().allocations }
+    pub fn live_bytes(&self) -> usize {
+        self.0.live.load(Ordering::Acquire)
+    }
+    pub(crate) fn same_heap(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub(crate) fn mutation_epoch(&self) -> u64 {
+        self.0.mutation_epoch.load(Ordering::Acquire)
+    }
+    pub(crate) fn bump_mutation_epoch(&self) {
+        self.0.mutation_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn peak_bytes(&self) -> usize {
+        self.0.lock().peak
+    }
+    pub fn allocations(&self) -> u64 {
+        self.0.lock().allocations
+    }
 
     /// Strings may be exposed as ordinary Arc<str> aliases. Keep a weak entry
     /// and its charge until every alias is gone; no Value wrapper can lose it.
@@ -543,20 +683,30 @@ impl Heap {
         let bytes = text.len().checked_add(1).ok_or(LanaError::Oom)?;
         let mut reservation = self.reserve(bytes)?;
         let mut state = self.0.lock();
-        if state.allocations.is_multiple_of(256) { state.collect_strings(); }
+        if state.allocations.is_multiple_of(256) {
+            state.collect_strings();
+        }
         state.strings.try_reserve(1).map_err(|_| LanaError::Oom)?;
         let string: Arc<str> = Arc::from(text);
-        state.strings.insert(Arc::as_ptr(&string) as *const () as usize, (Arc::downgrade(&string), bytes));
+        state.strings.insert(
+            Arc::as_ptr(&string) as *const () as usize,
+            (Arc::downgrade(&string), bytes),
+        );
         reservation.bytes = 0; // The weak entry now owns this charge.
         Ok(string)
     }
 
     pub fn lossy_string(&self, mut bytes: &[u8]) -> Result<Arc<str>, LanaError> {
-        if let Ok(text) = std::str::from_utf8(bytes) { return self.string(text); }
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return self.string(text);
+        }
         let mut decoded = Buffer::new(self, 0, 0)?;
         loop {
             match std::str::from_utf8(bytes) {
-                Ok(text) => { decoded.extend_from_slice(text.as_bytes())?; break; }
+                Ok(text) => {
+                    decoded.extend_from_slice(text.as_bytes())?;
+                    break;
+                }
                 Err(error) => {
                     decoded.extend_from_slice(&bytes[..error.valid_up_to()])?;
                     decoded.extend_from_slice("\u{fffd}".as_bytes())?;
@@ -570,18 +720,27 @@ impl Heap {
         self.string(std::str::from_utf8(&decoded).unwrap())
     }
 
-    pub fn collect_strings(&self) { self.0.lock().collect_strings(); }
+    pub fn collect_strings(&self) {
+        self.0.lock().collect_strings();
+    }
 
     pub fn set_limit(&self, limit: usize) -> Result<(), LanaError> {
         let mut state = self.0.lock();
         state.collect_strings();
-        if state.live > limit { return Err(LanaError::Oom); }
+        if state.live > limit {
+            return Err(LanaError::Oom);
+        }
         state.limit = limit;
         Ok(())
     }
 
     pub fn reserve(&self, bytes: usize) -> Result<Reservation, LanaError> {
-        let mut reservation = Reservation { heap: self.clone(), bytes: 0, gc_nodes: 0, gc_edges: 0 };
+        let mut reservation = Reservation {
+            heap: self.clone(),
+            bytes: 0,
+            gc_nodes: 0,
+            gc_edges: 0,
+        };
         reservation.resize(bytes)?;
         Ok(reservation)
     }
@@ -598,13 +757,20 @@ pub struct Reservation {
 }
 
 impl Reservation {
-    pub(crate) fn heap(&self) -> &Heap { &self.heap }
+    pub(crate) fn heap(&self) -> &Heap {
+        &self.heap
+    }
 
     pub(crate) fn admit_gc(&mut self, nodes: usize, edges: usize) -> Result<(), LanaError> {
         let added_nodes = nodes.saturating_sub(self.gc_nodes);
         let added_edges = edges.saturating_sub(self.gc_edges);
-        if added_nodes != 0 || added_edges != 0 { self.heap.admit_gc(added_nodes, added_edges)?; }
-        self.heap.release_gc(self.gc_nodes.saturating_sub(nodes), self.gc_edges.saturating_sub(edges));
+        if added_nodes != 0 || added_edges != 0 {
+            self.heap.admit_gc(added_nodes, added_edges)?;
+        }
+        self.heap.release_gc(
+            self.gc_nodes.saturating_sub(nodes),
+            self.gc_edges.saturating_sub(edges),
+        );
         self.gc_nodes = nodes;
         self.gc_edges = edges;
         Ok(())
@@ -626,7 +792,9 @@ impl Reservation {
 impl Drop for Reservation {
     fn drop(&mut self) {
         self.heap.0.lock().live -= self.bytes;
-        if self.gc_nodes != 0 || self.gc_edges != 0 { self.heap.release_gc(self.gc_nodes, self.gc_edges); }
+        if self.gc_nodes != 0 || self.gc_edges != 0 {
+            self.heap.release_gc(self.gc_nodes, self.gc_edges);
+        }
     }
 }
 
@@ -641,13 +809,19 @@ pub struct Buffer<T> {
 }
 
 impl<T> Buffer<T> {
-    pub fn filled(heap: &Heap, len: usize, value: T) -> Result<Self, LanaError> where T: Clone {
+    pub fn filled(heap: &Heap, len: usize, value: T) -> Result<Self, LanaError>
+    where
+        T: Clone,
+    {
         let mut buffer = Self::new(heap, len, 0)?;
         buffer.values.resize(len, value);
         Ok(buffer)
     }
 
-    pub fn from_slice(heap: &Heap, values: &[T]) -> Result<Self, LanaError> where T: Clone {
+    pub fn from_slice(heap: &Heap, values: &[T]) -> Result<Self, LanaError>
+    where
+        T: Clone,
+    {
         let mut buffer = Self::new(heap, values.len(), 0)?;
         buffer.values.extend_from_slice(values);
         Ok(buffer)
@@ -656,26 +830,43 @@ impl<T> Buffer<T> {
     /// Admit an already-owned host buffer to this heap without copying it.
     pub fn from_vec(heap: &Heap, values: Vec<T>, owner_bytes: usize) -> Result<Self, LanaError> {
         let reservation = heap.reserve(Self::bytes(values.capacity(), owner_bytes)?)?;
-        Ok(Self { values, reservation, owner_bytes, barrier: None })
+        Ok(Self {
+            values,
+            reservation,
+            owner_bytes,
+            barrier: None,
+        })
     }
 
     pub fn new(heap: &Heap, capacity: usize, owner_bytes: usize) -> Result<Self, LanaError> {
         let bytes = Self::bytes(capacity, owner_bytes)?;
         let reservation = heap.reserve(bytes)?;
         let mut values = Vec::new();
-        values.try_reserve_exact(capacity).map_err(|_| LanaError::Oom)?;
-        Ok(Self { values, reservation, owner_bytes, barrier: None })
+        values
+            .try_reserve_exact(capacity)
+            .map_err(|_| LanaError::Oom)?;
+        Ok(Self {
+            values,
+            reservation,
+            owner_bytes,
+            barrier: None,
+        })
     }
 
     fn bytes(capacity: usize, owner_bytes: usize) -> Result<usize, LanaError> {
-        capacity.checked_mul(size_of::<T>()).and_then(|n| n.checked_add(owner_bytes))
+        capacity
+            .checked_mul(size_of::<T>())
+            .and_then(|n| n.checked_add(owner_bytes))
             .ok_or(LanaError::Oom)
     }
 
-    pub fn capacity(&self) -> usize { self.values.capacity() }
+    pub fn capacity(&self) -> usize {
+        self.values.capacity()
+    }
 
     pub(crate) fn set_barrier(&mut self, barrier: &Arc<CycleSlot>) -> Result<(), LanaError> {
-        self.reservation.admit_gc(0, self.capacity().checked_mul(5).ok_or(LanaError::Oom)?)?;
+        self.reservation
+            .admit_gc(0, self.capacity().checked_mul(5).ok_or(LanaError::Oom)?)?;
         self.barrier = Some(barrier.clone());
         Ok(())
     }
@@ -683,14 +874,26 @@ impl<T> Buffer<T> {
     pub(crate) fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
         let before = self.values.len();
         self.values.retain(keep);
-        if self.values.len() != before { if let Some(barrier) = &self.barrier { barrier.mutated(); } }
+        if self.values.len() != before {
+            if let Some(barrier) = &self.barrier {
+                barrier.mutated();
+            }
+        }
     }
 
-    pub(crate) fn heap(&self) -> &Heap { &self.reservation.heap }
+    pub(crate) fn heap(&self) -> &Heap {
+        &self.reservation.heap
+    }
 
     pub fn reserve(&mut self, additional: usize) -> Result<(), LanaError> {
-        let required = self.values.len().checked_add(additional).ok_or(LanaError::Oom)?;
-        if required <= self.capacity() { return Ok(()); }
+        let required = self
+            .values
+            .len()
+            .checked_add(additional)
+            .ok_or(LanaError::Oom)?;
+        if required <= self.capacity() {
+            return Ok(());
+        }
         let capacity = required.max(self.capacity().saturating_mul(2));
         match self.reserve_capacity(capacity) {
             Err(LanaError::Oom) if capacity > required => self.reserve_capacity(required),
@@ -701,12 +904,22 @@ impl<T> Buffer<T> {
     fn reserve_capacity(&mut self, capacity: usize) -> Result<(), LanaError> {
         let old_bytes = self.reservation.bytes;
         let old_edges = self.reservation.gc_edges;
-        if self.barrier.is_some() { self.reservation.admit_gc(0, capacity.checked_mul(5).ok_or(LanaError::Oom)?)?; }
-        if let Err(error) = self.reservation.resize(Self::bytes(capacity, self.owner_bytes)?) {
+        if self.barrier.is_some() {
+            self.reservation
+                .admit_gc(0, capacity.checked_mul(5).ok_or(LanaError::Oom)?)?;
+        }
+        if let Err(error) = self
+            .reservation
+            .resize(Self::bytes(capacity, self.owner_bytes)?)
+        {
             self.reservation.admit_gc(0, old_edges)?;
             return Err(error);
         }
-        if self.values.try_reserve_exact(capacity - self.values.len()).is_err() {
+        if self
+            .values
+            .try_reserve_exact(capacity - self.values.len())
+            .is_err()
+        {
             self.reservation.resize(old_bytes)?;
             self.reservation.admit_gc(0, old_edges)?;
             return Err(LanaError::Oom);
@@ -717,63 +930,101 @@ impl<T> Buffer<T> {
     pub fn push(&mut self, value: T) -> Result<(), LanaError> {
         self.reserve(1)?;
         self.values.push(value);
-        if let Some(barrier) = &self.barrier { barrier.mutated(); }
+        if let Some(barrier) = &self.barrier {
+            barrier.mutated();
+        }
         Ok(())
     }
 
     pub fn extend(&mut self, values: impl IntoIterator<Item = T>) -> Result<(), LanaError> {
-        for value in values { self.push(value)?; }
+        for value in values {
+            self.push(value)?;
+        }
         Ok(())
     }
 
-    pub fn extend_from_slice(&mut self, values: &[T]) -> Result<(), LanaError> where T: Clone {
+    pub fn extend_from_slice(&mut self, values: &[T]) -> Result<(), LanaError>
+    where
+        T: Clone,
+    {
         self.reserve(values.len())?;
         self.values.extend_from_slice(values);
-        if !values.is_empty() { if let Some(barrier) = &self.barrier { barrier.mutated(); } }
+        if !values.is_empty() {
+            if let Some(barrier) = &self.barrier {
+                barrier.mutated();
+            }
+        }
         Ok(())
     }
 
     pub(crate) fn swap_remove(&mut self, index: usize) -> T {
         let value = self.values.swap_remove(index);
-        if let Some(barrier) = &self.barrier { barrier.mutated(); }
+        if let Some(barrier) = &self.barrier {
+            barrier.mutated();
+        }
         value
     }
 
     pub fn pop(&mut self) -> Option<T> {
         let value = self.values.pop();
-        if value.is_some() { if let Some(barrier) = &self.barrier { barrier.mutated(); } }
+        if value.is_some() {
+            if let Some(barrier) = &self.barrier {
+                barrier.mutated();
+            }
+        }
         value
     }
     pub fn clear(&mut self) {
-        if !self.values.is_empty() { if let Some(barrier) = &self.barrier { barrier.mutated(); } }
+        if !self.values.is_empty() {
+            if let Some(barrier) = &self.barrier {
+                barrier.mutated();
+            }
+        }
         self.values.clear();
     }
     pub fn truncate(&mut self, len: usize) {
-        if len < self.values.len() { if let Some(barrier) = &self.barrier { barrier.mutated(); } }
+        if len < self.values.len() {
+            if let Some(barrier) = &self.barrier {
+                barrier.mutated();
+            }
+        }
         self.values.truncate(len);
     }
 
-    pub fn resize(&mut self, len: usize, value: T) -> Result<(), LanaError> where T: Clone {
+    pub fn resize(&mut self, len: usize, value: T) -> Result<(), LanaError>
+    where
+        T: Clone,
+    {
         let changed = len != self.values.len();
         self.reserve(len.saturating_sub(self.values.len()))?;
         self.values.resize(len, value);
-        if changed { if let Some(barrier) = &self.barrier { barrier.mutated(); } }
+        if changed {
+            if let Some(barrier) = &self.barrier {
+                barrier.mutated();
+            }
+        }
         Ok(())
     }
 }
 
 impl<T> Deref for Buffer<T> {
     type Target = [T];
-    fn deref(&self) -> &[T] { &self.values }
+    fn deref(&self) -> &[T] {
+        &self.values
+    }
 }
 
 impl<T: PartialEq> PartialEq for Buffer<T> {
-    fn eq(&self, other: &Self) -> bool { self.values == other.values }
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
 }
 
 impl<T> DerefMut for Buffer<T> {
     fn deref_mut(&mut self) -> &mut [T] {
-        if let Some(barrier) = &self.barrier { barrier.mutated(); }
+        if let Some(barrier) = &self.barrier {
+            barrier.mutated();
+        }
         &mut self.values
     }
 }
@@ -781,7 +1032,9 @@ impl<T> DerefMut for Buffer<T> {
 impl<'a, T> IntoIterator for &'a Buffer<T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
-    fn into_iter(self) -> Self::IntoIter { self.values.iter() }
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
 }
 
 #[cfg(test)]
@@ -831,7 +1084,10 @@ mod tests {
         for first in 0..=255u8 {
             for second in [0, 0x7f, 0x80, 0xbf, 0xe2, 0xff] {
                 let bytes = [first, second];
-                assert_eq!(&*heap.lossy_string(&bytes).unwrap(), &*String::from_utf8_lossy(&bytes));
+                assert_eq!(
+                    &*heap.lossy_string(&bytes).unwrap(),
+                    &*String::from_utf8_lossy(&bytes)
+                );
             }
         }
         heap.collect_strings();
@@ -881,7 +1137,10 @@ mod tests {
         assert_eq!(heap.live_bytes(), 16);
         drop(buffer);
         assert_eq!(heap.live_bytes(), 0);
-        assert_eq!(Buffer::<u64>::new(&heap, usize::MAX, 0).unwrap_err(), LanaError::Oom);
+        assert_eq!(
+            Buffer::<u64>::new(&heap, usize::MAX, 0).unwrap_err(),
+            LanaError::Oom
+        );
         assert_eq!(heap.live_bytes(), 0);
     }
 
@@ -914,7 +1173,9 @@ mod tests {
                 let successes = &successes;
                 scope.spawn(move || {
                     let reservation = heap.reserve(64);
-                    if reservation.is_ok() { successes.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+                    if reservation.is_ok() {
+                        successes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
                     barrier.wait();
                     drop(reservation);
                 });

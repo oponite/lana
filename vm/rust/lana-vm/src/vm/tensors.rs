@@ -17,7 +17,12 @@ fn tensor_optional_dtype(arguments: &[Value], argc: usize) -> Option<TensorDtype
 }
 
 impl Vm<'_> {
-    pub(super) fn host_tensor(&mut self, host_id: u32, arguments: &[Value], out: &mut Value) -> LanaError {
+    pub(super) fn host_tensor(
+        &mut self,
+        host_id: u32,
+        arguments: &[Value],
+        out: &mut Value,
+    ) -> LanaError {
         let argc = arguments.len();
         match host_id {
             LANA_HOST_TENSOR_ALLOC => {
@@ -154,185 +159,433 @@ impl Vm<'_> {
                 }
             }
             LANA_HOST_TENSOR_RESHAPE => {
-                if argc != 2 { return LanaError::Type; }
-                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
-                let result = { let alloc = self.heap.clone(); tensor::tensor_reshape(&alloc, source, &arguments[1]) };
+                if argc != 2 {
+                    return LanaError::Type;
+                }
+                let ValueKind::Tensor(source) = &arguments[0].kind else {
+                    return LanaError::Type;
+                };
+                let result = {
+                    let alloc = self.heap.clone();
+                    tensor::tensor_reshape(&alloc, source, &arguments[1])
+                };
                 match result {
                     Ok(value) => {
                         *out = value;
-                        if arguments[0].derivation.is_some() { self.ad_record(10, &arguments[0], None, -1, out) } else { LanaError::Ok }
+                        if arguments[0].derivation.is_some() {
+                            self.ad_record(10, &arguments[0], None, -1, out)
+                        } else {
+                            LanaError::Ok
+                        }
                     }
                     Err(error) => error,
                 }
             }
             LANA_HOST_TENSOR_TRANSPOSE => {
-                if argc != 1 { return LanaError::Type; }
-                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
-                let result = { let alloc = self.heap.clone(); tensor::tensor_transpose(&alloc, source) };
+                if argc != 1 {
+                    return LanaError::Type;
+                }
+                let ValueKind::Tensor(source) = &arguments[0].kind else {
+                    return LanaError::Type;
+                };
+                let result = {
+                    let alloc = self.heap.clone();
+                    tensor::tensor_transpose(&alloc, source)
+                };
                 match result {
                     Ok(value) => {
                         *out = value;
-                        if arguments[0].derivation.is_some() { self.ad_record(11, &arguments[0], None, -1, out) } else { LanaError::Ok }
+                        if arguments[0].derivation.is_some() {
+                            self.ad_record(11, &arguments[0], None, -1, out)
+                        } else {
+                            LanaError::Ok
+                        }
                     }
                     Err(error) => error,
                 }
             }
-            LANA_HOST_TENSOR_EXP | LANA_HOST_TENSOR_LOG | LANA_HOST_TENSOR_SQRT | LANA_HOST_TENSOR_RELU => {
-                if argc != 1 { return LanaError::Type; }
-                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
+            LANA_HOST_TENSOR_EXP
+            | LANA_HOST_TENSOR_LOG
+            | LANA_HOST_TENSOR_SQRT
+            | LANA_HOST_TENSOR_RELU => {
+                if argc != 1 {
+                    return LanaError::Type;
+                }
+                let ValueKind::Tensor(source) = &arguments[0].kind else {
+                    return LanaError::Type;
+                };
                 let op = host_id - LANA_HOST_TENSOR_EXP;
-                let result = { let alloc = self.heap.clone(); tensor::tensor_unary_math(&alloc, source, op) };
+                let result = {
+                    let alloc = self.heap.clone();
+                    tensor::tensor_unary_math(&alloc, source, op)
+                };
                 match result {
                     Ok(value) => {
                         *out = value;
-                        if arguments[0].derivation.is_some() { self.ad_record(12 + op as i32, &arguments[0], None, -1, out) } else { LanaError::Ok }
+                        if arguments[0].derivation.is_some() {
+                            self.ad_record(12 + op as i32, &arguments[0], None, -1, out)
+                        } else {
+                            LanaError::Ok
+                        }
                     }
                     Err(error) => error,
                 }
             }
             LANA_HOST_TENSOR_SOFTMAX | LANA_HOST_TENSOR_LOGSUMEXP => {
-                if argc != 1 && argc != 2 { return LanaError::Type; }
-                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
+                if argc != 1 && argc != 2 {
+                    return LanaError::Type;
+                }
+                let ValueKind::Tensor(source) = &arguments[0].kind else {
+                    return LanaError::Type;
+                };
                 let axis_value = if argc == 2 { Some(&arguments[1]) } else { None };
-                let result = { let alloc = self.heap.clone(); tensor::tensor_softmax_like(&alloc, source, axis_value, host_id == LANA_HOST_TENSOR_LOGSUMEXP) };
+                let result = {
+                    let alloc = self.heap.clone();
+                    tensor::tensor_softmax_like(
+                        &alloc,
+                        source,
+                        axis_value,
+                        host_id == LANA_HOST_TENSOR_LOGSUMEXP,
+                    )
+                };
                 match result {
                     Ok(value) => {
                         *out = value;
-                        if arguments[0].derivation.is_none() { return LanaError::Ok; }
-                        let mut axis_number = match axis_value { None => -1.0, Some(v) => v.as_number() };
-                        if axis_number < 0.0 { axis_number += source.ndim as f64; }
-                        self.ad_record(if host_id == LANA_HOST_TENSOR_LOGSUMEXP { 17 } else { 16 }, &arguments[0], None, axis_number as i32, out)
+                        if arguments[0].derivation.is_none() {
+                            return LanaError::Ok;
+                        }
+                        let mut axis_number = match axis_value {
+                            None => -1.0,
+                            Some(v) => v.as_number(),
+                        };
+                        if axis_number < 0.0 {
+                            axis_number += source.ndim as f64;
+                        }
+                        self.ad_record(
+                            if host_id == LANA_HOST_TENSOR_LOGSUMEXP {
+                                17
+                            } else {
+                                16
+                            },
+                            &arguments[0],
+                            None,
+                            axis_number as i32,
+                            out,
+                        )
                     }
                     Err(error) => error,
                 }
             }
             LANA_HOST_TENSOR_ARGMAX => {
-                if argc != 1 && argc != 2 { return LanaError::Type; }
-                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
+                if argc != 1 && argc != 2 {
+                    return LanaError::Type;
+                }
+                let ValueKind::Tensor(source) = &arguments[0].kind else {
+                    return LanaError::Type;
+                };
                 let alloc = self.heap.clone();
-                match tensor::tensor_argmax(&alloc, source, if argc == 2 { Some(&arguments[1]) } else { None }) {
-                    Ok(value) => { *out = value; LanaError::Ok }
+                match tensor::tensor_argmax(
+                    &alloc,
+                    source,
+                    if argc == 2 { Some(&arguments[1]) } else { None },
+                ) {
+                    Ok(value) => {
+                        *out = value;
+                        LanaError::Ok
+                    }
                     Err(error) => error,
                 }
             }
             LANA_HOST_TENSOR_COMPARE => {
-                if argc != 3 { return LanaError::Type; }
+                if argc != 3 {
+                    return LanaError::Type;
+                }
                 let (ValueKind::Tensor(a), ValueKind::Tensor(b), ValueKind::String(operation)) =
-                    (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind) else { return LanaError::Type; };
+                    (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind)
+                else {
+                    return LanaError::Type;
+                };
                 let alloc = self.heap.clone();
                 match tensor::tensor_compare_values(&alloc, a, b, operation) {
-                    Ok(value) => { *out = value; LanaError::Ok }
+                    Ok(value) => {
+                        *out = value;
+                        LanaError::Ok
+                    }
                     Err(error) => error,
                 }
             }
             LANA_HOST_TENSOR_SELECT => {
-                if argc != 3 { return LanaError::Type; }
+                if argc != 3 {
+                    return LanaError::Type;
+                }
                 let (ValueKind::Tensor(mask), ValueKind::Tensor(yes), ValueKind::Tensor(no)) =
-                    (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind) else { return LanaError::Type; };
-                let result = { let alloc = self.heap.clone(); tensor::tensor_select_values(&alloc, mask, yes, no) };
+                    (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind)
+                else {
+                    return LanaError::Type;
+                };
+                let result = {
+                    let alloc = self.heap.clone();
+                    tensor::tensor_select_values(&alloc, mask, yes, no)
+                };
                 match result {
                     Ok(value) => {
                         *out = value;
-                        if arguments[1].derivation.is_none() && arguments[2].derivation.is_none() { return LanaError::Ok; }
-                        let shape = match &out.kind { ValueKind::Tensor(t) => t.shape.clone(), _ => unreachable!() };
+                        if arguments[1].derivation.is_none() && arguments[2].derivation.is_none() {
+                            return LanaError::Ok;
+                        }
+                        let shape = match &out.kind {
+                            ValueKind::Tensor(t) => t.shape.clone(),
+                            _ => unreachable!(),
+                        };
                         let alloc = self.heap.clone();
-                        let mut yes_mask = match tensor::tensor_new_dtype(&alloc, shape.len(), &shape, yes.dtype) { Ok(t) => t, Err(error) => return error };
-                        let mut no_mask = match tensor::tensor_new_dtype(&alloc, shape.len(), &shape, no.dtype) { Ok(t) => t, Err(error) => return error };
+                        let mut yes_mask = match tensor::tensor_new_dtype(
+                            &alloc,
+                            shape.len(),
+                            &shape,
+                            yes.dtype,
+                        ) {
+                            Ok(t) => t,
+                            Err(error) => return error,
+                        };
+                        let mut no_mask =
+                            match tensor::tensor_new_dtype(&alloc, shape.len(), &shape, no.dtype) {
+                                Ok(t) => t,
+                                Err(error) => return error,
+                            };
                         for i in 0..shape.iter().product() {
-                            let selected = if tensor_get_real(mask, tensor::broadcast_index(mask, &shape, i)) != 0.0 { 1.0 } else { 0.0 };
-                            tensor_set_real(&mut yes_mask, i, selected); tensor_set_real(&mut no_mask, i, 1.0 - selected);
+                            let selected =
+                                if tensor_get_real(mask, tensor::broadcast_index(mask, &shape, i))
+                                    != 0.0
+                                {
+                                    1.0
+                                } else {
+                                    0.0
+                                };
+                            tensor_set_real(&mut yes_mask, i, selected);
+                            tensor_set_real(&mut no_mask, i, 1.0 - selected);
                         }
                         drop(alloc);
-                        let yes_mask_value = Value::tensor(Arc::new(match yes_mask.try_clone(&self.heap) { Ok(t) => t, Err(error) => return error }));
-                        let no_mask_value = Value::tensor(Arc::new(match no_mask.try_clone(&self.heap) { Ok(t) => t, Err(error) => return error }));
-                        let mut yes_product = { let alloc = self.heap.clone(); match tensor::tensor_elementwise(&alloc, yes, &yes_mask, 2) { Ok(t) => Value::tensor(Arc::new(t)), Err(error) => return error } };
-                        if arguments[1].derivation.is_some() { let error = self.ad_record(2, &arguments[1], Some(&yes_mask_value), -1, &mut yes_product); if error != LanaError::Ok { return error; } }
-                        let mut no_product = { let alloc = self.heap.clone(); match tensor::tensor_elementwise(&alloc, no, &no_mask, 2) { Ok(t) => Value::tensor(Arc::new(t)), Err(error) => return error } };
-                        if arguments[2].derivation.is_some() { let error = self.ad_record(2, &arguments[2], Some(&no_mask_value), -1, &mut no_product); if error != LanaError::Ok { return error; } }
+                        let yes_mask_value =
+                            Value::tensor(Arc::new(match yes_mask.try_clone(&self.heap) {
+                                Ok(t) => t,
+                                Err(error) => return error,
+                            }));
+                        let no_mask_value =
+                            Value::tensor(Arc::new(match no_mask.try_clone(&self.heap) {
+                                Ok(t) => t,
+                                Err(error) => return error,
+                            }));
+                        let mut yes_product = {
+                            let alloc = self.heap.clone();
+                            match tensor::tensor_elementwise(&alloc, yes, &yes_mask, 2) {
+                                Ok(t) => Value::tensor(Arc::new(t)),
+                                Err(error) => return error,
+                            }
+                        };
+                        if arguments[1].derivation.is_some() {
+                            let error = self.ad_record(
+                                2,
+                                &arguments[1],
+                                Some(&yes_mask_value),
+                                -1,
+                                &mut yes_product,
+                            );
+                            if error != LanaError::Ok {
+                                return error;
+                            }
+                        }
+                        let mut no_product = {
+                            let alloc = self.heap.clone();
+                            match tensor::tensor_elementwise(&alloc, no, &no_mask, 2) {
+                                Ok(t) => Value::tensor(Arc::new(t)),
+                                Err(error) => return error,
+                            }
+                        };
+                        if arguments[2].derivation.is_some() {
+                            let error = self.ad_record(
+                                2,
+                                &arguments[2],
+                                Some(&no_mask_value),
+                                -1,
+                                &mut no_product,
+                            );
+                            if error != LanaError::Ok {
+                                return error;
+                            }
+                        }
                         self.ad_record(0, &yes_product, Some(&no_product), -1, out)
                     }
                     Err(error) => error,
                 }
             }
             LANA_HOST_TENSOR_GATHER => {
-                if argc != 3 { return LanaError::Type; }
+                if argc != 3 {
+                    return LanaError::Type;
+                }
                 let (ValueKind::Tensor(source), ValueKind::Tensor(indices)) =
-                    (&arguments[0].kind, &arguments[1].kind) else { return LanaError::Type; };
-                let result = { let alloc = self.heap.clone(); tensor::tensor_gather_values(&alloc, source, indices, &arguments[2]) };
+                    (&arguments[0].kind, &arguments[1].kind)
+                else {
+                    return LanaError::Type;
+                };
+                let result = {
+                    let alloc = self.heap.clone();
+                    tensor::tensor_gather_values(&alloc, source, indices, &arguments[2])
+                };
                 match result {
                     Ok(value) => {
                         *out = value;
-                        if arguments[0].derivation.is_none() { return LanaError::Ok; }
-                        let mut axis = arguments[2].as_number(); if axis < 0.0 { axis += source.ndim as f64; }
+                        if arguments[0].derivation.is_none() {
+                            return LanaError::Ok;
+                        }
+                        let mut axis = arguments[2].as_number();
+                        if axis < 0.0 {
+                            axis += source.ndim as f64;
+                        }
                         self.ad_record(18, &arguments[0], Some(&arguments[1]), axis as i32, out)
                     }
                     Err(error) => error,
                 }
             }
             LANA_HOST_CHOLESKY_SOLVE => {
-                if argc != 2 { return LanaError::Type; }
+                if argc != 2 {
+                    return LanaError::Type;
+                }
                 let (ValueKind::Tensor(matrix), ValueKind::Tensor(rhs)) =
-                    (&arguments[0].kind, &arguments[1].kind) else { return LanaError::Type; };
-                let result = { let alloc = self.heap.clone(); tensor::tensor_cholesky_solve(&alloc, matrix, rhs) };
+                    (&arguments[0].kind, &arguments[1].kind)
+                else {
+                    return LanaError::Type;
+                };
+                let result = {
+                    let alloc = self.heap.clone();
+                    tensor::tensor_cholesky_solve(&alloc, matrix, rhs)
+                };
                 match result {
                     Ok(value) => {
                         *out = value;
-                        if arguments[0].derivation.is_some() || arguments[1].derivation.is_some() { self.ad_record(19, &arguments[0], Some(&arguments[1]), -1, out) } else { LanaError::Ok }
+                        if arguments[0].derivation.is_some() || arguments[1].derivation.is_some() {
+                            self.ad_record(19, &arguments[0], Some(&arguments[1]), -1, out)
+                        } else {
+                            LanaError::Ok
+                        }
                     }
                     Err(error) => error,
                 }
             }
             LANA_HOST_RANDOM_UNIFORM | LANA_HOST_RANDOM_NORMAL => {
-                if argc != 2 { return LanaError::Type; }
+                if argc != 2 {
+                    return LanaError::Type;
+                }
                 let alloc = self.heap.clone();
-                match tensor::tensor_random(&alloc, &arguments[0], &arguments[1], host_id == LANA_HOST_RANDOM_NORMAL) {
-                    Ok(value) => { *out = value; LanaError::Ok }
+                match tensor::tensor_random(
+                    &alloc,
+                    &arguments[0],
+                    &arguments[1],
+                    host_id == LANA_HOST_RANDOM_NORMAL,
+                ) {
+                    Ok(value) => {
+                        *out = value;
+                        LanaError::Ok
+                    }
                     Err(error) => error,
                 }
             }
             LANA_HOST_TENSOR_DEVICE => {
-                if argc != 1 { return LanaError::Type; }
-                let ValueKind::Tensor(tensor) = &arguments[0].kind else { return LanaError::Type; };
-                *out = Value::string(Arc::from(if tensor.device == TensorDevice::Metal { "metal" } else { "cpu" }));
+                if argc != 1 {
+                    return LanaError::Type;
+                }
+                let ValueKind::Tensor(tensor) = &arguments[0].kind else {
+                    return LanaError::Type;
+                };
+                *out = Value::string(Arc::from(if tensor.device == TensorDevice::Metal {
+                    "metal"
+                } else {
+                    "cpu"
+                }));
                 LanaError::Ok
             }
             LANA_HOST_TENSOR_TO_DEVICE => {
-                if argc != 3 { return LanaError::Type; }
-                let (ValueKind::Tensor(source), ValueKind::String(device), ValueKind::Capability(token)) =
-                    (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind) else { return LanaError::Type; };
-                let target = match &**device { "cpu" => TensorDevice::Cpu, "metal" => TensorDevice::Metal, _ => return LanaError::InvalidParameters };
+                if argc != 3 {
+                    return LanaError::Type;
+                }
+                let (
+                    ValueKind::Tensor(source),
+                    ValueKind::String(device),
+                    ValueKind::Capability(token),
+                ) = (&arguments[0].kind, &arguments[1].kind, &arguments[2].kind)
+                else {
+                    return LanaError::Type;
+                };
+                let target = match &**device {
+                    "cpu" => TensorDevice::Cpu,
+                    "metal" => TensorDevice::Metal,
+                    _ => return LanaError::InvalidParameters,
+                };
                 if target == TensorDevice::Metal {
                     let shared = &token.shared;
                     let named_gpu = matches!(&shared.base_snapshot.kind, ValueKind::String(name) if &**name == "gpu");
-                    if !named_gpu || !capability_allows_locked(shared, token, LANA_CAPABILITY_READ) { return LanaError::Capability; }
-                    if source.dtype == TensorDtype::F64 || source.is_complex || !crate::metal::metal_available() { return LanaError::UnsupportedOperation; }
+                    if !named_gpu || !capability_allows_locked(shared, token, LANA_CAPABILITY_READ)
+                    {
+                        return LanaError::Capability;
+                    }
+                    if source.dtype == TensorDtype::F64
+                        || source.is_complex
+                        || !crate::metal::metal_available()
+                    {
+                        return LanaError::UnsupportedOperation;
+                    }
                 }
                 let result = self.tensor_copy_contiguous(source);
-                match result { Ok(mut tensor) => {
-                    if target == TensorDevice::Metal {
-                        let charge = match self.heap.reserve(source.data.len()) { Ok(charge) => charge, Err(error) => return error };
-                        let Some(buffer) = crate::metal::ResidentBuffer::new(&tensor.data) else { return LanaError::UnsupportedOperation; };
-                        let tensor_mut = Arc::get_mut(&mut tensor).expect("new tensor is unique");
-                        tensor_mut.metal_buffer = Some(Arc::new(buffer));
-                        tensor_mut.metal_charge = Some(Arc::new(charge));
-                        tensor_mut.device = target;
-                    } else { Arc::get_mut(&mut tensor).expect("new tensor is unique").device = target; }
-                    *out = Value::tensor(tensor); LanaError::Ok
-                }, Err(error) => error }
+                match result {
+                    Ok(mut tensor) => {
+                        if target == TensorDevice::Metal {
+                            let charge = match self.heap.reserve(source.data.len()) {
+                                Ok(charge) => charge,
+                                Err(error) => return error,
+                            };
+                            let Some(buffer) = crate::metal::ResidentBuffer::new(&tensor.data)
+                            else {
+                                return LanaError::UnsupportedOperation;
+                            };
+                            let tensor_mut =
+                                Arc::get_mut(&mut tensor).expect("new tensor is unique");
+                            tensor_mut.metal_buffer = Some(Arc::new(buffer));
+                            tensor_mut.metal_charge = Some(Arc::new(charge));
+                            tensor_mut.device = target;
+                        } else {
+                            Arc::get_mut(&mut tensor)
+                                .expect("new tensor is unique")
+                                .device = target;
+                        }
+                        *out = Value::tensor(tensor);
+                        LanaError::Ok
+                    }
+                    Err(error) => error,
+                }
             }
             LANA_HOST_TENSOR_TO_CPU => {
-                if argc != 1 { return LanaError::Type; }
-                let ValueKind::Tensor(source) = &arguments[0].kind else { return LanaError::Type; };
-                match self.tensor_copy_contiguous(source) { Ok(mut tensor) => {
-                    let tensor_mut = Arc::get_mut(&mut tensor).expect("new tensor is unique");
-                    if let Some(buffer) = &source.metal_buffer {
-                        buffer.copy_into(Arc::get_mut(&mut tensor_mut.data).expect("new tensor buffer is unique"));
+                if argc != 1 {
+                    return LanaError::Type;
+                }
+                let ValueKind::Tensor(source) = &arguments[0].kind else {
+                    return LanaError::Type;
+                };
+                match self.tensor_copy_contiguous(source) {
+                    Ok(mut tensor) => {
+                        let tensor_mut = Arc::get_mut(&mut tensor).expect("new tensor is unique");
+                        if let Some(buffer) = &source.metal_buffer {
+                            buffer.copy_into(
+                                Arc::get_mut(&mut tensor_mut.data)
+                                    .expect("new tensor buffer is unique"),
+                            );
+                        }
+                        tensor_mut.metal_buffer = None;
+                        tensor_mut.metal_charge = None;
+                        tensor_mut.device = TensorDevice::Cpu;
+                        *out = Value::tensor(tensor);
+                        LanaError::Ok
                     }
-                    tensor_mut.metal_buffer = None;
-                    tensor_mut.metal_charge = None;
-                    tensor_mut.device = TensorDevice::Cpu;
-                    *out = Value::tensor(tensor); LanaError::Ok
-                }, Err(error) => error }
+                    Err(error) => error,
+                }
             }
             LANA_HOST_TENSOR_SHAPE => {
                 if argc != 1 {
@@ -342,10 +595,18 @@ impl Vm<'_> {
                     return LanaError::Type;
                 };
                 let mut items = match self.allocate_array_items(t.shape.len()) {
-                    Ok(items) => items, Err(error) => return error,
+                    Ok(items) => items,
+                    Err(error) => return error,
                 };
-                if let Err(error) = items.extend(t.shape.iter().map(|&dim| Value::number(dim as f64))) { return error; }
-                *out = Value::array(Arc::new(Mutex::new(match Array::from_buffer(items) { Ok(array) => array, Err(error) => return error })));
+                if let Err(error) =
+                    items.extend(t.shape.iter().map(|&dim| Value::number(dim as f64)))
+                {
+                    return error;
+                }
+                *out = Value::array(Arc::new(Mutex::new(match Array::from_buffer(items) {
+                    Ok(array) => array,
+                    Err(error) => return error,
+                })));
                 LanaError::Ok
             }
             LANA_HOST_TENSOR_NDIM => {
@@ -358,16 +619,19 @@ impl Vm<'_> {
                 *out = Value::number(t.ndim as f64);
                 LanaError::Ok
             }
-            LANA_HOST_TENSOR_ADD | LANA_HOST_TENSOR_SUB | LANA_HOST_TENSOR_MUL | LANA_HOST_TENSOR_DIV => {
+            LANA_HOST_TENSOR_ADD | LANA_HOST_TENSOR_SUB | LANA_HOST_TENSOR_MUL
+            | LANA_HOST_TENSOR_DIV => {
                 if argc != 2 {
                     return LanaError::Type;
                 }
                 let op = host_id - LANA_HOST_TENSOR_ADD;
-                let (a_pred, a_var, a_unc) = match tensor::tensor_uncertainty_unpack(&arguments[0]) {
+                let (a_pred, a_var, a_unc) = match tensor::tensor_uncertainty_unpack(&arguments[0])
+                {
                     Ok(x) => x,
                     Err(error) => return error,
                 };
-                let (b_pred, b_var, b_unc) = match tensor::tensor_uncertainty_unpack(&arguments[1]) {
+                let (b_pred, b_var, b_unc) = match tensor::tensor_uncertainty_unpack(&arguments[1])
+                {
                     Ok(x) => x,
                     Err(error) => return error,
                 };
@@ -414,11 +678,13 @@ impl Vm<'_> {
                 if argc == 3 && !matches!(arguments[2].kind, ValueKind::String(_)) {
                     return LanaError::Type;
                 }
-                let (a_pred, a_var, a_unc) = match tensor::tensor_uncertainty_unpack(&arguments[0]) {
+                let (a_pred, a_var, a_unc) = match tensor::tensor_uncertainty_unpack(&arguments[0])
+                {
                     Ok(x) => x,
                     Err(error) => return error,
                 };
-                let (b_pred, b_var, b_unc) = match tensor::tensor_uncertainty_unpack(&arguments[1]) {
+                let (b_pred, b_var, b_unc) = match tensor::tensor_uncertainty_unpack(&arguments[1])
+                {
                     Ok(x) => x,
                     Err(error) => return error,
                 };
@@ -491,7 +757,10 @@ impl Vm<'_> {
                 *out = Value::tensor(Arc::new(t));
                 LanaError::Ok
             }
-            LANA_HOST_TENSOR_SUM | LANA_HOST_TENSOR_MEAN | LANA_HOST_TENSOR_MAX | LANA_HOST_TENSOR_MIN => {
+            LANA_HOST_TENSOR_SUM
+            | LANA_HOST_TENSOR_MEAN
+            | LANA_HOST_TENSOR_MAX
+            | LANA_HOST_TENSOR_MIN => {
                 if argc != 1 && argc != 2 {
                     return LanaError::Type;
                 }
@@ -534,7 +803,13 @@ impl Vm<'_> {
                                     axis_number as i32
                                 };
                             }
-                            return self.ad_record(5 + op as i32, &arguments[0], None, ad_axis, out);
+                            return self.ad_record(
+                                5 + op as i32,
+                                &arguments[0],
+                                None,
+                                ad_axis,
+                                out,
+                            );
                         }
                         LanaError::Ok
                     }

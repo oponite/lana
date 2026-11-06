@@ -93,8 +93,13 @@ pub struct PersistentState {
 
 const TOP_KEYS: [&str; 6] = ["schema", "p", "d_re", "d_im", "metadata", "provenance"];
 const METADATA_KEYS: [&str; 4] = ["timestamp", "source", "weight", "confidence"];
-const PROVENANCE_KEYS: [&str; 5] =
-    ["derivation_id", "input_revision", "kind", "operation", "captured_inputs"];
+const PROVENANCE_KEYS: [&str; 5] = [
+    "derivation_id",
+    "input_revision",
+    "kind",
+    "operation",
+    "captured_inputs",
+];
 
 /// Whether `map` has exactly the keys in `keys` (and no others), mirroring
 /// `map_has_exact_keys`.
@@ -108,7 +113,8 @@ fn map_has_exact_keys(map: &Map, keys: &[&str]) -> bool {
 /// Look up a key, mirroring `map_find_value`. Callers guarantee the key is
 /// present (via `map_has_exact_keys`), so a missing key is a bug.
 fn map_find_value<'a>(map: &'a Map, key: &str) -> &'a Value {
-    map.get(key).expect("key guaranteed present by map_has_exact_keys")
+    map.get(key)
+        .expect("key guaranteed present by map_has_exact_keys")
 }
 
 /// Parse a decimal `u64` from a string value, mirroring `parse_u64` (which
@@ -175,98 +181,92 @@ pub fn persistent_state_encode(state: &PersistentState) -> Result<Vec<u8>, LanaE
 
     let heap = lana_vm::heap::Heap::new(256 * 1024 * 1024);
     let mut metadata = Map::new(&heap, 4)?;
-    metadata
-        .set(
-            Arc::from("confidence"),
-            if state.metadata.has_confidence {
-                Value::number(state.metadata.confidence)
-            } else {
-                Value::null()
-            },
-            false,
-        )
-        ?;
-    metadata
-        .set(
-            Arc::from("source"),
-            if state.metadata.has_source {
-                Value::string(state.metadata.source.clone().unwrap())
-            } else {
-                Value::null()
-            },
-            false,
-        )
-        ?;
-    metadata
-        .set(
-            Arc::from("timestamp"),
-            if state.metadata.has_timestamp {
-                Value::number(state.metadata.timestamp)
-            } else {
-                Value::null()
-            },
-            false,
-        )
-        ?;
-    metadata
-        .set(
-            Arc::from("weight"),
-            if state.metadata.has_weight {
-                Value::number(state.metadata.weight)
-            } else {
-                Value::null()
-            },
-            false,
-        )
-        ?;
+    metadata.set(
+        Arc::from("confidence"),
+        if state.metadata.has_confidence {
+            Value::number(state.metadata.confidence)
+        } else {
+            Value::null()
+        },
+        false,
+    )?;
+    metadata.set(
+        Arc::from("source"),
+        if state.metadata.has_source {
+            Value::string(state.metadata.source.clone().unwrap())
+        } else {
+            Value::null()
+        },
+        false,
+    )?;
+    metadata.set(
+        Arc::from("timestamp"),
+        if state.metadata.has_timestamp {
+            Value::number(state.metadata.timestamp)
+        } else {
+            Value::null()
+        },
+        false,
+    )?;
+    metadata.set(
+        Arc::from("weight"),
+        if state.metadata.has_weight {
+            Value::number(state.metadata.weight)
+        } else {
+            Value::null()
+        },
+        false,
+    )?;
 
     let mut top = Map::new(&heap, 6)?;
     top.set(Arc::from("d_im"), Value::number(state.state.d_im), false)?;
     top.set(Arc::from("d_re"), Value::number(state.state.d_re), false)?;
-    top.set(Arc::from("metadata"), Value::map(Arc::new(Mutex::new(metadata))), false)?;
+    top.set(
+        Arc::from("metadata"),
+        Value::map(Arc::new(Mutex::new(metadata))),
+        false,
+    )?;
     top.set(Arc::from("p"), Value::number(state.state.p), false)?;
     if state.has_provenance {
         let mut provenance = Map::new(&heap, 5)?;
-        provenance
-            .set(
-                Arc::from("captured_inputs"),
-                Value::string(state.provenance.captured_inputs.clone().unwrap()),
-                false,
-            )
-            ?;
-        provenance
-            .set(
-                Arc::from("derivation_id"),
-                Value::string(Arc::from(state.provenance.derivation_id.to_string())),
-                false,
-            )
-            ?;
-        provenance
-            .set(
-                Arc::from("input_revision"),
-                Value::string(Arc::from(state.provenance.input_revision.to_string())),
-                false,
-            )
-            ?;
-        provenance
-            .set(
-                Arc::from("kind"),
-                Value::string(state.provenance.kind.clone().unwrap()),
-                false,
-            )
-            ?;
-        provenance
-            .set(
-                Arc::from("operation"),
-                Value::string(state.provenance.operation.clone().unwrap()),
-                false,
-            )
-            ?;
-        top.set(Arc::from("provenance"), Value::map(Arc::new(Mutex::new(provenance))), false)?;
+        provenance.set(
+            Arc::from("captured_inputs"),
+            Value::string(state.provenance.captured_inputs.clone().unwrap()),
+            false,
+        )?;
+        provenance.set(
+            Arc::from("derivation_id"),
+            Value::string(Arc::from(state.provenance.derivation_id.to_string())),
+            false,
+        )?;
+        provenance.set(
+            Arc::from("input_revision"),
+            Value::string(Arc::from(state.provenance.input_revision.to_string())),
+            false,
+        )?;
+        provenance.set(
+            Arc::from("kind"),
+            Value::string(state.provenance.kind.clone().unwrap()),
+            false,
+        )?;
+        provenance.set(
+            Arc::from("operation"),
+            Value::string(state.provenance.operation.clone().unwrap()),
+            false,
+        )?;
+        top.set(
+            Arc::from("provenance"),
+            Value::map(Arc::new(Mutex::new(provenance))),
+            false,
+        )?;
     } else {
         top.set(Arc::from("provenance"), Value::null(), false)?;
     }
-    top.set(Arc::from("schema"), Value::number(STATE_CODEC_SCHEMA as f64), false)?;
+    top.set(
+        Arc::from("schema"),
+        Value::number(STATE_CODEC_SCHEMA as f64),
+        false,
+    )?;
 
     let encoded = encode_value(&Value::map(Arc::new(Mutex::new(top))))?;
     Ok(encoded.into_bytes())
@@ -332,11 +332,15 @@ pub fn persistent_state_decode(buf: &[u8]) -> Result<PersistentState, LanaError>
             }
             has_provenance = true;
             provenance.derivation_id = parse_u64(map_find_value(&provenance_map, "derivation_id"))?;
-            provenance.input_revision = parse_u64(map_find_value(&provenance_map, "input_revision"))?;
+            provenance.input_revision =
+                parse_u64(map_find_value(&provenance_map, "input_revision"))?;
             provenance.kind = Some(expect_string(map_find_value(&provenance_map, "kind"))?);
-            provenance.operation = Some(expect_string(map_find_value(&provenance_map, "operation"))?);
-            provenance.captured_inputs =
-                Some(expect_string(map_find_value(&provenance_map, "captured_inputs"))?);
+            provenance.operation =
+                Some(expect_string(map_find_value(&provenance_map, "operation"))?);
+            provenance.captured_inputs = Some(expect_string(map_find_value(
+                &provenance_map,
+                "captured_inputs",
+            ))?);
         }
         _ => return Err(LanaError::Schema),
     }
@@ -356,7 +360,11 @@ mod tests {
 
     #[test]
     fn state_round_trip() {
-        let state = State { p: 0.5, d_re: 0.3, d_im: 0.1 };
+        let state = State {
+            p: 0.5,
+            d_re: 0.3,
+            d_im: 0.1,
+        };
         let encoded = state_encode(&state).unwrap();
         assert_eq!(encoded.len(), STATE_CODEC_LENGTH);
         assert_eq!(&encoded[0..4], b"LST1");
@@ -381,7 +389,11 @@ mod tests {
     fn persistent_state_round_trip() {
         let state = PersistentState {
             schema_version: STATE_CODEC_SCHEMA,
-            state: State { p: 0.5, d_re: 0.3, d_im: 0.1 },
+            state: State {
+                p: 0.5,
+                d_re: 0.3,
+                d_im: 0.1,
+            },
             metadata: PersistentStateMetadata {
                 has_timestamp: true,
                 has_source: true,

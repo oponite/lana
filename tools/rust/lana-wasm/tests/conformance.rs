@@ -20,7 +20,9 @@ fn check_rejects_invalid_source() {
     let source = "let x = ;\n";
     let result = check(source);
     assert!(result.starts_with("{\"ok\":false,\"error\":{\"line\":"));
-    assert!(result.contains("\"message\":\"parse error at line 1 column 9: expected expression, got symbol ;\""));
+    assert!(result.contains(
+        "\"message\":\"parse error at line 1 column 9: expected expression, got symbol ;\""
+    ));
 }
 
 #[test]
@@ -48,8 +50,18 @@ fn run_escapes_string_result() {
 
 #[test]
 fn embedded_stdlib_and_tasks_execute() {
-    assert_eq!(run("import \"std/core\" as core; return type_of(core.identity_kernel([0, 1]));", ""),
-        "{\"ok\":true,\"result\":\"kernel\"}");
-    assert_eq!(run("fn worker() { return 7; } let task = fork worker(); return join(task);", ""),
-        "{\"ok\":true,\"result\":\"7\"}");
+    assert_eq!(
+        run(
+            "import \"std/core\" as core; return type_of(core.identity_kernel([0, 1]));",
+            ""
+        ),
+        "{\"ok\":true,\"result\":\"kernel\"}"
+    );
+    assert_eq!(
+        run(
+            "fn worker() { return 7; } let task = fork worker(); return join(task);",
+            ""
+        ),
+        "{\"ok\":true,\"result\":\"7\"}"
+    );
 }

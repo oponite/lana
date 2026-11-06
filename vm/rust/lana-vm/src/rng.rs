@@ -16,14 +16,19 @@ impl Rng {
     const DEFAULT_INCREMENT: u64 = (1442695040888963407u64 << 1) | 1;
 
     pub fn new() -> Self {
-        Self { state: 0, increment: Self::DEFAULT_INCREMENT }
+        Self {
+            state: 0,
+            increment: Self::DEFAULT_INCREMENT,
+        }
     }
 
     /// Advance the generator and return the next 32-bit value, matching
     /// `lana_vm_random`.
     pub fn random(&mut self) -> u32 {
         let old_state = self.state;
-        self.state = old_state.wrapping_mul(6364136223846793005).wrapping_add(self.increment);
+        self.state = old_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(self.increment);
         let xor_shifted = (((old_state >> 18) ^ old_state) >> 27) as u32;
         let rotation = (old_state >> 59) as u32;
         (xor_shifted >> rotation) | (xor_shifted << ((0u32.wrapping_sub(rotation)) & 31))

@@ -8,17 +8,17 @@
 //! `run`, `run-bytecode`, `dis`, and `verify`. Commands that need the
 //! self-hosted compiler locate `lana-compiler.labc` and run it on the Rust VM.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::io::Write;
 
 use lana_bytecode::{Chunk, LanaError, LanaErrorInfo, OpCode};
 use lana_runtime::execution::ExecutionConfig;
 use lana_vm::Vm;
 
 mod bridge_worker;
-mod packages;
 mod lsp;
+mod packages;
 
 const LANA_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -37,7 +37,10 @@ fn run_usage(program: &str) {
 }
 
 fn execution_config_command(args: &[String]) -> ExitCode {
-    if args.first().map(String::as_str) != Some("init") { usage("lana"); return ExitCode::from(2); }
+    if args.first().map(String::as_str) != Some("init") {
+        usage("lana");
+        return ExitCode::from(2);
+    }
     let mut metadata = None;
     let mut key = None;
     let mut capability_id = None;
@@ -46,7 +49,10 @@ fn execution_config_command(args: &[String]) -> ExitCode {
     let mut ca_file = None;
     let mut index = 1;
     while index < args.len() {
-        let Some(value) = args.get(index + 1) else { usage("lana"); return ExitCode::from(2); };
+        let Some(value) = args.get(index + 1) else {
+            usage("lana");
+            return ExitCode::from(2);
+        };
         let slot = match args[index].as_str() {
             "--metadata" => &mut metadata,
             "--key" => &mut key,
@@ -54,21 +60,45 @@ fn execution_config_command(args: &[String]) -> ExitCode {
             "--origin" => &mut origin,
             "--credential-key-id" => &mut credential_key_id,
             "--ca-file" => &mut ca_file,
-            _ => { usage("lana"); return ExitCode::from(2); }
+            _ => {
+                usage("lana");
+                return ExitCode::from(2);
+            }
         };
-        if slot.replace(value.as_str()).is_some() { usage("lana"); return ExitCode::from(2); }
+        if slot.replace(value.as_str()).is_some() {
+            usage("lana");
+            return ExitCode::from(2);
+        }
         index += 2;
     }
     let (Some(metadata), Some(key), Some(capability_id), Some(origin), Some(credential_key_id)) =
-        (metadata, key, capability_id, origin, credential_key_id) else { usage("lana"); return ExitCode::from(2); };
-    match ExecutionConfig::write(Path::new(metadata), Path::new(key), capability_id, origin, credential_key_id, ca_file) {
+        (metadata, key, capability_id, origin, credential_key_id)
+    else {
+        usage("lana");
+        return ExitCode::from(2);
+    };
+    match ExecutionConfig::write(
+        Path::new(metadata),
+        Path::new(key),
+        capability_id,
+        origin,
+        credential_key_id,
+        ca_file,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(_) => { eprintln!("execution-config: initialization failed"); ExitCode::from(1) }
+        Err(_) => {
+            eprintln!("execution-config: initialization failed");
+            ExitCode::from(1)
+        }
     }
 }
 
 fn report_error(error: &lana_vm::VmError) {
-    let path = if error.function.is_empty() { "<bytecode>" } else { &error.function };
+    let path = if error.function.is_empty() {
+        "<bytecode>"
+    } else {
+        &error.function
+    };
     // Matches `6aacbde2f67f:tools/c/cli.c` `report_error`: VM runtime errors carry a source
     // span of (line, 1)-(line, 1) and an error kind, e.g.
     // `<bytecode>:7:1-7:1: error[validation/LANA_ERR_HISTORY]: ...`.
@@ -82,7 +112,9 @@ fn report_error(error: &lana_vm::VmError) {
         error.message,
         error.operation,
         error.ip,
-        OpCode::try_from(error.opcode).map(|op| op.name()).unwrap_or("UNKNOWN"),
+        OpCode::try_from(error.opcode)
+            .map(|op| op.name())
+            .unwrap_or("UNKNOWN"),
     );
     if error.resolution_reason != lana_vm::LANA_RESOLUTION_REASON_NONE {
         // `lana_error_set_resolution` always marks the count as present, so
@@ -124,11 +156,18 @@ enum CliError {
     /// The compiler (or a program) failed at runtime on the VM.
     Run(lana_vm::VmError),
     /// A compiler failure, attributed to the source file rather than compiler bytecode.
-    Compile { path: String, error: lana_vm::VmError },
+    Compile {
+        path: String,
+        error: lana_vm::VmError,
+    },
     /// The compiler emitted assembly that failed to assemble.
     Assemble { path: String, info: LanaErrorInfo },
     /// Failed to write a chunk to disk.
-    Write { path: String, info: LanaErrorInfo, durability_uncertain: bool },
+    Write {
+        path: String,
+        info: LanaErrorInfo,
+        durability_uncertain: bool,
+    },
     /// A project-level failure (missing manifest, bad plan, I/O).
     Project,
 }
@@ -136,35 +175,64 @@ enum CliError {
 fn report_cli_error(error: &CliError) {
     match error {
         CliError::Load { path, info } => {
-            eprintln!("{path}:{}: error[{}]: {}", info.line, info.code.name(), info.message);
+            eprintln!(
+                "{path}:{}: error[{}]: {}",
+                info.line,
+                info.code.name(),
+                info.message
+            );
         }
         CliError::Run(vm_error) => report_error(vm_error),
         CliError::Compile { path, error } => {
             let mut line = 1u32;
             let mut column = 1u32;
-            if let Some(rest) = error.message.strip_prefix("parse error at line ").or_else(|| error.message.strip_prefix("type error at line ")) {
+            if let Some(rest) = error
+                .message
+                .strip_prefix("parse error at line ")
+                .or_else(|| error.message.strip_prefix("type error at line "))
+            {
                 if let Some((line_text, column_text)) = rest.split_once(" column ") {
                     line = line_text.parse().unwrap_or(1);
-                    column = column_text.split(':').next().unwrap_or("1").parse().unwrap_or(1);
+                    column = column_text
+                        .split(':')
+                        .next()
+                        .unwrap_or("1")
+                        .parse()
+                        .unwrap_or(1);
                 }
             }
-            let kind = if error.message.starts_with("parse error") { "parse/LANA_ERR_PARSE" }
-                else if error.message.starts_with("type error") { "validation/LANA_ERR_TYPE" }
-                else if error.code == LanaError::Assertion { "assertion/LANA_ERR_ASSERTION" }
-                else { return report_error(error); };
-            eprintln!("{path}:{line}:{column}-{line}:{column}: error[{kind}]: {}", error.message);
+            let kind = if error.message.starts_with("parse error") {
+                "parse/LANA_ERR_PARSE"
+            } else if error.message.starts_with("type error") {
+                "validation/LANA_ERR_TYPE"
+            } else if error.code == LanaError::Assertion {
+                "assertion/LANA_ERR_ASSERTION"
+            } else {
+                return report_error(error);
+            };
+            eprintln!(
+                "{path}:{line}:{column}-{line}:{column}: error[{kind}]: {}",
+                error.message
+            );
         }
         CliError::Assemble { path, info } => {
             eprintln!(
                 "{path}:{}:1-{}:1: error[{}]: {} (instruction {}, opcode {})",
-                info.line, info.line,
+                info.line,
+                info.line,
                 info.code.name(),
                 info.message,
                 info.ip,
-                OpCode::try_from(info.opcode).map(|op| op.name()).unwrap_or("UNKNOWN"),
+                OpCode::try_from(info.opcode)
+                    .map(|op| op.name())
+                    .unwrap_or("UNKNOWN"),
             );
         }
-        CliError::Write { path, info, durability_uncertain } => {
+        CliError::Write {
+            path,
+            info,
+            durability_uncertain,
+        } => {
             eprintln!("{path}: error[{}]: {}", info.code.name(), info.message);
             if *durability_uncertain {
                 eprintln!("  durability: uncertain");
@@ -210,7 +278,11 @@ fn find_compiler() -> Option<PathBuf> {
     }
     if let Ok(path) = std::env::var("PATH") {
         for entry in path.split(':') {
-            let dir = if entry.is_empty() { Path::new(".") } else { Path::new(entry) };
+            let dir = if entry.is_empty() {
+                Path::new(".")
+            } else {
+                Path::new(entry)
+            };
             let candidate = dir.join("lana-compiler.labc");
             if candidate.exists() {
                 return Some(candidate);
@@ -220,8 +292,9 @@ fn find_compiler() -> Option<PathBuf> {
     let built = PathBuf::from(env!("LANA_BUILT_COMPILER"));
     // A plain Cargo development binary may use its own build-script output.
     // Installed binaries must find their packaged compiler instead.
-    let development = std::env::current_exe().ok().is_some_and(|exe|
-        exe.parent() == built.ancestors().nth(4));
+    let development = std::env::current_exe()
+        .ok()
+        .is_some_and(|exe| exe.parent() == built.ancestors().nth(4));
     (development && built.is_file()).then_some(built)
 }
 
@@ -229,21 +302,36 @@ fn find_compiler() -> Option<PathBuf> {
 /// mirroring `run_compiler_program` in `6aacbde2f67f:tools/c/cli.c`.
 fn run_compiler_program(compiler: &Path, args: &[String]) -> Result<(), CliError> {
     let path_str = compiler.to_string_lossy().into_owned();
-    let bytes = lana_bytecode::loader::read_file(compiler)
-        .map_err(|info| CliError::Load { path: path_str.clone(), info })?;
-    let chunk = lana_bytecode::loader::load(&bytes)
-        .map_err(|info| CliError::Load { path: path_str, info })?;
+    let bytes = lana_bytecode::loader::read_file(compiler).map_err(|info| CliError::Load {
+        path: path_str.clone(),
+        info,
+    })?;
+    let chunk = lana_bytecode::loader::load(&bytes).map_err(|info| CliError::Load {
+        path: path_str,
+        info,
+    })?;
     let mut vm = Vm::new(&chunk);
     vm.set_program_args(args);
-    let input = if args.first().is_some_and(|arg| arg == "--symbols") { args.get(3).or_else(|| args.get(1)) } else if args.first().is_some_and(|arg| arg.starts_with("--")) { args.get(1) } else { args.first() };
+    let input = if args.first().is_some_and(|arg| arg == "--symbols") {
+        args.get(3).or_else(|| args.get(1))
+    } else if args.first().is_some_and(|arg| arg.starts_with("--")) {
+        args.get(1)
+    } else {
+        args.first()
+    };
     if let Some(input) = input {
         let source = Path::new(input);
-        let anchor = if source.exists() { Some(source) } else { source.parent().filter(|parent| parent.exists()) };
+        let anchor = if source.exists() {
+            Some(source)
+        } else {
+            source.parent().filter(|parent| parent.exists())
+        };
         if let Some(anchor) = anchor {
-        let paths = packages::compiler_paths(anchor).map_err(|message| CliError::Load {
-            path:input.clone(), info:LanaErrorInfo::new(LanaError::Schema, 0, 0, 0, &message),
-        })?;
-        vm.set_package_paths(paths);
+            let paths = packages::compiler_paths(anchor).map_err(|message| CliError::Load {
+                path: input.clone(),
+                info: LanaErrorInfo::new(LanaError::Schema, 0, 0, 0, &message),
+            })?;
+            vm.set_package_paths(paths);
         }
     }
     let result = vm.run();
@@ -258,22 +346,38 @@ fn run_compiler_program(compiler: &Path, args: &[String]) -> Result<(), CliError
 /// `lana_bytecode::loader::load`).
 fn write_chunk(chunk: &Chunk, path: &str) -> Result<(), (LanaErrorInfo, bool)> {
     let out = lana_bytecode::encoder::encode(chunk);
-    lana_runtime::atomic_file::write(Path::new(path), &out)
-        .map_err(|error| (LanaErrorInfo::new(LanaError::Io, 0, 0, 0, format!("cannot write output file: {error}")),
-            lana_runtime::atomic_file::durability_uncertain(&error)))
+    lana_runtime::atomic_file::write(Path::new(path), &out).map_err(|error| {
+        (
+            LanaErrorInfo::new(
+                LanaError::Io,
+                0,
+                0,
+                0,
+                format!("cannot write output file: {error}"),
+            ),
+            lana_runtime::atomic_file::durability_uncertain(&error),
+        )
+    })
 }
 
 /// Compile a `.lana` source to a `.labc` chunk, mirroring
 /// `compile_source_file` in `6aacbde2f67f:tools/c/cli.c`: run the compiler to emit assembly,
 /// assemble it, and write the chunk.
-fn compile_source_file(compiler: &Path, source_path: &str, output_path: &str) -> Result<(), CliError> {
+fn compile_source_file(
+    compiler: &Path,
+    source_path: &str,
+    output_path: &str,
+) -> Result<(), CliError> {
     let asm_path = temp_path("lana-assembly");
     let asm_str = asm_path.to_string_lossy().into_owned();
     let program_args = vec![source_path.to_string(), asm_str.clone()];
     if let Err(error) = run_compiler_program(compiler, &program_args) {
         let _ = std::fs::remove_file(&asm_path);
         return Err(match error {
-            CliError::Run(error) => CliError::Compile { path: source_path.to_string(), error },
+            CliError::Run(error) => CliError::Compile {
+                path: source_path.to_string(),
+                error,
+            },
             other => other,
         });
     }
@@ -285,8 +389,10 @@ fn compile_source_file(compiler: &Path, source_path: &str, output_path: &str) ->
         }
     };
     let _ = std::fs::remove_file(&asm_path);
-    let mut chunk = lana_bytecode::assemble(&asm_text)
-        .map_err(|info| CliError::Assemble { path: source_path.to_string(), info })?;
+    let mut chunk = lana_bytecode::assemble(&asm_text).map_err(|info| CliError::Assemble {
+        path: source_path.to_string(),
+        info,
+    })?;
     for (ip, pair) in chunk.code.windows(2).enumerate() {
         if pair[0].opcode == OpCode::PossibilityBuild
             && pair[1].opcode == OpCode::InfoSample
@@ -294,16 +400,28 @@ fn compile_source_file(compiler: &Path, source_path: &str, output_path: &str) ->
         {
             return Err(CliError::Assemble {
                 path: source_path.to_string(),
-                info: LanaErrorInfo::new(LanaError::UnsupportedOperation, ip + 1, pair[1].opcode as u8, pair[1].line,
-                    "possibility has no weights; use distribution(...) before sample"),
+                info: LanaErrorInfo::new(
+                    LanaError::UnsupportedOperation,
+                    ip + 1,
+                    pair[1].opcode as u8,
+                    pair[1].line,
+                    "possibility has no weights; use distribution(...) before sample",
+                ),
             });
         }
     }
-    if chunk.code.iter().any(|ins| ins.opcode == OpCode::InfoSample) {
+    if chunk
+        .code
+        .iter()
+        .any(|ins| ins.opcode == OpCode::InfoSample)
+    {
         chunk.version = lana_bytecode::opcode::LABC_VERSION_5;
     }
-    write_chunk(&chunk, output_path)
-        .map_err(|(info, durability_uncertain)| CliError::Write { path: output_path.to_string(), info, durability_uncertain })
+    write_chunk(&chunk, output_path).map_err(|(info, durability_uncertain)| CliError::Write {
+        path: output_path.to_string(),
+        info,
+        durability_uncertain,
+    })
 }
 
 fn run_command(args: &[String]) -> ExitCode {
@@ -464,7 +582,9 @@ fn run_command(args: &[String]) -> ExitCode {
             if opcode != 0 {
                 opcodes.push(',');
             }
-            let name = OpCode::try_from(opcode as u8).map(|op| op.name()).unwrap_or("UNKNOWN");
+            let name = OpCode::try_from(opcode as u8)
+                .map(|op| op.name())
+                .unwrap_or("UNKNOWN");
             opcodes.push_str(&format!("\"{name}\":{count}"));
         }
         eprintln!(
@@ -621,12 +741,19 @@ fn assemble_command(args: &[String]) -> ExitCode {
     let chunk = match lana_bytecode::assemble(&text) {
         Ok(chunk) => chunk,
         Err(info) => {
-            report_cli_error(&CliError::Assemble { path: input.clone(), info });
+            report_cli_error(&CliError::Assemble {
+                path: input.clone(),
+                info,
+            });
             return ExitCode::from(1);
         }
     };
     if let Err((info, durability_uncertain)) = write_chunk(&chunk, output) {
-        report_cli_error(&CliError::Write { path: output.clone(), info, durability_uncertain });
+        report_cli_error(&CliError::Write {
+            path: output.clone(),
+            info,
+            durability_uncertain,
+        });
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
@@ -721,7 +848,8 @@ fn project_finish_build(
     let source_path = Path::new(directory).join(&project.entry);
     let cache_dir = Path::new(directory).join(".lana").join("cache");
     let build_dir = Path::new(directory).join("build");
-    if std::fs::create_dir_all(&cache_dir).is_err() || std::fs::create_dir_all(&build_dir).is_err() {
+    if std::fs::create_dir_all(&cache_dir).is_err() || std::fs::create_dir_all(&build_dir).is_err()
+    {
         return Err(());
     }
     let cache_path = cache_dir.join(format!("{hash:016x}.labc"));
@@ -746,8 +874,7 @@ fn project_finish_build(
         "schema = 1\nproject = \"{}\"\ncontent = \"{hash:016x}\"\n{locked}",
         project.name
     );
-    if !hosted &&
-        lana_runtime::atomic_file::write(&lock_path, lock.as_bytes()).is_err() {
+    if !hosted && lana_runtime::atomic_file::write(&lock_path, lock.as_bytes()).is_err() {
         return Err(());
     }
     *output = output_path.to_string_lossy().into_owned();
@@ -757,7 +884,11 @@ fn project_finish_build(
 
 /// Build a project using the compiler's `--project-plan` output, mirroring
 /// `lana_project_build_with_plan` in `6aacbde2f67f:tools/c/project.c`.
-fn project_build_with_plan(directory: &str, compiler: &Path, output: &mut String) -> Result<(), ()> {
+fn project_build_with_plan(
+    directory: &str,
+    compiler: &Path,
+    output: &mut String,
+) -> Result<(), ()> {
     let project = project_load(directory).ok_or(())?;
     let plan_path = temp_path("lana-project-plan");
     let plan_str = plan_path.to_string_lossy().into_owned();
@@ -788,7 +919,8 @@ fn project_build_with_plan(directory: &str, compiler: &Path, output: &mut String
         Err(_) => return Err(()),
     };
     let locked = extract_dependencies(&plan_text);
-    let (hash, hosted) = packages::build_hash(Path::new(directory), hash).map_err(|error| eprintln!("{error}"))?;
+    let (hash, hosted) =
+        packages::build_hash(Path::new(directory), hash).map_err(|error| eprintln!("{error}"))?;
     project_finish_build(directory, &project, hash, &locked, hosted, compiler, output)
 }
 
@@ -839,25 +971,53 @@ fn debug_command(args: &[String]) -> ExitCode {
         report_cli_error(&error);
         return ExitCode::from(1);
     }
-    let breakpoint = if args.len() == 4 { args[3].parse::<u32>().ok() } else { None };
-    let code = match lana_bytecode::loader::read_file(&bytecode_path).ok().and_then(|bytes| lana_bytecode::loader::load(&bytes).ok()) {
+    let breakpoint = if args.len() == 4 {
+        args[3].parse::<u32>().ok()
+    } else {
+        None
+    };
+    let code = match lana_bytecode::loader::read_file(&bytecode_path)
+        .ok()
+        .and_then(|bytes| lana_bytecode::loader::load(&bytes).ok())
+    {
         Some(chunk) => {
             let mut vm = Vm::new(&chunk);
             if let Some(line) = breakpoint {
                 vm.set_breakpoint_line(line);
                 let result = vm.run();
-                if result != LanaError::Ok { report_error(vm.error()); return ExitCode::from(1); }
+                if result != LanaError::Ok {
+                    report_error(vm.error());
+                    return ExitCode::from(1);
+                }
             }
             loop {
-                let Some((instruction, line, function, frames)) = vm.debug_location() else { break ExitCode::SUCCESS; };
-                println!("BREAK line={line} instruction={} function={function} frames={frames}", instruction + 1);
+                let Some((instruction, line, function, frames)) = vm.debug_location() else {
+                    break ExitCode::SUCCESS;
+                };
+                println!(
+                    "BREAK line={line} instruction={} function={function} frames={frames}",
+                    instruction + 1
+                );
                 print!("debug [s]tep [c]ontinue [q]uit> ");
-                if std::io::stdout().flush().is_err() { break ExitCode::from(1); }
+                if std::io::stdout().flush().is_err() {
+                    break ExitCode::from(1);
+                }
                 let mut command = String::new();
-                if std::io::stdin().read_line(&mut command).is_err() || command.starts_with('q') { break ExitCode::from(1); }
-                let result = if command.starts_with('s') { vm.debug_step() } else { vm.debug_continue() };
-                if result != LanaError::Ok { report_error(vm.error()); break ExitCode::from(1); }
-                if command.starts_with('c') { break ExitCode::SUCCESS; }
+                if std::io::stdin().read_line(&mut command).is_err() || command.starts_with('q') {
+                    break ExitCode::from(1);
+                }
+                let result = if command.starts_with('s') {
+                    vm.debug_step()
+                } else {
+                    vm.debug_continue()
+                };
+                if result != LanaError::Ok {
+                    report_error(vm.error());
+                    break ExitCode::from(1);
+                }
+                if command.starts_with('c') {
+                    break ExitCode::SUCCESS;
+                }
             }
         }
         None => ExitCode::from(1),
@@ -915,7 +1075,7 @@ fn inspect_command(args: &[String]) -> ExitCode {
     // A `.lana` source is compiled to a temporary chunk first, mirroring the
     // C CLI's `main()` dispatch.
     let bytecode_path;
-    
+
     let effective_path = if path.ends_with(".lana") {
         let Some(compiler) = find_compiler() else {
             eprintln!("native Lana compiler bytecode not found");
@@ -935,7 +1095,11 @@ fn inspect_command(args: &[String]) -> ExitCode {
     let bytes = match lana_bytecode::loader::read_file(&effective_path) {
         Ok(bytes) => bytes,
         Err(error) => {
-            eprintln!("{effective_path}: error[{}]: {}", error.code.name(), error.message);
+            eprintln!(
+                "{effective_path}: error[{}]: {}",
+                error.code.name(),
+                error.message
+            );
             return ExitCode::from(1);
         }
     };
@@ -958,7 +1122,10 @@ fn inspect_command(args: &[String]) -> ExitCode {
     }
     let result_value = match vm.result() {
         Ok(value) => value,
-        Err(error) => { eprintln!("inspect: {}", error.name()); return ExitCode::from(1); }
+        Err(error) => {
+            eprintln!("inspect: {}", error.name());
+            return ExitCode::from(1);
+        }
     };
     if result_value.value_type() != lana_bytecode::ValueType::StateDist {
         eprintln!(
@@ -982,7 +1149,15 @@ fn inspect_command(args: &[String]) -> ExitCode {
 fn json_quote(text: &str) -> String {
     let mut quoted = String::from("\"");
     for character in text.chars() {
-        match character { '\"' => quoted.push_str("\\\""), '\\' => quoted.push_str("\\\\"), '\n' => quoted.push_str("\\n"), '\r' => quoted.push_str("\\r"), '\t' => quoted.push_str("\\t"), c if c.is_control() => quoted.push_str(&format!("\\u{:04x}", c as u32)), c => quoted.push(c) }
+        match character {
+            '\"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            c if c.is_control() => quoted.push_str(&format!("\\u{:04x}", c as u32)),
+            c => quoted.push(c),
+        }
     }
     quoted.push('\"');
     quoted
@@ -1031,8 +1206,14 @@ fn main() -> ExitCode {
     }
     match args[1].as_str() {
         "package" => match packages::command(&args[2..]) {
-            Ok(report) => { println!("{report}"); ExitCode::SUCCESS }
-            Err(error) => { eprintln!("package: {error}"); ExitCode::from(1) }
+            Ok(report) => {
+                println!("{report}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("package: {error}");
+                ExitCode::from(1)
+            }
         },
         "bridge-worker" if args.len() == 2 => bridge_worker::serve(),
         "live" if args.len() == 3 => bridge_worker::live(&args[2]),
@@ -1066,9 +1247,17 @@ fn main() -> ExitCode {
                 usage("lana");
                 return ExitCode::from(2);
             }
-            let mode = if is_fmt { "--project-fmt" } else { "--project-doc" };
+            let mode = if is_fmt {
+                "--project-fmt"
+            } else {
+                "--project-doc"
+            };
             let argument = if is_fmt {
-                if args.len() == 3 { "check" } else { "write" }
+                if args.len() == 3 {
+                    "check"
+                } else {
+                    "write"
+                }
             } else {
                 "."
             };

@@ -137,7 +137,8 @@ impl Derivation {
         if self.outcome == DerivationOutcome::Unresolved {
             return EvidenceStatus::Unknown;
         }
-        if self.kind == DerivationKind::Observation && self.exactness == DerivationExactness::Exact {
+        if self.kind == DerivationKind::Observation && self.exactness == DerivationExactness::Exact
+        {
             return EvidenceStatus::Observed;
         }
         if self.kind == DerivationKind::Assumption
@@ -160,7 +161,11 @@ impl Derivation {
 mod tests {
     use super::*;
 
-    fn d(kind: DerivationKind, exactness: DerivationExactness, outcome: DerivationOutcome) -> Derivation {
+    fn d(
+        kind: DerivationKind,
+        exactness: DerivationExactness,
+        outcome: DerivationOutcome,
+    ) -> Derivation {
         Derivation {
             task_lineage: 0,
             local_sequence: 0,
@@ -188,27 +193,57 @@ mod tests {
     #[test]
     fn status_classifies_each_row() {
         assert_eq!(
-            d(DerivationKind::Observation, DerivationExactness::Exact, DerivationOutcome::Success).status(),
+            d(
+                DerivationKind::Observation,
+                DerivationExactness::Exact,
+                DerivationOutcome::Success
+            )
+            .status(),
             EvidenceStatus::Observed
         );
         assert_eq!(
-            d(DerivationKind::Evidence, DerivationExactness::Exact, DerivationOutcome::Success).status(),
+            d(
+                DerivationKind::Evidence,
+                DerivationExactness::Exact,
+                DerivationOutcome::Success
+            )
+            .status(),
             EvidenceStatus::Exact
         );
         assert_eq!(
-            d(DerivationKind::Operation, DerivationExactness::Exact, DerivationOutcome::Success).status(),
+            d(
+                DerivationKind::Operation,
+                DerivationExactness::Exact,
+                DerivationOutcome::Success
+            )
+            .status(),
             EvidenceStatus::Exact
         );
         assert_eq!(
-            d(DerivationKind::Assumption, DerivationExactness::Approximate, DerivationOutcome::Success).status(),
+            d(
+                DerivationKind::Assumption,
+                DerivationExactness::Approximate,
+                DerivationOutcome::Success
+            )
+            .status(),
             EvidenceStatus::Modeled
         );
         assert_eq!(
-            d(DerivationKind::Sample, DerivationExactness::Sample, DerivationOutcome::Success).status(),
+            d(
+                DerivationKind::Sample,
+                DerivationExactness::Sample,
+                DerivationOutcome::Success
+            )
+            .status(),
             EvidenceStatus::Sampled
         );
         assert_eq!(
-            d(DerivationKind::Operation, DerivationExactness::Exact, DerivationOutcome::Unresolved).status(),
+            d(
+                DerivationKind::Operation,
+                DerivationExactness::Exact,
+                DerivationOutcome::Unresolved
+            )
+            .status(),
             EvidenceStatus::Unknown
         );
     }

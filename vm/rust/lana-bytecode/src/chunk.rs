@@ -16,7 +16,14 @@ pub struct Instruction {
 
 impl Instruction {
     pub fn new(opcode: OpCode, a: u32, b: u32, c: u32, imm: u32, line: u32) -> Self {
-        Self { opcode, a, b, c, imm, line }
+        Self {
+            opcode,
+            a,
+            b,
+            c,
+            imm,
+            line,
+        }
     }
 }
 
@@ -41,6 +48,12 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn new(version: u32, entry: u32) -> Self {
-        Self { version, entry, code: Vec::new(), constants: Vec::new(), functions: Vec::new() }
+        Self {
+            version,
+            entry,
+            code: Vec::new(),
+            constants: Vec::new(),
+            functions: Vec::new(),
+        }
     }
 }

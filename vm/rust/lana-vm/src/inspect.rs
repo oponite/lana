@@ -62,7 +62,9 @@ fn inspect_visit(node: &Arc<StateDist>, graph: &mut InspectGraph) -> Result<usiz
         StateDistKind::Dirac(_) => {
             graph.dirac_count += 1;
         }
-        StateDistKind::Append { left, right, sigma, .. } => {
+        StateDistKind::Append {
+            left, right, sigma, ..
+        } => {
             graph.append_count += 1;
             if *sigma != 0.0 {
                 graph.sampling_required = true;
@@ -128,18 +130,32 @@ fn emit_node_json(out: &mut String, graph: &InspectGraph, id: usize) {
             out.push_str(",\"kind\":\"dirac\",\"state\":");
             emit_state(out, &state.state);
         }
-        StateDistKind::Append { left, right, sigma, .. } => {
+        StateDistKind::Append {
+            left, right, sigma, ..
+        } => {
             out.push_str(",\"kind\":\"append\",\"left\":");
             emit_operand_json(out, graph, left);
             out.push_str(",\"right\":");
             emit_operand_json(out, graph, right);
             let _ = write!(out, ",\"sigma\":{}", lana_bytecode::format_g(*sigma));
         }
-        StateDistKind::Transform { child, transform_id } => {
-            let _ = write!(out, ",\"kind\":\"transform\",\"transform_id\":{transform_id},\"child\":{}", graph.node_id(child));
+        StateDistKind::Transform {
+            child,
+            transform_id,
+        } => {
+            let _ = write!(
+                out,
+                ",\"kind\":\"transform\",\"transform_id\":{transform_id},\"child\":{}",
+                graph.node_id(child)
+            );
         }
         StateDistKind::Attenuate { child, factor } => {
-            let _ = write!(out, ",\"kind\":\"attenuate\",\"factor\":{},\"child\":{}", lana_bytecode::format_g(*factor), graph.node_id(child));
+            let _ = write!(
+                out,
+                ",\"kind\":\"attenuate\",\"factor\":{},\"child\":{}",
+                lana_bytecode::format_g(*factor),
+                graph.node_id(child)
+            );
         }
     }
     out.push('}');
@@ -186,13 +202,23 @@ fn emit_dot_node(out: &mut String, graph: &InspectGraph, id: usize) {
             let _ = write!(out, "transform\\n{name}");
         }
         StateDistKind::Attenuate { factor, .. } => {
-            let _ = write!(out, "attenuate\\nfactor={}", lana_bytecode::format_g(*factor));
+            let _ = write!(
+                out,
+                "attenuate\\nfactor={}",
+                lana_bytecode::format_g(*factor)
+            );
         }
     }
     out.push_str("\"];\n");
 }
 
-fn emit_dot_edge(out: &mut String, graph: &InspectGraph, from: usize, label: &str, operand: &DistOperand) {
+fn emit_dot_edge(
+    out: &mut String,
+    graph: &InspectGraph,
+    from: usize,
+    label: &str,
+    operand: &DistOperand,
+) {
     let _ = write!(out, "  n{from} -> ");
     match operand {
         DistOperand::Inline(state) => {
@@ -226,10 +252,22 @@ fn emit_dot(graph: &InspectGraph) -> String {
                 emit_dot_edge(&mut out, graph, id, "right", right);
             }
             StateDistKind::Transform { child, .. } => {
-                emit_dot_edge(&mut out, graph, id, "child", &DistOperand::Node(child.clone()));
+                emit_dot_edge(
+                    &mut out,
+                    graph,
+                    id,
+                    "child",
+                    &DistOperand::Node(child.clone()),
+                );
             }
             StateDistKind::Attenuate { child, .. } => {
-                emit_dot_edge(&mut out, graph, id, "child", &DistOperand::Node(child.clone()));
+                emit_dot_edge(
+                    &mut out,
+                    graph,
+                    id,
+                    "child",
+                    &DistOperand::Node(child.clone()),
+                );
             }
             StateDistKind::Dirac(_) => {}
         }
@@ -255,10 +293,17 @@ mod tests {
     use crate::state::StateValue;
 
     fn dirac(p: f64) -> Arc<StateDist> {
-        let mut state = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut state = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(state::make_complex(p, 0.0, 0.0, &mut state), LanaError::Ok);
         Arc::new(StateDist {
-            kind: StateDistKind::Dirac(StateValue { state, indexes: Default::default() }),
+            kind: StateDistKind::Dirac(StateValue {
+                state,
+                indexes: Default::default(),
+            }),
         })
     }
 

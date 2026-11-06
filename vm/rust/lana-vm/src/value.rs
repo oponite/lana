@@ -25,7 +25,8 @@ struct PrintOutput {
 
 impl std::fmt::Write for PrintOutput {
     fn write_str(&mut self, text: &str) -> std::fmt::Result {
-        if self.failed || text.len() > self.limit.saturating_sub(self.text.len())
+        if self.failed
+            || text.len() > self.limit.saturating_sub(self.text.len())
             || self.text.try_reserve_exact(text.len()).is_err()
         {
             self.failed = true;
@@ -211,27 +212,45 @@ pub struct Array {
 
 impl Array {
     /// Permanently prohibit mutation of this captured container.
-    pub fn freeze(&mut self) { self.frozen = true; }
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
 
     pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
-        Self::from_buffer(crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())?)
+        Self::from_buffer(crate::heap::Buffer::new(
+            heap,
+            capacity,
+            std::mem::size_of::<Self>(),
+        )?)
     }
 
     pub fn from_items(heap: &crate::heap::Heap, items: Vec<Value>) -> Result<Self, LanaError> {
-        Self::from_buffer(crate::heap::Buffer::from_vec(heap, items, std::mem::size_of::<Self>())?)
+        Self::from_buffer(crate::heap::Buffer::from_vec(
+            heap,
+            items,
+            std::mem::size_of::<Self>(),
+        )?)
     }
 
     pub(crate) fn from_buffer(items: crate::heap::Buffer<Value>) -> Result<Self, LanaError> {
         let cycle = items.heap().cycle_slot()?;
         let mut items = items;
         items.set_barrier(&cycle)?;
-        Ok(Self { items, frozen: false, cycle })
+        Ok(Self {
+            items,
+            frozen: false,
+            cycle,
+        })
     }
 
-    pub fn items(&self) -> &[Value] { &self.items }
+    pub fn items(&self) -> &[Value] {
+        &self.items
+    }
 
     pub fn push(&mut self, item: Value) -> Result<(), LanaError> {
-        if self.frozen { return Err(LanaError::UnsupportedOperation); }
+        if self.frozen {
+            return Err(LanaError::UnsupportedOperation);
+        }
         self.items.push(item)
     }
 }
@@ -252,21 +271,32 @@ pub struct MapEntry {
 
 impl Map {
     /// Permanently prohibit mutation of this captured container.
-    pub fn freeze(&mut self) { self.frozen = true; }
+    pub fn freeze(&mut self) {
+        self.frozen = true;
+    }
 
     /// Create an empty map, mirroring `lana_map_new`.
     pub fn new(heap: &crate::heap::Heap, capacity: usize) -> Result<Self, LanaError> {
         let cycle = heap.cycle_slot()?;
         let mut entries = crate::heap::Buffer::new(heap, capacity, std::mem::size_of::<Self>())?;
         entries.set_barrier(&cycle)?;
-        Ok(Self { entries, frozen: false, cycle })
+        Ok(Self {
+            entries,
+            frozen: false,
+            cycle,
+        })
     }
 
-    pub fn entries(&self) -> &[MapEntry] { &self.entries }
+    pub fn entries(&self) -> &[MapEntry] {
+        &self.entries
+    }
 
     /// Look up a key, mirroring `lana_map_get`. Returns `None` when absent.
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.entries.iter().find(|entry| &*entry.key == key).map(|entry| &entry.value)
+        self.entries
+            .iter()
+            .find(|entry| &*entry.key == key)
+            .map(|entry| &entry.value)
     }
 
     /// Whether a key is present, mirroring `lana_map_has >= 0`.
@@ -276,8 +306,15 @@ impl Map {
 
     /// Insert or replace a key, mirroring `lana_map_set`. With
     /// `reject_existing` the insert fails with `Key` when the key is present.
-    pub fn set(&mut self, key: Arc<str>, value: Value, reject_existing: bool) -> Result<(), LanaError> {
-        if self.frozen { return Err(LanaError::UnsupportedOperation); }
+    pub fn set(
+        &mut self,
+        key: Arc<str>,
+        value: Value,
+        reject_existing: bool,
+    ) -> Result<(), LanaError> {
+        if self.frozen {
+            return Err(LanaError::UnsupportedOperation);
+        }
         if let Some(entry) = self.entries.iter_mut().find(|entry| *entry.key == *key) {
             if reject_existing {
                 return Err(LanaError::Key);
@@ -288,7 +325,9 @@ impl Map {
         let heap = self.entries.heap().clone();
         let key = heap.string(&key)?;
         let result = self.entries.push(MapEntry { key, value });
-        if result.is_err() { heap.collect_strings(); }
+        if result.is_err() {
+            heap.collect_strings();
+        }
         result
     }
 }
@@ -373,7 +412,9 @@ impl Set {
         Ok(Self { items, cycle })
     }
 
-    pub fn items(&self) -> &[Value] { &self.items }
+    pub fn items(&self) -> &[Value] {
+        &self.items
+    }
 }
 
 /// A compiled regular expression (LIP-021 §2), mirroring `struct LanaRegex` in
@@ -581,13 +622,27 @@ pub struct Tensor {
 }
 
 impl Tensor {
-    pub fn shape(&self) -> &[usize] { &self.shape }
-    pub fn strides(&self) -> &[usize] { &self.strides }
-    pub fn ndim(&self) -> usize { self.ndim }
-    pub fn dtype(&self) -> TensorDtype { self.dtype }
-    pub fn device(&self) -> TensorDevice { self.device }
-    pub fn is_complex(&self) -> bool { self.is_complex }
-    pub fn is_state(&self) -> bool { self.is_state }
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+    pub fn strides(&self) -> &[usize] {
+        &self.strides
+    }
+    pub fn ndim(&self) -> usize {
+        self.ndim
+    }
+    pub fn dtype(&self) -> TensorDtype {
+        self.dtype
+    }
+    pub fn device(&self) -> TensorDevice {
+        self.device
+    }
+    pub fn is_complex(&self) -> bool {
+        self.is_complex
+    }
+    pub fn is_state(&self) -> bool {
+        self.is_state
+    }
 }
 
 /// The reserved `unknown` variant tag, matching the C11 `0xFFFFFFFF`.
@@ -894,148 +949,358 @@ pub enum ValueKind {
 
 impl Value {
     pub fn null() -> Self {
-        Self { kind: ValueKind::Null, derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Null,
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn number(number: f64) -> Self {
-        Self { kind: ValueKind::Number(number), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Number(number),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn boolean(boolean: bool) -> Self {
-        Self { kind: ValueKind::Bool(boolean), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Bool(boolean),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn string(string: Arc<str>) -> Self {
-        Self { kind: ValueKind::String(string), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::String(string),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn state(state: StateValue) -> Self {
-        Self { kind: ValueKind::State(state), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::State(state),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn distribution(p0: f64, p1: f64) -> Self {
-        Self { kind: ValueKind::Distribution { p0, p1 }, derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Distribution { p0, p1 },
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn sample(sample: i32) -> Self {
-        Self { kind: ValueKind::Sample(sample), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Sample(sample),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn array(array: Arc<Mutex<Array>>) -> Self {
         if let Ok(value) = array.try_lock() {
-            value.cycle.bind(crate::heap::CycleWeak::Array(Arc::downgrade(&array)));
+            value
+                .cycle
+                .bind(crate::heap::CycleWeak::Array(Arc::downgrade(&array)));
         }
-        Self { kind: ValueKind::Array(array), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Array(array),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn function(function: u32) -> Self {
-        Self { kind: ValueKind::Function(function), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Function(function),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn kernel(kernel: Arc<FiniteKernel>) -> Self {
-        Self { kind: ValueKind::Kernel(kernel), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Kernel(kernel),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn network(network: Arc<FiniteNetwork>) -> Self {
-        Self { kind: ValueKind::Network(network), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Network(network),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn task(task: Arc<Task>) -> Self {
-        Self { kind: ValueKind::Task(task), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Task(task),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn state_dist(distribution: Arc<StateDist>) -> Self {
-        Self { kind: ValueKind::StateDist(distribution), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::StateDist(distribution),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn map(map: Arc<Mutex<Map>>) -> Self {
         if let Ok(value) = map.try_lock() {
-            value.cycle.bind(crate::heap::CycleWeak::Map(Arc::downgrade(&map)));
+            value
+                .cycle
+                .bind(crate::heap::CycleWeak::Map(Arc::downgrade(&map)));
         }
-        Self { kind: ValueKind::Map(map), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Map(map),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn possibility(possibility: Arc<Possibility>) -> Self {
-        Self { kind: ValueKind::Possibility(possibility), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Possibility(possibility),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn paths(paths: Arc<PathSet>) -> Self {
-        Self { kind: ValueKind::PathSet(paths), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::PathSet(paths),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn joint(joint: Arc<JointState>) -> Self {
-        Self { kind: ValueKind::Joint(joint), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Joint(joint),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn capability(capability: Arc<CapabilityToken>) -> Self {
-        Self { kind: ValueKind::Capability(capability), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Capability(capability),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn adt(adt: Arc<Adt>) -> Self {
-        Self { kind: ValueKind::Adt(adt), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Adt(adt),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn tensor(tensor: Arc<Tensor>) -> Self {
-        Self { kind: ValueKind::Tensor(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Tensor(tensor),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn nqubit_state(tensor: Arc<Tensor>) -> Self {
-        Self { kind: ValueKind::NQubitState(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::NQubitState(tensor),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn povm(tensor: Arc<Tensor>) -> Self {
-        Self { kind: ValueKind::Povm(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Povm(tensor),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn channel(tensor: Arc<Tensor>) -> Self {
-        Self { kind: ValueKind::Channel(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Channel(tensor),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn observable(tensor: Arc<Tensor>) -> Self {
-        Self { kind: ValueKind::Observable(tensor), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Observable(tensor),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn lazy(function: u32, bound: usize) -> Self {
-        Self { kind: ValueKind::Lazy { function, bound }, derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Lazy { function, bound },
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn generator(generator: Arc<Mutex<Generator>>) -> Self {
-        Self { kind: ValueKind::Generator(generator), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Generator(generator),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn future(future: Arc<Mutex<Future>>) -> Self {
-        Self { kind: ValueKind::Future(future), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Future(future),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn set(set: Arc<Mutex<Set>>) -> Self {
         if let Ok(value) = set.try_lock() {
-            value.cycle.bind(crate::heap::CycleWeak::Set(Arc::downgrade(&set)));
+            value
+                .cycle
+                .bind(crate::heap::CycleWeak::Set(Arc::downgrade(&set)));
         }
-        Self { kind: ValueKind::Set(set), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Set(set),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn regex(regex: Arc<Regex>) -> Self {
-        Self { kind: ValueKind::Regex(regex), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Regex(regex),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn optimizer(optimizer: Arc<Optimizer>) -> Self {
-        Self { kind: ValueKind::Optimizer(optimizer), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Optimizer(optimizer),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn training_result(result: Arc<TrainingResult>) -> Self {
-        Self { kind: ValueKind::TrainingResult(result), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::TrainingResult(result),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn inference_algorithm(algorithm: Arc<InferenceAlgorithm>) -> Self {
-        Self { kind: ValueKind::InferenceAlgorithm(algorithm), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::InferenceAlgorithm(algorithm),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn posterior(posterior: Arc<Posterior>) -> Self {
-        Self { kind: ValueKind::Posterior(posterior), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Posterior(posterior),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     pub fn dataset(dataset: Arc<Dataset>) -> Self {
-        Self { kind: ValueKind::Dataset(dataset), derivation: None, reactive: None, claim: None, planned_effect: None }
+        Self {
+            kind: ValueKind::Dataset(dataset),
+            derivation: None,
+            reactive: None,
+            claim: None,
+            planned_effect: None,
+        }
     }
 
     /// The stable type tag, matching `ValueType` in `6aacbde2f67f:vm/include/value.h`.
@@ -1057,7 +1322,11 @@ impl Value {
             ValueKind::StateDist(_) => ValueType::StateDist,
             ValueKind::Map(_) => ValueType::Map,
             ValueKind::Possibility(ref value) => {
-                if value.weights.is_some() { ValueType::Distribution } else { ValueType::Possibility }
+                if value.weights.is_some() {
+                    ValueType::Distribution
+                } else {
+                    ValueType::Possibility
+                }
             }
             ValueKind::PathSet(_) => ValueType::PathSet,
             ValueKind::Capability(_) => ValueType::SharedCapability,
@@ -1101,7 +1370,11 @@ impl Value {
             ValueKind::StateDist(_) => "state_dist",
             ValueKind::Map(_) => "map",
             ValueKind::Possibility(ref value) => {
-                if value.weights.is_some() { "distribution" } else { "possibility" }
+                if value.weights.is_some() {
+                    "distribution"
+                } else {
+                    "possibility"
+                }
             }
             ValueKind::PathSet(_) => "paths",
             ValueKind::Capability(_) => "shared_capability",
@@ -1199,63 +1472,114 @@ impl Value {
     pub(crate) fn inspection_child(&self, index: usize) -> Option<Value> {
         match &self.kind {
             ValueKind::Array(v) => v.lock().unwrap().items.get(index).cloned(),
-            ValueKind::Map(v) => v.lock().unwrap().entries.get(index).map(|e| e.value.clone()),
+            ValueKind::Map(v) => v
+                .lock()
+                .unwrap()
+                .entries
+                .get(index)
+                .map(|e| e.value.clone()),
             ValueKind::Set(v) => v.lock().unwrap().items.get(index).cloned(),
             ValueKind::Adt(v) => v.fields.get(index).cloned(),
             ValueKind::ObjectValue(v) => v.fields.get(index).cloned(),
-            ValueKind::ClassObject(v) => v.object.upgrade().and_then(|o| o.fields.lock().unwrap().get(index).cloned().flatten()),
+            ValueKind::ClassObject(v) => v
+                .object
+                .upgrade()
+                .and_then(|o| o.fields.lock().unwrap().get(index).cloned().flatten()),
             ValueKind::Possibility(v) => v.values.get(index).cloned(),
             ValueKind::PathSet(v) => v.alternatives.get(index).map(|a| a.result.clone()),
             ValueKind::Joint(v) => {
-                if let Some(value) = v.values.get(index) { return Some(value.clone()); }
+                if let Some(value) = v.values.get(index) {
+                    return Some(value.clone());
+                }
                 let index = index - v.values.len();
                 let width = v.names.len();
-                if width == 0 { return None; }
-                v.rows.get(index / width).and_then(|r| r.values.get(index % width)).cloned()
+                if width == 0 {
+                    return None;
+                }
+                v.rows
+                    .get(index / width)
+                    .and_then(|r| r.values.get(index % width))
+                    .cloned()
             }
             _ => None,
         }
     }
 
-    fn check_graph(&self, limit: usize, rejected: LanaError, dataset_key: bool) -> Result<(), LanaError> {
+    fn check_graph(
+        &self,
+        limit: usize,
+        rejected: LanaError,
+        dataset_key: bool,
+    ) -> Result<(), LanaError> {
         fn resolved(value: &Value) -> Value {
-            value.reactive.as_ref().and_then(|r| r.lock().unwrap().current.clone())
+            value
+                .reactive
+                .as_ref()
+                .and_then(|r| r.lock().unwrap().current.clone())
                 .unwrap_or_else(|| value.clone())
         }
         fn check(value: &Value, rejected: LanaError, dataset_key: bool) -> Result<(), LanaError> {
             let bad = match &value.kind {
-                ValueKind::Joint(_) | ValueKind::StateDist(_) | ValueKind::Distribution { .. } => dataset_key,
-                ValueKind::Possibility(_) | ValueKind::PathSet(_) => rejected == LanaError::UnresolvedValue,
-                ValueKind::Capability(v) => rejected == LanaError::ClaimRevoked && v.revoked.load(Ordering::Acquire),
+                ValueKind::Joint(_) | ValueKind::StateDist(_) | ValueKind::Distribution { .. } => {
+                    dataset_key
+                }
+                ValueKind::Possibility(_) | ValueKind::PathSet(_) => {
+                    rejected == LanaError::UnresolvedValue
+                }
+                ValueKind::Capability(v) => {
+                    rejected == LanaError::ClaimRevoked && v.revoked.load(Ordering::Acquire)
+                }
                 _ => false,
             };
-            if bad { Err(rejected) } else { Ok(()) }
+            if bad {
+                Err(rejected)
+            } else {
+                Ok(())
+            }
         }
         let root = resolved(self);
         check(&root, rejected, dataset_key)?;
-        if root.container_identity().is_none() { return Ok(()); }
+        if root.container_identity().is_none() {
+            return Ok(());
+        }
         let budget = crate::heap::Heap::new(limit);
         let mut stack = crate::heap::Buffer::new(&budget, 1, 0)?;
         let mut seen = crate::heap::Buffer::new(&budget, 0, 0)?;
-        stack.push(PrintFrame { value: root, next: 0, identity: None })?;
+        stack.push(PrintFrame {
+            value: root,
+            next: 0,
+            identity: None,
+        })?;
         while let Some(frame) = stack.last_mut() {
             // A definite class identity stays definite when a field holds Information.
-            if rejected == LanaError::UnresolvedValue && matches!(frame.value.kind, ValueKind::ClassObject(_)) {
+            if rejected == LanaError::UnresolvedValue
+                && matches!(frame.value.kind, ValueKind::ClassObject(_))
+            {
                 stack.pop();
                 continue;
             }
             if frame.identity.is_none() {
                 check(&frame.value, rejected, dataset_key)?;
-                let Some(identity) = frame.value.container_identity() else { stack.pop(); continue; };
+                let Some(identity) = frame.value.container_identity() else {
+                    stack.pop();
+                    continue;
+                };
                 // ponytail: bounded linear identity lookup; use a budgeted hash
                 // table if graph inspection becomes a measured bottleneck.
-                if seen.contains(&identity) { stack.pop(); continue; }
+                if seen.contains(&identity) {
+                    stack.pop();
+                    continue;
+                }
                 seen.push(identity)?;
                 frame.identity = Some(identity);
             }
             if let Some(child) = frame.value.inspection_child(frame.next) {
                 frame.next += 1;
-                stack.push(PrintFrame { value: resolved(&child), next: 0, identity: None })?;
+                stack.push(PrintFrame {
+                    value: resolved(&child),
+                    next: 0,
+                    identity: None,
+                })?;
             } else {
                 stack.pop();
             }
@@ -1265,20 +1589,33 @@ impl Value {
 
     /// Render the value exactly as `lana_value_print` in `6aacbde2f67f:vm/c/value.c`.
     pub fn print(&self) -> String {
-        self.try_print(usize::MAX).unwrap_or_else(|_| "<out-of-memory>".into())
+        self.try_print(usize::MAX)
+            .unwrap_or_else(|_| "<out-of-memory>".into())
     }
 
     /// Render without recursively locking containers or traversing cycles.
     pub fn try_print(&self, limit: usize) -> Result<String, LanaError> {
-        let mut out = PrintOutput { text: String::new(), limit, failed: false };
+        let mut out = PrintOutput {
+            text: String::new(),
+            limit,
+            failed: false,
+        };
         let mut stack = Vec::new();
         let frame_size = std::mem::size_of::<PrintFrame>();
-        if frame_size > limit { return Err(LanaError::Oom); }
+        if frame_size > limit {
+            return Err(LanaError::Oom);
+        }
         stack.try_reserve_exact(1).map_err(|_| LanaError::Oom)?;
-        stack.push(PrintFrame { value: self.clone(), next: 0, identity: None });
+        stack.push(PrintFrame {
+            value: self.clone(),
+            next: 0,
+            identity: None,
+        });
         while !stack.is_empty() {
             out.limit = limit.saturating_sub(stack.capacity() * frame_size);
-            if out.failed { return Err(LanaError::Oom); }
+            if out.failed {
+                return Err(LanaError::Oom);
+            }
             let frame_index = stack.len() - 1;
             let identity = match &stack[frame_index].value.kind {
                 ValueKind::Array(value) => Some(Arc::as_ptr(value) as usize),
@@ -1298,7 +1635,9 @@ impl Value {
             // ponytail: linear ancestor scan; replace with a budgeted index if
             // deep-graph rendering becomes a measured performance bottleneck.
             if stack[frame_index].identity.is_none()
-                && stack[..frame_index].iter().any(|frame| frame.identity == Some(identity))
+                && stack[..frame_index]
+                    .iter()
+                    .any(|frame| frame.identity == Some(identity))
             {
                 out.push_str("<cycle>");
                 stack.pop();
@@ -1313,7 +1652,11 @@ impl Value {
                     ValueKind::Set(_) => out.push_str("set{"),
                     ValueKind::Joint(_) => out.push_str("joint_state{"),
                     ValueKind::Possibility(value) => {
-                        out.push_str(if value.weights.is_some() { "distribution{" } else { "possibility{" });
+                        out.push_str(if value.weights.is_some() {
+                            "distribution{"
+                        } else {
+                            "possibility{"
+                        });
                     }
                     ValueKind::PathSet(_) => out.push_str("paths{"),
                     ValueKind::Adt(adt) => {
@@ -1325,8 +1668,12 @@ impl Value {
             }
             let index = frame.next;
             let (child, key, guard) = match &frame.value.kind {
-                ValueKind::Array(value) => (value.lock().unwrap().items.get(index).cloned(), None, None),
-                ValueKind::Set(value) => (value.lock().unwrap().items.get(index).cloned(), None, None),
+                ValueKind::Array(value) => {
+                    (value.lock().unwrap().items.get(index).cloned(), None, None)
+                }
+                ValueKind::Set(value) => {
+                    (value.lock().unwrap().items.get(index).cloned(), None, None)
+                }
                 ValueKind::Map(value) => {
                     let value = value.lock().unwrap();
                     match value.entries.get(index) {
@@ -1335,41 +1682,79 @@ impl Value {
                     }
                 }
                 ValueKind::Joint(value) => match value.names.get(index) {
-                    Some(key) => (Some(value.values.get(index).cloned().unwrap_or_else(|| Value::string(Arc::from("<finite-law>")))), Some(key.clone()), None),
+                    Some(key) => (
+                        Some(
+                            value
+                                .values
+                                .get(index)
+                                .cloned()
+                                .unwrap_or_else(|| Value::string(Arc::from("<finite-law>"))),
+                        ),
+                        Some(key.clone()),
+                        None,
+                    ),
                     None => (None, None, None),
                 },
                 ValueKind::Possibility(value) => (value.values.get(index).cloned(), None, None),
                 ValueKind::PathSet(value) => match value.alternatives.get(index) {
-                    Some(alternative) => (Some(alternative.result.clone()), None, Some(alternative.guard)),
+                    Some(alternative) => (
+                        Some(alternative.result.clone()),
+                        None,
+                        Some(alternative.guard),
+                    ),
                     None => (None, None, None),
                 },
                 ValueKind::Adt(value) => (value.fields.get(index).cloned(), None, None),
                 _ => unreachable!(),
             };
             if let Some(child) = child {
-                if index != 0 { out.push_str(", "); }
+                if index != 0 {
+                    out.push_str(", ");
+                }
                 if let Some(key) = key {
                     let quoted = matches!(frame.value.kind, ValueKind::Map(_));
-                    if quoted { out.push('"'); }
+                    if quoted {
+                        out.push('"');
+                    }
                     out.push_str(&key);
-                    if quoted { out.push('"'); }
+                    if quoted {
+                        out.push('"');
+                    }
                     out.push_str(": ");
                 }
-                if let Some(guard) = guard { out.push_str(if guard { "true => " } else { "false => " }); }
+                if let Some(guard) = guard {
+                    out.push_str(if guard { "true => " } else { "false => " });
+                }
                 frame.next += 1;
                 if stack.len() == stack.capacity() {
                     let capacity = stack.capacity().checked_mul(2).ok_or(LanaError::Oom)?;
                     let bytes = capacity.checked_mul(frame_size).ok_or(LanaError::Oom)?;
-                    if bytes > limit.saturating_sub(out.text.capacity()) { return Err(LanaError::Oom); }
-                    stack.try_reserve_exact(capacity - stack.len()).map_err(|_| LanaError::Oom)?;
+                    if bytes > limit.saturating_sub(out.text.capacity()) {
+                        return Err(LanaError::Oom);
+                    }
+                    stack
+                        .try_reserve_exact(capacity - stack.len())
+                        .map_err(|_| LanaError::Oom)?;
                 }
-                stack.push(PrintFrame { value: child, next: 0, identity: None });
+                stack.push(PrintFrame {
+                    value: child,
+                    next: 0,
+                    identity: None,
+                });
             } else {
-                out.push(if matches!(frame.value.kind, ValueKind::Array(_)) { ']' } else { '}' });
+                out.push(if matches!(frame.value.kind, ValueKind::Array(_)) {
+                    ']'
+                } else {
+                    '}'
+                });
                 stack.pop();
             }
         }
-        if out.failed { Err(LanaError::Oom) } else { Ok(out.text) }
+        if out.failed {
+            Err(LanaError::Oom)
+        } else {
+            Ok(out.text)
+        }
     }
 
     fn print_into(&self, out: &mut PrintOutput) {
@@ -1385,14 +1770,16 @@ impl Value {
                     "state(p={}, d_re={}, d_im={})",
                     lana_bytecode::format_g(state.state.p),
                     lana_bytecode::format_g(state.state.d_re),
-                    lana_bytecode::format_g(state.state.d_im));
+                    lana_bytecode::format_g(state.state.d_im)
+                );
             }
             ValueKind::Distribution { p0, p1 } => {
                 let _ = write!(
                     out,
                     "distribution(p0={}, p1={})",
                     lana_bytecode::format_g(*p0),
-                    lana_bytecode::format_g(*p1));
+                    lana_bytecode::format_g(*p1)
+                );
             }
             ValueKind::Sample(sample) => {
                 let _ = write!(out, "{sample}");
@@ -1436,8 +1823,7 @@ impl Value {
                 let _ = write!(
                     out,
                     "generator(function={}, exhausted={})",
-                    generator.function,
-                    generator.exhausted
+                    generator.function, generator.exhausted
                 );
             }
             ValueKind::Future(future) => {
@@ -1445,9 +1831,7 @@ impl Value {
                 let _ = write!(
                     out,
                     "future(function={}, exhausted={}, ready={})",
-                    future.function,
-                    future.exhausted,
-                    future.ready
+                    future.function, future.exhausted, future.ready
                 );
             }
             ValueKind::Set(_) => unreachable!("container handled by iterative renderer"),
@@ -1467,7 +1851,11 @@ impl Value {
                 );
             }
             ValueKind::TrainingResult(result) => {
-                let _ = write!(out, "training_result(steps={})", result.steps.lock().unwrap().items.len());
+                let _ = write!(
+                    out,
+                    "training_result(steps={})",
+                    result.steps.lock().unwrap().items.len()
+                );
             }
             ValueKind::InferenceAlgorithm(algorithm) => {
                 let _ = write!(
@@ -1481,7 +1869,11 @@ impl Value {
                 );
             }
             ValueKind::Posterior(posterior) => {
-                let _ = write!(out, "posterior(steps={})", posterior.steps.lock().unwrap().items.len());
+                let _ = write!(
+                    out,
+                    "posterior(steps={})",
+                    posterior.steps.lock().unwrap().items.len()
+                );
             }
             ValueKind::ClassObject(value) => {
                 let _ = write!(out, "class<{}>", value.descriptor.qualified_name);
@@ -1513,7 +1905,9 @@ impl From<&lana_bytecode::Value> for Value {
 /// elements render as `[re, im]` with `%.12g` each. A 0-d tensor prints its
 /// single scalar (or `[re, im]` pair) with no brackets.
 fn tensor_print_rec(tensor: &Tensor, dim: usize, offset: usize, out: &mut PrintOutput) {
-    if out.failed { return; }
+    if out.failed {
+        return;
+    }
     use std::fmt::Write;
     if dim == tensor.ndim {
         if tensor.is_complex {
@@ -1548,7 +1942,10 @@ mod tests {
         let mut map = Map::new(&heap, 1).unwrap();
         let before = heap.live_bytes();
         heap.set_limit(before).unwrap();
-        assert_eq!(map.set(Arc::from("retained key"), Value::number(1.0), false), Err(LanaError::Oom));
+        assert_eq!(
+            map.set(Arc::from("retained key"), Value::number(1.0), false),
+            Err(LanaError::Oom)
+        );
         assert!(map.entries().is_empty());
         assert_eq!(heap.live_bytes(), before);
     }
@@ -1578,13 +1975,25 @@ mod tests {
         assert_eq!(value.check_resolved(4096), Ok(()));
         assert_eq!(value.check_capabilities(4096), Ok(()));
         array.lock().unwrap().items.clear();
-        array.lock().unwrap().items.push(Value::number(1.0)).unwrap();
-        let aliases = Value::array(Arc::new(Mutex::new(Array::from_items(&heap, vec![value.clone(), value]).unwrap())));
+        array
+            .lock()
+            .unwrap()
+            .items
+            .push(Value::number(1.0))
+            .unwrap();
+        let aliases = Value::array(Arc::new(Mutex::new(
+            Array::from_items(&heap, vec![value.clone(), value]).unwrap(),
+        )));
         assert_eq!(aliases.print(), "[[1], [1]]");
         assert_eq!(aliases.try_print(4).unwrap_err(), LanaError::Oom);
-        let mut roots = vec![Arc::new(Mutex::new(Array::from_items(&heap, vec![Value::number(1.0)]).unwrap()))];
+        let mut roots = vec![Arc::new(Mutex::new(
+            Array::from_items(&heap, vec![Value::number(1.0)]).unwrap(),
+        ))];
         for _ in 0..5000 {
-            roots.push(Arc::new(Mutex::new(Array::from_items(&heap, vec![Value::array(roots.last().unwrap().clone())]).unwrap())));
+            roots.push(Arc::new(Mutex::new(
+                Array::from_items(&heap, vec![Value::array(roots.last().unwrap().clone())])
+                    .unwrap(),
+            )));
         }
         let root = Value::array(roots.last().unwrap().clone());
         let rendered = root.try_print(4 * 1024 * 1024).unwrap();
@@ -1593,11 +2002,21 @@ mod tests {
         assert_eq!(root.check_capabilities(4 * 1024 * 1024), Ok(()));
         assert_eq!(root.check_resolved(16), Err(LanaError::Oom));
         let unknown = Value::possibility(Arc::new(Possibility {
-            values: vec![Value::number(1.), Value::number(2.)], weights: None, dependency_id: 1,
+            values: vec![Value::number(1.), Value::number(2.)],
+            weights: None,
+            dependency_id: 1,
         }));
-        roots[0].lock().unwrap().items[0] = Value::adt(Arc::new(Adt { variant: 0, fields: vec![unknown] }));
-        assert_eq!(root.check_resolved(4 * 1024 * 1024), Err(LanaError::UnresolvedValue));
-        for root in &roots { root.lock().unwrap().items.clear(); }
+        roots[0].lock().unwrap().items[0] = Value::adt(Arc::new(Adt {
+            variant: 0,
+            fields: vec![unknown],
+        }));
+        assert_eq!(
+            root.check_resolved(4 * 1024 * 1024),
+            Err(LanaError::UnresolvedValue)
+        );
+        for root in &roots {
+            root.lock().unwrap().items.clear();
+        }
     }
 
     #[test]
@@ -1611,8 +2030,10 @@ mod tests {
         assert_eq!(Value::sample(1).type_name(), "sample");
         assert_eq!(Value::function(0).type_name(), "function");
         assert_eq!(
-            Value::state_dist(Arc::new(StateDist { kind: StateDistKind::Dirac(StateValue::default()) }))
-                .type_name(),
+            Value::state_dist(Arc::new(StateDist {
+                kind: StateDistKind::Dirac(StateValue::default())
+            }))
+            .type_name(),
             "state_dist"
         );
         let shared = Arc::new(SharedInformation {
@@ -1645,7 +2066,11 @@ mod tests {
     #[test]
     fn print_matches_c11_state() {
         let state = crate::state::StateValue {
-            state: crate::state::State { p: 0.5, d_re: 0.0, d_im: 0.0 },
+            state: crate::state::State {
+                p: 0.5,
+                d_re: 0.0,
+                d_im: 0.0,
+            },
             indexes: crate::state::Indexes::default(),
         };
         assert_eq!(Value::state(state).print(), "state(p=0.5, d_re=0, d_im=0)");
@@ -1654,8 +2079,9 @@ mod tests {
     #[test]
     fn print_matches_c11_array() {
         let heap = crate::heap::Heap::new(4096);
-        let array = Arc::new(Mutex::new(Array::from_items(&heap,
-            vec![Value::number(1.0), Value::boolean(true)]).unwrap()));
+        let array = Arc::new(Mutex::new(
+            Array::from_items(&heap, vec![Value::number(1.0), Value::boolean(true)]).unwrap(),
+        ));
         assert_eq!(Value::array(array).print(), "[1, true]");
     }
 }

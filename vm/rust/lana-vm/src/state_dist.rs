@@ -77,14 +77,28 @@ fn support_compare(a: &StateValue, b: &StateValue) -> Ordering {
         .p
         .partial_cmp(&b.state.p)
         .unwrap_or(Ordering::Equal)
-        .then(a.state.d_re.partial_cmp(&b.state.d_re).unwrap_or(Ordering::Equal))
-        .then(a.state.d_im.partial_cmp(&b.state.d_im).unwrap_or(Ordering::Equal))
+        .then(
+            a.state
+                .d_re
+                .partial_cmp(&b.state.d_re)
+                .unwrap_or(Ordering::Equal),
+        )
+        .then(
+            a.state
+                .d_im
+                .partial_cmp(&b.state.d_im)
+                .unwrap_or(Ordering::Equal),
+        )
 }
 
 /// Collect the support of a node into `items`, mirroring `support_collect`.
 /// The C11 resets the depth on each recursive call, so the depth check is
 /// effectively dead; the recursion is bounded by the tree depth.
-fn support_collect(node: &Arc<StateDist>, items: &mut Vec<StateValue>, limit: u32) -> Result<(), LanaError> {
+fn support_collect(
+    node: &Arc<StateDist>,
+    items: &mut Vec<StateValue>,
+    limit: u32,
+) -> Result<(), LanaError> {
     match &node.kind {
         StateDistKind::Dirac(state) => {
             if !state::state_valid(&state.state) {
@@ -96,7 +110,10 @@ fn support_collect(node: &Arc<StateDist>, items: &mut Vec<StateValue>, limit: u3
             items.push(state.clone());
             Ok(())
         }
-        StateDistKind::Transform { child, transform_id } => {
+        StateDistKind::Transform {
+            child,
+            transform_id,
+        } => {
             let child_support = support(child, limit)?;
             for child_state in child_support {
                 if items.len() >= limit as usize {
@@ -138,13 +155,24 @@ fn support_collect(node: &Arc<StateDist>, items: &mut Vec<StateValue>, limit: u3
             }
             Ok(())
         }
-        StateDistKind::Append { has_cached_parameters, sigma, p, m_re, m_im, .. } => {
+        StateDistKind::Append {
+            has_cached_parameters,
+            sigma,
+            p,
+            m_re,
+            m_im,
+            ..
+        } => {
             if *has_cached_parameters && *sigma == 0.0 {
                 if items.len() >= limit as usize {
                     return Err(LanaError::Limit);
                 }
                 let mut result = StateValue {
-                    state: State { p: 0.0, d_re: 0.0, d_im: 0.0 },
+                    state: State {
+                        p: 0.0,
+                        d_re: 0.0,
+                        d_im: 0.0,
+                    },
                     indexes: Default::default(),
                 };
                 let error = state::make_complex(*p, *m_re, *m_im, &mut result.state);
@@ -166,10 +194,17 @@ mod tests {
     use crate::value::StateDist;
 
     fn dirac(p: f64) -> Arc<StateDist> {
-        let mut state = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut state = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(state::make_complex(p, 0.0, 0.0, &mut state), LanaError::Ok);
         Arc::new(StateDist {
-            kind: StateDistKind::Dirac(StateValue { state, indexes: Default::default() }),
+            kind: StateDistKind::Dirac(StateValue {
+                state,
+                indexes: Default::default(),
+            }),
         })
     }
 

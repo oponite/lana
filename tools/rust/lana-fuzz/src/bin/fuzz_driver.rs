@@ -55,5 +55,9 @@ fn main() -> ExitCode {
         }
     }
 
-    if failed { ExitCode::from(1) } else { ExitCode::SUCCESS }
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
