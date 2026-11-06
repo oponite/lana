@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "joint_state{a: 1}\njoint_state{a: 1, b: 2}\njoint_state{b: 2, x: 1}\n[1, 2]\n",
+  "stderr": ""
+}

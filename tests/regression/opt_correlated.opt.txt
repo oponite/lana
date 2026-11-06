@@ -1,2 +1,0 @@
-corr_ratio: fold z = 10
-independent: fold w = 105

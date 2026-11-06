@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "1\n42\n{\"id\": [0, 5], \"revision\": 0, \"kind\": evidence, \"operation\": evidence, \"inputs\": [], \"source\": {\"label\": source, \"function\": <main>, \"line\": 14}, \"exactness\": exact, \"details\": {\"summary\": root}, \"outcome\": success, \"status\": exact, \"reason\": none}\nevidence evidence id=[0,5] revision=0 exactness=exact outcome=success reason=none label=source inputs=0\n{\"id\": [0, 6], \"revision\": 0, \"kind\": assumption, \"operation\": assume, \"inputs\": [], \"source\": {\"label\": assumption, \"function\": <main>, \"line\": 19}, \"exactness\": approximate, \"details\": {\"summary\": root}, \"outcome\": success, \"status\": modeled, \"reason\": none}\n",
+  "stderr": ""
+}

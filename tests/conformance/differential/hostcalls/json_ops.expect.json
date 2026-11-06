@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "[true, {\"a\": 1, \"b\": [true, null, x]}]\n[true,{\"a\":1,\"b\":[true,null,\"x\"]}]\n[true, {\"n\": 1.5, \"s\": hi, \"b\": true, \"z\": null, \"a\": [1, 2]}]\n[true,{\"a\":[1,2],\"b\":true,\"n\":1.5,\"s\":\"hi\",\"z\":null}]\n",
+  "stderr": ""
+}

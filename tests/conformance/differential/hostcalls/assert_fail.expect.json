@@ -1,0 +1,5 @@
+{
+  "exit": 1,
+  "stdout": "",
+  "stderr": "<bytecode>:4:1-4:1: error[assertion/LANA_ERR_ASSERTION]: assertion failed (operation HOST_CALL) (instruction 2, opcode HOST_CALL)\n"
+}

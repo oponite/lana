@@ -1,0 +1,5 @@
+{
+  "exit": 1,
+  "stdout": "",
+  "stderr": "worker:0:1-0:1: error[cancellation/LANA_ERR_CANCELLED]: task cancelled (operation execute) (instruction 5, opcode NOP)\n  resolution: cancelled, remaining alternatives: 0\n  cancellation: lineage 10451216379200822465 (task cancelled)\n"
+}
