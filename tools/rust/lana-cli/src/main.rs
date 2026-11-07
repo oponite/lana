@@ -189,6 +189,7 @@ fn report_cli_error(error: &CliError) {
             if let Some(rest) = error
                 .message
                 .strip_prefix("parse error at line ")
+                .or_else(|| error.message.strip_prefix("lex error at line "))
                 .or_else(|| error.message.strip_prefix("type error at line "))
             {
                 if let Some((line_text, column_text)) = rest.split_once(" column ") {
@@ -201,7 +202,9 @@ fn report_cli_error(error: &CliError) {
                         .unwrap_or(1);
                 }
             }
-            let kind = if error.message.starts_with("parse error") {
+            let kind = if error.message.starts_with("parse error")
+                || error.message.starts_with("lex error")
+            {
                 "parse/LANA_ERR_PARSE"
             } else if error.message.starts_with("type error") {
                 "validation/LANA_ERR_TYPE"
