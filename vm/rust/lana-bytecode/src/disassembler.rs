@@ -1,5 +1,5 @@
 //! LABC disassembler, mirroring `lana_disassemble_instruction` and
-//! `lana_disassemble` in `vm/c/bytecode.c`.
+//! `lana_disassemble` in `6aacbde2f67f:vm/c/bytecode.c`.
 //!
 //! Output is byte-identical to the C11 disassembler for the same chunk.
 
@@ -42,13 +42,17 @@ fn number(constants: &[Value], index: u32) -> f64 {
 }
 
 /// Format a number like C's `%.12g`, matching the STATE_NEW disassembly in
-/// `vm/c/bytecode.c` and `lana_value_print` in `vm/c/value.c`.
+/// `6aacbde2f67f:vm/c/bytecode.c` and `lana_value_print` in `6aacbde2f67f:vm/c/value.c`.
 pub fn format_g(value: f64) -> String {
     if value.is_nan() {
         return "nan".to_string();
     }
     if value.is_infinite() {
-        return if value.is_sign_positive() { "inf".to_string() } else { "-inf".to_string() };
+        return if value.is_sign_positive() {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
     }
     if value == 0.0 {
         return "0".to_string();
@@ -56,7 +60,7 @@ pub fn format_g(value: f64) -> String {
     let negative = value.is_sign_negative();
     let abs = value.abs();
     let exponent = abs.log10().floor() as i32;
-    let use_scientific = exponent < -4 || exponent >= 12;
+    let use_scientific = !(-4..12).contains(&exponent);
     let mut digits;
     if use_scientific {
         let mantissa = abs / 10f64.powi(exponent);
@@ -89,34 +93,72 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!("{offset:04} {:<20} ", ins.opcode.name()));
     match ins.opcode {
-        OpCode::ValueNew | OpCode::ObjectNew | OpCode::OoGet | OpCode::OoSet
-        | OpCode::OoCall | OpCode::OoStaticCall | OpCode::OoAsInterface => {
-            let argument = if ins.b == u32::MAX { "-".into() } else { format!("R{}", ins.b) };
-            let index = if ins.imm == u32::MAX { "-".into() } else { ins.imm.to_string() };
-            out.push_str(&format!("R{} {} descriptor=K{} {}", ins.a, argument, ins.c, index));
+        OpCode::ValueNew
+        | OpCode::ObjectNew
+        | OpCode::OoGet
+        | OpCode::OoSet
+        | OpCode::OoCall
+        | OpCode::OoStaticCall
+        | OpCode::OoAsInterface => {
+            let argument = if ins.b == u32::MAX {
+                "-".into()
+            } else {
+                format!("R{}", ins.b)
+            };
+            let index = if ins.imm == u32::MAX {
+                "-".into()
+            } else {
+                ins.imm.to_string()
+            };
+            out.push_str(&format!(
+                "R{} {} descriptor=K{} {}",
+                ins.a, argument, ins.c, index
+            ));
         }
         OpCode::StateNew => {
             out.push_str(&format!(
                 "R{} p=K{}({}) d_re=K{}({}) d_im=K{}({})",
-                ins.a, ins.b, format_g(number(&chunk.constants, ins.b)),
-                ins.c, format_g(number(&chunk.constants, ins.c)),
-                ins.imm, format_g(number(&chunk.constants, ins.imm))));
+                ins.a,
+                ins.b,
+                format_g(number(&chunk.constants, ins.b)),
+                ins.c,
+                format_g(number(&chunk.constants, ins.c)),
+                ins.imm,
+                format_g(number(&chunk.constants, ins.imm))
+            ));
         }
         OpCode::StateBuild => {
-            out.push_str(&format!("R{} p=R{} d_re=R{} d_im=R{}", ins.imm, ins.a, ins.b, ins.c));
+            out.push_str(&format!(
+                "R{} p=R{} d_re=R{} d_im=R{}",
+                ins.imm, ins.a, ins.b, ins.c
+            ));
         }
         OpCode::Mix => {
-            out.push_str(&format!("R{} <- mix(R{}, R{}, w=R{})", ins.a, ins.b, ins.c, ins.imm));
+            out.push_str(&format!(
+                "R{} <- mix(R{}, R{}, w=R{})",
+                ins.a, ins.b, ins.c, ins.imm
+            ));
         }
         OpCode::Map => {
-            let name = if ins.c == LANA_TRANSFORM_INVERT { "invert" } else { "neutralize" };
+            let name = if ins.c == LANA_TRANSFORM_INVERT {
+                "invert"
+            } else {
+                "neutralize"
+            };
             out.push_str(&format!("R{} <- map(R{}, {})", ins.a, ins.b, name));
         }
         OpCode::Support => {
-            out.push_str(&format!("R{} <- support(R{}, limit={})", ins.a, ins.b, ins.imm));
+            out.push_str(&format!(
+                "R{} <- support(R{}, limit={})",
+                ins.a, ins.b, ins.imm
+            ));
         }
         OpCode::Expect => {
-            let name = if ins.imm == LANA_OBSERVABLE_PROBABILITY { "probability" } else { "unknown" };
+            let name = if ins.imm == LANA_OBSERVABLE_PROBABILITY {
+                "probability"
+            } else {
+                "unknown"
+            };
             out.push_str(&format!("R{} <- expect(R{}, {})", ins.a, ins.b, name));
         }
         OpCode::Validate => {
@@ -126,7 +168,11 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
             out.push_str(&format!("R{} <- revision(R{})", ins.a, ins.b));
         }
         OpCode::Transform => {
-            let name = if ins.c == LANA_TRANSFORM_INVERT { "invert" } else { "neutralize" };
+            let name = if ins.c == LANA_TRANSFORM_INVERT {
+                "invert"
+            } else {
+                "neutralize"
+            };
             out.push_str(&format!("R{} <- {}(R{})", ins.a, name, ins.b));
         }
         OpCode::Measure => {
@@ -136,22 +182,43 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
             out.push_str(&format!("R{} R{} -> R{}", ins.a, ins.b, ins.c));
         }
         OpCode::Attenuate => {
-            out.push_str(&format!("R{} <- attenuate(R{}, factor=R{})", ins.a, ins.b, ins.c));
+            out.push_str(&format!(
+                "R{} <- attenuate(R{}, factor=R{})",
+                ins.a, ins.b, ins.c
+            ));
         }
         OpCode::TraceDistance => {
-            out.push_str(&format!("R{} <- trace_distance(R{}, R{})", ins.a, ins.b, ins.c));
+            out.push_str(&format!(
+                "R{} <- trace_distance(R{}, R{})",
+                ins.a, ins.b, ins.c
+            ));
         }
         OpCode::AppendRedundant => {
-            out.push_str(&format!("R{} R{} redundant(strength=R{}) -> R{}", ins.a, ins.b, ins.imm, ins.c));
+            out.push_str(&format!(
+                "R{} R{} redundant(strength=R{}) -> R{}",
+                ins.a, ins.b, ins.imm, ins.c
+            ));
         }
         OpCode::AppendFullRedundancy => {
-            out.push_str(&format!("R{} R{} full_redundancy -> R{}", ins.a, ins.b, ins.c));
+            out.push_str(&format!(
+                "R{} R{} full_redundancy -> R{}",
+                ins.a, ins.b, ins.c
+            ));
         }
         OpCode::AppendComplementary => {
-            out.push_str(&format!("R{} R{} complementary(strength=R{}) -> R{}", ins.a, ins.b, ins.imm, ins.c));
+            out.push_str(&format!(
+                "R{} R{} complementary(strength=R{}) -> R{}",
+                ins.a, ins.b, ins.imm, ins.c
+            ));
         }
         OpCode::AdtBuild => {
-            out.push_str(&format!("R{}..R{} variant=K{} -> R{}", ins.b, ins.b + ins.c - 1, ins.imm, ins.a));
+            out.push_str(&format!(
+                "R{}..R{} variant=K{} -> R{}",
+                ins.b,
+                ins.b + ins.c - 1,
+                ins.imm,
+                ins.a
+            ));
         }
         OpCode::AdtCase => {
             out.push_str(&format!("R{} variant=K{} -> {}", ins.a, ins.b, ins.imm));
@@ -160,10 +227,16 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
             out.push_str(&format!("R{} <- R{}[{}]", ins.a, ins.b, ins.c));
         }
         OpCode::Lazy => {
-            out.push_str(&format!("R{} <- lazy(function[{}], bound=R{})", ins.a, ins.b, ins.c));
+            out.push_str(&format!(
+                "R{} <- lazy(function[{}], bound=R{})",
+                ins.a, ins.b, ins.c
+            ));
         }
         OpCode::Force => {
-            out.push_str(&format!("R{} <- force(R{}, index=R{})", ins.a, ins.b, ins.c));
+            out.push_str(&format!(
+                "R{} <- force(R{}, index=R{})",
+                ins.a, ins.b, ins.c
+            ));
         }
         OpCode::Bootstrap => {
             out.push_str(&format!(
@@ -204,37 +277,61 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
         OpCode::MeasureBasis => {
             out.push_str(&format!(
                 "R{} basis={} mode={} -> R{}",
-                ins.a, basis_name(ins.c), measure_name(ins.imm), ins.b));
+                ins.a,
+                basis_name(ins.c),
+                measure_name(ins.imm),
+                ins.b
+            ));
         }
         OpCode::EstimateMeasureProbability | OpCode::EstimateMeasureDistribution => {
             out.push_str(&format!(
                 "R{} basis={} samples={} -> R{}",
-                ins.a, basis_name(ins.c), ins.imm, ins.b));
+                ins.a,
+                basis_name(ins.c),
+                ins.imm,
+                ins.b
+            ));
         }
         OpCode::JointBuild => {
             out.push_str(&format!(
                 "R{}..R{} descriptor[{}] -> R{}",
-                ins.b, ins.b + ins.c - 1, ins.imm, ins.a));
+                ins.b,
+                ins.b + ins.c - 1,
+                ins.imm,
+                ins.a
+            ));
         }
         OpCode::JointProject => {
             out.push_str(&format!("R{} names[{}] -> R{}", ins.a, ins.c, ins.b));
         }
         OpCode::JointCondition => {
-            out.push_str(&format!("R{} condition[{}]=R{} -> R{}", ins.a, ins.c, ins.imm, ins.b));
+            out.push_str(&format!(
+                "R{} condition[{}]=R{} -> R{}",
+                ins.a, ins.c, ins.imm, ins.b
+            ));
         }
         OpCode::JointConditionMap | OpCode::ObserveMap => {
             out.push_str(&format!("R{} evidence=R{} -> R{}", ins.a, ins.c, ins.b));
         }
-        OpCode::JointSample | OpCode::Resolve | OpCode::PossibilityBuild | OpCode::DistributionBuild
-        | OpCode::InfoSample | OpCode::Derivation | OpCode::Explain
-        | OpCode::Join | OpCode::JoinAll => {
+        OpCode::JointSample
+        | OpCode::Resolve
+        | OpCode::PossibilityBuild
+        | OpCode::DistributionBuild
+        | OpCode::InfoSample
+        | OpCode::Derivation
+        | OpCode::Explain
+        | OpCode::Join
+        | OpCode::JoinAll => {
             out.push_str(&format!("R{} -> R{}", ins.a, ins.b));
         }
         OpCode::JointBuildFinite => {
             out.push_str(&format!("rows=R{} names[{}] -> R{}", ins.a, ins.c, ins.b));
         }
         OpCode::JointRename => {
-            out.push_str(&format!("R{} name[{}]->name[{}] -> R{}", ins.a, ins.c, ins.imm, ins.b));
+            out.push_str(&format!(
+                "R{} name[{}]->name[{}] -> R{}",
+                ins.a, ins.c, ins.imm, ins.b
+            ));
         }
         OpCode::PathSplit => {
             out.push_str(&format!("R{} false->{}", ins.a, ins.imm));
@@ -243,13 +340,19 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
             out.push_str("join");
         }
         OpCode::Observe => {
-            out.push_str(&format!("R{} name[{}]=R{} -> R{}", ins.a, ins.c, ins.imm, ins.b));
+            out.push_str(&format!(
+                "R{} name[{}]=R{} -> R{}",
+                ins.a, ins.c, ins.imm, ins.b
+            ));
         }
         OpCode::Evidence | OpCode::Assume => {
             out.push_str(&format!("R{} label[{}] -> R{}", ins.a, ins.c, ins.b));
         }
         OpCode::Fork => {
-            out.push_str(&format!("function[{}] R{} argc={} -> R{}", ins.b, ins.c, ins.imm, ins.a));
+            out.push_str(&format!(
+                "function[{}] R{} argc={} -> R{}",
+                ins.b, ins.c, ins.imm, ins.a
+            ));
         }
         OpCode::JoinTimeout => {
             out.push_str(&format!("R{} timeout=R{} -> R{}", ins.a, ins.b, ins.c));
@@ -274,7 +377,10 @@ pub fn disassemble_instruction(chunk: &Chunk, offset: usize) -> String {
         }
         OpCode::Halt | OpCode::Nop => {}
         _ => {
-            out.push_str(&format!("a={} b={} c={} imm={}", ins.a, ins.b, ins.c, ins.imm));
+            out.push_str(&format!(
+                "a={} b={} c={} imm={}",
+                ins.a, ins.b, ins.c, ins.imm
+            ));
         }
     }
     out.push_str(&format!("  ; line {}\n", ins.line));
@@ -286,7 +392,12 @@ pub fn disassemble(chunk: &Chunk) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "LABC v{} entry={} constants={} functions={} instructions={}\n",
-        chunk.version, chunk.entry, chunk.constants.len(), chunk.functions.len(), chunk.code.len()));
+        chunk.version,
+        chunk.entry,
+        chunk.constants.len(),
+        chunk.functions.len(),
+        chunk.code.len()
+    ));
     for offset in 0..chunk.code.len() {
         out.push_str(&disassemble_instruction(chunk, offset));
     }

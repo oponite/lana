@@ -19,6 +19,21 @@ lana-bytecode = { path = "vm/rust/lana-bytecode" }
 lana-vm = { path = "vm/rust/lana-vm", default-features = false }
 lana-runtime = { path = "runtime/rust/lana-runtime", default-features = false }
 
+# CI runs clippy with -D warnings. These lints are allowed by design:
+# VM handlers take many registers and operands, wide signatures and
+# register-indexed loops mirror the bytecode, NaN-aware comparisons are
+# deliberate (`f64::clamp` panics on NaN bounds), and `(|| { ... })()`
+# scopes `?` inside host calls.
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"
+result_large_err = "allow"
+neg_cmp_op_on_partial_ord = "allow"
+manual_clamp = "allow"
+redundant_closure_call = "allow"
+should_implement_trait = "allow"
+
 # Keep the Rust VM optimized for the published performance gate.
 [profile.release]
 opt-level = 3

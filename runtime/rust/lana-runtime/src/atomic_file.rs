@@ -18,17 +18,28 @@ impl std::fmt::Display for UncertainWrite {
 impl std::error::Error for UncertainWrite {}
 
 pub fn durability_uncertain(error: &io::Error) -> bool {
-    error.get_ref().is_some_and(|cause| cause.is::<UncertainWrite>())
+    error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<UncertainWrite>())
 }
 
 /// Validation/write/rename errors leave the old destination intact. A directory
 /// sync error after rename means the complete new file is visible but its crash
 /// durability is uncertain; callers must inspect it before retrying.
 pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_with_sync(path, bytes,
-        |file| { publication_failpoint("before_file_sync")?; file.sync_all() },
+    write_with_sync(
+        path,
+        bytes,
+        |file| {
+            publication_failpoint("before_file_sync")?;
+            file.sync_all()
+        },
         || publication_failpoint("before_rename"),
-        |directory| { publication_failpoint("after_rename")?; directory.sync_all() })
+        |directory| {
+            publication_failpoint("after_rename")?;
+            directory.sync_all()
+        },
+    )
 }
 
 // Opt-in test binary only; ordinary builds cannot read this failpoint.
@@ -50,16 +61,26 @@ fn write_with_sync(
 ) -> io::Result<()> {
     #[cfg(not(unix))]
     let _ = sync_parent;
-    let name = path.file_name().ok_or_else(|| io::Error::other("missing file name"))?;
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("missing file name"))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     #[cfg(unix)]
     let directory = fs::File::open(parent)?;
     let mut name = name.to_os_string();
-    name.push(format!(".lana-{}-{}.tmp", std::process::id(), NEXT_FILE.fetch_add(1, Ordering::Relaxed)));
+    name.push(format!(
+        ".lana-{}-{}.tmp",
+        std::process::id(),
+        NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+    ));
     let temporary = parent.join(name);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
@@ -74,7 +95,9 @@ fn write_with_sync(
         sync_parent(&directory).map_err(|_| io::Error::other(UncertainWrite))?;
         Ok(())
     })();
-    if result.is_err() { let _ = fs::remove_file(&temporary); }
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
     result
 }
 
@@ -101,10 +124,24 @@ fn pre_and_post_replacement_errors_have_distinct_outcomes() {
     fs::create_dir_all(&root).unwrap();
     let path = root.join("value");
     write(&path, b"old").unwrap();
-    let before = write_with_sync(&path, b"new", |_| Err(io::Error::other("before")), || Ok(()), |_| Ok(())).unwrap_err();
+    let before = write_with_sync(
+        &path,
+        b"new",
+        |_| Err(io::Error::other("before")),
+        || Ok(()),
+        |_| Ok(()),
+    )
+    .unwrap_err();
     assert!(!durability_uncertain(&before));
     assert_eq!(fs::read(&path).unwrap(), b"old");
-    let after = write_with_sync(&path, b"new", |_| Ok(()), || Ok(()), |_| Err(io::Error::other("after"))).unwrap_err();
+    let after = write_with_sync(
+        &path,
+        b"new",
+        |_| Ok(()),
+        || Ok(()),
+        |_| Err(io::Error::other("after")),
+    )
+    .unwrap_err();
     assert!(durability_uncertain(&after));
     assert_eq!(fs::read(&path).unwrap(), b"new");
     assert_eq!(fs::read_dir(&root).unwrap().count(), 1);

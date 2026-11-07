@@ -1,5 +1,5 @@
-//! Effect execution and attempt storage, mirroring `runtime/c/effects.c` and
-//! `runtime/include/effects.h`.
+//! Effect execution and attempt storage, mirroring `6aacbde2f67f:runtime/c/effects.c` and
+//! `6aacbde2f67f:runtime/include/effects.h`.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,7 +8,7 @@ use lana_bytecode::LanaError;
 use lana_vm::value::Value;
 
 use crate::policy::{Decision, PolicyOutcome};
-use crate::store::{Store, store_commit, store_get, store_put};
+use crate::store::{store_commit, store_get, store_put, Store};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -48,7 +48,11 @@ fn now_seconds() -> Result<u64, LanaError> {
         .map_err(|_| LanaError::Io)
 }
 
-fn store_attempt(store: &mut Store, attempt: &EffectAttempt, allow_overwrite: bool) -> Result<(), LanaError> {
+fn store_attempt(
+    store: &mut Store,
+    attempt: &EffectAttempt,
+    allow_overwrite: bool,
+) -> Result<(), LanaError> {
     if attempt.schema_version != 1
         || attempt.attempt_id == 0
         || attempt.decision_id == 0
@@ -63,7 +67,10 @@ fn store_attempt(store: &mut Store, attempt: &EffectAttempt, allow_overwrite: bo
     {
         return Err(LanaError::Schema);
     }
-    let key = format!("effect-attempt/{}/{}", attempt.decision_id, attempt.attempt_id);
+    let key = format!(
+        "effect-attempt/{}/{}",
+        attempt.decision_id, attempt.attempt_id
+    );
     if !allow_overwrite {
         match store_get(store, &key) {
             Ok(_) => return Err(LanaError::Conflict),
@@ -87,10 +94,7 @@ fn store_attempt(store: &mut Store, attempt: &EffectAttempt, allow_overwrite: bo
 
 /// Execute a planned effect through the caller-supplied executor, mirroring
 /// `lana_effect_execute_planned`.
-pub fn effect_execute_planned(
-    executor: &EffectExecutor,
-    plan: &Value,
-) -> Result<Value, LanaError> {
+pub fn effect_execute_planned(executor: &EffectExecutor, plan: &Value) -> Result<Value, LanaError> {
     executor(plan)
 }
 
@@ -107,7 +111,8 @@ pub fn effect_execute_attempt(
     plan: &Value,
     executor: &EffectExecutor,
 ) -> Result<(Value, EffectAttempt), LanaError> {
-    if decision.outcome != PolicyOutcome::Authorize || decision.effect.is_none() || attempt_id == 0 {
+    if decision.outcome != PolicyOutcome::Authorize || decision.effect.is_none() || attempt_id == 0
+    {
         return Err(LanaError::Capability);
     }
     let started = now_seconds()?;
@@ -134,7 +139,11 @@ pub fn effect_execute_attempt(
         decision_id: decision.decision_id,
         effect_desc: decision.effect.clone().unwrap(),
         target: Some(decision.target.clone()),
-        status: if execution_error.is_none() { EffectStatus::Succeeded } else { EffectStatus::Failed },
+        status: if execution_error.is_none() {
+            EffectStatus::Succeeded
+        } else {
+            EffectStatus::Failed
+        },
         start_time: started,
         end_time: ended,
         failure_reason: match execution_error {
@@ -179,7 +188,10 @@ mod tests {
         };
         effect_store_attempt(&mut store, &attempt).unwrap();
         crate::store::store_commit(&mut store).unwrap();
-        assert_eq!(effect_store_attempt(&mut store, &attempt).unwrap_err(), LanaError::Conflict);
+        assert_eq!(
+            effect_store_attempt(&mut store, &attempt).unwrap_err(),
+            LanaError::Conflict
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

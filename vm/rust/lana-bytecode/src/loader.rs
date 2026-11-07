@@ -16,7 +16,9 @@
 
 use crate::chunk::{Chunk, Function, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
-use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1, LABC_VERSION_3, LABC_VERSION_4, LABC_VERSION_5};
+use crate::opcode::{
+    OpCode, LABC_VERSION, LABC_VERSION_1, LABC_VERSION_3, LABC_VERSION_4, LABC_VERSION_5,
+};
 use crate::value::{Value, ValueType};
 
 /// Maximum serialized chunk size, matching the C11 loader's 64 MiB cap.
@@ -29,7 +31,8 @@ const MAX_FUNCTION_NAME_LENGTH: u32 = 1_000_000;
 
 /// Read at most one byte beyond the serialized limit before rejecting input.
 pub fn read_file(path: impl AsRef<std::path::Path>) -> Result<Vec<u8>, LanaErrorInfo> {
-    let file = std::fs::File::open(path).map_err(|error| LanaErrorInfo::new(LanaError::Io, 0, 0, 0, error.to_string()))?;
+    let file = std::fs::File::open(path)
+        .map_err(|error| LanaErrorInfo::new(LanaError::Io, 0, 0, 0, error.to_string()))?;
     read_bounded(file)
 }
 
@@ -42,15 +45,35 @@ fn read_bounded(mut reader: impl std::io::Read) -> Result<Vec<u8>, LanaErrorInfo
             Ok(0) => return Ok(bytes),
             Ok(count) => count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(LanaErrorInfo::new(LanaError::Io, 0, 0, 0, error.to_string())),
+            Err(error) => {
+                return Err(LanaErrorInfo::new(
+                    LanaError::Io,
+                    0,
+                    0,
+                    0,
+                    error.to_string(),
+                ))
+            }
         };
         let required = bytes.len() + count;
         if required > MAX_CHUNK_SIZE {
-            return Err(LanaErrorInfo::new(LanaError::Limit, 0, 0, 0, "chunk exceeds size limit"));
+            return Err(LanaErrorInfo::new(
+                LanaError::Limit,
+                0,
+                0,
+                0,
+                "chunk exceeds size limit",
+            ));
         }
         if required > bytes.capacity() {
-            let capacity = required.max(bytes.capacity().saturating_mul(2)).min(MAX_CHUNK_SIZE);
-            bytes.try_reserve_exact(capacity - bytes.len()).map_err(|_| LanaErrorInfo::new(LanaError::Oom, 0, 0, 0, "cannot allocate bytecode input"))?;
+            let capacity = required
+                .max(bytes.capacity().saturating_mul(2))
+                .min(MAX_CHUNK_SIZE);
+            bytes
+                .try_reserve_exact(capacity - bytes.len())
+                .map_err(|_| {
+                    LanaErrorInfo::new(LanaError::Oom, 0, 0, 0, "cannot allocate bytecode input")
+                })?;
         }
         bytes.extend_from_slice(&buffer[..count]);
     }
@@ -98,115 +121,229 @@ impl<'a> Reader<'a> {
 pub fn load(bytes: &[u8]) -> Result<Chunk, LanaErrorInfo> {
     let mut reader = Reader::new(bytes);
     if bytes.len() > MAX_CHUNK_SIZE {
-        return Err(LanaErrorInfo::new(LanaError::Limit, 0, 0, 0, "chunk exceeds size limit"));
+        return Err(LanaErrorInfo::new(
+            LanaError::Limit,
+            0,
+            0,
+            0,
+            "chunk exceeds size limit",
+        ));
     }
-    let magic = reader.read_bytes(4).ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+    let magic = reader
+        .read_bytes(4)
+        .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
     if magic != b"LABC" {
         return Err(LanaErrorInfo::new(
-            LanaError::IncompatibleFormat, 0, 0, 0, "invalid LABC magic"));
+            LanaError::IncompatibleFormat,
+            0,
+            0,
+            0,
+            "invalid LABC magic",
+        ));
     }
-    let version = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-    let constants = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-    let functions = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-    let instructions = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-    let entry = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+    let version = reader
+        .read_u32()
+        .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+    let constants = reader
+        .read_u32()
+        .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+    let functions = reader
+        .read_u32()
+        .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+    let instructions = reader
+        .read_u32()
+        .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+    let entry = reader
+        .read_u32()
+        .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
 
-    if version != LABC_VERSION && version != LABC_VERSION_1 && version != LABC_VERSION_3
-        && version != LABC_VERSION_4 && version != LABC_VERSION_5 && version != 6
+    if version != LABC_VERSION
+        && version != LABC_VERSION_1
+        && version != LABC_VERSION_3
+        && version != LABC_VERSION_4
+        && version != LABC_VERSION_5
+        && version != 6
     {
         return Err(LanaErrorInfo::new(
-            LanaError::IncompatibleFormat, 0, 0, 0,
-            format!("unsupported LABC version {version}")));
+            LanaError::IncompatibleFormat,
+            0,
+            0,
+            0,
+            format!("unsupported LABC version {version}"),
+        ));
     }
     if constants > MAX_CONSTANTS || functions > MAX_FUNCTIONS || instructions > MAX_INSTRUCTIONS {
-        return Err(LanaErrorInfo::new(LanaError::Limit, 0, 0, 0, "chunk exceeds count limits"));
+        return Err(LanaErrorInfo::new(
+            LanaError::Limit,
+            0,
+            0,
+            0,
+            "chunk exceeds count limits",
+        ));
     }
     if constants as usize > bytes.len()
         || functions as usize > bytes.len() / 16
         || instructions as usize > bytes.len() / 21
     {
-        return Err(LanaErrorInfo::new(LanaError::Format, 0, 0, 0, "chunk counts exceed file size"));
+        return Err(LanaErrorInfo::new(
+            LanaError::Format,
+            0,
+            0,
+            0,
+            "chunk counts exceed file size",
+        ));
     }
 
     let mut chunk = Chunk::new(version, entry);
     for _ in 0..constants {
-        let type_byte = reader.read_u8().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        let value_type = ValueType::try_from(type_byte)
-            .map_err(|_| format_error(LanaError::Format, 0, 0, 0))?;
+        let type_byte = reader
+            .read_u8()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        let value_type =
+            ValueType::try_from(type_byte).map_err(|_| format_error(LanaError::Format, 0, 0, 0))?;
         let value = match value_type {
             ValueType::Number => {
-                let bits = reader.read_u64().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+                let bits = reader
+                    .read_u64()
+                    .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
                 Value::Number(f64::from_bits(bits))
             }
             ValueType::Bool => {
-                let boolean = reader.read_u8().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+                let boolean = reader
+                    .read_u8()
+                    .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
                 if boolean > 1 {
                     return Err(LanaErrorInfo::new(
-                        LanaError::Format, 0, 0, 0, "invalid boolean constant"));
+                        LanaError::Format,
+                        0,
+                        0,
+                        0,
+                        "invalid boolean constant",
+                    ));
                 }
                 Value::Bool(boolean != 0)
             }
             ValueType::String => {
-                let length = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+                let length = reader
+                    .read_u32()
+                    .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
                 if length > MAX_STRING_LENGTH {
                     return Err(LanaErrorInfo::new(
-                        LanaError::Format, 0, 0, 0, "string constant exceeds length limit"));
+                        LanaError::Format,
+                        0,
+                        0,
+                        0,
+                        "string constant exceeds length limit",
+                    ));
                 }
                 let bytes = reader
                     .read_bytes(length as usize)
                     .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
                 Value::String(if version == 6 {
-                    std::str::from_utf8(bytes).map_err(|_| LanaErrorInfo::new(
-                        LanaError::Format, 0, 0, 0, "invalid UTF-8 in v6 string constant"))?.to_string()
-                } else { String::from_utf8_lossy(bytes).into_owned() })
+                    std::str::from_utf8(bytes)
+                        .map_err(|_| {
+                            LanaErrorInfo::new(
+                                LanaError::Format,
+                                0,
+                                0,
+                                0,
+                                "invalid UTF-8 in v6 string constant",
+                            )
+                        })?
+                        .to_string()
+                } else {
+                    String::from_utf8_lossy(bytes).into_owned()
+                })
             }
             ValueType::Null => Value::Null,
             _ => {
                 return Err(LanaErrorInfo::new(
-                    LanaError::Format, 0, 0, 0, "constant type is not serializable"));
+                    LanaError::Format,
+                    0,
+                    0,
+                    0,
+                    "constant type is not serializable",
+                ));
             }
         };
         chunk.constants.push(value);
     }
 
     for _ in 0..functions {
-        let name_length = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        let name_length = reader
+            .read_u32()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
         if name_length > MAX_FUNCTION_NAME_LENGTH {
             return Err(LanaErrorInfo::new(
-                LanaError::Format, 0, 0, 0, "function name exceeds length limit"));
+                LanaError::Format,
+                0,
+                0,
+                0,
+                "function name exceeds length limit",
+            ));
         }
         let name_bytes = reader
             .read_bytes(name_length as usize)
             .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
         let name = String::from_utf8_lossy(name_bytes).into_owned();
-        let function_entry = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        let register_count = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        let arity = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        chunk.functions.push(Function { name, entry: function_entry, register_count, arity });
+        let function_entry = reader
+            .read_u32()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        let register_count = reader
+            .read_u32()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        let arity = reader
+            .read_u32()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        chunk.functions.push(Function {
+            name,
+            entry: function_entry,
+            register_count,
+            arity,
+        });
     }
 
     let mut unknown_opcode = None;
     for ip in 0..instructions {
-        let opcode_byte = reader.read_u8().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        let opcode_byte = reader
+            .read_u8()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
         // Finish decoding before verification, as C does. A later truncation
         // or invalid entry takes precedence over an unknown opcode.
         let opcode = OpCode::try_from(opcode_byte).unwrap_or_else(|_| {
             unknown_opcode.get_or_insert((ip as usize, opcode_byte));
             OpCode::Count
         });
-        let a = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        let b = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        let c = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        let imm = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        let line = reader.read_u32().ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
-        chunk.code.push(Instruction::new(opcode, a, b, c, imm, line));
+        let a = reader
+            .read_u32()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        let b = reader
+            .read_u32()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        let c = reader
+            .read_u32()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        let imm = reader
+            .read_u32()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        let line = reader
+            .read_u32()
+            .ok_or_else(|| format_error(LanaError::Format, 0, 0, 0))?;
+        chunk
+            .code
+            .push(Instruction::new(opcode, a, b, c, imm, line));
     }
 
     // The C11 loader rejects any trailing bytes after the last instruction
     // (`fgetc(file) != EOF`), so a well-formed LABC file must be fully consumed.
     if reader.offset != bytes.len() {
         return Err(LanaErrorInfo::new(
-            LanaError::Format, 0, 0, 0, "trailing bytes after LABC chunk"));
+            LanaError::Format,
+            0,
+            0,
+            0,
+            "trailing bytes after LABC chunk",
+        ));
     }
 
     crate::verifier::verify(&chunk).map_err(|mut error| {
@@ -236,12 +373,17 @@ mod bounded_read_tests {
         assert_eq!(bytes.len(), MAX_CHUNK_SIZE);
         drop(bytes);
         let mut source = std::io::repeat(0).take((MAX_CHUNK_SIZE + 100) as u64);
-        assert_eq!(read_bounded(&mut source).unwrap_err().code, LanaError::Limit);
+        assert_eq!(
+            read_bounded(&mut source).unwrap_err().code,
+            LanaError::Limit
+        );
         assert_eq!(source.limit(), 99);
         assert_eq!(read_bounded(&b"LABC"[..]).unwrap(), b"LABC");
         struct Broken;
         impl Read for Broken {
-            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> { Err(std::io::Error::other("broken")) }
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("broken"))
+            }
         }
         assert_eq!(read_bounded(Broken).unwrap_err().code, LanaError::Io);
     }

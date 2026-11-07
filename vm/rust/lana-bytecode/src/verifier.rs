@@ -32,17 +32,26 @@ fn constant_valid(chunk: &Chunk, value: u32) -> bool {
     value < chunk.constants.len() as u32
 }
 
-fn verify_register(error: &mut LanaErrorInfo, ip: usize, instruction: &Instruction, reg: u32) -> Result<(), LanaError> {
+fn verify_register(
+    error: &mut LanaErrorInfo,
+    ip: usize,
+    instruction: &Instruction,
+    reg: u32,
+) -> Result<(), LanaError> {
     if !register_valid(reg) {
         *error = LanaErrorInfo::new(
-            LanaError::Register, ip, instruction.opcode as u8, instruction.line,
-            format!("register R{reg} is out of range"));
+            LanaError::Register,
+            ip,
+            instruction.opcode as u8,
+            instruction.line,
+            format!("register R{reg} is out of range"),
+        );
         return Err(LanaError::Register);
     }
     Ok(())
 }
 
-/// Mirror of `lana_state_make_complex` in `vm/c/state.c`, used to validate the
+/// Mirror of `lana_state_make_complex` in `6aacbde2f67f:vm/c/state.c`, used to validate the
 /// three constant operands of OP_STATE_NEW.
 fn state_make_complex(p: f64, d_re: f64, d_im: f64) -> Result<(), LanaError> {
     if !p.is_finite() || !d_re.is_finite() || !d_im.is_finite() {
@@ -62,7 +71,11 @@ fn state_make_complex(p: f64, d_re: f64, d_im: f64) -> Result<(), LanaError> {
     } else {
         (d_re, d_im)
     };
-    let (d_re, d_im) = if p == 0.0 || p == 1.0 { (0.0, 0.0) } else { (d_re, d_im) };
+    let (d_re, d_im) = if p == 0.0 || p == 1.0 {
+        (0.0, 0.0)
+    } else {
+        (d_re, d_im)
+    };
     let p = if p == 0.0 { 0.0 } else { p };
     let d_re = if d_re == 0.0 { 0.0 } else { d_re };
     let d_im = if d_im == 0.0 { 0.0 } else { d_im };
@@ -84,17 +97,27 @@ fn state_make_complex(p: f64, d_re: f64, d_im: f64) -> Result<(), LanaError> {
 pub fn verify(chunk: &Chunk) -> Result<(), LanaErrorInfo> {
     if chunk.code.is_empty() || chunk.entry >= chunk.code.len() as u32 {
         return Err(LanaErrorInfo::new(
-            LanaError::Format, 0, OpCode::Nop as u8, 0, "chunk has no valid entry point"));
+            LanaError::Format,
+            0,
+            OpCode::Nop as u8,
+            0,
+            "chunk has no valid entry point",
+        ));
     }
-    if chunk.version != crate::opcode::LABC_VERSION && chunk.version != crate::opcode::LABC_VERSION_1
+    if chunk.version != crate::opcode::LABC_VERSION
+        && chunk.version != crate::opcode::LABC_VERSION_1
         && chunk.version != crate::opcode::LABC_VERSION_3
         && chunk.version != crate::opcode::LABC_VERSION_4
         && chunk.version != crate::opcode::LABC_VERSION_5
         && chunk.version != crate::opcode::LABC_VERSION_6
     {
         return Err(LanaErrorInfo::new(
-            LanaError::Format, 0, OpCode::Nop as u8, 0,
-            format!("unsupported LABC version {}", chunk.version)));
+            LanaError::Format,
+            0,
+            OpCode::Nop as u8,
+            0,
+            format!("unsupported LABC version {}", chunk.version),
+        ));
     }
     for (function_index, function) in chunk.functions.iter().enumerate() {
         if function.entry >= chunk.code.len() as u32
@@ -102,33 +125,57 @@ pub fn verify(chunk: &Chunk) -> Result<(), LanaErrorInfo> {
             || function.arity > function.register_count
         {
             return Err(LanaErrorInfo::new(
-                LanaError::Format, function.entry as usize, OpCode::Call as u8, 0,
-                format!("function {function_index} has invalid metadata")));
+                LanaError::Format,
+                function.entry as usize,
+                OpCode::Call as u8,
+                0,
+                format!("function {function_index} has invalid metadata"),
+            ));
         }
     }
     for (ip, ins) in chunk.code.iter().enumerate() {
         if ins.opcode as u8 >= max_opcode_for_version(chunk.version) {
             return Err(LanaErrorInfo::new(
-                LanaError::Opcode, ip, ins.opcode as u8, ins.line,
-                format!("unknown opcode {}", ins.opcode as u8)));
+                LanaError::Opcode,
+                ip,
+                ins.opcode as u8,
+                ins.line,
+                format!("unknown opcode {}", ins.opcode as u8),
+            ));
         }
         let result = verify_instruction(chunk, ip, ins);
         if let Err(code) = result {
             let message = format!("invalid operands for {}", ins.opcode.name());
-            return Err(LanaErrorInfo::new(code, ip, ins.opcode as u8, ins.line, message));
+            return Err(LanaErrorInfo::new(
+                code,
+                ip,
+                ins.opcode as u8,
+                ins.line,
+                message,
+            ));
         }
     }
-    if chunk.version == 6 { crate::objects::verify(chunk)?; }
+    if chunk.version == 6 {
+        crate::objects::verify(chunk)?;
+    }
     Ok(())
 }
 
 /// First invalid opcode for a given LABC version. New opcodes are appended, so
 /// each version accepts exactly the range it introduced.
 fn max_opcode_for_version(version: u32) -> u8 {
-    if version == crate::opcode::LABC_VERSION_6 { return OpCode::Count as u8; }
-    if version == crate::opcode::LABC_VERSION_5 { return OpCode::ValueNew as u8; }
-    if version == crate::opcode::LABC_VERSION_4 { return OpCode::DistributionBuild as u8; }
-    if version == crate::opcode::LABC_VERSION_3 { return OpCode::Async as u8; }
+    if version == crate::opcode::LABC_VERSION_6 {
+        return OpCode::Count as u8;
+    }
+    if version == crate::opcode::LABC_VERSION_5 {
+        return OpCode::ValueNew as u8;
+    }
+    if version == crate::opcode::LABC_VERSION_4 {
+        return OpCode::DistributionBuild as u8;
+    }
+    if version == crate::opcode::LABC_VERSION_3 {
+        return OpCode::Async as u8;
+    }
     OpCode::Generator as u8
 }
 
@@ -136,7 +183,11 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
     use OpCode::*;
     let mut error = LanaErrorInfo::new(LanaError::Ok, 0, 0, 0, "");
     let mut result = Ok(());
-    let check = |result: &mut Result<(), LanaError>, error: &mut LanaErrorInfo, ip: usize, ins: &Instruction, reg: u32| {
+    let check = |result: &mut Result<(), LanaError>,
+                 error: &mut LanaErrorInfo,
+                 ip: usize,
+                 ins: &Instruction,
+                 reg: u32| {
         if result.is_ok() {
             if let Err(code) = verify_register(error, ip, ins, reg) {
                 *result = Err(code);
@@ -169,8 +220,11 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
                     || imm.value_type() != crate::value::ValueType::Number
                 {
                     result = Err(LanaError::Type);
-                } else if let (crate::value::Value::Number(p), crate::value::Value::Number(d_re), crate::value::Value::Number(d_im)) =
-                    (b, c, imm)
+                } else if let (
+                    crate::value::Value::Number(p),
+                    crate::value::Value::Number(d_re),
+                    crate::value::Value::Number(d_im),
+                ) = (b, c, imm)
                 {
                     result = state_make_complex(*p, *d_re, *d_im);
                 }
@@ -422,7 +476,9 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && !constant_valid(chunk, ins.imm) {
                 result = Err(LanaError::Constant);
             }
-            if result.is_ok() && chunk.constants[ins.imm as usize].value_type() != crate::value::ValueType::String {
+            if result.is_ok()
+                && chunk.constants[ins.imm as usize].value_type() != crate::value::ValueType::String
+            {
                 result = Err(LanaError::Type);
             }
         }
@@ -432,7 +488,9 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && !constant_valid(chunk, ins.c) {
                 result = Err(LanaError::Constant);
             }
-            if result.is_ok() && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String {
+            if result.is_ok()
+                && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String
+            {
                 result = Err(LanaError::Type);
             }
         }
@@ -443,7 +501,9 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && !constant_valid(chunk, ins.c) {
                 result = Err(LanaError::Constant);
             }
-            if result.is_ok() && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String {
+            if result.is_ok()
+                && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String
+            {
                 result = Err(LanaError::Type);
             }
         }
@@ -468,7 +528,9 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && !constant_valid(chunk, ins.c) {
                 result = Err(LanaError::Constant);
             }
-            if result.is_ok() && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String {
+            if result.is_ok()
+                && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String
+            {
                 result = Err(LanaError::Type);
             }
             if result.is_ok() && ins.imm != 0 {
@@ -478,12 +540,14 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
         JointRename => {
             check(&mut result, &mut error, ip, ins, ins.a);
             check(&mut result, &mut error, ip, ins, ins.b);
-            if result.is_ok() && (!constant_valid(chunk, ins.c) || !constant_valid(chunk, ins.imm)) {
+            if result.is_ok() && (!constant_valid(chunk, ins.c) || !constant_valid(chunk, ins.imm))
+            {
                 result = Err(LanaError::Constant);
             }
             if result.is_ok()
                 && (chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String
-                    || chunk.constants[ins.imm as usize].value_type() != crate::value::ValueType::String)
+                    || chunk.constants[ins.imm as usize].value_type()
+                        != crate::value::ValueType::String)
             {
                 result = Err(LanaError::Type);
             }
@@ -516,7 +580,9 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && !constant_valid(chunk, ins.c) {
                 result = Err(LanaError::Constant);
             }
-            if result.is_ok() && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String {
+            if result.is_ok()
+                && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String
+            {
                 result = Err(LanaError::Type);
             }
         }
@@ -526,7 +592,9 @@ fn verify_instruction(chunk: &Chunk, ip: usize, ins: &Instruction) -> Result<(),
             if result.is_ok() && !constant_valid(chunk, ins.c) {
                 result = Err(LanaError::Constant);
             }
-            if result.is_ok() && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String {
+            if result.is_ok()
+                && chunk.constants[ins.c as usize].value_type() != crate::value::ValueType::String
+            {
                 result = Err(LanaError::Type);
             }
             if result.is_ok() && ins.imm != 0 {

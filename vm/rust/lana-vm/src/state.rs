@@ -45,7 +45,11 @@ pub enum BasisId {
 }
 
 fn positive_zero(value: f64) -> f64 {
-    if value == 0.0 { 0.0 } else { value }
+    if value == 0.0 {
+        0.0
+    } else {
+        value
+    }
 }
 
 pub fn disposition_squared(state: &State) -> f64 {
@@ -53,8 +57,11 @@ pub fn disposition_squared(state: &State) -> f64 {
 }
 
 pub fn state_valid(state: &State) -> bool {
-    if !state.p.is_finite() || !state.d_re.is_finite() || !state.d_im.is_finite()
-        || state.p < 0.0 || state.p > 1.0
+    if !state.p.is_finite()
+        || !state.d_re.is_finite()
+        || !state.d_im.is_finite()
+        || state.p < 0.0
+        || state.p > 1.0
     {
         return false;
     }
@@ -98,7 +105,11 @@ pub fn make_complex(p: f64, d_re: f64, d_im: f64, out: &mut State) -> LanaError 
         d_re: positive_zero(d_re),
         d_im: positive_zero(d_im),
     };
-    if state_valid(out) { LanaError::Ok } else { LanaError::InvalidState }
+    if state_valid(out) {
+        LanaError::Ok
+    } else {
+        LanaError::InvalidState
+    }
 }
 
 pub fn make(p: f64, d: f64, out: &mut State) -> LanaError {
@@ -127,7 +138,8 @@ pub fn basis_probability(basis: u32, state: &State, out: &mut f64) -> LanaError 
         2 => 0.5 + c_im,
         _ => return LanaError::Measure,
     };
-    if !probability.is_finite() || probability < -STATE_EPSILON || probability > 1.0 + STATE_EPSILON {
+    if !probability.is_finite() || probability < -STATE_EPSILON || probability > 1.0 + STATE_EPSILON
+    {
         return LanaError::InvalidState;
     }
     let mut probability = probability;
@@ -354,12 +366,25 @@ mod tests {
 
     #[test]
     fn make_complex_clamps_and_normalizes() {
-        let mut state = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
-        assert_eq!(make_complex(1.5, 0.0, 0.0, &mut state), LanaError::InvalidState);
+        let mut state = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
+        assert_eq!(
+            make_complex(1.5, 0.0, 0.0, &mut state),
+            LanaError::InvalidState
+        );
         // Radius beyond 1 + epsilon is rejected, matching `lana_state_make_complex`.
-        assert_eq!(make_complex(0.5, 2.0, 0.0, &mut state), LanaError::InvalidState);
+        assert_eq!(
+            make_complex(0.5, 2.0, 0.0, &mut state),
+            LanaError::InvalidState
+        );
         // Radius within epsilon of 1 is normalized to the unit circle.
-        assert_eq!(make_complex(0.5, 1.0 + 1e-13, 0.0, &mut state), LanaError::Ok);
+        assert_eq!(
+            make_complex(0.5, 1.0 + 1e-13, 0.0, &mut state),
+            LanaError::Ok
+        );
         assert!((state.d_re * state.d_re + state.d_im * state.d_im - 1.0).abs() < 1e-12);
         assert_eq!(make_complex(0.0, 0.3, 0.4, &mut state), LanaError::Ok);
         assert_eq!(state.d_re, 0.0);
@@ -368,7 +393,11 @@ mod tests {
 
     #[test]
     fn basis_probability_matches_c11() {
-        let mut state = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut state = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(make_complex(0.5, 0.0, 0.0, &mut state), LanaError::Ok);
         let mut out = 0.0;
         assert_eq!(basis_probability(0, &state, &mut out), LanaError::Ok);
@@ -382,12 +411,28 @@ mod tests {
 
     #[test]
     fn mix_is_weight_symmetric() {
-        let mut left = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
-        let mut right = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut left = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
+        let mut right = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(make_complex(0.2, 0.0, 0.0, &mut left), LanaError::Ok);
         assert_eq!(make_complex(0.8, 0.0, 0.0, &mut right), LanaError::Ok);
-        let mut a = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
-        let mut b = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut a = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
+        let mut b = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(mix(&left, &right, 0.3, &mut a), LanaError::Ok);
         assert_eq!(mix(&right, &left, 0.7, &mut b), LanaError::Ok);
         // The two orderings compute the same products; `1.0 - 0.7` is not exactly
@@ -399,45 +444,96 @@ mod tests {
 
     #[test]
     fn mix_rejects_bad_weight() {
-        let mut left = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
-        let mut right = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut left = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
+        let mut right = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(make_complex(0.5, 0.0, 0.0, &mut left), LanaError::Ok);
         assert_eq!(make_complex(0.5, 0.0, 0.0, &mut right), LanaError::Ok);
-        let mut out = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
-        assert_eq!(mix(&left, &right, 1.5, &mut out), LanaError::InvalidParameters);
-        assert_eq!(mix(&left, &right, f64::NAN, &mut out), LanaError::InvalidParameters);
+        let mut out = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
+        assert_eq!(
+            mix(&left, &right, 1.5, &mut out),
+            LanaError::InvalidParameters
+        );
+        assert_eq!(
+            mix(&left, &right, f64::NAN, &mut out),
+            LanaError::InvalidParameters
+        );
     }
 
     #[test]
     fn transform_apply_matches_c11() {
-        let mut source = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut source = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(make_complex(0.3, 0.4, 0.0, &mut source), LanaError::Ok);
-        let mut out = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut out = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(transform_apply(0, &source, &mut out), LanaError::Ok);
         assert_eq!(out.p, 0.7);
         assert_eq!(out.d_im, -0.0);
         assert_eq!(transform_apply(1, &source, &mut out), LanaError::Ok);
         assert_eq!(out.d_re, 0.0);
-        assert_eq!(transform_apply(9, &source, &mut out), LanaError::UnsupportedOperation);
+        assert_eq!(
+            transform_apply(9, &source, &mut out),
+            LanaError::UnsupportedOperation
+        );
     }
 
     #[test]
     fn attenuate_scales_disposition_only() {
-        let mut source = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut source = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(make_complex(0.5, 0.6, 0.0, &mut source), LanaError::Ok);
-        let mut out = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut out = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(attenuate(&source, 0.5, &mut out), LanaError::Ok);
         assert_eq!(out.p, 0.5);
         assert!((out.d_re - 0.3).abs() < 1e-12);
         assert_eq!(out.d_im, 0.0);
-        assert_eq!(attenuate(&source, 1.5, &mut out), LanaError::InvalidParameters);
-        assert_eq!(attenuate(&source, f64::NAN, &mut out), LanaError::InvalidParameters);
+        assert_eq!(
+            attenuate(&source, 1.5, &mut out),
+            LanaError::InvalidParameters
+        );
+        assert_eq!(
+            attenuate(&source, f64::NAN, &mut out),
+            LanaError::InvalidParameters
+        );
     }
 
     #[test]
     fn trace_distance_matches_n1_formula() {
-        let mut left = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
-        let mut right = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut left = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
+        let mut right = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(make_complex(0.5, 0.6, 0.0, &mut left), LanaError::Ok);
         assert_eq!(make_complex(0.5, 0.4, 0.0, &mut right), LanaError::Ok);
         let mut out = 0.0;
@@ -447,8 +543,16 @@ mod tests {
 
     #[test]
     fn append_relationship_parameters_match_modes() {
-        let mut left = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
-        let mut right = State { p: 0.0, d_re: 0.0, d_im: 0.0 };
+        let mut left = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
+        let mut right = State {
+            p: 0.0,
+            d_re: 0.0,
+            d_im: 0.0,
+        };
         assert_eq!(make_complex(0.4, 0.2, 0.0, &mut left), LanaError::Ok);
         assert_eq!(make_complex(0.8, -0.1, 0.0, &mut right), LanaError::Ok);
         let mut p = 0.0;
@@ -457,30 +561,75 @@ mod tests {
         let mut sigma = 0.0;
         // independent: p_C = 0.4 + 0.8 - 0.32 = 0.88.
         assert_eq!(
-            append_relationship_parameters(&left, &right, APPEND_INDEPENDENT, 0.0, &mut p, &mut m_re, &mut m_im, &mut sigma),
+            append_relationship_parameters(
+                &left,
+                &right,
+                APPEND_INDEPENDENT,
+                0.0,
+                &mut p,
+                &mut m_re,
+                &mut m_im,
+                &mut sigma
+            ),
             LanaError::Ok
         );
         assert!((p - 0.88).abs() < 1e-12);
         // redundant r=0.8: q = 0.2*0.32 + 0.8*0.4 = 0.384, p_C = 0.816.
         assert_eq!(
-            append_relationship_parameters(&left, &right, APPEND_REDUNDANT, 0.8, &mut p, &mut m_re, &mut m_im, &mut sigma),
+            append_relationship_parameters(
+                &left,
+                &right,
+                APPEND_REDUNDANT,
+                0.8,
+                &mut p,
+                &mut m_re,
+                &mut m_im,
+                &mut sigma
+            ),
             LanaError::Ok
         );
         assert!((p - 0.816).abs() < 1e-12);
         // complementary k=0.3: q = 0.7*0.32 + 0.3*0.2 = 0.284, p_C = 0.916.
         assert_eq!(
-            append_relationship_parameters(&left, &right, APPEND_COMPLEMENTARY, 0.3, &mut p, &mut m_re, &mut m_im, &mut sigma),
+            append_relationship_parameters(
+                &left,
+                &right,
+                APPEND_COMPLEMENTARY,
+                0.3,
+                &mut p,
+                &mut m_re,
+                &mut m_im,
+                &mut sigma
+            ),
             LanaError::Ok
         );
         assert!((p - 0.916).abs() < 1e-12);
         // full_redundancy requires p_a == p_b.
         assert_eq!(
-            append_relationship_parameters(&left, &right, APPEND_FULL_REDUNDANCY, 0.0, &mut p, &mut m_re, &mut m_im, &mut sigma),
+            append_relationship_parameters(
+                &left,
+                &right,
+                APPEND_FULL_REDUNDANCY,
+                0.0,
+                &mut p,
+                &mut m_re,
+                &mut m_im,
+                &mut sigma
+            ),
             LanaError::InvalidParameters
         );
         // redundant strength must be in [0,1).
         assert_eq!(
-            append_relationship_parameters(&left, &right, APPEND_REDUNDANT, 1.0, &mut p, &mut m_re, &mut m_im, &mut sigma),
+            append_relationship_parameters(
+                &left,
+                &right,
+                APPEND_REDUNDANT,
+                1.0,
+                &mut p,
+                &mut m_re,
+                &mut m_im,
+                &mut sigma
+            ),
             LanaError::InvalidParameters
         );
     }

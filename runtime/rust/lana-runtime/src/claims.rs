@@ -1,5 +1,5 @@
-//! Relationship claims and resolution, mirroring `runtime/c/claims.c` and
-//! `runtime/include/claims.h`.
+//! Relationship claims and resolution, mirroring `6aacbde2f67f:runtime/c/claims.c` and
+//! `6aacbde2f67f:runtime/include/claims.h`.
 //!
 //! The payload encoding, digest, and Ed25519 signature verification are
 //! byte-identical to the C11 reference so that differential conformance can
@@ -227,12 +227,17 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex<const N: usize>(text: &str) -> Result<[u8; N], LanaError> {
-    if text.len() != N * 2 || !text.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+    if text.len() != N * 2
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err(LanaError::Schema);
     }
     let mut bytes = [0; N];
     for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).map_err(|_| LanaError::Schema)?;
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
+            .map_err(|_| LanaError::Schema)?;
     }
     Ok(bytes)
 }
@@ -245,7 +250,9 @@ fn claim_map(heap: &Heap, fields: Vec<(&str, Value)>) -> Result<Value, LanaError
     Ok(Value::map(Arc::new(Mutex::new(map))))
 }
 
-fn claim_text(text: impl Into<Arc<str>>) -> Value { Value::string(text.into()) }
+fn claim_text(text: impl Into<Arc<str>>) -> Value {
+    Value::string(text.into())
+}
 
 /// Schema-1 JSON projection. The LCP1 payload and signature remain unchanged.
 pub fn claim_to_record(claim: &RelationshipClaim) -> Result<Value, LanaError> {
@@ -255,41 +262,63 @@ pub fn claim_to_record(claim: &RelationshipClaim) -> Result<Value, LanaError> {
         RelationshipKind::SameDependency => "same_dependency",
         RelationshipKind::ExplicitJoint => return Err(LanaError::InvalidParameters),
     };
-    let lifecycle = match claim.lifecycle { ClaimLifecycle::Active => "active", ClaimLifecycle::Revoked => "revoked" };
+    let lifecycle = match claim.lifecycle {
+        ClaimLifecycle::Active => "active",
+        ClaimLifecycle::Revoked => "revoked",
+    };
     let heap = Heap::new(256 * 1024 * 1024);
-    let payload = claim_map(&heap, vec![
-        ("schema_version", Value::number(claim.schema_version as f64)),
-        ("claim_id", claim_text(claim.claim_id.to_string())),
-        ("version", Value::number(claim.version as f64)),
-        ("subject", claim_text(claim.subject.clone())),
-        ("scope", claim_text(claim.scope.clone())),
-        ("issuer", claim_text(claim.issuer.clone())),
-        ("issuer_key_id", claim_text(claim.issuer_key_id.clone())),
-        ("authority_policy_version", claim_text(claim.authority_policy_version.clone())),
-        ("origin", claim_text(claim.origin.clone())),
-        ("relationship", claim_text(relationship)),
-        ("parameters_hex", claim_text(hex(&claim.parameters))),
-        ("validity_start", claim_text(claim.validity_start.to_string())),
-        ("validity_end", claim_text(claim.validity_end.to_string())),
-        ("lifecycle", claim_text(lifecycle)),
-    ])?;
-    let empty = || lana_vm::value::Array::new(&heap, 0)
-        .map(|array| Value::array(Arc::new(Mutex::new(array))));
-    claim_map(&heap, vec![
-        ("record_schema", Value::number(1.0)),
-        ("id", claim_text(format!("relationship_claim/{}/{}", claim.claim_id, claim.version))),
-        ("kind", claim_text("relationship_claim")),
-        ("transport_status", claim_text("ok")),
-        ("domain_status", claim_text(lifecycle)),
-        ("payload", payload),
-        ("error", Value::null()),
-        ("evidence", empty()?),
-        ("assumptions", empty()?),
-        ("exactness", claim_text("exact")),
-        ("metadata", Value::null()),
-        ("payload_digest", claim_text(hex(&claim.payload_digest))),
-        ("signature", claim_text(hex(&claim.signature))),
-    ])
+    let payload = claim_map(
+        &heap,
+        vec![
+            ("schema_version", Value::number(claim.schema_version as f64)),
+            ("claim_id", claim_text(claim.claim_id.to_string())),
+            ("version", Value::number(claim.version as f64)),
+            ("subject", claim_text(claim.subject.clone())),
+            ("scope", claim_text(claim.scope.clone())),
+            ("issuer", claim_text(claim.issuer.clone())),
+            ("issuer_key_id", claim_text(claim.issuer_key_id.clone())),
+            (
+                "authority_policy_version",
+                claim_text(claim.authority_policy_version.clone()),
+            ),
+            ("origin", claim_text(claim.origin.clone())),
+            ("relationship", claim_text(relationship)),
+            ("parameters_hex", claim_text(hex(&claim.parameters))),
+            (
+                "validity_start",
+                claim_text(claim.validity_start.to_string()),
+            ),
+            ("validity_end", claim_text(claim.validity_end.to_string())),
+            ("lifecycle", claim_text(lifecycle)),
+        ],
+    )?;
+    let empty = || {
+        lana_vm::value::Array::new(&heap, 0).map(|array| Value::array(Arc::new(Mutex::new(array))))
+    };
+    claim_map(
+        &heap,
+        vec![
+            ("record_schema", Value::number(1.0)),
+            (
+                "id",
+                claim_text(format!(
+                    "relationship_claim/{}/{}",
+                    claim.claim_id, claim.version
+                )),
+            ),
+            ("kind", claim_text("relationship_claim")),
+            ("transport_status", claim_text("ok")),
+            ("domain_status", claim_text(lifecycle)),
+            ("payload", payload),
+            ("error", Value::null()),
+            ("evidence", empty()?),
+            ("assumptions", empty()?),
+            ("exactness", claim_text("exact")),
+            ("metadata", Value::null()),
+            ("payload_digest", claim_text(hex(&claim.payload_digest))),
+            ("signature", claim_text(hex(&claim.signature))),
+        ],
+    )
 }
 
 fn record_field<'a>(map: &'a Map, name: &str) -> Result<&'a Value, LanaError> {
@@ -305,14 +334,24 @@ fn record_text(map: &Map, name: &str) -> Result<Arc<str>, LanaError> {
 
 fn record_u32(map: &Map, name: &str) -> Result<u32, LanaError> {
     match record_field(map, name)?.kind {
-        ValueKind::Number(number) if number.is_finite() && number >= 0.0 && number <= u32::MAX as f64 && number.fract() == 0.0 => Ok(number as u32),
+        ValueKind::Number(number)
+            if number.is_finite()
+                && number >= 0.0
+                && number <= u32::MAX as f64
+                && number.fract() == 0.0 =>
+        {
+            Ok(number as u32)
+        }
         _ => Err(LanaError::Schema),
     }
 }
 
 fn record_u64(map: &Map, name: &str) -> Result<u64, LanaError> {
     let text = record_text(map, name)?;
-    if text.is_empty() || (text.starts_with('0') && text.len() > 1) || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+    if text.is_empty()
+        || (text.starts_with('0') && text.len() > 1)
+        || !text.bytes().all(|byte| byte.is_ascii_digit())
+    {
         return Err(LanaError::Schema);
     }
     text.parse().map_err(|_| LanaError::Schema)
@@ -320,32 +359,58 @@ fn record_u64(map: &Map, name: &str) -> Result<u64, LanaError> {
 
 fn record_hex(map: &Map, name: &str) -> Result<Vec<u8>, LanaError> {
     let text = record_text(map, name)?;
-    if text.len() % 2 != 0 || !text.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+    if text.len() % 2 != 0
+        || !text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err(LanaError::Schema);
     }
-    text.as_bytes().chunks_exact(2).map(|pair| {
-        u8::from_str_radix(std::str::from_utf8(pair).map_err(|_| LanaError::Schema)?, 16).map_err(|_| LanaError::Schema)
-    }).collect()
+    text.as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            u8::from_str_radix(
+                std::str::from_utf8(pair).map_err(|_| LanaError::Schema)?,
+                16,
+            )
+            .map_err(|_| LanaError::Schema)
+        })
+        .collect()
 }
 
 /// Parse an untrusted record. Call `claim_validate` before using its authority.
 pub fn claim_from_record(record: &Value) -> Result<RelationshipClaim, LanaError> {
-    let ValueKind::Map(record) = &record.kind else { return Err(LanaError::Schema) };
+    let ValueKind::Map(record) = &record.kind else {
+        return Err(LanaError::Schema);
+    };
     let record = record.lock().unwrap();
-    if record.entries().len() != 13 || record_u32(&record, "record_schema")? != 1
+    if record.entries().len() != 13
+        || record_u32(&record, "record_schema")? != 1
         || record_text(&record, "kind")?.as_ref() != "relationship_claim"
         || record_text(&record, "transport_status")?.as_ref() != "ok"
         || record_text(&record, "exactness")?.as_ref() != "exact"
         || !matches!(record_field(&record, "error")?.kind, ValueKind::Null)
         || !matches!(record_field(&record, "metadata")?.kind, ValueKind::Null)
-    { return Err(LanaError::Schema); }
-    for name in ["evidence", "assumptions"] {
-        let ValueKind::Array(items) = &record_field(&record, name)?.kind else { return Err(LanaError::Schema) };
-        if !items.lock().unwrap().items().is_empty() { return Err(LanaError::Schema); }
+    {
+        return Err(LanaError::Schema);
     }
-    let ValueKind::Map(payload) = &record_field(&record, "payload")?.kind else { return Err(LanaError::Schema) };
+    for name in ["evidence", "assumptions"] {
+        let ValueKind::Array(items) = &record_field(&record, name)?.kind else {
+            return Err(LanaError::Schema);
+        };
+        if !items.lock().unwrap().items().is_empty() {
+            return Err(LanaError::Schema);
+        }
+    }
+    let ValueKind::Map(payload) = &record_field(&record, "payload")?.kind else {
+        return Err(LanaError::Schema);
+    };
     let payload = payload.lock().unwrap();
-    if payload.entries().len() != 14 || record_u32(&payload, "schema_version")? != RELATIONSHIP_CLAIM_SCHEMA_VERSION {
+    if payload.entries().len() != 14
+        || record_u32(&payload, "schema_version")? != RELATIONSHIP_CLAIM_SCHEMA_VERSION
+    {
         return Err(LanaError::Schema);
     }
     let claim_id = record_u64(&payload, "claim_id")?;
@@ -358,7 +423,9 @@ pub fn claim_from_record(record: &Value) -> Result<RelationshipClaim, LanaError>
         "revoked" => ClaimLifecycle::Revoked,
         _ => return Err(LanaError::Schema),
     };
-    if record_text(&record, "domain_status")?.as_ref() != record_text(&payload, "lifecycle")?.as_ref() {
+    if record_text(&record, "domain_status")?.as_ref()
+        != record_text(&payload, "lifecycle")?.as_ref()
+    {
         return Err(LanaError::Schema);
     }
     let relationship = match record_text(&payload, "relationship")?.as_ref() {
@@ -367,7 +434,8 @@ pub fn claim_from_record(record: &Value) -> Result<RelationshipClaim, LanaError>
         _ => return Err(LanaError::Schema),
     };
     let claim = RelationshipClaim {
-        claim_id, version,
+        claim_id,
+        version,
         subject: record_text(&payload, "subject")?,
         scope: record_text(&payload, "scope")?,
         issuer: record_text(&payload, "issuer")?,
@@ -413,7 +481,10 @@ fn trust_config_valid(trust: &ClaimTrustConfig) -> bool {
     trust.schema_version == 1 && !trust.authority_policy_version.is_empty()
 }
 
-fn find_issuer<'a>(claim: &RelationshipClaim, trust: &'a ClaimTrustConfig) -> Option<&'a TrustedIssuer> {
+fn find_issuer<'a>(
+    claim: &RelationshipClaim,
+    trust: &'a ClaimTrustConfig,
+) -> Option<&'a TrustedIssuer> {
     trust.issuers.iter().find(|issuer| {
         issuer.issuer == claim.issuer
             && issuer.key_id == claim.issuer_key_id
@@ -572,7 +643,9 @@ pub fn relationship_resolve(
     }
 }
 
-pub fn relationship_resolution_encode(resolution: &RelationshipResolution) -> Result<Vec<u8>, LanaError> {
+pub fn relationship_resolution_encode(
+    resolution: &RelationshipResolution,
+) -> Result<Vec<u8>, LanaError> {
     if resolution.schema_version != RELATIONSHIP_RESOLUTION_SCHEMA_VERSION
         || (!resolution.has_relationship && !resolution.parameters.is_empty())
     {
@@ -743,8 +816,10 @@ mod tests {
             schema_version: 1,
             authority_policy_version: Arc::from("v1"),
             issuers: vec![TrustedIssuer {
-                issuer: Arc::from("issuer-1"), key_id: Arc::from("key-1"),
-                scope: Arc::from("scope-a"), public_key: *key_pair.pk,
+                issuer: Arc::from("issuer-1"),
+                key_id: Arc::from("key-1"),
+                scope: Arc::from("scope-a"),
+                public_key: *key_pair.pk,
             }],
         };
         let record = claim_to_record(&claim).unwrap();
@@ -756,29 +831,96 @@ mod tests {
         assert_eq!(restored.signature, claim.signature);
         assert!(claim_validate(&restored, &trust, "alice", "scope-a").is_ok());
 
-        let ValueKind::Map(record_map) = &decoded.kind else { unreachable!() };
+        let ValueKind::Map(record_map) = &decoded.kind else {
+            unreachable!()
+        };
         let payload = record_map.lock().unwrap().get("payload").unwrap().clone();
-        let ValueKind::Map(payload_map) = payload.kind else { unreachable!() };
-        payload_map.lock().unwrap().set(Arc::from("origin"), claim_text("changed"), false).unwrap();
+        let ValueKind::Map(payload_map) = payload.kind else {
+            unreachable!()
+        };
+        payload_map
+            .lock()
+            .unwrap()
+            .set(Arc::from("origin"), claim_text("changed"), false)
+            .unwrap();
         let changed = claim_from_record(&decoded).unwrap();
-        assert_eq!(claim_validate(&changed, &trust, "alice", "scope-a"), Err(LanaError::Integrity));
-        payload_map.lock().unwrap().set(Arc::from("origin"), claim_text("origin-1"), false).unwrap();
-        record_map.lock().unwrap().set(Arc::from("id"), claim_text("relationship_claim/1/1"), false).unwrap();
-        assert!(matches!(claim_from_record(&decoded), Err(LanaError::Schema)));
-        record_map.lock().unwrap().set(Arc::from("id"), claim_text(format!("relationship_claim/{}/1", claim.claim_id)), false).unwrap();
-        record_map.lock().unwrap().set(Arc::from("signature"), claim_text("AB".repeat(64)), false).unwrap();
-        assert!(matches!(claim_from_record(&decoded), Err(LanaError::Schema)));
-        record_map.lock().unwrap().set(Arc::from("signature"), claim_text(hex(&[0; 64])), false).unwrap();
+        assert_eq!(
+            claim_validate(&changed, &trust, "alice", "scope-a"),
+            Err(LanaError::Integrity)
+        );
+        payload_map
+            .lock()
+            .unwrap()
+            .set(Arc::from("origin"), claim_text("origin-1"), false)
+            .unwrap();
+        record_map
+            .lock()
+            .unwrap()
+            .set(Arc::from("id"), claim_text("relationship_claim/1/1"), false)
+            .unwrap();
+        assert!(matches!(
+            claim_from_record(&decoded),
+            Err(LanaError::Schema)
+        ));
+        record_map
+            .lock()
+            .unwrap()
+            .set(
+                Arc::from("id"),
+                claim_text(format!("relationship_claim/{}/1", claim.claim_id)),
+                false,
+            )
+            .unwrap();
+        record_map
+            .lock()
+            .unwrap()
+            .set(Arc::from("signature"), claim_text("AB".repeat(64)), false)
+            .unwrap();
+        assert!(matches!(
+            claim_from_record(&decoded),
+            Err(LanaError::Schema)
+        ));
+        record_map
+            .lock()
+            .unwrap()
+            .set(Arc::from("signature"), claim_text(hex(&[0; 64])), false)
+            .unwrap();
         let bad_signature = claim_from_record(&decoded).unwrap();
-        assert_eq!(claim_validate(&bad_signature, &trust, "alice", "scope-a"), Err(LanaError::Integrity));
-        record_map.lock().unwrap().set(Arc::from("record_schema"), Value::number(2.0), false).unwrap();
-        assert!(matches!(claim_from_record(&decoded), Err(LanaError::Schema)));
+        assert_eq!(
+            claim_validate(&bad_signature, &trust, "alice", "scope-a"),
+            Err(LanaError::Integrity)
+        );
+        record_map
+            .lock()
+            .unwrap()
+            .set(Arc::from("record_schema"), Value::number(2.0), false)
+            .unwrap();
+        assert!(matches!(
+            claim_from_record(&decoded),
+            Err(LanaError::Schema)
+        ));
 
         let mut revoked = claim.clone();
         revoked.lifecycle = ClaimLifecycle::Revoked;
-        assert_eq!(claim_validate(&claim_from_record(&claim_to_record(&revoked).unwrap()).unwrap(), &trust, "alice", "scope-a"), Err(LanaError::ClaimRevoked));
+        assert_eq!(
+            claim_validate(
+                &claim_from_record(&claim_to_record(&revoked).unwrap()).unwrap(),
+                &trust,
+                "alice",
+                "scope-a"
+            ),
+            Err(LanaError::ClaimRevoked)
+        );
         let mut expired = claim.clone();
         expired.validity_end = 0;
-        assert_eq!(claim_validate(&claim_from_record(&claim_to_record(&expired).unwrap()).unwrap(), &trust, "alice", "scope-a"), Err(LanaError::ClaimExpired));
+        assert_eq!(
+            claim_validate(
+                &claim_from_record(&claim_to_record(&expired).unwrap()).unwrap(),
+                &trust,
+                "alice",
+                "scope-a"
+            ),
+            Err(LanaError::ClaimExpired)
+        );
     }
 }

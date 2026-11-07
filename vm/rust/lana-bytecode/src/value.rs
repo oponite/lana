@@ -1,10 +1,10 @@
-//! Serialized value types, mirroring `ValueType` in `vm/include/value.h`.
+//! Serialized value types, mirroring `ValueType` in `6aacbde2f67f:vm/include/value.h`.
 //!
 //! Only the constant-serializable types (`Null`, `Number`, `Bool`, `String`)
 //! appear in LABC constant pools. The remaining discriminants are reserved to
 //! keep the numeric values aligned with the C11 enum.
 
-/// Value types. The discriminants match `ValueType` in `vm/include/value.h`.
+/// Value types. The discriminants match `ValueType` in `6aacbde2f67f:vm/include/value.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ValueType {

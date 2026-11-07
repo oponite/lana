@@ -1,5 +1,5 @@
 //! Lana bytecode: the LABC v2 binary format, loader, verifier, and
-//! disassembler, mirroring the C11 implementation in `vm/c/bytecode.c`.
+//! disassembler, mirroring the C11 implementation in `6aacbde2f67f:vm/c/bytecode.c`.
 //!
 //! This crate is the first stage of the Rust runtime boundary: it must accept
 //! exactly the chunks the C11 loader accepts and reject exactly the chunks it
@@ -11,8 +11,8 @@ pub mod disassembler;
 pub mod encoder;
 pub mod error;
 pub mod loader;
-pub mod opcode;
 pub mod objects;
+pub mod opcode;
 pub mod value;
 pub mod verifier;
 
@@ -38,8 +38,12 @@ mod tests {
             register_count: 1,
             arity: 0,
         });
-        chunk.code.push(Instruction::new(OpCode::LoadConst, 0, 0, 0, 0, 1));
-        chunk.code.push(Instruction::new(OpCode::Halt, 0, 0, 0, 0, 2));
+        chunk
+            .code
+            .push(Instruction::new(OpCode::LoadConst, 0, 0, 0, 0, 1));
+        chunk
+            .code
+            .push(Instruction::new(OpCode::Halt, 0, 0, 0, 0, 2));
         chunk
     }
 
@@ -90,8 +94,13 @@ mod tests {
     #[test]
     fn verifier_rejects_overflowing_register_range() {
         let mut chunk = Chunk::new(opcode::LABC_VERSION, 0);
-        chunk.code.push(Instruction::new(OpCode::HostCall, 0, 0, 0, u32::MAX, 1));
-        assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Register);
+        chunk
+            .code
+            .push(Instruction::new(OpCode::HostCall, 0, 0, 0, u32::MAX, 1));
+        assert_eq!(
+            verifier::verify(&chunk).unwrap_err().code,
+            LanaError::Register
+        );
     }
 
     #[test]
@@ -117,9 +126,13 @@ mod tests {
         assert!(verifier::verify(&chunk).is_ok());
         chunk.code[0] = Instruction::new(OpCode::HostCall, 0, 221, 0, 0, 1);
         assert!(verifier::verify(&chunk).is_ok());
-        for id in [222] {
+        {
+            let id = 222;
             chunk.code[0] = Instruction::new(OpCode::HostCall, 0, id, 0, 0, 1);
-            assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Format);
+            assert_eq!(
+                verifier::verify(&chunk).unwrap_err().code,
+                LanaError::Format
+            );
         }
     }
 
@@ -128,11 +141,17 @@ mod tests {
         let mut chunk = sample_chunk();
         chunk.version = opcode::LABC_VERSION_3;
         chunk.code[0] = Instruction::new(OpCode::Async, 0, 0, 0, 0, 1);
-        assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Opcode);
+        assert_eq!(
+            verifier::verify(&chunk).unwrap_err().code,
+            LanaError::Opcode
+        );
 
         chunk.version = opcode::LABC_VERSION_4;
         chunk.code[0] = Instruction::new(OpCode::DistributionBuild, 0, 0, 0, 0, 1);
-        assert_eq!(verifier::verify(&chunk).unwrap_err().code, LanaError::Opcode);
+        assert_eq!(
+            verifier::verify(&chunk).unwrap_err().code,
+            LanaError::Opcode
+        );
     }
 
     #[test]
@@ -193,7 +212,10 @@ mod tests {
         bytes.push(0x9e);
         bytes.extend_from_slice(&[0; 20]);
         let error = loader::load(&bytes).unwrap_err();
-        assert_eq!((error.code, error.ip, error.opcode), (LanaError::Opcode, 0, 0x9e));
+        assert_eq!(
+            (error.code, error.ip, error.opcode),
+            (LanaError::Opcode, 0, 0x9e)
+        );
         assert_eq!(error.message, "unknown opcode 158");
 
         bytes[20] = 1; // Invalid entry is checked before the opcode.
@@ -201,7 +223,10 @@ mod tests {
         bytes[20] = 0;
         bytes.pop(); // Incomplete decoding is also a format error.
         assert_eq!(loader::load(&bytes).unwrap_err().code, LanaError::Format);
-        assert_eq!(loader::load(&header_bytes(0, 0, 0)).unwrap_err().code, LanaError::Format);
+        assert_eq!(
+            loader::load(&header_bytes(0, 0, 0)).unwrap_err().code,
+            LanaError::Format
+        );
     }
 
     #[test]

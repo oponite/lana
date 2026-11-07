@@ -17,3 +17,6 @@ wasm-bindgen = "=0.2.100"
 
 [build-dependencies]
 lana-bytecode = { workspace = true }
+
+[lints]
+workspace = true

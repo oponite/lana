@@ -38,12 +38,27 @@ fn predict(threshold: f64, temperature: f64) -> bool {
 }
 
 fn open(path: &str) -> Store {
-    store_open(&StoreOptions { schema_version: 1, path: path.into(), timeout_ms: 0 }).unwrap()
+    store_open(&StoreOptions {
+        schema_version: 1,
+        path: path.into(),
+        timeout_ms: 0,
+    })
+    .unwrap()
 }
 
 fn put_observation(store: &mut Store, index: usize, (temperature, failure): Observation) {
-    store_put(store, &format!("observation/{index}/temperature"), &Value::number(temperature)).unwrap();
-    store_put(store, &format!("observation/{index}/failure"), &Value::boolean(failure)).unwrap();
+    store_put(
+        store,
+        &format!("observation/{index}/temperature"),
+        &Value::number(temperature),
+    )
+    .unwrap();
+    store_put(
+        store,
+        &format!("observation/{index}/failure"),
+        &Value::boolean(failure),
+    )
+    .unwrap();
 }
 
 fn observations(store: &Store) -> Vec<Observation> {
@@ -51,8 +66,12 @@ fn observations(store: &Store) -> Vec<Observation> {
     (0..count)
         .map(|index| {
             (
-                store_get(store, &format!("observation/{index}/temperature")).unwrap().as_number(),
-                store_get(store, &format!("observation/{index}/failure")).unwrap().as_bool(),
+                store_get(store, &format!("observation/{index}/temperature"))
+                    .unwrap()
+                    .as_number(),
+                store_get(store, &format!("observation/{index}/failure"))
+                    .unwrap()
+                    .as_bool(),
             )
         })
         .collect()
@@ -76,7 +95,10 @@ fn correct(path: &str) {
     let mut store = open(path);
     let mut examples = observations(&store);
     assert_eq!(examples.len(), 4);
-    assert!(!predict(store_get(&store, "rule/1").unwrap().as_number(), 75.0));
+    assert!(!predict(
+        store_get(&store, "rule/1").unwrap().as_number(),
+        75.0
+    ));
     let correction = (75.0, true);
     examples.push(correction);
     let threshold = learn_threshold(&examples).unwrap();
@@ -94,10 +116,31 @@ fn reload(path: &str) {
     let revised = store_get(&store, "rule/2").unwrap().as_number();
     assert_eq!((first, revised), (80.0, 72.5));
     assert_eq!(store_get(&store, "rule/latest").unwrap().as_number(), 2.0);
-    assert_eq!(observations(&store), vec![(60.0, false), (70.0, false), (90.0, true), (100.0, true), (75.0, true)]);
+    assert_eq!(
+        observations(&store),
+        vec![
+            (60.0, false),
+            (70.0, false),
+            (90.0, true),
+            (100.0, true),
+            (75.0, true)
+        ]
+    );
 
-    let held_out = [(65.0, false), (71.0, false), (73.0, true), (74.0, true), (85.0, true), (95.0, true)];
-    let score = |threshold| held_out.iter().filter(|&&(temperature, outcome)| predict(threshold, temperature) == outcome).count();
+    let held_out = [
+        (65.0, false),
+        (71.0, false),
+        (73.0, true),
+        (74.0, true),
+        (85.0, true),
+        (95.0, true),
+    ];
+    let score = |threshold| {
+        held_out
+            .iter()
+            .filter(|&&(temperature, outcome)| predict(threshold, temperature) == outcome)
+            .count()
+    };
     assert_eq!(score(first), 4);
     assert_eq!(score(revised), 6);
     assert!(!predict(first, 73.0));
@@ -111,7 +154,10 @@ fn reject(path: &str) {
     let mut examples = observations(&store);
     examples.push((90.0, false));
     assert_eq!(learn_threshold(&examples), None);
-    assert!(matches!(store_commit(&mut store), Err(LanaError::UnsupportedOperation)));
+    assert!(matches!(
+        store_commit(&mut store),
+        Err(LanaError::UnsupportedOperation)
+    ));
     assert_eq!(store_current_revision(&store).unwrap().revision_id, before);
     assert_eq!(store_get(&store, "rule/latest").unwrap().as_number(), 2.0);
     assert_eq!(observations(&store).len(), 5);
@@ -119,7 +165,9 @@ fn reject(path: &str) {
 
 #[test]
 fn phase_helper() {
-    let Ok(phase) = std::env::var("LANA_LEARNING_PHASE") else { return };
+    let Ok(phase) = std::env::var("LANA_LEARNING_PHASE") else {
+        return;
+    };
     let path = std::env::var("LANA_LEARNING_STORE").unwrap();
     match phase.as_str() {
         "initial" => initial(&path),
@@ -135,7 +183,10 @@ fn learning_loop() {
     let path = std::env::temp_dir().join(format!(
         "lana-learning-loop-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let executable = std::env::current_exe().unwrap();
     for phase in ["initial", "correct", "reload", "reject", "reload"] {
@@ -145,7 +196,12 @@ fn learning_loop() {
             .env("LANA_LEARNING_STORE", &path)
             .output()
             .unwrap();
-        assert!(output.status.success(), "{phase}: {}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{phase}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         if phase == "reload" {
             print!("{}", String::from_utf8_lossy(&output.stdout));
         }

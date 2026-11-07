@@ -1,5 +1,5 @@
-//! Policy evaluation and decision storage, mirroring `runtime/c/policy.c` and
-//! `runtime/include/policy.h`.
+//! Policy evaluation and decision storage, mirroring `6aacbde2f67f:runtime/c/policy.c` and
+//! `6aacbde2f67f:runtime/include/policy.h`.
 
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use lana_vm::value::{Value, ValueKind};
 
 use crate::codec;
 use crate::sha256;
-use crate::store::{Store, store_get, store_put};
+use crate::store::{store_get, store_put, Store};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -75,7 +75,7 @@ pub struct Decision {
 }
 
 fn text_ok(text: Option<&str>) -> bool {
-    text.map_or(false, |t| !t.is_empty())
+    text.is_some_and(|t| !t.is_empty())
 }
 
 fn json_safe(text: Option<&str>) -> bool {
@@ -104,7 +104,9 @@ fn validate_policy(policy: &Policy) -> Result<(), LanaError> {
     }
     if (policy.rule.kind == PolicyRuleKind::ProbabilityAtLeast
         || policy.rule.kind == PolicyRuleKind::OrderLessThan)
-        && (!policy.rule.threshold.is_finite() || policy.rule.threshold < 0.0 || policy.rule.threshold > 1.0)
+        && (!policy.rule.threshold.is_finite()
+            || policy.rule.threshold < 0.0
+            || policy.rule.threshold > 1.0)
     {
         return Err(LanaError::InvalidProbability);
     }
@@ -119,14 +121,26 @@ fn validate_policy(policy: &Policy) -> Result<(), LanaError> {
 pub fn policy_version(policy: &Policy) -> Result<[u8; 32], LanaError> {
     validate_policy(policy)?;
     let mut canonical = String::new();
-    canonical.push_str(&codec::encode_value(&Value::string(policy.policy_id.clone()))?);
-    canonical.push_str(&codec::encode_value(&Value::string(policy.rule.field.clone()))?);
-    canonical.push_str(&codec::encode_value(&Value::number(policy.rule.kind as u32 as f64))?);
+    canonical.push_str(&codec::encode_value(&Value::string(
+        policy.policy_id.clone(),
+    ))?);
+    canonical.push_str(&codec::encode_value(&Value::string(
+        policy.rule.field.clone(),
+    ))?);
+    canonical.push_str(&codec::encode_value(&Value::number(
+        policy.rule.kind as u32 as f64,
+    ))?);
     canonical.push_str(&codec::encode_value(&Value::number(policy.rule.threshold))?);
     canonical.push_str(&codec::encode_value(&Value::string(
-        policy.rule.expected.clone().unwrap_or_else(|| Arc::from("")),
+        policy
+            .rule
+            .expected
+            .clone()
+            .unwrap_or_else(|| Arc::from("")),
     ))?);
-    canonical.push_str(&codec::encode_value(&Value::string(policy.rule.effect.clone()))?);
+    canonical.push_str(&codec::encode_value(&Value::string(
+        policy.rule.effect.clone(),
+    ))?);
     Ok(sha256::sha256(canonical.as_bytes()))
 }
 
@@ -178,7 +192,7 @@ fn condition_matches(rule: &PolicyRule, input: &Value) -> bool {
             matches!(value.kind, ValueKind::Number(n) if n < rule.threshold && n >= 0.0)
         }
         PolicyRuleKind::Equals => match (&value.kind, &rule.expected) {
-            (ValueKind::String(s), Some(expected)) => &**s == &**expected,
+            (ValueKind::String(s), Some(expected)) => **s == **expected,
             _ => false,
         },
         PolicyRuleKind::Present => true,
@@ -211,8 +225,16 @@ pub fn policy_evaluate(
         evidence_ids: evaluation.evidence_ids.clone(),
         derivation_ids: evaluation.derivation_ids.clone(),
         relationship_resolution: evaluation.relationship_resolution.clone(),
-        outcome: if matches { PolicyOutcome::Authorize } else { PolicyOutcome::RequestMoreEvidence },
-        effect: if matches { Some(policy.rule.effect.clone()) } else { None },
+        outcome: if matches {
+            PolicyOutcome::Authorize
+        } else {
+            PolicyOutcome::RequestMoreEvidence
+        },
+        effect: if matches {
+            Some(policy.rule.effect.clone())
+        } else {
+            None
+        },
         evaluation_time: evaluation.evaluation_time,
         reason: evaluation.reason.clone(),
         requested_evidence: evaluation.requested_evidence.clone(),
@@ -316,7 +338,10 @@ mod tests {
     #[test]
     fn nonfinite_thresholds_are_rejected_before_versioning() {
         let mut policy = sample_policy();
-        for kind in [PolicyRuleKind::ProbabilityAtLeast, PolicyRuleKind::OrderLessThan] {
+        for kind in [
+            PolicyRuleKind::ProbabilityAtLeast,
+            PolicyRuleKind::OrderLessThan,
+        ] {
             policy.rule.kind = kind;
             for threshold in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 1.1] {
                 policy.rule.threshold = threshold;

@@ -12,19 +12,52 @@ mod accelerate {
     #[link(name = "Accelerate", kind = "framework")]
     extern "C" {
         fn cblas_sgemm(
-            order: i32, transa: i32, transb: i32, m: i32, n: i32, k: i32,
-            alpha: f32, a: *const f32, lda: i32, b: *const f32, ldb: i32,
-            beta: f32, c: *mut f32, ldc: i32,
+            order: i32,
+            transa: i32,
+            transb: i32,
+            m: i32,
+            n: i32,
+            k: i32,
+            alpha: f32,
+            a: *const f32,
+            lda: i32,
+            b: *const f32,
+            ldb: i32,
+            beta: f32,
+            c: *mut f32,
+            ldc: i32,
         );
         fn cblas_dgemm(
-            order: i32, transa: i32, transb: i32, m: i32, n: i32, k: i32,
-            alpha: f64, a: *const f64, lda: i32, b: *const f64, ldb: i32,
-            beta: f64, c: *mut f64, ldc: i32,
+            order: i32,
+            transa: i32,
+            transb: i32,
+            m: i32,
+            n: i32,
+            k: i32,
+            alpha: f64,
+            a: *const f64,
+            lda: i32,
+            b: *const f64,
+            ldb: i32,
+            beta: f64,
+            c: *mut f64,
+            ldc: i32,
         );
         fn cblas_zgemm(
-            order: i32, transa: i32, transb: i32, m: i32, n: i32, k: i32,
-            alpha: *const f64, a: *const f64, lda: i32, b: *const f64,
-            ldb: i32, beta: *const f64, c: *mut f64, ldc: i32,
+            order: i32,
+            transa: i32,
+            transb: i32,
+            m: i32,
+            n: i32,
+            k: i32,
+            alpha: *const f64,
+            a: *const f64,
+            lda: i32,
+            b: *const f64,
+            ldb: i32,
+            beta: *const f64,
+            c: *mut f64,
+            ldc: i32,
         );
     }
 
@@ -32,13 +65,23 @@ mod accelerate {
     /// `int` range; any tensor under the VM memory limit is far below it,
     /// but the caller falls back to the portable loop rather than truncate.
     pub fn gemm(
-        m: usize, k: usize, n: usize, complex: bool,
-        a: *const f64, lda: usize, b: *const f64, ldb: usize, c: *mut f64,
+        m: usize,
+        k: usize,
+        n: usize,
+        complex: bool,
+        a: *const f64,
+        lda: usize,
+        b: *const f64,
+        ldb: usize,
+        c: *mut f64,
     ) -> bool {
         let lda = if lda == 0 { 1 } else { lda };
         let ldb = if ldb == 0 { 1 } else { ldb };
-        if m > i32::MAX as usize || k > i32::MAX as usize || n > i32::MAX as usize
-            || lda > i32::MAX as usize || ldb > i32::MAX as usize
+        if m > i32::MAX as usize
+            || k > i32::MAX as usize
+            || n > i32::MAX as usize
+            || lda > i32::MAX as usize
+            || ldb > i32::MAX as usize
         {
             return false;
         }
@@ -47,16 +90,25 @@ mod accelerate {
                 let one = [1.0f64, 0.0];
                 let zero = [0.0f64, 0.0];
                 cblas_zgemm(
-                    ROW_MAJOR, NO_TRANS, NO_TRANS,
-                    m as i32, n as i32, k as i32,
-                    one.as_ptr(), a, lda as i32, b, ldb as i32,
-                    zero.as_ptr(), c, n as i32,
+                    ROW_MAJOR,
+                    NO_TRANS,
+                    NO_TRANS,
+                    m as i32,
+                    n as i32,
+                    k as i32,
+                    one.as_ptr(),
+                    a,
+                    lda as i32,
+                    b,
+                    ldb as i32,
+                    zero.as_ptr(),
+                    c,
+                    n as i32,
                 );
             } else {
                 cblas_dgemm(
-                    ROW_MAJOR, NO_TRANS, NO_TRANS,
-                    m as i32, n as i32, k as i32,
-                    1.0, a, lda as i32, b, ldb as i32, 0.0, c, n as i32,
+                    ROW_MAJOR, NO_TRANS, NO_TRANS, m as i32, n as i32, k as i32, 1.0, a,
+                    lda as i32, b, ldb as i32, 0.0, c, n as i32,
                 );
             }
         }
@@ -71,13 +123,21 @@ mod accelerate {
     /// falls back to the naive loop) when a dimension exceeds the BLAS `int`
     /// range or the scratch cannot be allocated.
     pub fn gemm_fp32(
-        m: usize, k: usize, n: usize,
-        a: *const f64, lda: usize, b: *const f64, ldb: usize, c: *mut f64,
+        m: usize,
+        k: usize,
+        n: usize,
+        a: *const f64,
+        lda: usize,
+        b: *const f64,
+        ldb: usize,
+        c: *mut f64,
     ) -> bool {
         let lda = if lda == 0 { 1 } else { lda };
         let ldb = if ldb == 0 { 1 } else { ldb };
-        if m > i32::MAX as usize || k > i32::MAX as usize
-            || n > i32::MAX as usize || lda > i32::MAX as usize
+        if m > i32::MAX as usize
+            || k > i32::MAX as usize
+            || n > i32::MAX as usize
+            || lda > i32::MAX as usize
             || ldb > i32::MAX as usize
         {
             return false;
@@ -109,11 +169,20 @@ mod accelerate {
         fc.resize(c_cnt, 0.0f32);
         unsafe {
             cblas_sgemm(
-                ROW_MAJOR, NO_TRANS, NO_TRANS,
-                m as i32, n as i32, k as i32,
-                1.0f32, fa.as_ptr(), if k == 0 { 1 } else { k } as i32,
-                fb.as_ptr(), if n == 0 { 1 } else { n } as i32,
-                0.0f32, fc.as_mut_ptr(), n as i32,
+                ROW_MAJOR,
+                NO_TRANS,
+                NO_TRANS,
+                m as i32,
+                n as i32,
+                k as i32,
+                1.0f32,
+                fa.as_ptr(),
+                if k == 0 { 1 } else { k } as i32,
+                fb.as_ptr(),
+                if n == 0 { 1 } else { n } as i32,
+                0.0f32,
+                fc.as_mut_ptr(),
+                n as i32,
             );
         }
         for i in 0..m {
@@ -130,8 +199,15 @@ use accelerate::gemm as blas_gemm;
 
 #[cfg(not(target_os = "macos"))]
 fn blas_gemm(
-    _: usize, _: usize, _: usize, _: bool,
-    _: *const f64, _: usize, _: *const f64, _: usize, _: *mut f64,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: bool,
+    _: *const f64,
+    _: usize,
+    _: *const f64,
+    _: usize,
+    _: *mut f64,
 ) -> bool {
     false
 }
@@ -141,8 +217,14 @@ use accelerate::gemm_fp32 as blas_gemm_fp32;
 
 #[cfg(not(target_os = "macos"))]
 fn blas_gemm_fp32(
-    _: usize, _: usize, _: usize,
-    _: *const f64, _: usize, _: *const f64, _: usize, _: *mut f64,
+    _: usize,
+    _: usize,
+    _: usize,
+    _: *const f64,
+    _: usize,
+    _: *const f64,
+    _: usize,
+    _: *mut f64,
 ) -> bool {
     false
 }
@@ -161,8 +243,16 @@ fn blas_gemm_fp32(
 /// The pointers must be aligned, valid for the matrix extents and leading
 /// dimensions, and `c` must not alias either input.
 pub unsafe fn backend_gemm(
-    m: usize, k: usize, n: usize, complex: bool, fp32: bool,
-    a: *const f64, lda: usize, b: *const f64, ldb: usize, c: *mut f64,
+    m: usize,
+    k: usize,
+    n: usize,
+    complex: bool,
+    fp32: bool,
+    a: *const f64,
+    lda: usize,
+    b: *const f64,
+    ldb: usize,
+    c: *mut f64,
 ) {
     if m == 0 || n == 0 {
         return;

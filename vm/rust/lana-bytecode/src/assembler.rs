@@ -2,7 +2,10 @@
 
 use crate::chunk::{Chunk, Function, Instruction};
 use crate::error::{LanaError, LanaErrorInfo};
-use crate::opcode::{OpCode, LABC_VERSION, LABC_VERSION_1, LABC_VERSION_3, LABC_VERSION_4, LABC_VERSION_5, LANA_MAX_REGISTERS};
+use crate::opcode::{
+    OpCode, LABC_VERSION, LABC_VERSION_1, LABC_VERSION_3, LABC_VERSION_4, LABC_VERSION_5,
+    LANA_MAX_REGISTERS,
+};
 use crate::value::{Value, ValueType};
 
 const LANA_NO_OPERAND: u32 = u32::MAX;
@@ -30,66 +33,230 @@ const LANA_COMPARE_GREATER_EQUAL: u32 = 5;
 const LANA_HISTORY_LATEST: u32 = 0;
 const LANA_HISTORY_DURATION: u32 = 1;
 
-/// Host-call names in id order, mirroring the table in `vm/c/assembler.c`.
+/// Host-call names in id order, mirroring the table in `6aacbde2f67f:vm/c/assembler.c`.
 pub const HOST_CALL_NAMES: &[&str] = &[
-    "args", "read_text", "write_text", "now", "random", "assert",
-    "map_new", "map_has", "map_get", "map_set", "map_keys", "index_get", "index_set", "json_parse", "json_stringify",
-    "csv_read", "csv_write", "string_length", "string_byte_at",
-    "string_slice", "string_concat", "number_to_string", "array_new",
-    "array_push", "string_hex", "string_join", "array_length",
-    "string_unescape", "path_resolve", "sample_record",
-    "information_new", "claim_new", "claim_value", "claim_proposition",
-    "claim_status", "planned_effect_new", "planned_effect_execute",
-    "planned_effect_status", "shared_information", "shared_grant",
-    "shared_revoke", "shared_snapshot", "shared_at", "shared_observe",
-    "shared_revision", "shared_identity", "shared_wait",
-    "information_inspect", "directory_list", "directory_create",
-    "path_exists", "write_text_atomic", "hash_update", "lazy_bound",
-    "correlated", "surprisal",
-    "tensor_alloc", "tensor_zeros", "tensor_ones", "tensor_eye", "tensor_dtype",
-    "tensor_shape", "tensor_ndim", "tensor_add", "tensor_sub", "tensor_mul",
-    "tensor_div", "tensor_matmul", "tensor_sum", "tensor_mean", "tensor_max",
-    "tensor_min", "tensor", "tensor_complex", "grant", "revoke",
-    "set_new", "set_add", "set_contains", "set_union", "set_intersect",
-    "set_difference", "getenv", "random_seed", "floor", "string_to_number",
-    "type_of", "format", "format_number", "char_length",
-    "string_codepoint_slice", "to_upper", "to_lower",
-    "regex_compile", "regex_match", "regex_search", "regex_replace",
+    "args",
+    "read_text",
+    "write_text",
+    "now",
+    "random",
+    "assert",
+    "map_new",
+    "map_has",
+    "map_get",
+    "map_set",
+    "map_keys",
+    "index_get",
+    "index_set",
+    "json_parse",
+    "json_stringify",
+    "csv_read",
+    "csv_write",
+    "string_length",
+    "string_byte_at",
+    "string_slice",
+    "string_concat",
+    "number_to_string",
+    "array_new",
+    "array_push",
+    "string_hex",
+    "string_join",
+    "array_length",
+    "string_unescape",
+    "path_resolve",
+    "sample_record",
+    "information_new",
+    "claim_new",
+    "claim_value",
+    "claim_proposition",
+    "claim_status",
+    "planned_effect_new",
+    "planned_effect_execute",
+    "planned_effect_status",
+    "shared_information",
+    "shared_grant",
+    "shared_revoke",
+    "shared_snapshot",
+    "shared_at",
+    "shared_observe",
+    "shared_revision",
+    "shared_identity",
+    "shared_wait",
+    "information_inspect",
+    "directory_list",
+    "directory_create",
+    "path_exists",
+    "write_text_atomic",
+    "hash_update",
+    "lazy_bound",
+    "correlated",
+    "surprisal",
+    "tensor_alloc",
+    "tensor_zeros",
+    "tensor_ones",
+    "tensor_eye",
+    "tensor_dtype",
+    "tensor_shape",
+    "tensor_ndim",
+    "tensor_add",
+    "tensor_sub",
+    "tensor_mul",
+    "tensor_div",
+    "tensor_matmul",
+    "tensor_sum",
+    "tensor_mean",
+    "tensor_max",
+    "tensor_min",
+    "tensor",
+    "tensor_complex",
+    "grant",
+    "revoke",
+    "set_new",
+    "set_add",
+    "set_contains",
+    "set_union",
+    "set_intersect",
+    "set_difference",
+    "getenv",
+    "random_seed",
+    "floor",
+    "string_to_number",
+    "type_of",
+    "format",
+    "format_number",
+    "char_length",
+    "string_codepoint_slice",
+    "to_upper",
+    "to_lower",
+    "regex_compile",
+    "regex_match",
+    "regex_search",
+    "regex_replace",
     "gpu_matmul",
-    "density_operator", "povm", "channel", "observable", "tensor_product",
-    "partial_trace", "measure_with", "apply_to", "expect", "mix",
-    "trace_distance", "is_separable", "to_state",
-    "grad", "vjp",
-    "sgd", "adam", "train",
-    "mcmc", "vi", "smc", "infer", "update", "resume",
-    "state_tensor", "append", "measure", "transform",
-    "run_async", "future_all", "future_race", "sleep",
-    "dataset", "dataset_filter", "dataset_map", "dataset_select",
-    "dataset_limit", "dataset_sort", "dataset_group_by", "dataset_aggregate",
-    "dataset_join", "dataset_materialize", "dataset_explain",
-    "store_open", "store_put", "store_get", "store_delete", "store_commit",
-    "store_scan", "store_current_revision", "policy_evaluate",
-    "policy_store_decision", "ledger_append", "ledger_query",
-    "store_get_at", "store_snapshot", "store_commit_if",
-    "adapter_load", "adapter_fetch",
-    "ffi_declare", "ffi_load", "ffi_call",
-    "http_get", "http_post", "socket_connect", "socket_send",
-    "socket_recv", "socket_close",
-    "tensor_cast", "tensor_reshape", "tensor_transpose",
-    "tensor_exp", "tensor_log", "tensor_sqrt", "tensor_relu",
-    "tensor_softmax", "tensor_logsumexp", "tensor_argmax",
-    "tensor_compare", "tensor_select", "tensor_gather",
-    "cholesky_solve", "random_uniform", "random_normal",
-    "tensor_device", "tensor_to_device", "tensor_to_cpu",
-    "execution_capability", "execution_authorize", "execution_execute",
+    "density_operator",
+    "povm",
+    "channel",
+    "observable",
+    "tensor_product",
+    "partial_trace",
+    "measure_with",
+    "apply_to",
+    "expect",
+    "mix",
+    "trace_distance",
+    "is_separable",
+    "to_state",
+    "grad",
+    "vjp",
+    "sgd",
+    "adam",
+    "train",
+    "mcmc",
+    "vi",
+    "smc",
+    "infer",
+    "update",
+    "resume",
+    "state_tensor",
+    "append",
+    "measure",
+    "transform",
+    "run_async",
+    "future_all",
+    "future_race",
+    "sleep",
+    "dataset",
+    "dataset_filter",
+    "dataset_map",
+    "dataset_select",
+    "dataset_limit",
+    "dataset_sort",
+    "dataset_group_by",
+    "dataset_aggregate",
+    "dataset_join",
+    "dataset_materialize",
+    "dataset_explain",
+    "store_open",
+    "store_put",
+    "store_get",
+    "store_delete",
+    "store_commit",
+    "store_scan",
+    "store_current_revision",
+    "policy_evaluate",
+    "policy_store_decision",
+    "ledger_append",
+    "ledger_query",
+    "store_get_at",
+    "store_snapshot",
+    "store_commit_if",
+    "adapter_load",
+    "adapter_fetch",
+    "ffi_declare",
+    "ffi_load",
+    "ffi_call",
+    "http_get",
+    "http_post",
+    "socket_connect",
+    "socket_send",
+    "socket_recv",
+    "socket_close",
+    "tensor_cast",
+    "tensor_reshape",
+    "tensor_transpose",
+    "tensor_exp",
+    "tensor_log",
+    "tensor_sqrt",
+    "tensor_relu",
+    "tensor_softmax",
+    "tensor_logsumexp",
+    "tensor_argmax",
+    "tensor_compare",
+    "tensor_select",
+    "tensor_gather",
+    "cholesky_solve",
+    "random_uniform",
+    "random_normal",
+    "tensor_device",
+    "tensor_to_device",
+    "tensor_to_cpu",
+    "execution_capability",
+    "execution_authorize",
+    "execution_execute",
     "future_message",
-    "core_entropy", "core_conditional_entropy", "core_mutual_information",
-    "core_broja", "core_kernel", "core_identity_kernel", "core_compose_kernels", "core_network", "core_infer", "core_forget_weights", "core_assign_weights",
-    "dataset_source", "dataset_query", "dataset_apply", "dataset_snapshot",
-    "dataset_evidence", "dataset_exclusions", "rules_learn", "rules_predict",
-    "rules_save", "rules_add_counterexample", "rules_inspect", "rules_rollback",
-    "trees_fit", "trees_predict", "trees_explain", "trees_save", "trees_load",
-    "evaluation_walk_forward", "dataset_sqlite", "document_extract", "snapshot", "live_register",
+    "core_entropy",
+    "core_conditional_entropy",
+    "core_mutual_information",
+    "core_broja",
+    "core_kernel",
+    "core_identity_kernel",
+    "core_compose_kernels",
+    "core_network",
+    "core_infer",
+    "core_forget_weights",
+    "core_assign_weights",
+    "dataset_source",
+    "dataset_query",
+    "dataset_apply",
+    "dataset_snapshot",
+    "dataset_evidence",
+    "dataset_exclusions",
+    "rules_learn",
+    "rules_predict",
+    "rules_save",
+    "rules_add_counterexample",
+    "rules_inspect",
+    "rules_rollback",
+    "trees_fit",
+    "trees_predict",
+    "trees_explain",
+    "trees_save",
+    "trees_load",
+    "evaluation_walk_forward",
+    "dataset_sqlite",
+    "document_extract",
+    "snapshot",
+    "live_register",
 ];
 
 struct Label {
@@ -290,15 +457,15 @@ fn add_hex_string(chunk: &mut Chunk, encoded: &str) -> Result<u32, LanaError> {
         decoded.push(byte);
     }
     let index = chunk.constants.len() as u32;
-    chunk
-        .constants
-        .push(Value::String(if chunk.version == 6 {
-            String::from_utf8(decoded).map_err(|_| LanaError::Format)?
-        } else { String::from_utf8_lossy(&decoded).into_owned() }));
+    chunk.constants.push(Value::String(if chunk.version == 6 {
+        String::from_utf8(decoded).map_err(|_| LanaError::Format)?
+    } else {
+        String::from_utf8_lossy(&decoded).into_owned()
+    }));
     Ok(index)
 }
 
-/// Emit one instruction line, mirroring `emit_line` in `vm/c/assembler.c`.
+/// Emit one instruction line, mirroring `emit_line` in `6aacbde2f67f:vm/c/assembler.c`.
 fn emit_line(
     chunk: &mut Chunk,
     tokens: &[&str],
@@ -665,7 +832,13 @@ fn emit_line(
             let a = reg(tokens[1])?;
             let b = reg(tokens[2])?;
             let count = parse_number(tokens[3]).ok_or_else(|| {
-                LanaErrorInfo::new(LanaError::Format, ip, OpCode::Nop as u8, line, "invalid field count")
+                LanaErrorInfo::new(
+                    LanaError::Format,
+                    ip,
+                    OpCode::Nop as u8,
+                    line,
+                    "invalid field count",
+                )
             })?;
             if count < 0.0 || count > LANA_MAX_REGISTERS as f64 {
                 return Err(LanaErrorInfo::new(
@@ -714,7 +887,13 @@ fn emit_line(
             let a = reg(tokens[1])?;
             let b = reg(tokens[2])?;
             let index = parse_number(tokens[3]).ok_or_else(|| {
-                LanaErrorInfo::new(LanaError::Format, ip, OpCode::Nop as u8, line, "invalid field index")
+                LanaErrorInfo::new(
+                    LanaError::Format,
+                    ip,
+                    OpCode::Nop as u8,
+                    line,
+                    "invalid field index",
+                )
             })?;
             if index < 0.0 || index > LANA_MAX_REGISTERS as f64 {
                 return Err(LanaErrorInfo::new(
@@ -1040,9 +1219,13 @@ fn emit_line(
             expect(3)?;
             let a = reg(tokens[1])?;
             let b = reg(tokens[2])?;
-            ins.opcode = if tokens[0] == "POSSIBILITY_BUILD" { OpCode::PossibilityBuild }
-                else if tokens[0] == "DISTRIBUTION_BUILD" { OpCode::DistributionBuild }
-                else { OpCode::InfoSample };
+            ins.opcode = if tokens[0] == "POSSIBILITY_BUILD" {
+                OpCode::PossibilityBuild
+            } else if tokens[0] == "DISTRIBUTION_BUILD" {
+                OpCode::DistributionBuild
+            } else {
+                OpCode::InfoSample
+            };
             ins.a = a;
             ins.b = b;
             ins.c = 0;
@@ -1463,24 +1646,44 @@ fn emit_line(
             ins.c = a;
             ins.imm = number as u32;
         }
-        "VALUE_NEW" | "OBJECT_NEW" | "OO_GET" | "OO_SET" | "OO_CALL" | "OO_STATIC_CALL" | "OO_AS_INTERFACE" => {
+        "VALUE_NEW" | "OBJECT_NEW" | "OO_GET" | "OO_SET" | "OO_CALL" | "OO_STATIC_CALL"
+        | "OO_AS_INTERFACE" => {
             expect(5)?;
             ins.opcode = match tokens[0] {
-                "VALUE_NEW" => OpCode::ValueNew, "OBJECT_NEW" => OpCode::ObjectNew,
-                "OO_GET" => OpCode::OoGet, "OO_SET" => OpCode::OoSet,
-                "OO_CALL" => OpCode::OoCall, "OO_STATIC_CALL" => OpCode::OoStaticCall,
+                "VALUE_NEW" => OpCode::ValueNew,
+                "OBJECT_NEW" => OpCode::ObjectNew,
+                "OO_GET" => OpCode::OoGet,
+                "OO_SET" => OpCode::OoSet,
+                "OO_CALL" => OpCode::OoCall,
+                "OO_STATIC_CALL" => OpCode::OoStaticCall,
                 _ => OpCode::OoAsInterface,
             };
             ins.a = reg(tokens[1])?;
-            ins.b = if tokens[2] == "-" { u32::MAX } else { reg(tokens[2])? };
+            ins.b = if tokens[2] == "-" {
+                u32::MAX
+            } else {
+                reg(tokens[2])?
+            };
             ins.c = add_hex_string(chunk, tokens[3])?;
-            if let Some(index) = chunk.constants[..ins.c as usize].iter().position(|value| value == &chunk.constants[ins.c as usize]) {
+            if let Some(index) = chunk.constants[..ins.c as usize]
+                .iter()
+                .position(|value| value == &chunk.constants[ins.c as usize])
+            {
                 chunk.constants.pop();
                 ins.c = index as u32;
             }
-            ins.imm = if tokens[4] == "-" { u32::MAX } else {
-                tokens[4].parse::<u32>().map_err(|_| LanaErrorInfo::new(LanaError::Format, ip,
-                    ins.opcode as u8, line, "invalid object instruction index/count"))?
+            ins.imm = if tokens[4] == "-" {
+                u32::MAX
+            } else {
+                tokens[4].parse::<u32>().map_err(|_| {
+                    LanaErrorInfo::new(
+                        LanaError::Format,
+                        ip,
+                        ins.opcode as u8,
+                        line,
+                        "invalid object instruction index/count",
+                    )
+                })?
             };
         }
         "RETURN" | "PRINT" => {
@@ -1508,7 +1711,7 @@ fn emit_line(
 }
 
 /// Assemble LABC assembly text into a verified chunk, mirroring
-/// `lana_assemble_file` in `vm/c/assembler.c`.
+/// `lana_assemble_file` in `6aacbde2f67f:vm/c/assembler.c`.
 pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
     let mut chunk = Chunk::new(LABC_VERSION, 0);
     let mut labels: Vec<Label> = Vec::new();
@@ -1527,8 +1730,8 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
         if cursor.is_empty() {
             continue;
         }
-        if cursor.ends_with(':') {
-            let name = cursor[..cursor.len() - 1].trim();
+        if let Some(name) = cursor.strip_suffix(':') {
+            let name = name.trim();
             if labels.len() >= LANA_ASSEMBLER_MAX_FIXUPS || name.is_empty() || name.len() >= 64 {
                 return Err(LanaErrorInfo::new(
                     LanaError::Limit,
@@ -1545,7 +1748,7 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
             continue;
         }
         let tokens: Vec<&str> = cursor
-            .split(|c: char| c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',')
+            .split([' ', '\t', '\r', '\n', ','])
             .filter(|token| !token.is_empty())
             .collect();
         if tokens.is_empty() {
@@ -1625,8 +1828,12 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
                         "invalid version",
                     )
                 })?;
-                if version != LABC_VERSION && version != LABC_VERSION_1 && version != LABC_VERSION_3
-                    && version != LABC_VERSION_4 && version != LABC_VERSION_5 && version != 6
+                if version != LABC_VERSION
+                    && version != LABC_VERSION_1
+                    && version != LABC_VERSION_3
+                    && version != LABC_VERSION_4
+                    && version != LABC_VERSION_5
+                    && version != 6
                 {
                     return Err(LanaErrorInfo::new(
                         LanaError::IncompatibleFormat,
@@ -1637,8 +1844,13 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
                     ));
                 }
                 if version == 6 && (!chunk.code.is_empty() || !chunk.constants.is_empty()) {
-                    return Err(LanaErrorInfo::new(LanaError::Format, chunk.code.len(), 0, line,
-                        ".version 6 must precede instructions and constants"));
+                    return Err(LanaErrorInfo::new(
+                        LanaError::Format,
+                        chunk.code.len(),
+                        0,
+                        line,
+                        ".version 6 must precede instructions and constants",
+                    ));
                 }
                 chunk.version = version;
                 continue;
@@ -1667,7 +1879,13 @@ pub fn assemble(text: &str) -> Result<Chunk, LanaErrorInfo> {
             _ => {}
         }
         let instruction_line = if source_line == 0 { line } else { source_line };
-        emit_line(&mut chunk, &tokens, instruction_line, &mut fixups, &mut function_fixups)?;
+        emit_line(
+            &mut chunk,
+            &tokens,
+            instruction_line,
+            &mut fixups,
+            &mut function_fixups,
+        )?;
     }
 
     for fixup in &fixups {
