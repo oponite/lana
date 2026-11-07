@@ -1,0 +1,4 @@
+// café ☕ 🌊
+let s = "café ☕ 🌊"; # é
+print(s);
+print("LEX_NON_ASCII_PASS");

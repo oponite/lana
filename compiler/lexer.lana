@@ -25,39 +25,35 @@ fn is_letter(byte) {
     return false;
 }
 
+// The scanners below run once per source byte, so they keep their loops minimal:
+// columns are derived from the byte offset when a scan ends, and the loop flag
+// carries the bounds check (the language has no `break`).
 fn skip_comment(source, offset, column) {
-    let length = string_length(source);
-    let scanning = true;
+    let length = string_length(source); let start = offset; let scanning = offset < length;
     while (scanning) {
-        if (offset >= length) { scanning = false; } else {
-            if (string_byte_at(source, offset) == 10) { scanning = false; } else {
-                offset = offset + 1; column = column + 1;
-            }
-        }
+        if (string_byte_at(source, offset) == 10) { scanning = false; } else { offset = offset + 1; scanning = offset < length; }
     }
-    return [offset, column];
+    return [offset, column + offset - start];
 }
 
 fn scan_identifier(source, offset, line, column, classes) {
-    let length = string_length(source); let start = offset; let start_column = column; let scanning = true;
+    let length = string_length(source); let start = offset;
+    offset = offset + 1; let scanning = offset < length;
     while (scanning) {
-        if (offset >= length) { scanning = false; } else {
-            if (classes[string_byte_at(source, offset)] >= 2) { offset = offset + 1; column = column + 1; }
-            else { scanning = false; }
-        }
+        if (classes[string_byte_at(source, offset)] >= 2) { offset = offset + 1; scanning = offset < length; } else { scanning = false; }
     }
-    return [offset, column, token("identifier", string_slice(source, start, offset), line, start_column)];
+    return [offset, column + offset - start, token("identifier", string_slice(source, start, offset), line, column)];
 }
 
 fn scan_number(source, offset, line, column, classes) {
-    let length = string_length(source); let start = offset; let start_column = column;
+    let length = string_length(source); let start = offset;
     let seen_dot = false; let scanning = true;
     while (scanning) {
         if (offset >= length) { scanning = false; } else {
             let byte = string_byte_at(source, offset);
-            if (classes[byte] == 2) { offset = offset + 1; column = column + 1; } else {
+            if (classes[byte] == 2) { offset = offset + 1; } else {
                 if (byte == 46) {
-                    if (seen_dot) { scanning = false; } else { seen_dot = true; offset = offset + 1; column = column + 1; }
+                    if (seen_dot) { scanning = false; } else { seen_dot = true; offset = offset + 1; }
                 } else { scanning = false; }
             }
         }
@@ -68,52 +64,64 @@ fn scan_number(source, offset, line, column, classes) {
         if (marker == 69) { exponent = true; }
         if (marker == 101) { exponent = true; }
         if (exponent) {
-            offset = offset + 1; column = column + 1;
+            offset = offset + 1;
             if (offset < length) {
                 let sign = string_byte_at(source, offset);
-                if (sign == 43) { offset = offset + 1; column = column + 1; }
-                else { if (sign == 45) { offset = offset + 1; column = column + 1; } }
+                if (sign == 43) { offset = offset + 1; }
+                else { if (sign == 45) { offset = offset + 1; } }
             }
-            if (offset >= length) { lex_error(line, start_column, "expected exponent digits"); }
-            if (!is_digit(string_byte_at(source, offset))) { lex_error(line, start_column, "expected exponent digits"); }
+            if (offset >= length) { lex_error(line, column, "expected exponent digits"); }
+            if (!is_digit(string_byte_at(source, offset))) { lex_error(line, column, "expected exponent digits"); }
             let scanning_exponent = true;
             while (scanning_exponent) {
                 if (offset >= length) { scanning_exponent = false; }
                 else {
-                    if (is_digit(string_byte_at(source, offset))) { offset = offset + 1; column = column + 1; }
+                    if (is_digit(string_byte_at(source, offset))) { offset = offset + 1; }
                     else { scanning_exponent = false; }
                 }
             }
         }
     }
-    return [offset, column, token("number", string_slice(source, start, offset), line, start_column)];
+    return [offset, column + offset - start, token("number", string_slice(source, start, offset), line, column)];
 }
 
 fn scan_string(source, offset, line, column) {
-    let length = string_length(source); let start_column = column;
-    offset = offset + 1; column = column + 1; let content_start = offset;
+    let length = string_length(source); let start = offset;
+    offset = offset + 1; let content_start = offset;
     let escaped = false; let scanning = true; let value = "";
     while (scanning) {
-        if (offset >= length) { lex_error(line, start_column, "unterminated string literal"); }
+        if (offset >= length) { lex_error(line, column, "unterminated string literal"); }
         let byte = string_byte_at(source, offset);
-        if (escaped) { escaped = false; offset = offset + 1; column = column + 1; } else {
-            if (byte == 92) { escaped = true; offset = offset + 1; column = column + 1; } else {
+        if (escaped) { escaped = false; } else {
+            if (byte == 92) { escaped = true; } else {
                 if (byte == 34) {
                     value = string_unescape(string_slice(source, content_start, offset));
-                    scanning = false; offset = offset + 1; column = column + 1;
-                } else {
-                    if (byte == 10) { lex_error(line, start_column, "unterminated string literal"); }
-                    offset = offset + 1; column = column + 1;
-                }
+                    scanning = false;
+                } else { if (byte == 10) { lex_error(line, column, "unterminated string literal"); } }
             }
         }
+        offset = offset + 1;
     }
-    return [offset, column, token("string", value, line, start_column)];
+    return [offset, column + offset - start, token("string", value, line, column)];
+}
+
+fn lex_utf8_width(byte) {
+    if (byte >= 240) { return 4; }
+    if (byte >= 224) { return 3; }
+    if (byte >= 192) { return 2; }
+    return 1;
 }
 
 fn scan_symbol(source, offset, line, column) {
     let length = string_length(source); let text = string_slice(source, offset, offset + 1);
+    // Every two-character operator ends in '=' or '>'; checking that byte first skips
+    // the pair slice for other symbols and never splits a multi-byte character.
+    let pairable = false;
     if (offset + 1 < length) {
+        let next = string_byte_at(source, offset + 1);
+        if (next == 61) { pairable = true; } if (next == 62) { pairable = true; }
+    }
+    if (pairable) {
         let pair = string_slice(source, offset, offset + 2);
         if (pair == "->") { text = pair; } if (pair == "==") { text = pair; }
         if (pair == "!=") { text = pair; } if (pair == "<=") { text = pair; } if (pair == ">=") { text = pair; }
@@ -128,7 +136,15 @@ fn lex(source) {
     let tokens = array_new(0); let length = string_length(source); let offset = 0; let line = 1; let column = 1;
     while (offset < length) {
         let byte = string_byte_at(source, offset);
-        if (classes[byte] == 1) {
+        let kind = classes[byte];
+        if (byte == 32) {
+            // Indentation dominates whitespace; consume a run of spaces in one tight loop.
+            let start = offset; offset = offset + 1; let spacing = offset < length;
+            while (spacing) {
+                if (string_byte_at(source, offset) == 32) { offset = offset + 1; spacing = offset < length; } else { spacing = false; }
+            }
+            column = column + offset - start;
+        } else { if (kind == 1) {
             if (byte == 10) { line = line + 1; column = 1; } else { column = column + 1; }
             offset = offset + 1;
         } else {
@@ -139,15 +155,21 @@ fn lex(source) {
                 let skipped = skip_comment(source, offset, column); offset = skipped[0]; column = skipped[1];
             } else {
                 let scanned = null;
-                if (classes[byte] == 3) { scanned = scan_identifier(source, offset, line, column, classes); } else {
-                    if (classes[byte] == 2) { scanned = scan_number(source, offset, line, column, classes); } else {
+                if (kind == 3) { scanned = scan_identifier(source, offset, line, column, classes); } else {
+                    if (kind == 2) { scanned = scan_number(source, offset, line, column, classes); } else {
                         if (byte == 34) { scanned = scan_string(source, offset, line, column); }
-                        else { scanned = scan_symbol(source, offset, line, column); }
+                        else {
+                            if (byte >= 128) {
+                                let character = string_slice(source, offset, offset + lex_utf8_width(byte));
+                                lex_error(line, column, string_concat("unexpected character '", string_concat(character, "'")));
+                            }
+                            scanned = scan_symbol(source, offset, line, column);
+                        }
                     }
                 }
                 offset = scanned[0]; column = scanned[1]; array_push(tokens, scanned[2]);
             }
-        }
+        } }
     }
     array_push(tokens, token("eof", "<eof>", line, column)); return tokens;
 }

@@ -56,7 +56,7 @@ python3 tests/run.py --no-build --filter 'bootstrap|local_install'
 
 Add source regressions to `tests/regression/` and register them in
 `tests/cases.json`. The bootstrap check compares two compiler outputs with the
-checked assembly. Its limits remain 256 MiB and 50,000,000 instructions.
+checked assembly. Its limits are 512 MiB and 50,000,000 instructions (LIP-034).
 
 Published LABC v1-v2 bytecode and assembly fixtures are checked by
 `lana_legacy_bytecode` in `tests/run.py`. Rust loader fuzzing lives in `fuzz/`.

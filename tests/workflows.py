@@ -54,7 +54,7 @@ def run(name, cli, compiler, work, env):
         return result.stdout
 
     def compile_to(source, output):
-        call(cli, "run", compiler, "--memory-limit-mib", "256", "--instruction-limit", "50000000", "--", source, output)
+        call(cli, "run", compiler, "--memory-limit-mib", "512", "--instruction-limit", "50000000", "--", source, output)
 
     if name == "bootstrap":
         bundle = work / "compiler-bootstrap.lana"

@@ -152,5 +152,8 @@
   {"name": "native_bootstrap_instructions", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_budget.lana", "--instruction-limit", "1000"], "expect_failure": true, "contains": ["LANA_ERR_LIMIT"]},
   {"name": "lana_source_inputs", "command": ["{python}", "{root}/tests/test_source_inputs.py", "{cli}"], "contains": ["SOURCE_INPUTS_PASS"]},
   {"name": "lana_bytecode_fixtures", "command": ["{python}", "{root}/tests/conformance/differential/run.py", "{cli}"], "contains": ["DIFFERENTIAL_PASS"]},
-  {"name": "native_measure_canonical", "command": ["{cli}", "run", "{root}/tests/regression/measure_canonical.lana"]}
+  {"name": "native_measure_canonical", "command": ["{cli}", "run", "{root}/tests/regression/measure_canonical.lana"]},
+  {"name": "native_lex_non_ascii_rejected", "command": ["{cli}", "run", "{root}/tests/regression/lex_non_ascii_rejected.lana"], "expect_failure": true, "contains": ["unexpected character 'é'", ":2:11-2:11: error\\[parse/LANA_ERR_PARSE\\]"], "source_span": "{root}/tests/regression/lex_non_ascii_rejected.lana"},
+  {"name": "native_lex_non_ascii_after_symbol_rejected", "command": ["{cli}", "run", "{root}/tests/regression/lex_non_ascii_after_symbol_rejected.lana"], "expect_failure": true, "contains": ["unexpected character 'é'", ":1:12-1:12: error\\[parse/LANA_ERR_PARSE\\]"], "source_span": "{root}/tests/regression/lex_non_ascii_after_symbol_rejected.lana"},
+  {"name": "native_lex_non_ascii_strings_pass", "command": ["{cli}", "run", "{root}/tests/regression/lex_non_ascii_strings_pass.lana"], "contains": ["café ☕ 🌊", "LEX_NON_ASCII_PASS"]}
 ]
