@@ -26,7 +26,8 @@ Bug fixes, documentation, and tooling do not require a LIP.
 ## Compatibility promises
 
 - The Rust loader accepts LABC v1-v6; published v1-v2 behavior retains frozen compatibility fixtures.
-- Resource limits are 256 MiB and 50,000,000 instructions.
+- Resource limits are 256 MiB and 50,000,000 instructions for programs, and
+  512 MiB and 50,000,000 instructions for the compiler (LIP-034).
 - `UNKNOWN` is preserved; no operation substitutes a default relationship,
   probability, or policy outcome.
 - The 1.x authority documents remain authoritative for unchanged behavior.

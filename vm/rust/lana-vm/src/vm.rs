@@ -247,6 +247,10 @@ fn instruction_max_register(ins: &Instruction) -> usize {
 /// is `[entry, next_entry)` (or `[entry, code.len())` for the last). The entry
 /// frame and forked-task frames stay at `LANA_MAX_REGISTERS` because they run
 /// code whose function index is not known at frame-construction time.
+/// Memory limit for running the self-hosted compiler (LIP-034). Programs keep
+/// the 256 MiB default; the compiler's 50,000,000-instruction limit is unchanged.
+pub const LANA_COMPILER_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
+
 fn compute_max_registers(chunk: &Chunk) -> Vec<usize> {
     let mut entries: Vec<(usize, usize)> = chunk
         .functions

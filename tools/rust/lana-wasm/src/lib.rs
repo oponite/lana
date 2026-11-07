@@ -67,6 +67,8 @@ fn compile_source(source: &str) -> Result<Chunk, String> {
         )
     })?;
     let mut vm = Vm::new(&compiler_chunk);
+    vm.set_memory_limit(lana_vm::vm::LANA_COMPILER_MEMORY_LIMIT)
+        .map_err(|_| "{\"line\":0,\"message\":\"cannot set compiler memory limit\"}".to_string())?;
     vm.set_virtual_file(SOURCE_PATH, source.to_string());
     for (path, source) in STDLIB {
         vm.set_virtual_file(path, source.to_string());

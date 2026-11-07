@@ -7,7 +7,7 @@ This document defines how the Rust VM owns data, runs work, and handles failure.
 
 Each VM owns its registers, heap, instruction budget, memory budget, random stream, and error state. Bytecode and constants are immutable and may be shared between tasks. VM-owned pointers never cross task heaps: transfer copies reachable data and preserves aliases and cycles with a memo table.
 
-Validate a complete result before publishing it. An invalid input, unsupported operation, cancellation, exhausted budget, allocation failure, or failed callback exposes no partial value, register update, store revision, or effect receipt. Operations charge their work and temporary memory to the active task. The compiler is limited to 256 MiB and 50,000,000 instructions.
+Validate a complete result before publishing it. An invalid input, unsupported operation, cancellation, exhausted budget, allocation failure, or failed callback exposes no partial value, register update, store revision, or effect receipt. Operations charge their work and temporary memory to the active task. The compiler is limited to 512 MiB and 50,000,000 instructions (LIP-034); programs default to 256 MiB.
 
 An I/O error before atomic replacement leaves the old file or store state intact. If directory sync fails after replacement, report `LANA_ERR_IO` with `durability: "uncertain"` and the path. Reopen and inspect the result before retrying. A complete journal commit record is also a publication boundary. A failed sync or later manifest write reports the same uncertain outcome. Before that boundary, failed writes truncate and sync back to the previous journal offset; a failed rollback is uncertain. An uncertain store handle releases its lock and rejects further operations until a fresh open.
 

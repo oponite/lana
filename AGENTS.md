@@ -166,10 +166,10 @@ threshold.
 - Lana uses lowercase `snake_case`, semicolons, and small explicit functions.
 - Add language fixtures in
   `tests/regression/` and register them in `tests/cases.json`.
-- Never weaken compiler limits: 256 MiB and 50,000,000 instructions. Exhaustion
+- Never weaken compiler limits: 512 MiB and 50,000,000 instructions (LIP-034). Exhaustion
   is an error and must not expose partial bytecode.
 - Benchmark result snapshots are machine-local evidence, not conformance.
-- Run `git diff --check`; there is no repository-wide formatter.
+- Run `git diff --check` and `cargo fmt --all --check` (CI enforces rustfmt on the Rust workspace).
 
 ## Development policy
 

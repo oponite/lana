@@ -1152,8 +1152,8 @@ bytes remain covered by frozen compatibility fixtures.
 Imports are relative `.lana` paths and must precede executable syntax. The
 native loader canonicalizes paths, rejects cycles and imported-module top-level
 statements, deduplicates modules, and resolves local and alias-qualified calls.
-Compiler execution uses explicit 256 MiB memory and 50,000,000-instruction
-policies; exhaustion is an error and never emits partial bytecode.
+Compiler execution uses explicit 512 MiB memory and 50,000,000-instruction
+policies (LIP-034); exhaustion is an error and never emits partial bytecode.
 The compiler verifies complete output before replacing its destination.
 Parse, verifier, cancellation, limit, and allocation failures report
 `LANA_ERR_PARSE`, the applicable verifier error, `LANA_ERR_CANCELLED`,

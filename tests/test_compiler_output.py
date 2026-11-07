@@ -74,7 +74,7 @@ with tempfile.TemporaryDirectory() as directory:
                                  env=dict(os.environ, LANA_COMPILER_LABC=str(memory_compiler)),
                                  capture_output=True, text=True, timeout=30)
         assert limited.returncode != 0 and 'LANA_ERR_OOM' in limited.stderr, limited.stderr
-        assert 'memory limit 268435456' in limited.stderr, limited.stderr
+        assert 'memory limit 536870912' in limited.stderr, limited.stderr  # LIP-034: 512 MiB
         if present:
             assert output.read_bytes() == before
             verified = subprocess.run([lana, 'verify', str(output)], capture_output=True, text=True, timeout=120)

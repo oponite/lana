@@ -314,6 +314,11 @@ fn run_compiler_program(compiler: &Path, args: &[String]) -> Result<(), CliError
         info,
     })?;
     let mut vm = Vm::new(&chunk);
+    vm.set_memory_limit(lana_vm::vm::LANA_COMPILER_MEMORY_LIMIT)
+        .map_err(|code| CliError::Load {
+            path: compiler.to_string_lossy().into_owned(),
+            info: LanaErrorInfo::new(code, 0, 0, 0, "cannot set compiler memory limit"),
+        })?;
     vm.set_program_args(args);
     let input = if args.first().is_some_and(|arg| arg == "--symbols") {
         args.get(3).or_else(|| args.get(1))
