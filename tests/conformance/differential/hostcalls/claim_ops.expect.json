@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "42\nclaim_prop\n{\"exactness\": exact, \"tolerance\": 0, \"source_valid\": true}\n",
+  "stderr": ""
+}

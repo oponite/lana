@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "hello world\ntrue\nfalse\natomic content\n[{\"name\": a.txt, \"kind\": file}, {\"name\": b.txt, \"kind\": file}]\n",
+  "stderr": ""
+}

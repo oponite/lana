@@ -1,0 +1,5 @@
+{
+  "exit": 1,
+  "stdout": "",
+  "stderr": "<bytecode>:7:1-7:1: error[validation/LANA_ERR_HISTORY]: LANA_ERR_HISTORY (operation PREVIOUS) (instruction 5, opcode PREVIOUS)\n"
+}

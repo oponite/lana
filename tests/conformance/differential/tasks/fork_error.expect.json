@@ -1,0 +1,5 @@
+{
+  "exit": 1,
+  "stdout": "",
+  "stderr": "worker:9:1-9:1: error[type/LANA_ERR_TYPE]: LANA_ERR_TYPE (operation BINARY) (instruction 6, opcode BINARY)\n"
+}
