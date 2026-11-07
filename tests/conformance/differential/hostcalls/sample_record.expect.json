@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "[42, {\"source_dependency\": sample_source, \"rng_seed\": 1279348289, \"task_lineage\": 0, \"operation\": sample_op, \"revision\": 0}]\n",
+  "stderr": ""
+}

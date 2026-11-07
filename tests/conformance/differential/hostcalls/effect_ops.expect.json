@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "{\"identity\": 1, \"execution_count\": 0, \"kind\": effect_kind}\n42\n{\"identity\": 1, \"execution_count\": 1, \"kind\": effect_kind}\n",
+  "stderr": ""
+}

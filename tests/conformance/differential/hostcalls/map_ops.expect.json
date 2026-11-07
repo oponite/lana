@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "{\"key1\": val1, \"key2\": val2}\ntrue\nval2\nval3\n[key1, key2, key3]\nval1\n",
+  "stderr": ""
+}

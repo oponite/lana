@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "0.88\ndistribution(p0=0.12, p1=0.88)\n1\nstate(p=0.88, d_re=-0.0784661667836, d_im=-0.0999319888232)\n0.88\ndistribution(p0=0.12, p1=0.88)\n0.4\n",
+  "stderr": ""
+}

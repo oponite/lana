@@ -149,5 +149,8 @@
   {"name": "lana_workflow_runner", "command": ["{python}", "{root}/tests/test_workflow_runner.py"], "contains": ["WORKFLOW_RUNNER_PASS"]},
   {"name": "native_bootstrap_overflow", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_overflow.lana"], "expect_failure": true, "contains": ["LANA_ERR_INVALID_PARAMETERS"]},
   {"name": "native_bootstrap_memory", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_budget.lana", "--memory-limit-mib", "1"], "expect_failure": true, "contains": ["LANA_ERR_OOM"]},
-  {"name": "native_bootstrap_instructions", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_budget.lana", "--instruction-limit", "1000"], "expect_failure": true, "contains": ["LANA_ERR_LIMIT"]}
+  {"name": "native_bootstrap_instructions", "command": ["{cli}", "run", "{root}/tests/regression/bootstrap_budget.lana", "--instruction-limit", "1000"], "expect_failure": true, "contains": ["LANA_ERR_LIMIT"]},
+  {"name": "lana_source_inputs", "command": ["{python}", "{root}/tests/test_source_inputs.py", "{cli}"], "contains": ["SOURCE_INPUTS_PASS"]},
+  {"name": "lana_bytecode_fixtures", "command": ["{python}", "{root}/tests/conformance/differential/run.py", "{cli}"], "contains": ["DIFFERENTIAL_PASS"]},
+  {"name": "native_measure_canonical", "command": ["{cli}", "run", "{root}/tests/regression/measure_canonical.lana"]}
 ]

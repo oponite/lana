@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "{\"estimate\": 42, \"ci_low\": 42, \"ci_high\": 42, \"method\": sampled, \"procedure\": bootstrap, \"sample_count\": 100, \"seed\": 1279348289}\n",
+  "stderr": ""
+}

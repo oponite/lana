@@ -1,0 +1,5 @@
+{
+  "exit": 0,
+  "stdout": "operation task_join id=[0,1] revision=0 exactness=exact outcome=success reason=none label= inputs=0\n",
+  "stderr": ""
+}
