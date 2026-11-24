@@ -253,6 +253,7 @@ name = "lana-runtime"
 version = "4.2.0"
 dependencies = [
  "ed25519-compact",
+ "flate2",
  "lana-bytecode",
  "lana-vm",
  "ring",

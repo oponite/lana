@@ -21,6 +21,8 @@ pub mod effects;
 pub mod execution;
 pub mod future_messages;
 pub mod host_calls;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod info_memory;
 pub mod information_codec;
 pub mod ledger;
 pub mod live;
